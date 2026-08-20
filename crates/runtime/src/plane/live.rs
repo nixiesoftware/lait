@@ -2829,7 +2829,7 @@ impl ResidencyOracle for HostResidency {
         // comment forbids read-path use; this asks about the indices named and
         // costs one existence check each, so a request cannot be turned into
         // work by being about something large.
-        let authorize = |_action: crate::content_host::ContentAction| Ok(());
+        let authorize = |_action: crate::content_host::ContentAction<'_>| Ok(());
         let policy = crate::content_host::ContentPolicy {
             space: &self.space,
             keys: self.keys.clone(),

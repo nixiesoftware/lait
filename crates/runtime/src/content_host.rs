@@ -46,9 +46,10 @@ pub enum Failure {
     Denied { demand: Vec<u8> },
     /// No committed descriptor for this reference.
     Unknown,
-    /// The chunk is not held locally. Expected — content is
-    /// descriptor-complete, not byte-complete — and plan 14 is what fetches it.
+    /// Not held locally. Content is descriptor-complete, not byte-complete.
     NotResident,
+    /// Held, and sealed to an epoch this Station has no key for.
+    Sealed,
     /// The content or the request exceeded a bound.
     Bounds,
     /// The store or cache refused.
@@ -65,6 +66,27 @@ pub enum Storage {
     Replica,
     Cache,
     Encoding,
+}
+
+/// A residency probe that could not be taken is this Station's problem, and
+/// never an answer about the content.
+fn probed(answer: Result<bool, replica::content::residency::Failure>) -> Result<bool, Failure> {
+    answer.map_err(|_| Failure::Storage(Storage::Cache))
+}
+
+impl Failure {
+    /// Whether fetching could change this answer.
+    ///
+    /// The question a demand-paged read asks before retrying.
+    ///
+    /// `Invalid` is deliberately not fetchable, though corrupt local bytes are
+    /// repairable in principle: the entry stays resident, so a fetch would
+    /// install beside it and the next read would find the same bad bytes. The
+    /// repair is evict-then-refetch, and evicting is a data-dropping act that
+    /// wants its own authorization rather than being a side effect of reading.
+    pub fn fetchable(&self) -> bool {
+        matches!(self, Failure::NotResident)
+    }
 }
 
 impl std::fmt::Display for Failure {
@@ -111,31 +133,53 @@ impl ContentStatus {
     }
 }
 
-/// What an operation is asking permission to do. Runtime turns one of these
-/// into the Mechanics demand it checks.
+/// What an operation is asking permission to do, and to which bytes. Runtime
+/// turns one of these into the Mechanics demand it checks.
+///
+/// `Publish` names no content because ingest is what mints one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentAction {
+pub enum ContentAction<'a> {
     Publish,
-    Read,
-    Pin,
-    RemoveLocal,
+    Read(&'a ContentRef),
+    Pin(&'a ContentRef),
+    RemoveLocal(&'a ContentRef),
     /// Hand bytes to a peer. Distinct from Read because it is: a member who may
     /// open a file locally has not thereby agreed to become its provider, and
     /// the peer-facing surface is the one remote input reaches.
-    Serve,
+    Serve(&'a ContentRef),
 }
 
-impl ContentAction {
+impl<'a> ContentAction<'a> {
     /// The capability name this action needs.
     pub fn capability(self) -> &'static str {
         match self {
             ContentAction::Publish => "content.publish",
-            ContentAction::Read => "content.read",
-            ContentAction::Pin => "content.pin",
-            ContentAction::RemoveLocal => "content.remove-local",
-            ContentAction::Serve => "content.serve",
+            ContentAction::Read(_) => "content.read",
+            ContentAction::Pin(_) => "content.pin",
+            ContentAction::RemoveLocal(_) => "content.remove-local",
+            ContentAction::Serve(_) => "content.serve",
         }
     }
+
+    /// The bytes this action is about, if they exist yet.
+    pub fn content(self) -> Option<&'a ContentRef> {
+        match self {
+            ContentAction::Publish => None,
+            ContentAction::Read(content)
+            | ContentAction::Pin(content)
+            | ContentAction::RemoveLocal(content)
+            | ContentAction::Serve(content) => Some(content),
+        }
+    }
+}
+
+/// Why these bytes are being acquired, which decides how long they are held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acquisition {
+    /// "I want this file." Held until nothing declares the content.
+    Keep,
+    /// "I am watching this now." Held for the operation only.
+    Stream,
 }
 
 /// Who is asking, and what the host should check them against.
@@ -145,7 +189,10 @@ impl ContentAction {
 pub struct ContentPolicy<'a> {
     pub space: &'a SpaceId,
     pub keys: Arc<dyn ContentKeys>,
-    pub authorize: &'a dyn Fn(ContentAction) -> Result<(), Vec<u8>>,
+    /// A predicate that reads only the discriminant is Space-wide; one that
+    /// reads the content can scope to what declares it
+    /// (`Replica::declaring_worlds`).
+    pub authorize: &'a dyn for<'c> Fn(ContentAction<'c>) -> Result<(), Vec<u8>>,
     /// Operator ceiling on one content's length. May only lower the protocol
     /// maximum.
     pub max_content_len: u64,
@@ -288,7 +335,7 @@ impl ContentHost {
                 .cache
                 .release_content(&ingested.descriptor.content_nonce);
             let _ = self.cache.release_operation(&operation);
-            for (_, slot) in self.resident_entries(&ingested.descriptor) {
+            for (_, slot) in self.resident_entries(&ingested.descriptor)? {
                 let _ = self.cache.evict(&slot);
             }
             return Err(Failure::Storage(Storage::Replica));
@@ -312,21 +359,22 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
     ) -> Result<ContentStatus, Failure> {
-        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Read(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         // The one call that genuinely walks the whole content, because
         // "resident_chunks" is a question about all of them. Nothing on the
         // read path may use it: a Range request is about a span, and paying
         // chunk_count to answer a question about three chunks is how a 4 GiB
         // file makes every seek cost sixteen thousand existence checks.
-        let resident = self.resident_entries(&descriptor).len() as u32;
+        let resident = self.resident_entries(&descriptor)?.len() as u32;
         Ok(ContentStatus {
             content: *content,
             plaintext_len: descriptor.plaintext_len,
             chunk_count: descriptor.chunk_count,
             chunk_plaintext_len: descriptor.chunk_plaintext_len,
             resident_chunks: resident,
-            pinned: self.is_pinned(&descriptor),
+            pinned: self.is_pinned(&descriptor)?,
         })
     }
 
@@ -343,7 +391,8 @@ impl ContentHost {
         offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, Failure> {
-        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Read(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         if len > MAX_RANGE_BYTES {
             return Err(Failure::Bounds);
         }
@@ -351,7 +400,7 @@ impl ContentHost {
         let key = policy
             .keys
             .opening_key(&descriptor.epoch)
-            .ok_or(Failure::NotResident)?;
+            .ok_or(Failure::Sealed)?;
 
         let chunk_len = descriptor.chunk_plaintext_len as u64;
         let end = offset
@@ -390,7 +439,7 @@ impl ContentHost {
         let mut spanned = Vec::with_capacity((last - first + 1) as usize);
         for index in first..=last {
             let slot = replica::content::chunk_slot(&descriptor, index);
-            if !self.cache.is_resident(&slot) {
+            if !probed(self.cache.is_resident(&slot))? {
                 return Err(Failure::NotResident);
             }
             spanned.push(slot);
@@ -416,9 +465,10 @@ impl ContentHost {
 
     /// Hold this content against quota pressure until unpinned.
     pub fn pin(&self, policy: &ContentPolicy<'_>, content: &ContentRef) -> Result<(), Failure> {
-        (policy.authorize)(ContentAction::Pin).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Pin(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        for (_, entry) in self.resident_entries(&descriptor) {
+        for (_, entry) in self.resident_entries(&descriptor)? {
             self.cache
                 .pin(&entry)
                 .map_err(|_| Failure::Storage(Storage::Cache))?;
@@ -427,9 +477,10 @@ impl ContentHost {
     }
 
     pub fn unpin(&self, policy: &ContentPolicy<'_>, content: &ContentRef) -> Result<(), Failure> {
-        (policy.authorize)(ContentAction::Pin).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Pin(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        for (_, entry) in self.resident_entries(&descriptor) {
+        for (_, entry) in self.resident_entries(&descriptor)? {
             self.cache
                 .unpin(&entry)
                 .map_err(|_| Failure::Storage(Storage::Cache))?;
@@ -445,10 +496,10 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
     ) -> Result<(), Failure> {
-        (policy.authorize)(ContentAction::RemoveLocal)
+        (policy.authorize)(ContentAction::RemoveLocal(content))
             .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        let entries = self.resident_entries(&descriptor);
+        let entries = self.resident_entries(&descriptor)?;
         self.cache
             .release_content(&descriptor.content_nonce)
             .map_err(|_| Failure::Storage(Storage::Cache))?;
@@ -478,7 +529,8 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
     ) -> Result<ContentDescriptor, Failure> {
-        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Read(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         self.descriptor(content)
     }
 
@@ -499,7 +551,8 @@ impl ContentHost {
         content: &ContentRef,
         wanted: &[u32],
     ) -> Result<Vec<u32>, Failure> {
-        (policy.authorize)(ContentAction::Serve).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Serve(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = match self.descriptor(content) {
             Ok(descriptor) => descriptor,
             // Never heard of it — the same empty answer a known-but-absent
@@ -509,15 +562,17 @@ impl ContentHost {
             // nothing" would have a fetcher cache that answer and stop asking.
             Err(other) => return Err(other),
         };
-        let mut answer: Vec<u32> = wanted
+        let mut answer: Vec<u32> = Vec::new();
+        for index in wanted
             .iter()
             .copied()
             .filter(|index| *index < descriptor.chunk_count)
-            .filter(|index| {
-                self.cache
-                    .is_resident(&replica::content::chunk_slot(&descriptor, *index))
-            })
-            .collect();
+        {
+            let slot = replica::content::chunk_slot(&descriptor, index);
+            if probed(self.cache.is_resident(&slot))? {
+                answer.push(index);
+            }
+        }
         answer.sort_unstable();
         answer.dedup();
         Ok(answer)
@@ -562,10 +617,12 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
         operation: [u8; 16],
+        intent: Acquisition,
         part: u32,
         proof: &ChunkProof,
     ) -> Result<(), Failure> {
-        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Read(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         // The proof's leaf length is authenticated — the caller verified it
         // against the committed root before staging a byte — so it is the right
         // ceiling for this read, and a slot holding anything else is already
@@ -580,7 +637,7 @@ impl ContentHost {
             .read_staged(&operation, part)
             .map_err(|_| Failure::NotResident)?;
 
-        match self.install_chunk(policy, content, operation, proof, &staged) {
+        match self.install_chunk(policy, content, operation, intent, proof, &staged) {
             Ok(()) => {
                 self.cache
                     .discard_staged_part(&operation, part)
@@ -610,7 +667,8 @@ impl ContentHost {
         content: &ContentRef,
         chunk_index: u32,
     ) -> Result<(Vec<u8>, ChunkProof), Failure> {
-        (policy.authorize)(ContentAction::Serve).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Serve(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         if chunk_index >= descriptor.chunk_count {
             return Err(Failure::Bounds);
@@ -633,10 +691,12 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
         operation: [u8; 16],
+        intent: Acquisition,
         proof: &ChunkProof,
         ciphertext: &[u8],
     ) -> Result<(), Failure> {
-        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Read(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         descriptor.verify_chunk(proof, ciphertext)?;
         let entry = replica::content::chunk_slot(&descriptor, proof.leaf.chunk_index);
@@ -645,11 +705,17 @@ impl ContentHost {
         self.cache
             .install(&entry, ciphertext, &sidecar)
             .map_err(|_| Failure::Storage(Storage::Cache))?;
-        // Both holds, as ingest takes them: the transfer's, and the content's.
+        // The transfer's hold always. The content's is what outlives the
+        // transfer, so only a caller that means to keep the bytes takes it —
+        // a chunk behind a playhead has to become reclaimable.
         self.cache
             .hold_operation(operation, entry)
-            .and_then(|()| self.cache.hold_content(descriptor.content_nonce, entry))
             .map_err(|_| Failure::Storage(Storage::Cache))?;
+        if intent == Acquisition::Keep {
+            self.cache
+                .hold_content(descriptor.content_nonce, entry)
+                .map_err(|_| Failure::Storage(Storage::Cache))?;
+        }
         Ok(())
     }
 
@@ -659,10 +725,11 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
     ) -> Result<Vec<u32>, Failure> {
-        (policy.authorize)(ContentAction::Serve).map_err(|demand| Failure::Denied { demand })?;
+        (policy.authorize)(ContentAction::Serve(content))
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         Ok(self
-            .resident_entries(&descriptor)
+            .resident_entries(&descriptor)?
             .into_iter()
             .map(|(index, _)| index)
             .collect())
@@ -685,20 +752,27 @@ impl ContentHost {
     ///
     /// Presence is the answer here; the proof is checked when the bytes are
     /// actually used, by [`Self::chunk`] and by `open_resident_chunk`.
-    fn resident_entries(&self, descriptor: &ContentDescriptor) -> Vec<(u32, [u8; 32])> {
-        (0..descriptor.chunk_count)
-            .map(|index| (index, replica::content::chunk_slot(descriptor, index)))
-            .filter(|(_, slot)| self.cache.is_resident(slot))
-            .collect()
+    fn resident_entries(
+        &self,
+        descriptor: &ContentDescriptor,
+    ) -> Result<Vec<(u32, [u8; 32])>, Failure> {
+        let mut out = Vec::new();
+        for index in 0..descriptor.chunk_count {
+            let slot = replica::content::chunk_slot(descriptor, index);
+            if probed(self.cache.is_resident(&slot))? {
+                out.push((index, slot));
+            }
+        }
+        Ok(out)
     }
 
     /// Whether every resident chunk of this content is pinned.
     ///
     /// Pinning is per entry, so a content with no resident chunks is not
     /// pinned — there is nothing holding anything.
-    fn is_pinned(&self, descriptor: &ContentDescriptor) -> bool {
-        let entries = self.resident_entries(descriptor);
-        !entries.is_empty() && entries.iter().all(|(_, slot)| self.cache.is_pinned(slot))
+    fn is_pinned(&self, descriptor: &ContentDescriptor) -> Result<bool, Failure> {
+        let entries = self.resident_entries(descriptor)?;
+        Ok(!entries.is_empty() && entries.iter().all(|(_, slot)| self.cache.is_pinned(slot)))
     }
 }
 

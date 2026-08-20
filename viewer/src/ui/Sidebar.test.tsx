@@ -310,7 +310,6 @@ const space: SpaceRow = {
   last_opened: 0,
   status: "up",
   identity: { kind: "own" },
-  projects: [],
 };
 
 const project: ProjectDto = {

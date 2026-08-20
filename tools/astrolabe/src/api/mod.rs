@@ -591,6 +591,13 @@ pub struct CorrespondenceFacts {
     /// This identity's own device id on the plane — the address a correspondent
     /// writes to. `None` until the plane is known.
     pub my_device: Option<String>,
+    /// What this identity hands somebody so they can reach it, rendered for
+    /// copying. `None` until something has been published. Not a Card (that is
+    /// the address book's, and asserts nothing) and not an address (that is the
+    /// directory's, and is short and spoken).
+    pub my_reach: Option<String>,
+    /// Which conversation is this identity's own, when the backend has one.
+    pub me: Option<String>,
     /// The people this identity can reach. A person folds all their devices into
     /// one contact, and a click on one opens a chat.
     pub contacts: Vec<ContactRow>,
@@ -632,6 +639,11 @@ pub struct ConversationRow {
 /// One message in a conversation. The chat draws a custom component per `kind`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessageRow {
+    /// For an invitation, the link body it carries; `None` for a message.
+    pub invitation: Option<String>,
+    /// The deposit id for a received letter; `None` for one this identity sent.
+    /// An invitation is acted on by naming this.
+    pub id: Option<String>,
     /// True if this identity sent it — which side of the chat it is drawn on.
     pub mine: bool,
     /// `message` (text) or `invitation`. The chat draws each with its own
@@ -768,6 +780,31 @@ pub enum ActionRequest {
     SendMessage {
         to: String,
         body: String,
+    },
+    /// Publish this identity's reach so it can be handed to somebody. Acts on
+    /// nobody — showing a friend code is not befriending anyone.
+    ShareReach,
+    /// Take a correspondent in, by the announcement they handed over. The one
+    /// of the pair that creates a relationship, which is why it is named for
+    /// the person rather than for the artifact.
+    AddCorrespondent {
+        announcement: String,
+    },
+    /// Enter the Space an arriving invitation names.
+    ///
+    /// `message` is the invitation's deposit id in the transcript. Its
+    /// coordinates verify against their own Space, so accepting is the same act
+    /// as following an invite link — delivery was never admission.
+    OpenInvitation {
+        message: String,
+    },
+    /// Carry an invitation this identity already holds to a correspondent.
+    ///
+    /// `link` is an invite as a person receives one. Minting one is the Space's
+    /// authority and stays there; this only carries what somebody was given.
+    SendInvitation {
+        to: String,
+        link: String,
     },
     /// Ask the carrier for anything waiting, and file it into conversations.
     CollectMail,
@@ -937,6 +974,10 @@ impl ActionRequest {
             Self::StartHead => Action::StartHead,
             Self::StopHead { id } => Action::StopHead(id),
             Self::SendMessage { to, body } => Action::SendMessage { to, body },
+            Self::ShareReach => Action::ShareReach,
+            Self::AddCorrespondent { announcement } => Action::AddCorrespondent { announcement },
+            Self::OpenInvitation { message } => Action::OpenInvitation { message },
+            Self::SendInvitation { to, link } => Action::SendInvitation { to, link },
             Self::CollectMail => Action::CollectMail,
             Self::BlockSender { person } => Action::BlockSender(person),
             Self::AcceptContact { person } => Action::AcceptContact(person),
@@ -1785,6 +1826,8 @@ fn project(app: &App) -> ClientView {
         }),
         correspondence: app.correspondence().map(|corr| CorrespondenceFacts {
             my_device: corr.my_device.clone(),
+            my_reach: corr.my_reach.clone(),
+            me: corr.me.clone(),
             contacts: corr
                 .contacts
                 .iter()
@@ -1809,6 +1852,8 @@ fn project(app: &App) -> ClientView {
                         .messages
                         .iter()
                         .map(|message| ChatMessageRow {
+                            invitation: message.invitation.clone(),
+                            id: message.id.clone(),
                             mine: message.mine,
                             kind: message.kind.clone(),
                             body: message.body.clone(),

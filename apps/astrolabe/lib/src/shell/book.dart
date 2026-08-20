@@ -1375,15 +1375,23 @@ class _MessageContactRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final client = ClientScope.of(context);
+    final opening = ClientScope.watch(context)
+        .inFlight
+        .contains(ActionKeys.openConversation(contact.id));
     return Semantics(
       button: true,
       label: 'Open chat with ${contact.name}',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () {
-          client.dispatch(ActionRequest.openConversation(person: contact.id));
-          summonCorrespondence();
-        },
+        // One summons per press. The window is raised by the same gesture that
+        // asks for the tab, so an ungated row raises it again on every repeat.
+        onTap: opening
+            ? null
+            : () {
+                client
+                    .dispatch(ActionRequest.openConversation(person: contact.id));
+                summonCorrespondence();
+              },
         child: PersonTile(
           name: contact.name,
           picture: null,

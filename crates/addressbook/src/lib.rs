@@ -22,18 +22,22 @@
 //! This crate is a leaf. It names `fabric` and `mechanics`. It does not name
 //! daemon, Runtime, Replica, World, or a product. A0 ships no surface.
 
+pub mod announce;
 mod attest;
 mod bounds;
 mod bundle;
 mod codec;
+mod durable;
 mod engine;
 mod error;
 mod ids;
 mod mapping;
+pub mod reach_store;
 pub mod registry;
 mod store;
 mod types;
 
+pub use announce::{Announcement, ANNOUNCEMENT_VERSION};
 pub use attest::{names_of, parties_called, ResolvedName};
 pub use bounds::{
     MAX_ADDRESSBOOK_HISTORY_BYTES, MAX_BOOK_BYTES, MAX_BUNDLE_BYTES, MAX_CARDS,
@@ -46,6 +50,7 @@ pub use engine::{Action, BookEngine};
 pub use error::Error;
 pub use ids::{CardId, PathHash};
 pub use mapping::BODY_KEY;
+pub use reach_store::{ReachState, ReachStore};
 pub use registry::Registry;
 pub use store::Store;
 pub use types::{

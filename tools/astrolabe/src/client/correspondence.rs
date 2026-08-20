@@ -303,6 +303,8 @@ impl DemoCarrier {
             .entry(person_id.to_owned())
             .or_default()
             .push(ChatMessage {
+                id: None,
+                invitation: None,
                 mine: true,
                 kind: "message".into(),
                 body: Some(body.to_owned()),
@@ -340,6 +342,8 @@ impl DemoCarrier {
                 .entry(person_id)
                 .or_default()
                 .push(ChatMessage {
+                    id: None,
+                    invitation: None,
                     mine: false,
                     kind: kind.to_owned(),
                     body,
@@ -467,6 +471,8 @@ impl DemoCarrier {
             .collect();
         Correspondence {
             my_device: Some(self.me.device.as_str().to_owned()),
+            my_reach: None,
+            me: None,
             contacts,
             conversations,
             open_tabs: self.open_tabs.clone(),
@@ -503,6 +509,8 @@ impl DemoCarrier {
             .entry(person_id.to_owned())
             .or_default()
             .push(ChatMessage {
+                id: None,
+                invitation: None,
                 mine: true,
                 kind: "message".into(),
                 body: Some(body.to_owned()),
@@ -612,182 +620,13 @@ fn incept(seed: &[u8; 32], nonce: u8, space: &SpaceId) -> (Vec<SignedEvent>, Act
     (vec![event], id)
 }
 
-/// A correspondence backend that carries **real mail over a hosted Post** — not
-/// a fixture. It stands the [`ReachPlane`](crate::client::reach::ReachPlane) up
-/// against a live `lait-post` and runs the whole pipe: seal, deposit over HTTP,
-/// fetch back, open, file.
+/// The opt-in front-end fixture, and nothing else.
 ///
-/// v1 reaches the one correspondent that needs no directory: **yourself**. A
-/// person seals to their own profile's devices and reads it back — proof the
-/// carriage works end to end against real infrastructure. Reaching another
-/// person is the identical `send`/`collect` once a directory (AUTH-12) lets a
-/// stranger's profile be learned; nothing here changes when it does.
-pub struct PostBackend {
-    reach: crate::client::reach::PostReach,
-    /// What I have composed and sent — mine to remember whether or not it has
-    /// been fetched back, the same reason a sent message is kept locally.
-    sent: Vec<(u64, String)>,
-}
-
-impl PostBackend {
-    /// Stand the plane up from this identity's device seeds, pointed at `base`.
-    pub fn found(
-        seeds: Vec<[u8; 32]>,
-        base: String,
-        now: u64,
-    ) -> Result<Self, crate::client::reach::ReachError> {
-        Ok(Self {
-            reach: crate::client::reach::PostReach::found(seeds, base, now)?,
-            sent: Vec::new(),
-        })
-    }
-
-    /// This identity's own address, the id its self-conversation is keyed on.
-    fn self_id(&self) -> String {
-        self.reach.profile().as_str().to_owned()
-    }
-
-    /// Send a message. Only this identity's own address is reachable until a
-    /// directory carries a stranger's profile — anything else refuses honestly.
-    pub fn send(&mut self, to: &str, body: &str, now: u64) -> Result<(), ClientError> {
-        if to != self.self_id() {
-            return Err(ClientError::refused(
-                "only your own address is reachable over the Post yet",
-            ));
-        }
-        self.reach
-            .send_self(body, now)
-            .map_err(|error| ClientError::internal(format!("send over the Post: {error:?}")))?;
-        self.sent.push((now, body.to_owned()));
-        Ok(())
-    }
-
-    /// Fetch and file anything waiting over the Post.
-    pub fn collect(&mut self, now: u64) {
-        self.reach.collect(now);
-    }
-
-    /// Project the self-conversation as the model draws it.
-    pub fn snapshot(&self) -> Correspondence {
-        let me = self.self_id();
-        let my_device = self.reach.my_device().as_str().to_owned();
-        let name = "You (over the Post)".to_owned();
-
-        let mut messages: Vec<ChatMessage> = self
-            .sent
-            .iter()
-            .map(|(sent_at, body)| ChatMessage {
-                mine: true,
-                kind: "message".into(),
-                body: Some(body.clone()),
-                sent_at: *sent_at,
-                from_device: my_device.clone(),
-                provenance_agrees: true,
-            })
-            .collect();
-        for (from, body, sent_at, provenance_agrees) in self.reach.inbox() {
-            messages.push(ChatMessage {
-                mine: false,
-                kind: "message".into(),
-                body: Some(body),
-                sent_at,
-                from_device: from.as_str().to_owned(),
-                provenance_agrees,
-            });
-        }
-        messages.sort_by_key(|message| message.sent_at);
-
-        let contact = Contact {
-            id: me.clone(),
-            name: name.clone(),
-            devices: vec![my_device.clone()],
-            added: true,
-            is_agent: false,
-            parent_id: None,
-            parent_name: None,
-            unread: 0,
-        };
-        Correspondence {
-            my_device: Some(my_device),
-            contacts: vec![contact],
-            conversations: vec![Conversation {
-                peer_id: me.clone(),
-                peer_name: name,
-                messages,
-            }],
-            open_tabs: vec![me.clone()],
-            active_tab: Some(me),
-        }
-    }
-}
-
-/// The correspondence backend the runtime holds: either the in-process fixture
-/// or a real hosted-Post plane. The surface calls the same
-/// `send`/`collect`/`block`/… on whichever is underneath and never learns which.
-pub enum Correspondent {
-    /// The opt-in front-end validation fixture, `LAIT_CORRESPONDENCE_DEMO`.
-    Demo(DemoCarrier),
-    /// A real plane carrying mail over a hosted Post, `LAIT_POST_URL`.
-    Post(PostBackend),
-}
-
-impl Correspondent {
-    pub fn snapshot(&self) -> Correspondence {
-        match self {
-            Self::Demo(demo) => demo.snapshot(),
-            Self::Post(post) => post.snapshot(),
-        }
-    }
-
-    pub fn send(&mut self, to: &str, body: &str, now: u64) -> Result<(), ClientError> {
-        match self {
-            Self::Demo(demo) => demo.send(to, body, now),
-            Self::Post(post) => post.send(to, body, now),
-        }
-    }
-
-    pub fn collect(&mut self, now: u64) {
-        match self {
-            Self::Demo(demo) => demo.collect(now),
-            Self::Post(post) => post.collect(now),
-        }
-    }
-
-    pub fn block(&mut self, person: &str, now: u64) -> Result<(), ClientError> {
-        match self {
-            Self::Demo(demo) => demo.block(person, now),
-            // No stranger can reach you over the Post yet, so there is nobody to
-            // block — say so rather than pretend it landed.
-            Self::Post(_) => Err(ClientError::refused(
-                "blocking is not available over the Post yet",
-            )),
-        }
-    }
-
-    pub fn accept(&mut self, person: &str) {
-        if let Self::Demo(demo) = self {
-            demo.accept(person);
-        }
-    }
-
-    pub fn open(&mut self, person: &str) {
-        if let Self::Demo(demo) = self {
-            demo.open(person);
-        }
-    }
-
-    pub fn focus(&mut self, person: &str) {
-        if let Self::Demo(demo) = self {
-            demo.focus(person);
-        }
-    }
-
-    pub fn close(&mut self, person: &str) {
-        if let Self::Demo(demo) = self {
-            demo.close(person);
-        }
-    }
-}
+/// The real backend is the daemon's: `Client::reach_*` and `Client::correspond_*`
+/// reach the mailbox where it lives. What stays here is the loopback world that
+/// drives this interface with no daemon at all, which is the one thing a client
+/// legitimately holds — it is a harness, not a plane.
+pub type Correspondent = DemoCarrier;
 
 #[cfg(test)]
 mod tests {
@@ -910,56 +749,5 @@ mod tests {
         world.collect(NOW + 22);
         let after = conversation(&world.snapshot(), "grace").messages.len();
         assert_eq!(after, before, "a blocked person's message never lands");
-    }
-
-    /// The real backend carries a self-message over the **deployed** Post and the
-    /// snapshot the model draws shows both sides — the sent copy and the one
-    /// fetched back. Gated on `POST_SMOKE_URL`; a no-op without it.
-    #[test]
-    fn post_backend_round_trips_a_self_message_over_the_deployed_post() {
-        let Ok(base) = std::env::var("POST_SMOKE_URL") else {
-            return;
-        };
-        let base = base.trim_end_matches('/').to_owned();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_secs();
-        // Per-run seeds, so the persistent Post never crosses runs.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-            .to_le_bytes();
-        let mk = |tag: u8| {
-            let mut seed = [0u8; 32];
-            seed[..16].copy_from_slice(&stamp);
-            seed[16] = tag;
-            seed
-        };
-
-        let mut backend = PostBackend::found(vec![mk(1), mk(2)], base, now).expect("found");
-        let me = backend.self_id();
-        backend
-            .send(&me, "reached myself over the Post", now)
-            .expect("send self");
-        backend.collect(now);
-
-        let snapshot = backend.snapshot();
-        let convo = conversation(&snapshot, &me);
-        assert!(
-            convo
-                .messages
-                .iter()
-                .any(|m| m.mine && m.body.as_deref() == Some("reached myself over the Post")),
-            "the sent copy is in the transcript"
-        );
-        assert!(
-            convo
-                .messages
-                .iter()
-                .any(|m| !m.mine && m.body.as_deref() == Some("reached myself over the Post")),
-            "the copy fetched back over the Post is in the transcript"
-        );
     }
 }

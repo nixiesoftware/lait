@@ -39,7 +39,32 @@ use serde::Deserialize;
 
 use crate::control::{ContentCall, ContentErrorCode, ContentReply};
 
-use super::{err_json, App, ErrorKind};
+use super::{err_json, socket, App, ErrorKind};
+
+/// How often an in-flight upload samples its own progress.
+///
+/// The lane already coalesces and is lossy, so this is not a second throttle —
+/// it is how often the producer bothers to build a frame at all. A 64 KiB piece
+/// arrives far faster than twice a second, and every unsampled one would cost
+/// two allocations to be discarded downstream.
+const PROGRESS_SAMPLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// An operation id as a browser-stable key.
+fn hex(bytes: &[u8; 16]) -> String {
+    fn nibble(value: u8) -> char {
+        if value < 10 {
+            (b'0' + value) as char
+        } else {
+            (b'a' + value - 10) as char
+        }
+    }
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(nibble(byte >> 4));
+        out.push(nibble(byte & 0x0f));
+    }
+    out
+}
 
 /// How many content transfers this server will run at once, and how many of
 /// those may be uploads.
@@ -141,6 +166,7 @@ fn refuse_content(code: ContentErrorCode, message: &str) -> Response {
         ContentErrorCode::Denied => (StatusCode::FORBIDDEN, ErrorKind::Error),
         ContentErrorCode::Unknown => (StatusCode::NOT_FOUND, ErrorKind::NotFound),
         ContentErrorCode::NotResident => (StatusCode::CONFLICT, ErrorKind::Error),
+        ContentErrorCode::Sealed => (StatusCode::GONE, ErrorKind::Error),
         ContentErrorCode::Bounds => (StatusCode::RANGE_NOT_SATISFIABLE, ErrorKind::Error),
         ContentErrorCode::Storage => (StatusCode::SERVICE_UNAVAILABLE, ErrorKind::Error),
         ContentErrorCode::Invalid => (StatusCode::UNPROCESSABLE_ENTITY, ErrorKind::Error),
@@ -456,12 +482,39 @@ pub(super) async fn upload(
     // connection and nothing else — in particular it never holds its own upload
     // in this process's memory, which is the whole reason this route exists
     // rather than an inline JSON field.
+    // Sampled here rather than emitted per piece. The lane coalesces and is
+    // lossy by design, so a frame per 64 KiB would be discarded downstream
+    // after costing two allocations to build.
+    let transfer = hex(&operation);
+    let mut moved = 0u64;
+    let mut sampled = std::time::Instant::now();
+    app.socket.note(socket::TransferProgress {
+        transfer: transfer.clone(),
+        content: String::new(),
+        moved,
+        total: query.len,
+        done: false,
+    });
+
     let mut stream = body.into_data_stream();
     loop {
         match next_piece(&mut stream).await {
             Ok(Some(piece)) => {
                 if let Err(error) = upload.push(&piece).await {
                     return refuse_content(ContentErrorCode::Invalid, &format!("{error:#}"));
+                }
+                moved = moved.saturating_add(piece.len() as u64);
+                if sampled.elapsed() >= PROGRESS_SAMPLE {
+                    sampled = std::time::Instant::now();
+                    app.socket.note(socket::TransferProgress {
+                        transfer: transfer.clone(),
+                        // An ingest mints its name at the end, so there is
+                        // nothing truthful to put here until `finish`.
+                        content: String::new(),
+                        moved,
+                        total: query.len,
+                        done: false,
+                    });
                 }
             }
             Ok(None) => break,
@@ -473,15 +526,24 @@ pub(super) async fn upload(
         Ok(ContentReply::ContentWritten {
             content,
             plaintext_len,
-        }) => (
-            StatusCode::CREATED,
-            axum::Json(serde_json::json!({
-                "kind": "content",
-                "content": content,
-                "size": plaintext_len,
-            })),
-        )
-            .into_response(),
+        }) => {
+            app.socket.note(socket::TransferProgress {
+                transfer,
+                content: content.clone(),
+                moved: plaintext_len,
+                total: plaintext_len,
+                done: true,
+            });
+            (
+                StatusCode::CREATED,
+                axum::Json(serde_json::json!({
+                    "kind": "content",
+                    "content": content,
+                    "size": plaintext_len,
+                })),
+            )
+                .into_response()
+        }
         Ok(ContentReply::ContentError { code, message }) => refuse_content(code, &message),
         Ok(other) => refuse_content(
             ContentErrorCode::Storage,
@@ -764,7 +826,6 @@ mod end_to_end {
             origin: crate::orbits::Origin::default(),
             host_nick: String::new(),
             last_opened: 0,
-            projects: Vec::new(),
         };
         let app = Arc::new(App {
             world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
@@ -780,6 +841,10 @@ mod end_to_end {
             content_permits: ContentStreamPermits::new(),
             socket: crate::serve::socket::Hub::new(),
         });
+
+        // Attached before the upload starts, because the lane is live and not
+        // a log: a watcher that subscribes afterwards has missed it.
+        let mut progress = app.socket.subscribe();
 
         // Larger than one control-channel read buffer, so the body's first bytes
         // are the ones that land inside the header line's buffer — the mistake a
@@ -809,6 +874,28 @@ mod end_to_end {
             .expect("a content id")
             .to_string();
         assert_eq!(written["size"].as_u64(), Some(plaintext.len() as u64));
+
+        // The progress lane had no producer at all, so a browser subscribing to
+        // it watched a transfer it was never told about.
+        let mut frames = Vec::new();
+        while let Ok(frame) = progress.try_recv() {
+            frames.push(frame);
+        }
+        let opened = frames.first().expect("an upload announces that it began");
+        assert!(!opened.done);
+        assert_eq!(opened.total, plaintext.len() as u64);
+        assert!(
+            opened.content.is_empty(),
+            "an ingest has no name until it finishes"
+        );
+        let finished = frames.last().expect("and announces that it finished");
+        assert!(finished.done);
+        assert_eq!(finished.content, content, "named once there is a name");
+        assert_eq!(finished.moved, plaintext.len() as u64);
+        assert_eq!(
+            finished.transfer, opened.transfer,
+            "one transfer, keyed the same throughout"
+        );
 
         // HEAD answers geometry and residency in headers, and we sealed it, so
         // every chunk is here.

@@ -37,7 +37,7 @@ fn an_installed_entry_reads_back_with_its_sidecar() {
     let entry = address(&bytes);
     cache.install(&entry, &bytes, b"proof").unwrap();
 
-    assert!(cache.is_resident(&entry));
+    assert!(cache.is_resident(&entry).unwrap());
     assert_eq!(cache.read(&entry).unwrap(), (bytes, b"proof".to_vec()));
 }
 
@@ -61,7 +61,10 @@ fn a_slot_returns_exactly_what_was_put_in_it() {
     *raw.last_mut().unwrap() ^= 0xFF;
     std::fs::write(&path, &raw).unwrap();
     assert_eq!(cache.read(&slot), Err(Failure::Corrupt));
-    assert!(!cache.is_resident(&slot), "corrupt bytes are dropped");
+    assert!(
+        !cache.is_resident(&slot).unwrap(),
+        "corrupt bytes are dropped"
+    );
 }
 
 #[test]
@@ -83,12 +86,12 @@ fn corruption_drops_the_entry_and_leaves_it_refetchable() {
     std::fs::write(root.join("chunks").join(hex(&entry)), b"tampered!!").unwrap();
     assert_eq!(cache.read(&entry), Err(Failure::Corrupt));
     // Dropped, so the next read is an honest miss rather than a repeated lie.
-    assert!(!cache.is_resident(&entry));
+    assert!(!cache.is_resident(&entry).unwrap());
     assert_eq!(cache.read(&entry), Err(Failure::NotResident));
 
     // And it can simply be installed again.
     cache.install(&entry, &bytes, b"proof").unwrap();
-    assert!(cache.is_resident(&entry));
+    assert!(cache.is_resident(&entry).unwrap());
 }
 
 #[test]
@@ -113,7 +116,7 @@ fn an_entry_cannot_be_half_present() {
     // it drops it so the next attempt refetches.
     std::fs::write(root.join("chunks").join(hex(&entry)), b"	").unwrap();
     assert_eq!(cache.read(&entry), Err(Failure::Corrupt));
-    assert!(!cache.is_resident(&entry));
+    assert!(!cache.is_resident(&entry).unwrap());
 }
 
 #[test]
@@ -161,13 +164,13 @@ fn two_operations_holding_one_entry_both_have_to_release_it() {
     cache.release(&first).unwrap();
     cache.sweep().unwrap();
     assert!(
-        cache.is_resident(&entry),
+        cache.is_resident(&entry).unwrap(),
         "one release must not collect what another operation still holds"
     );
 
     cache.release(&second).unwrap();
     let report = cache.sweep().unwrap();
-    assert!(!cache.is_resident(&entry));
+    assert!(!cache.is_resident(&entry).unwrap());
     assert_eq!(report.entries_removed, 1);
 }
 
@@ -182,7 +185,10 @@ fn taking_a_lease_twice_holds_it_once() {
     cache.lease(&lease).unwrap();
     cache.release(&lease).unwrap();
     cache.sweep().unwrap();
-    assert!(!cache.is_resident(&entry), "one release was enough");
+    assert!(
+        !cache.is_resident(&entry).unwrap(),
+        "one release was enough"
+    );
 }
 
 #[test]
@@ -201,7 +207,7 @@ fn a_crashed_operation_releases_every_lease_it_held() {
     assert_eq!(cache.release_operation(&operation(9)).unwrap(), 5);
     cache.sweep().unwrap();
     for entry in entries {
-        assert!(!cache.is_resident(&entry));
+        assert!(!cache.is_resident(&entry).unwrap());
     }
 }
 
@@ -217,12 +223,12 @@ fn a_pin_survives_quota_pressure() {
     cache.pin(&pinned).unwrap();
 
     cache.sweep().unwrap();
-    assert!(cache.is_resident(&pinned));
-    assert!(!cache.is_resident(&loose));
+    assert!(cache.is_resident(&pinned).unwrap());
+    assert!(!cache.is_resident(&loose).unwrap());
 
     cache.unpin(&pinned).unwrap();
     cache.sweep().unwrap();
-    assert!(!cache.is_resident(&pinned));
+    assert!(!cache.is_resident(&pinned).unwrap());
 }
 
 #[test]
@@ -233,7 +239,7 @@ fn a_sweep_inside_quota_evicts_nothing() {
     let entry = address(&bytes);
     cache.install(&entry, &bytes, b"proof").unwrap();
     assert_eq!(cache.sweep().unwrap().entries_removed, 0);
-    assert!(cache.is_resident(&entry));
+    assert!(cache.is_resident(&entry).unwrap());
 }
 
 #[test]
@@ -251,7 +257,7 @@ fn staged_bytes_are_never_advertised_and_resume_from_where_they_are() {
     );
 
     // Partial bytes are not an entry: nothing about them is resident.
-    assert!(!cache.is_resident(&address(b"hello world")));
+    assert!(!cache.is_resident(&address(b"hello world")).unwrap());
 }
 
 #[test]
@@ -309,8 +315,11 @@ fn eviction_reclaims_the_most_room_for_the_fewest_refetches() {
     cache.install(&address(&small), &small, b"p").unwrap();
 
     cache.sweep().unwrap();
-    assert!(!cache.is_resident(&address(&big)), "largest goes first");
-    assert!(cache.is_resident(&address(&small)));
+    assert!(
+        !cache.is_resident(&address(&big)).unwrap(),
+        "largest goes first"
+    );
+    assert!(cache.is_resident(&address(&small)).unwrap());
 }
 
 fn hex(hash: &[u8; 32]) -> String {
@@ -386,9 +395,12 @@ fn an_unreadable_tag_directory_stops_the_sweep_rather_than_freeing_everything() 
         matches!(cache.sweep(), Err(Failure::Durability(_))),
         "a sweep that cannot read the holds must refuse"
     );
-    assert!(cache.is_resident(&entry), "and must not have deleted");
+    assert!(
+        cache.is_resident(&entry).unwrap(),
+        "and must not have deleted"
+    );
     assert!(matches!(cache.evict(&entry), Err(Failure::Durability(_))));
-    assert!(cache.is_resident(&entry));
+    assert!(cache.is_resident(&entry).unwrap());
 }
 
 #[test]
@@ -472,4 +484,47 @@ fn a_dead_operations_lease_is_released_and_a_content_hold_is_not() {
     );
     cache.release_content(&[9u8; 16]).unwrap();
     assert!(!cache.is_held(&entry).unwrap());
+}
+
+#[test]
+fn releasing_one_entry_leaves_the_same_holder_s_other_entries_and_other_holders_alone() {
+    // What a sliding window needs: let go of what has been passed without
+    // letting go of what has not been reached, and without letting go of what
+    // another reader is on. Pins cannot express it — they are keyed per entry,
+    // so one reader unpinning would unpin the other's chunk.
+    let cache = Residency::open(temp_root("release-one"), 1 << 20).unwrap();
+
+    let behind = [1u8; 32];
+    let ahead = [2u8; 32];
+    for entry in [behind, ahead] {
+        cache.install(&entry, b"bytes", b"sidecar").unwrap();
+    }
+    let reader = [7u8; 16];
+    let other = [8u8; 16];
+    cache.hold_operation(reader, behind).unwrap();
+    cache.hold_operation(reader, ahead).unwrap();
+    cache.hold_operation(other, behind).unwrap();
+
+    cache.release_operation_entry(reader, behind).unwrap();
+
+    assert!(
+        cache.is_held(&behind).unwrap(),
+        "the other reader is still on it"
+    );
+    assert!(
+        cache.is_held(&ahead).unwrap(),
+        "and this reader has not reached this one yet"
+    );
+
+    cache.release_operation_entry(other, behind).unwrap();
+    assert!(
+        !cache.is_held(&behind).unwrap(),
+        "nobody is on it once the last holder moves"
+    );
+    assert!(cache.is_held(&ahead).unwrap());
+
+    // Idempotent: a reader that lets go twice is not an error, and does not
+    // reach past its own hold.
+    cache.release_operation_entry(reader, behind).unwrap();
+    assert!(cache.is_held(&ahead).unwrap());
 }

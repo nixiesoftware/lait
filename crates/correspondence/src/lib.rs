@@ -83,12 +83,13 @@ use serde::{Deserialize, Serialize};
 pub mod letter;
 pub mod mailbox;
 pub mod mem;
+pub mod plane;
 pub mod post;
 pub mod watch;
 
 pub use letter::{Content, Letter};
 pub use mailbox::{Mailbox, Received};
-pub use mem::MemCarrier;
+pub use mem::{MemCarrier, SharedMem};
 pub use post::PostCarrier;
 
 /// The largest sealed envelope this plane will carry.
@@ -217,6 +218,20 @@ impl Missed {
 /// Anyone may write to anyone. That is what makes a first contact possible at
 /// all, and it is why every implementation owes a per-recipient capacity bound:
 /// without one, a mailbox is write amplification any stranger can drive.
+/// Something that can produce a carrier for a given device.
+///
+/// A [`Carrier`] signs as exactly one device — the Post fences a fetch to the
+/// signer's own mailbox, which is what stops it handing anybody else's mail
+/// over. But an identity holds several devices and a sender addresses whichever
+/// one resolution named, so collecting means asking as each of them in turn.
+///
+/// A contractor is therefore what a holder configures, and a carrier is what one
+/// operation uses. Deployment picks the contractor — memory in tests, a hosted
+/// Post today, a direct peer later — and nothing above this learns which.
+pub trait Contractor: Send {
+    fn carrier_for(&self, seed: &[u8; 32]) -> Box<dyn Carrier + Send>;
+}
+
 pub trait Carrier {
     /// Leave an envelope for later collection.
     ///

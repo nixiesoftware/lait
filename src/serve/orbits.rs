@@ -14,6 +14,29 @@ use crate::daemon::{Client, LocalOrbitId, OrbitAddress};
 use crate::orbits::{self, Catalog, Entry, Presence, StationIdentity};
 use mechanics::ids::SpaceId;
 
+/// Why a row carries no name.
+///
+/// A picker that cannot name a Space must say which of these it hit. They are
+/// different facts and only one of them is worth acting on: a store that is
+/// gone needs attention, a Station that is merely down needs a click, and a
+/// Space that is genuinely unnamed needs nothing at all.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Unnamed {
+    /// The registered path no longer holds a Space store.
+    StoreMissing,
+    /// The daemon answered: nothing is placed at this Orbit, so there was no
+    /// Station to read a name from. A measurement, and the ordinary state of
+    /// every Orbit nobody has opened yet.
+    NotProbed,
+    /// The daemon could not be asked at all. **Not** a reading that came back
+    /// empty — the difference between "this Space is not running" and "this
+    /// Space could not be asked", which only the first is worth acting on.
+    Unreachable,
+    /// A Station answered but its World is not docked — it has no name to give.
+    NotDocked,
+}
+
 /// One row of the browser's Orbit picker.
 #[derive(Debug, Clone, Serialize)]
 pub struct SpaceRow {
@@ -21,27 +44,41 @@ pub struct SpaceRow {
     pub id: LocalOrbitId,
     /// The replicated Space id expected at this Orbit.
     pub space: String,
-    /// Display name at last open (advisory when the Orbit is idle).
-    pub name: String,
+    /// The Catalog name, read from a live Station — `None` when it could not be
+    /// read, and [`Self::unnamed`] then says why.
+    ///
+    /// There is deliberately no fallback. The registry remembers the name this
+    /// device saw at founding, and serving that when the probe misses is what
+    /// made a renamed Space answer to its birth name indefinitely, with nothing
+    /// on the wire to mark the difference.
+    pub name: Option<String>,
+    /// Set when `name` is `None`. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unnamed: Option<Unnamed>,
     pub path: String,
     pub origin: String,
     pub last_opened: u64,
-    /// `up` | `idle` | `missing`, as the registry knows it.
+    /// `up` | `idle` | `missing` | `unknown`.
+    ///
+    /// `unknown` is not a fourth degree of down. It is the absence of a
+    /// reading, and it exists so that a probe this device could not complete
+    /// stops being reported as a Station this device found stopped.
     pub status: &'static str,
     pub identity: StationIdentity,
-    pub projects: Vec<orbits::ProjectBrief>,
 }
 
 /// Probe one Orbit's compatibility control adapter without activating it.
 ///
 /// Listing must remain passive: opening the picker cannot wake every registered
-/// Orbit. The authoritative Space name is used when a live Station answers.
-async fn status(daemon: &Client, entry: &Entry) -> (&'static str, Option<String>) {
+/// Orbit. The Catalog name is read when a live Station answers, and every path
+/// that fails to read one says which failure it was — the four of them used to
+/// collapse into a single `None` that the caller could only paper over.
+async fn status(daemon: &Client, entry: &Entry) -> (&'static str, Result<String, Unnamed>) {
     if orbits::presence(entry) == Presence::Missing {
-        return ("missing", None);
+        return ("missing", Err(Unnamed::StoreMissing));
     }
     let Some(space) = SpaceId::parse(&entry.space) else {
-        return ("idle", None);
+        return ("idle", Err(Unnamed::NotProbed));
     };
     let route = ControlRoute::Orbit {
         address: OrbitAddress::for_store(Path::new(&entry.path), space),
@@ -52,12 +89,19 @@ async fn status(daemon: &Client, entry: &Entry) -> (&'static str, Option<String>
     )
     .await;
     match reply {
-        Ok(Ok(Response::Status(info))) => {
-            let name = (!info.name.trim().is_empty()).then(|| info.name.clone());
-            ("up", name)
-        }
-        Ok(Ok(_)) => ("up", None),
-        _ => ("idle", None),
+        // An undocked Station reports `name_unavailable`; its blank name is the
+        // absence of a reading, not a Space without a name. A docked one is
+        // believed even when the name is empty — that is a measurement.
+        Ok(Ok(Response::Status(info))) if info.name_unavailable => ("up", Err(Unnamed::NotDocked)),
+        Ok(Ok(Response::Status(info))) => ("up", Ok(info.name.clone())),
+        // Any other reply is the daemon declining a passive request, which it
+        // does exactly when nothing is placed here. That answer is what `idle`
+        // means; reporting it as `up` claimed a Station that does not exist,
+        // and every freshly founded Orbit read that way until it was opened.
+        Ok(Ok(_)) => ("idle", Err(Unnamed::NotProbed)),
+        // The probe itself did not complete — it timed out, or the reply would
+        // not decode. Nothing was measured, so nothing is claimed.
+        _ => ("unknown", Err(Unnamed::Unreachable)),
     }
 }
 
@@ -68,16 +112,20 @@ pub async fn list(directory: &Catalog, daemon: &Client) -> Vec<SpaceRow> {
         let daemon = daemon.clone();
         probes.spawn(async move {
             let (status, catalog_name) = status(&daemon, &binding.entry).await;
+            let (name, unnamed) = match catalog_name {
+                Ok(name) => (Some(name), None),
+                Err(why) => (None, Some(why)),
+            };
             SpaceRow {
                 id: LocalOrbitId::for_store(Path::new(&binding.entry.path)),
                 space: binding.entry.space.clone(),
-                name: catalog_name.unwrap_or_else(|| binding.entry.name.clone()),
+                name,
+                unnamed,
                 path: binding.entry.path.clone(),
                 origin: binding.entry.origin.to_string(),
                 last_opened: binding.entry.last_opened,
                 status,
                 identity: binding.identity,
-                projects: binding.entry.projects.clone(),
             }
         });
     }

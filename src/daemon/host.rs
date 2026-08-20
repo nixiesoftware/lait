@@ -674,6 +674,13 @@ impl Listener {
             // before a Station could exist — and because running it in this
             // process is what stops it racing this process for the store lock.
             (ControlRoute::Daemon, request)
+                if crate::daemon::correspondence::is_correspondence_request(&request) =>
+            {
+                let response = self.router.correspondence().handle(request).await;
+                let _ = write_line(&mut write_half, &response).await;
+                Flow::Next(reader, write_half)
+            }
+            (ControlRoute::Daemon, request)
                 if crate::daemon::address_book::is_book_request(&request) =>
             {
                 let response = match self.router.book() {
@@ -1907,7 +1914,6 @@ mod tests {
                 origin: Origin::Founded,
                 host_nick: String::new(),
                 last_opened: 1,
-                projects: Vec::new(),
             }],
         );
         let resolved = directory.resolve(id.as_str()).unwrap();

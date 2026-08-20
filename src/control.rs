@@ -724,6 +724,49 @@ pub enum Request {
     /// with each op's authorization verdict (cryptographic provenance).
     MemberLog,
 
+    /// Identity-scoped correspondence. Daemon route only.
+    ///
+    /// Here rather than in the client because a World's head can reach this
+    /// plane and cannot reach Astrolabe, and because the daemon is the process
+    /// that is still running when a window is closed. What is carried is the
+    /// identity's; what an invitation grants is the Space's, and this never
+    /// decides the second.
+    ///
+    /// Publish this identity's reach and answer the artifact to hand over.
+    ReachShare,
+    /// Take a correspondent in, by the announcement they handed over.
+    ReachLearn {
+        announcement: String,
+    },
+    /// The correspondents this identity holds, and its own reach.
+    ReachView,
+    /// Learn a correspondent by the short address a directory issued.
+    ///
+    /// The directory is a mirror, so what comes back is verified here rather
+    /// than trusted: the announcement anchors to its own genesis, and a profile
+    /// this identity already holds whose device set has *changed* is refused
+    /// unless `accept_change` says a person looked at it. That refusal is
+    /// AUTH-18's v1 rung — a substituted key must block sending rather than
+    /// badge it, because field studies put manual verification at 13 to 14
+    /// percent and a warning nobody reads is not a defence.
+    ReachResolve {
+        address: String,
+        #[serde(default)]
+        accept_change: bool,
+    },
+    /// Seal a message to a learned correspondent and deposit it.
+    CorrespondSend {
+        to: String,
+        body: String,
+    },
+    /// Ask the carrier for anything waiting and file it.
+    CorrespondCollect,
+    /// Carry an invitation this identity already holds to a correspondent.
+    /// Minting one is the Space's authority and stays there.
+    CorrespondInvite {
+        to: String,
+        link: String,
+    },
     /// Identity-scoped address book. Daemon route only; never places an Orbit.
     /// The book is the one namer: member and presence rows leave the Station
     /// bare and the daemon decorates them from Cards — the `MemberAlias` verb
@@ -1522,6 +1565,9 @@ pub enum ContentErrorCode {
     Unknown,
     /// The descriptor is here and the bytes are not. Retryable, after a fetch.
     NotResident,
+    /// The bytes are here and sealed to an epoch this Station has no key for.
+    /// A fetch cannot help.
+    Sealed,
     /// A range past the content, or a length past what one call may return.
     Bounds,
     /// The store or the cache failed. Ours, not the caller's.
@@ -1681,6 +1727,13 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ConfigReload
         | Request::Stop
         | Request::Hello { .. }
+        | Request::ReachShare
+        | Request::ReachLearn { .. }
+        | Request::ReachView
+        | Request::ReachResolve { .. }
+        | Request::CorrespondSend { .. }
+        | Request::CorrespondCollect
+        | Request::CorrespondInvite { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -2060,6 +2113,71 @@ pub struct BookSuggestionView {
     pub handles: Vec<String>,
 }
 
+/// What the daemon answers about this identity's correspondence.
+///
+/// The whole of it, every time. A caller draws from this and holds nothing:
+/// the mailbox is the identity's and lives here, so a surface keeping its own
+/// copy would be a second model, disagreeing precisely when a letter lands
+/// while that surface was not running.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReachView {
+    /// The artifact a person hands somebody so they can reach this identity.
+    /// `None` until something has been published.
+    pub announcement: Option<String>,
+    /// This identity's own address on the plane.
+    pub profile: String,
+    /// The short, speakable address a directory issued — `act-ion-zoo-4417`.
+    /// `None` until this identity has published to one, which is optional: the
+    /// plane works on profile ids alone and a directory only makes them
+    /// sayable.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// The correspondents it holds, as address spellings.
+    pub correspondents: Vec<String>,
+    /// One transcript per correspondent, in send order.
+    pub conversations: Vec<ConversationView>,
+}
+
+/// Everything said with one correspondent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationView {
+    /// Their address.
+    pub peer: String,
+    pub letters: Vec<LetterView>,
+}
+
+/// One letter in a transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LetterView {
+    /// The carrier's deposit id, for a letter that arrived. `None` for one this
+    /// identity composed — a sent letter has no deposit until it lands, and
+    /// nothing acts on one. An invitation is acted on by naming this.
+    pub id: Option<String>,
+    /// Whether this identity wrote it.
+    pub mine: bool,
+    /// `message` or `invitation`. A string rather than an enum for the same
+    /// reason the lifecycle states are: a kind added later should widen a
+    /// caller's match rather than break its decoding.
+    pub kind: String,
+    /// The text, for a message. `None` for an invitation, which is acted on
+    /// rather than read.
+    pub body: Option<String>,
+    pub sent_at: u64,
+    /// The device that signed it, proven by the letter rather than claimed by
+    /// the carrier.
+    pub from_device: String,
+    /// Whether the carrier's word about the sender matched that proof. Shown
+    /// rather than resolved: the two disagreeing is a fact worth seeing.
+    pub provenance_agrees: bool,
+    /// For an invitation, the link body it carries. `None` for a message.
+    ///
+    /// Carried in the view because acting on an invitation *is* using its
+    /// coordinates, and a caller that had to ask again for them would be asking
+    /// the mailbox to remember which letter it had just described.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation: Option<String>,
+}
+
 /// The identity's book, plus how far legacy alias import has got.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookView {
@@ -2149,6 +2267,10 @@ pub enum Response {
         entries: Vec<MemberLogEntry>,
     },
     /// Identity-scoped address book (reply to the `Book*` requests).
+    /// This identity's reach: the artifact to hand over, its own address, and
+    /// the correspondents it holds. One shape answers every reach request, so a
+    /// caller never asks twice to see what a write changed.
+    Reach(Box<ReachView>),
     Book(Box<BookView>),
     /// Scoped handle decoration. Never a Card-existence bit for a handle
     /// outside the named Orbit's non-placing snapshot.
@@ -2863,7 +2985,16 @@ pub struct StatusInfo {
     pub nick: String,
     /// The space display name (synced catalog value; empty on a joiner
     /// whose catalog hasn't arrived yet).
+    ///
+    /// Read it only together with [`Self::name_unavailable`] — empty means
+    /// "this space has no name" and is a different fact from "nobody could ask".
     pub name: String,
+    /// Whether [`Self::name`] is UNAVAILABLE rather than empty. `true` means the
+    /// World is not docked, so no name was read — never render it as a name,
+    /// and never substitute a remembered one. Additive, so pre-existing clients
+    /// decode the status unchanged.
+    #[serde(default)]
+    pub name_unavailable: bool,
     /// The space overview description (synced catalog value; empty when unset).
     /// Additive so pre-SCOPE-2 clients decode the status unchanged.
     #[serde(default)]

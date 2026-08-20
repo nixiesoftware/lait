@@ -652,4 +652,36 @@ void main() {
     expect(find.text("Grace's agent"), findsOneWidget);
     expect(find.text('Ada'), findsNothing, reason: 'known list is hidden now');
   });
+
+  testWidgets('opening a chat already in flight asks a second time for nothing',
+      (tester) async {
+    CorrespondenceFacts one() => CorrespondenceFacts(
+          myDevice: null,
+          contacts: [_contact(id: 'ada', name: 'Ada')],
+          conversations: const [],
+          openTabs: const [],
+          activeTab: null,
+        );
+
+    // A press on this row does two things — asks for the tab and raises the
+    // chat window — so an ungated row raises the window again on every repeat
+    // while the first answer is still on its way.
+    final asked = await _pump(
+      tester,
+      _view(
+        correspondence: one(),
+        inFlight: [ActionKeys.openConversation('ada')],
+      ),
+    );
+    await tester.tap(find.text('Ada'), warnIfMissed: false);
+    await tester.pump();
+    expect(asked, isEmpty, reason: 'its own open is already under way');
+
+    // With nothing in flight the same row asks, so the gate is the key and not
+    // the row being inert.
+    final second = await _pump(tester, _view(correspondence: one()));
+    await tester.tap(find.text('Ada'), warnIfMissed: false);
+    await tester.pump();
+    expect(second, [const ActionRequest.openConversation(person: 'ada')]);
+  });
 }
