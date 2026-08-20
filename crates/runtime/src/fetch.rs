@@ -83,6 +83,15 @@ struct ProviderScore {
 /// How long a refusal or timeout keeps a provider out of the running.
 const PROBATION: Duration = Duration::from_secs(30);
 
+/// How many times a fetch re-asks for what it still wants.
+///
+/// A throttled provider refuses now and serves shortly; one pass would report
+/// the chunk missing when the only thing missing was patience.
+const MAX_FETCH_PASSES: usize = 8;
+
+/// Added per pass, so eight passes wait under two seconds in total.
+const PASS_BACKOFF: Duration = Duration::from_millis(50);
+
 /// A connected, admitted provider.
 pub struct Provider {
     station: Key,
@@ -431,62 +440,77 @@ impl Fetcher {
         outstanding
             .sort_by_key(|index| offers.values().filter(|held| held.contains(index)).count());
 
-        for index in outstanding {
-            if cancel.is_cancelled() {
-                // Drop would release the same things and call it Failed.
-                handle.finish(TransferState::Cancelled, Instant::now());
-                return Err(Failure::Cancelled);
+        let mut remaining = outstanding;
+        for pass in 0..MAX_FETCH_PASSES {
+            if remaining.is_empty() {
+                break;
             }
-            let candidates = self.rank(&offers, &scores, index);
-            if candidates.is_empty() {
-                continue;
+            if pass > 0 {
+                // A refused chunk is worth waiting for: the refusal a rate gate
+                // sends and the one an unwilling peer sends are the same frame,
+                // so the only safe reading is "not now". Linear, and bounded by
+                // the pass count, so a peer that means it still ends the fetch.
+                tokio::time::sleep(PASS_BACKOFF.saturating_mul(pass as u32)).await;
             }
-            let mut installed = false;
-            for station in candidates {
-                let Some(provider) = providers.iter().find(|p| p.station == station) else {
+            let mut still_wanted = Vec::new();
+            for index in std::mem::take(&mut remaining) {
+                if cancel.is_cancelled() {
+                    // Drop would release the same things and call it Failed.
+                    handle.finish(TransferState::Cancelled, Instant::now());
+                    return Err(Failure::Cancelled);
+                }
+                let candidates = self.rank(&offers, &scores, index);
+                if candidates.is_empty() {
                     continue;
-                };
-                match self
-                    .fetch_one(
-                        &policy,
-                        content,
-                        &descriptor,
-                        provider,
-                        index,
-                        operation,
-                        intent,
-                    )
-                    .await
-                {
-                    Ok(bytes) => {
-                        moved += bytes;
-                        handle.advance(
-                            TransferState::Transferring {
-                                bytes: moved,
-                                total: Some(total),
-                            },
-                            Instant::now(),
-                        );
-                        installed = true;
-                        break;
-                    }
-                    Err(lied) => {
-                        // A proof failure is attributable to exactly one peer,
-                        // and it costs a whole chunk — so that peer is out for
-                        // this content immediately rather than after a budget.
-                        // A refusal or a timeout only earns decaying probation.
-                        let score = scores.entry(station.clone()).or_default();
-                        if lied {
-                            offers.remove(&station);
-                        } else {
-                            score.probation_until = Some(Instant::now() + PROBATION);
+                }
+                let mut installed = false;
+                for station in candidates {
+                    let Some(provider) = providers.iter().find(|p| p.station == station) else {
+                        continue;
+                    };
+                    match self
+                        .fetch_one(
+                            &policy,
+                            content,
+                            &descriptor,
+                            provider,
+                            index,
+                            operation,
+                            intent,
+                        )
+                        .await
+                    {
+                        Ok(bytes) => {
+                            moved += bytes;
+                            handle.advance(
+                                TransferState::Transferring {
+                                    bytes: moved,
+                                    total: Some(total),
+                                },
+                                Instant::now(),
+                            );
+                            installed = true;
+                            break;
+                        }
+                        Err(lied) => {
+                            // A proof failure is attributable to exactly one peer,
+                            // and it costs a whole chunk — so that peer is out for
+                            // this content immediately rather than after a budget.
+                            // A refusal or a timeout only earns decaying probation.
+                            let score = scores.entry(station.clone()).or_default();
+                            if lied {
+                                offers.remove(&station);
+                            } else {
+                                score.probation_until = Some(Instant::now() + PROBATION);
+                            }
                         }
                     }
                 }
+                if !installed {
+                    still_wanted.push(index);
+                }
             }
-            if !installed {
-                continue;
-            }
+            remaining = still_wanted;
         }
 
         handle.advance(TransferState::Verifying, Instant::now());
@@ -668,6 +692,29 @@ impl Fetcher {
                     .is_none_or(|until| until <= now)
             })
             .collect();
+        if able.is_empty() {
+            // Everyone able is on probation. Probation exists so a blip does
+            // not blacklist everybody — banning the only peer that holds a
+            // chunk does exactly that, and a throttled provider is
+            // indistinguishable from an unwilling one by design. Soonest out of
+            // probation first.
+            let mut waiting: Vec<&Key> = offers
+                .iter()
+                .filter(|(_, held)| held.contains(&index))
+                .map(|(station, _)| station)
+                .collect();
+            waiting.sort_by_key(|station| {
+                scores
+                    .get(*station)
+                    .and_then(|s| s.probation_until)
+                    .unwrap_or(now)
+            });
+            return waiting
+                .into_iter()
+                .take(slots::MAX_INFLIGHT_CHUNKS_PER_PROVIDER)
+                .cloned()
+                .collect();
+        }
         able.sort_by(|a, b| {
             let sa = scores.get(*a).cloned().unwrap_or_default();
             let sb = scores.get(*b).cloned().unwrap_or_default();
