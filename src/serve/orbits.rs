@@ -25,8 +25,14 @@ use mechanics::ids::SpaceId;
 pub enum Unnamed {
     /// The registered path no longer holds a Space store.
     StoreMissing,
-    /// No Station answered, so the name was never read.
+    /// The daemon answered: nothing is placed at this Orbit, so there was no
+    /// Station to read a name from. A measurement, and the ordinary state of
+    /// every Orbit nobody has opened yet.
     NotProbed,
+    /// The daemon could not be asked at all. **Not** a reading that came back
+    /// empty — the difference between "this Space is not running" and "this
+    /// Space could not be asked", which only the first is worth acting on.
+    Unreachable,
     /// A Station answered but its World is not docked — it has no name to give.
     NotDocked,
 }
@@ -52,7 +58,11 @@ pub struct SpaceRow {
     pub path: String,
     pub origin: String,
     pub last_opened: u64,
-    /// `up` | `idle` | `missing`, as the registry knows it.
+    /// `up` | `idle` | `missing` | `unknown`.
+    ///
+    /// `unknown` is not a fourth degree of down. It is the absence of a
+    /// reading, and it exists so that a probe this device could not complete
+    /// stops being reported as a Station this device found stopped.
     pub status: &'static str,
     pub identity: StationIdentity,
 }
@@ -84,8 +94,14 @@ async fn status(daemon: &Client, entry: &Entry) -> (&'static str, Result<String,
         // believed even when the name is empty — that is a measurement.
         Ok(Ok(Response::Status(info))) if info.name_unavailable => ("up", Err(Unnamed::NotDocked)),
         Ok(Ok(Response::Status(info))) => ("up", Ok(info.name.clone())),
-        Ok(Ok(_)) => ("up", Err(Unnamed::NotProbed)),
-        _ => ("idle", Err(Unnamed::NotProbed)),
+        // Any other reply is the daemon declining a passive request, which it
+        // does exactly when nothing is placed here. That answer is what `idle`
+        // means; reporting it as `up` claimed a Station that does not exist,
+        // and every freshly founded Orbit read that way until it was opened.
+        Ok(Ok(_)) => ("idle", Err(Unnamed::NotProbed)),
+        // The probe itself did not complete — it timed out, or the reply would
+        // not decode. Nothing was measured, so nothing is claimed.
+        _ => ("unknown", Err(Unnamed::Unreachable)),
     }
 }
 

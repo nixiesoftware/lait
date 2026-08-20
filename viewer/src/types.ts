@@ -992,12 +992,13 @@ export interface SpaceRow {
    */
   name: string | null;
   /** Why `name` is null. Absent when a name was read. */
-  unnamed?: "store-missing" | "not-probed" | "not-docked";
+  unnamed?: "store-missing" | "not-probed" | "unreachable" | "not-docked";
   path: string;
   origin: string;
   last_opened: number;
-  /** `up` | `idle` | `missing`. */
-  status: "up" | "idle" | "missing";
+  /** `up` | `idle` | `missing` | `unknown` — where `unknown` is the absence of
+   * a reading, never a fourth degree of down. */
+  status: "up" | "idle" | "missing" | "unknown";
   identity: SpaceIdentity;
 }
 
