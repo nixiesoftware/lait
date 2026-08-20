@@ -12,6 +12,7 @@ import {
   setFullscreen,
   summonOwnedWindow,
   summonWorldSettings,
+  watchMenu,
   worldArtwork,
   type ClientAction,
   type ClientTransport,
@@ -22,6 +23,7 @@ import {
   type WorldPerson,
 } from "./client";
 import { BookSurface } from "./book";
+import { ChatSurface } from "./chat";
 import { DisplaysSurface } from "./displays";
 import { BigPictureSurface } from "./present";
 import { WorldSettingsSurface } from "./settings";
@@ -64,13 +66,23 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
         if (!refreshing) void dispatch({ type: "refresh" });
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
-        const target = event.key.toLowerCase() === "b" ? "book" : event.key.toLowerCase() === "d" ? "displays" : null;
+        const target = event.key.toLowerCase() === "b" ? "book"
+          : event.key.toLowerCase() === "d" ? "displays"
+          : event.key.toLowerCase() === "m" ? "chat"
+          : null;
         if (target !== null) { event.preventDefault(); void summonOwnedWindow(target); }
       }
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
   }, [dispatch, refreshing]);
+
+  // The native application menu's model-facing items land here: the menu is
+  // the OS's, but the model is this page's.
+  useEffect(() => watchMenu((id) => {
+    if (id === "refresh" && !refreshing) void dispatch({ type: "refresh" });
+    if (id === "theme") setDark(!dark);
+  }), [dispatch, refreshing, dark, setDark]);
 
   const worlds = view.library;
   const showing = useMemo(
@@ -150,6 +162,7 @@ function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedW
   return <main className="page owned-window" data-theme={dark ? "dark" : "light"}>
     {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
     {surface === "displays" && <DisplaysSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
+    {surface === "chat" && <ChatSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
   </main>;
 }
 

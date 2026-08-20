@@ -11,7 +11,7 @@ tauri-build = { version = "2.5.1", features = [] }
 astrolabe = { path = "../../../tools/astrolabe" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["tray-icon"] }
 
 # This desktop shell stays independently buildable while it matures beside the
 # Flutter client. It links the workspace's Astrolabe core as a normal path

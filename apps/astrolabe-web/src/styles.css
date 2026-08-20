@@ -113,3 +113,50 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 .present-retake:hover { background:#2a2a2acc; }
 .present-retake.corner { position:absolute; top:16px; right:16px; }
 .present-control:disabled { opacity:.45; pointer-events:none; }
+
+/* The chat — conversations, never an inbox. Its chrome is its tabs. */
+.chat-window { display:grid; grid-template-rows:auto minmax(0,1fr); height:100%; min-height:0; background:var(--surface-50); }
+.chat-tabs-band { display:flex; align-items:stretch; gap:8px; min-height:40px; padding:6px 12px 0; border-bottom:1px solid var(--border); background:var(--surface-100); }
+.chat-tabs-band .back-button { align-self:center; }
+.chat-band-title { align-self:center; color:var(--text); font-size:13px; }
+.chat-tabs { display:flex; overflow-x:auto; min-width:0; }
+.chat-tab { display:flex; align-items:center; gap:6px; max-width:180px; padding:0 8px; border-bottom:2px solid transparent; color:var(--muted); font-size:12px; cursor:pointer; user-select:none; }
+.chat-tab.active { border-bottom-color:var(--brand); color:var(--text); background:var(--surface-50); }
+.chat-tab-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chat-tab-close { border:0; padding:0 2px; color:var(--muted); background:transparent; font-size:14px; }
+.chat-tab-close:hover { color:var(--text); }
+.chat-empty { display:grid; flex:1; place-content:center; padding:24px; color:var(--muted); font-size:13px; text-align:center; }
+.chat-body { display:grid; grid-template-rows:auto minmax(0,1fr) auto; min-height:0; }
+.chat-header { display:flex; align-items:center; gap:10px; padding:8px 16px; border-bottom:1px solid var(--border); }
+.chat-header strong { color:var(--text); font-size:14px; }
+.chat-header-spring { flex:1; }
+.chat-transcript { min-height:0; overflow:auto; display:flex; flex-direction:column; padding:16px; }
+.chat-day { display:grid; place-items:center; margin:10px 0; }
+.chat-day span { border-radius:10px; padding:3px 9px; color:var(--muted); background:var(--surface-100); font-size:11px; }
+.chat-gap { margin:10px 0; border:0; border-top:1px solid var(--border); }
+.chat-row { display:flex; margin-bottom:2px; }
+.chat-row[data-group-ends] { margin-bottom:12px; }
+.chat-row.mine { flex-direction:column; align-items:flex-end; }
+.chat-row.theirs { align-items:flex-end; gap:6px; }
+.chat-gutter { display:inline-flex; flex:0 0 34px; }
+.chat-column { display:grid; gap:3px; min-width:0; justify-items:start; }
+.chat-byline { display:flex; align-items:baseline; gap:6px; }
+.chat-byline strong { color:var(--text); font-size:12px; }
+.chat-byline small,.chat-time { color:var(--faint); font-size:10px; }
+.chat-bubble { display:grid; gap:3px; max-width:460px; border-radius:7px; padding:7px 11px; color:var(--text); background:var(--surface-100); font-size:13px; line-height:1.45; overflow-wrap:anywhere; }
+.chat-bubble.mine { color:#fff; background:var(--brand); }
+.provenance-note { color:var(--faint); font-size:10px; }
+.invitation-card { display:grid; gap:7px; max-width:460px; border:1px solid var(--brand); border-radius:7px; padding:12px; background:var(--surface-100); }
+.invitation-card strong { color:#9ebfff; font-size:13px; }
+.invitation-card p { margin:0; color:var(--muted); font-size:12px; }
+.chat-composer { display:flex; align-items:flex-end; gap:6px; padding:12px; border-top:1px solid var(--border); }
+.rail-button { display:grid; place-items:center; width:36px; height:36px; border:0; border-radius:5px; color:var(--muted); background:transparent; font-size:15px; }
+.rail-button:hover { background:var(--surface-200); }
+.chat-input { flex:1; min-width:0; max-height:120px; resize:none; border:1px solid var(--border); border-radius:7px; padding:8px 10px; color:var(--text); background:#0f1318; font:inherit; font-size:13px; }
+.page[data-theme="light"] .chat-input { background:#fff; }
+.chat-send { display:grid; place-items:center; width:36px; height:36px; border:0; border-radius:50%; color:#fff; background:var(--brand); font-size:15px; }
+.chat-send:disabled { color:var(--faint); background:var(--surface-200); opacity:1; pointer-events:none; }
+.incoming-button { position:relative; width:auto; padding:0 6px; }
+.incoming-button[data-active] { color:#fff; background:var(--brand); }
+.incoming-count { position:absolute; top:-4px; right:-4px; min-width:15px; border-radius:8px; padding:1px 4px; color:#fff; background:#c2453e; font-size:9px; font-weight:750; text-align:center; }
+.message-row { cursor:pointer; }

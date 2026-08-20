@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from "react";
 
-import { actionKey, type Book, type Card, type ClientAction, type ClientView } from "./client";
+import { actionKey, summonOwnedWindow, type Book, type Card, type ClientAction, type ClientView, type Contact } from "./client";
 import { AiMark, AppDialog, Badge, DialogFooter, Empty, FacePlate, PersonTile, isAgentCard, presenceLabel } from "./kit";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
@@ -64,8 +64,18 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
   // show a card the book no longer holds.
   const [profile, setProfile] = useState<string | null>(null);
   const [dialog, setDialog] = useState<BookDialog | null>(null);
+  const [incoming, setIncoming] = useState(false);
 
   const book = view.book;
+  // The people this identity can hold a conversation with. Clicking one opens
+  // a chat — the address book is the way in, never a separate inbox. Known
+  // (added) contacts are the list; unknown strangers sit behind the CONTACTS
+  // band's badge, revealed only when asked for.
+  const messageContacts = view.correspondence?.contacts ?? [];
+  const knownContacts = messageContacts.filter((contact) => contact.added);
+  const unknownContacts = messageContacts.filter((contact) => !contact.added);
+  // Never strand on an empty Incoming panel if the last stranger cleared.
+  const showingIncoming = incoming && unknownContacts.length > 0;
   const profiled = profile === null ? null : book?.cards.find((card) => card.card === profile) ?? null;
 
   useEffect(() => {
@@ -97,9 +107,31 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
     <header className="book-top">
       <button className="back-button" onClick={onBack}>{ownedWindow ? "Close window" : "← Library"}</button>
     </header>
-    {book === null
+    {book === null && messageContacts.length === 0
       ? <div className="book-gutter"><Empty said="The book has not been read."
           next="Press F5 to ask the daemon. Nothing is created on your behalf." /></div>
+      // The same CONTACTS band, standalone: the known/unknown split holds
+      // even with no daemon-backed book behind it.
+      : book === null
+      ? <>
+        <div className="contacts-strip">
+          <span className="strip-title">CONTACTS</span>
+          {unknownContacts.length > 0 && <IncomingButton count={unknownContacts.length}
+            active={showingIncoming} onToggle={() => setIncoming(!showingIncoming)} />}
+        </div>
+        <div className="book-list">
+          {showingIncoming
+            ? unknownContacts.map((contact) => <MessageContactRow key={contact.id} contact={contact}
+                view={view} dispatch={dispatch} incoming />)
+            : knownContacts.length === 0
+              ? <span className="muted">No conversations.</span>
+              : <>
+                <SectionHead label="Messages" />
+                {knownContacts.map((contact) => <MessageContactRow key={contact.id} contact={contact}
+                  view={view} dispatch={dispatch} />)}
+              </>}
+        </div>
+      </>
       : profiled !== null
         ? <ProfilePage card={profiled} all={book.cards} view={view} dispatch={dispatch}
             onBack={() => setProfile(null)} openDialog={setDialog} />
@@ -124,16 +156,29 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
                 <span className="strip-title">CONTACTS</span>
                 <button className="strip-icon" aria-label="Search cards" title="Search cards (Ctrl+F)"
                   onClick={() => setSearching(true)}>⌕</button>
+                {unknownContacts.length > 0 && <IncomingButton count={unknownContacts.length}
+                  active={showingIncoming} onToggle={() => setIncoming(!showingIncoming)} />}
               </>}
           </div>
           <div className="book-list">
-            {shown.length === 0
+            {showingIncoming
+              // The Incoming panel: strangers the band's badge counts, shown
+              // only when its button is lit — never in the list.
+              ? unknownContacts.map((contact) => <MessageContactRow key={contact.id} contact={contact}
+                  view={view} dispatch={dispatch} incoming />)
+              : shown.length === 0 && knownContacts.length === 0
               ? <div className="book-gutter"><Empty
                   said={listed.length === 0 ? "No cards." : "No cards match that search."}
                   next={listed.length === 0
                     ? "The book is this identity's, even with no Space open."
                     : "Clear the search to see every Card."} /></div>
               : <>
+                {knownContacts.length > 0 && <>
+                  <SectionHead label="Messages" />
+                  {knownContacts.map((contact) => <MessageContactRow key={contact.id} contact={contact}
+                    view={view} dispatch={dispatch} />)}
+                  <hr className="book-rule" />
+                </>}
                 {contacts.length > 0 && <>
                   <SectionHead label="Contacts" count={contacts.length} />
                   {contacts.map((card) => <PersonRow key={card.card} card={card} onOpen={() => setProfile(card.card)} />)}
@@ -174,6 +219,58 @@ function CanonicalCard({ mine, hostAnswered, onOpen }: { mine: Card | null; host
 
 function SectionHead({ label, count }: { label: string; count?: number }) {
   return <div className="book-section-head"><span>{label}</span>{count !== undefined && <span className="dim">({count})</span>}</div>;
+}
+
+/**
+ * The door to the unknown, in the CONTACTS band beside search: a button with
+ * a count badge, the way Steam badges incoming requests.
+ */
+function IncomingButton({ count, active, onToggle }: { count: number; active: boolean; onToggle(): void }) {
+  return <button className="strip-icon incoming-button" data-active={active || undefined}
+    aria-label={`Incoming from unknown senders (${count})`} title={active ? "Back to contacts" : "Incoming"}
+    onClick={onToggle}>
+    ⊕<span className="incoming-count">{count}</span>
+  </button>;
+}
+
+/**
+ * A person one can message, drawn with the same canonical tile as every other
+ * row: the AI mark for an agent, a note for whose agent it is, and an unread
+ * badge. A single tap opens (or focuses) their chat — the address book is the
+ * way in, so the contact row *is* the entry.
+ */
+function MessageContactRow({ contact, view, dispatch, incoming = false }: {
+  contact: Contact; view: ClientView; dispatch: Dispatch; incoming?: boolean;
+}) {
+  return <div className="person-row message-row" role="button" aria-label={`Open chat with ${contact.name}`}
+    onClick={() => {
+      void dispatch({ type: "openConversation", person: contact.id });
+      void summonOwnedWindow("chat");
+    }}>
+    <PersonTile name={contact.name} picture={null} presence={null} agent={contact.isAgent}
+      note={contact.parentName === null ? undefined : `${contact.parentName}'s agent`}
+      trailing={incoming
+        ? <RequestActions person={contact.id} name={contact.name} view={view} dispatch={dispatch} />
+        : contact.unread > 0 ? <Badge label={`${contact.unread}`} solid /> : undefined} />
+  </div>;
+}
+
+/**
+ * Accept moves an unknown sender into the address book; dismiss blocks them
+ * at the carrier. The two acts on a request, ✓ and ✗, flush at the row's end.
+ */
+function RequestActions({ person, name, view, dispatch }: {
+  person: string; name: string; view: ClientView; dispatch: Dispatch;
+}) {
+  const stop = (event: React.MouseEvent) => event.stopPropagation();
+  return <span className="button-row" onClick={stop}>
+    <button className="strip-icon" aria-label={`Accept ${name}`} title="Accept"
+      disabled={view.inFlight.includes(actionKey.acceptContact(person))}
+      onClick={() => void dispatch({ type: "acceptContact", person })}>✓</button>
+    <button className="strip-icon danger-text" aria-label={`Dismiss ${name}`} title="Dismiss"
+      disabled={view.inFlight.includes(actionKey.blockSender(person))}
+      onClick={() => void dispatch({ type: "blockSender", person })}>✗</button>
+  </span>;
 }
 
 function PersonRow({ card, onOpen }: { card: Card; onOpen(): void }) {

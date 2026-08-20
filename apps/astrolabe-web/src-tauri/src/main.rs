@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const CLIENT_VIEW_EVENT: &str = "astrolabe://client-view";
+const MENU_EVENT: &str = "astrolabe://menu";
 
 // A browser preview must not infer desktop identity from its user agent. The
 // host owns this fact and installs it before the document's application code
@@ -36,10 +37,53 @@ struct WebClientView {
     space: Option<WebSpace>,
     book: Option<WebBook>,
     mcp: Option<WebMcpBinding>,
+    correspondence: Option<WebCorrespondenceFacts>,
     presentation: Option<WebPresentationFacts>,
     notices: Vec<WebNotice>,
     failures: Vec<WebFailure>,
     in_flight: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebCorrespondenceFacts {
+    my_device: Option<String>,
+    contacts: Vec<WebContact>,
+    conversations: Vec<WebConversation>,
+    open_tabs: Vec<String>,
+    active_tab: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebContact {
+    id: String,
+    name: String,
+    devices: Vec<String>,
+    added: bool,
+    is_agent: bool,
+    parent_id: Option<String>,
+    parent_name: Option<String>,
+    unread: u32,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebConversation {
+    peer_id: String,
+    peer_name: String,
+    messages: Vec<WebChatMessage>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebChatMessage {
+    mine: bool,
+    kind: String,
+    body: Option<String>,
+    sent_at: u64,
+    from_device: String,
+    provenance_agrees: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -606,6 +650,45 @@ impl From<ClientView> for WebClientView {
                     })
                     .collect(),
             }),
+            correspondence: view.correspondence.map(|corr| WebCorrespondenceFacts {
+                my_device: corr.my_device,
+                contacts: corr
+                    .contacts
+                    .into_iter()
+                    .map(|contact| WebContact {
+                        id: contact.id,
+                        name: contact.name,
+                        devices: contact.devices,
+                        added: contact.added,
+                        is_agent: contact.is_agent,
+                        parent_id: contact.parent_id,
+                        parent_name: contact.parent_name,
+                        unread: contact.unread,
+                    })
+                    .collect(),
+                conversations: corr
+                    .conversations
+                    .into_iter()
+                    .map(|conversation| WebConversation {
+                        peer_id: conversation.peer_id,
+                        peer_name: conversation.peer_name,
+                        messages: conversation
+                            .messages
+                            .into_iter()
+                            .map(|message| WebChatMessage {
+                                mine: message.mine,
+                                kind: message.kind,
+                                body: message.body,
+                                sent_at: message.sent_at,
+                                from_device: message.from_device,
+                                provenance_agrees: message.provenance_agrees,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                open_tabs: corr.open_tabs,
+                active_tab: corr.active_tab,
+            }),
             presentation: view.presentation.map(|presentation| WebPresentationFacts {
                 chosen: presentation.chosen.map(|chosen| WebPresentationChoice {
                     orbit: chosen.orbit,
@@ -778,6 +861,13 @@ enum WebAction {
     },
     DisplayAssignmentRevoke { assignment: String },
     DisplayDeviceRevoke { device: String },
+    SendMessage { to: String, body: String },
+    CollectMail,
+    BlockSender { person: String },
+    AcceptContact { person: String },
+    OpenConversation { person: String },
+    FocusConversation { person: String },
+    CloseConversation { person: String },
     EnterPresentation,
     PresentHere {
         orbit: String,
@@ -790,14 +880,15 @@ enum WebAction {
     LeavePresentation,
 }
 
-/// The Flutter client owns exactly these two auxiliary top-level windows.
+/// The Flutter client owns exactly these three auxiliary top-level windows.
 /// A request is a summon, never a navigation command: the existing window is
-/// restored and focused rather than creating a second Book or Displays view.
-#[derive(Deserialize)]
+/// restored and focused rather than creating a second view.
+#[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum OwnedWindowSurface {
     Book,
     Displays,
+    Chat,
 }
 
 impl OwnedWindowSurface {
@@ -805,6 +896,8 @@ impl OwnedWindowSurface {
         match self {
             Self::Book => "address-book",
             Self::Displays => "displays",
+            // Flutter's window key for the chat is `correspondence`.
+            Self::Chat => "correspondence",
         }
     }
 
@@ -812,6 +905,7 @@ impl OwnedWindowSurface {
         match self {
             Self::Book => "book",
             Self::Displays => "displays",
+            Self::Chat => "chat",
         }
     }
 
@@ -819,6 +913,7 @@ impl OwnedWindowSurface {
         match self {
             Self::Book => "Address book — Astrolabe",
             Self::Displays => "Displays — Astrolabe",
+            Self::Chat => "Chat — Astrolabe",
         }
     }
 }
@@ -916,6 +1011,13 @@ impl From<WebAction> for ActionRequest {
             },
             WebAction::DisplayAssignmentRevoke { assignment } => Self::DisplayAssignmentRevoke { assignment },
             WebAction::DisplayDeviceRevoke { device } => Self::DisplayDeviceRevoke { device },
+            WebAction::SendMessage { to, body } => Self::SendMessage { to, body },
+            WebAction::CollectMail => Self::CollectMail,
+            WebAction::BlockSender { person } => Self::BlockSender { person },
+            WebAction::AcceptContact { person } => Self::AcceptContact { person },
+            WebAction::OpenConversation { person } => Self::OpenConversation { person },
+            WebAction::FocusConversation { person } => Self::FocusConversation { person },
+            WebAction::CloseConversation { person } => Self::CloseConversation { person },
             WebAction::EnterPresentation => Self::EnterPresentation,
             WebAction::PresentHere { orbit, world, surface, input, title } => {
                 Self::PresentHere { orbit, world, surface, input, title }
@@ -1037,6 +1139,10 @@ async fn summon_owned_window(
     app: tauri::AppHandle,
     surface: OwnedWindowSurface,
 ) -> Result<(), String> {
+    summon_surface(&app, surface)
+}
+
+fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result<(), String> {
     let label = surface.label();
     if let Some(window) = app.get_webview_window(label) {
         if window.is_minimized().map_err(|error| error.to_string())? {
@@ -1060,7 +1166,7 @@ async fn summon_owned_window(
         )
     };
 
-    let builder = WebviewWindowBuilder::new(&app, label, url)
+    let builder = WebviewWindowBuilder::new(app, label, url)
         .title(surface.title())
         .resizable(true)
         .minimizable(true)
@@ -1088,7 +1194,121 @@ async fn summon_owned_window(
                 .build()
                 .map_err(|error| error.to_string())?;
         }
+        // The chat opens at Flutter's 760×660 and narrows to 520×480.
+        OwnedWindowSurface::Chat => {
+            builder
+                .inner_size(760.0, 660.0)
+                .min_inner_size(520.0, 480.0)
+                .maximizable(true)
+                .build()
+                .map_err(|error| error.to_string())?;
+        }
     }
+    Ok(())
+}
+
+/// The tray: the client's standing presence while every window is closed.
+/// Closing is not stopping — the primary window hides here so its Spaces keep
+/// converging, and this is the one place that genuinely quits.
+fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let open = MenuItem::with_id(app, "open", "Open Astrolabe", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Astrolabe", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("astrolabe")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip("Astrolabe")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            // Quitting is not closing: this is the item that stops the client
+            // and everything it supervises.
+            "quit" => app.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+/// The application menu, where the operating system keeps one of its own.
+/// macOS gives every application a menu bar above its windows; declaring it
+/// replaces the default whole, so the standard application items are declared
+/// too. Everywhere else the wordmark in the caption is the only application
+/// menu there is, and this does nothing.
+#[cfg(target_os = "macos")]
+fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let application = SubmenuBuilder::new(app, "Astrolabe")
+        .about(None)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    // ⌘R is what a Mac reaches for; F5 still works in the page itself.
+    let refresh = MenuItemBuilder::with_id("refresh", "Refresh local state")
+        .accelerator("Cmd+R")
+        .build(app)?;
+    let theme = MenuItemBuilder::with_id("theme", "Toggle theme").build(app)?;
+    let client = SubmenuBuilder::new(app, "Client")
+        .item(&refresh)
+        .item(&theme)
+        .build()?;
+
+    let displays = MenuItemBuilder::with_id("displays", "Displays")
+        .accelerator("Cmd+Shift+D")
+        .build(app)?;
+    let book = MenuItemBuilder::with_id("book", "Address book")
+        .accelerator("Cmd+Shift+B")
+        .build(app)?;
+    let chat = MenuItemBuilder::with_id("chat", "Chat")
+        .accelerator("Cmd+Shift+M")
+        .build(app)?;
+    let window = SubmenuBuilder::new(app, "Window")
+        .item(&displays)
+        .item(&book)
+        .item(&chat)
+        .separator()
+        .minimize()
+        .fullscreen()
+        .build()?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&application)
+        .item(&client)
+        .item(&window)
+        .build()?;
+    app.set_menu(menu)?;
+
+    app.on_menu_event(|app, event| match event.id.as_ref() {
+        // Refresh and theme act on the model, which lives behind the main
+        // window's page: forwarded as an event rather than re-implemented.
+        "refresh" | "theme" => {
+            let _ = app.emit(MENU_EVENT, event.id.as_ref().to_string());
+        }
+        "displays" => { let _ = summon_surface(app, OwnedWindowSurface::Displays); }
+        "book" => { let _ = summon_surface(app, OwnedWindowSurface::Book); }
+        "chat" => { let _ = summon_surface(app, OwnedWindowSurface::Chat); }
+        _ => {}
+    });
     Ok(())
 }
 
@@ -1101,7 +1321,21 @@ fn main() {
             api::subscribe(move |view| {
                 let _ = handle.emit(CLIENT_VIEW_EVENT, WebClientView::from(view));
             });
+            install_tray(app.handle())?;
+            #[cfg(target_os = "macos")]
+            install_menu(app.handle())?;
             Ok(())
+        })
+        // Closing the primary window is not stopping: it hides to the tray so
+        // this identity's Spaces keep converging. Secondary windows really
+        // close — they are views, not the client.
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             client_current,

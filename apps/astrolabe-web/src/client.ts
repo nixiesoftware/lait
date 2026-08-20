@@ -89,6 +89,45 @@ export interface DisplayPairing { pairing: string; confirmationPhrase: string[];
 export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
 
+/**
+ * A person's correspondence, drawn as conversations rather than an inbox.
+ * Which tabs are open, which is focused, and every message are shared state —
+ * the same view the address book reads, so a click there opens the tab the
+ * chat window draws.
+ */
+export interface CorrespondenceFacts {
+  /** This identity's own device id on the plane, or null until it is known. */
+  myDevice: string | null;
+  contacts: Contact[];
+  conversations: Conversation[];
+  openTabs: string[];
+  activeTab: string | null;
+}
+export interface Contact {
+  id: string;
+  name: string;
+  devices: string[];
+  /** In the book (a friend) vs an unadded stranger who wrote first. */
+  added: boolean;
+  isAgent: boolean;
+  parentId: string | null;
+  parentName: string | null;
+  /** Unread received messages — the badge. Zero once opened. */
+  unread: number;
+}
+export interface Conversation { peerId: string; peerName: string; messages: ChatMessage[]; }
+export interface ChatMessage {
+  mine: boolean;
+  /** `message` (text) or `invitation` — each drawn with its own component. */
+  kind: string;
+  body: string | null;
+  /** When it was written, unix seconds. */
+  sentAt: number;
+  fromDevice: string;
+  /** Whether the carrier's word matched the proof — surfaced, never hidden. */
+  provenanceAgrees: boolean;
+}
+
 /** Big Picture: this machine as a screen. Present while the mode is entered. */
 export interface PresentationFacts {
   chosen: PresentationChoice | null;
@@ -138,6 +177,7 @@ export interface ClientView {
   space: Space | null;
   book: Book | null;
   mcp: McpBinding | null;
+  correspondence: CorrespondenceFacts | null;
   presentation: PresentationFacts | null;
   notices: Notice[];
   failures: Failure[];
@@ -161,6 +201,10 @@ export type ClientAction =
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
   | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
+  | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
+  | { type: "blockSender"; person: string } | { type: "acceptContact"; person: string }
+  | { type: "openConversation"; person: string } | { type: "focusConversation"; person: string }
+  | { type: "closeConversation"; person: string }
   | { type: "enterPresentation" }
   | { type: "presentHere"; orbit: string; world: string; surface: string; input: string; title: string }
   | { type: "presentRefresh" } | { type: "leavePresentation" };
@@ -194,6 +238,13 @@ export const actionKey = {
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
+  sendMessage: (to: string) => `correspondence.send:${to}`,
+  collectMail: "correspondence.collect",
+  blockSender: (person: string) => `correspondence.block:${person}`,
+  acceptContact: (person: string) => `correspondence.accept:${person}`,
+  openConversation: (person: string) => `correspondence.open:${person}`,
+  focusConversation: (person: string) => `correspondence.focus:${person}`,
+  closeConversation: (person: string) => `correspondence.close:${person}`,
   enterPresentation: "present.enter",
   presentHere: "present.choose",
   presentRefresh: "present.refresh",
@@ -232,6 +283,13 @@ export function keyFor(action: ClientAction): string {
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
+    case "sendMessage": return actionKey.sendMessage(action.to);
+    case "collectMail": return actionKey.collectMail;
+    case "blockSender": return actionKey.blockSender(action.person);
+    case "acceptContact": return actionKey.acceptContact(action.person);
+    case "openConversation": return actionKey.openConversation(action.person);
+    case "focusConversation": return actionKey.focusConversation(action.person);
+    case "closeConversation": return actionKey.closeConversation(action.person);
     case "enterPresentation": return actionKey.enterPresentation;
     case "presentHere": return actionKey.presentHere;
     case "presentRefresh": return actionKey.presentRefresh;
@@ -260,12 +318,12 @@ export interface ClientTransport extends AstrolabeClientBridge {
   readonly mode: "host" | "tauri" | "fixture" | "unavailable";
 }
 
-/** The two Flutter-owned top-level surfaces. They are singleton OS windows. */
-export type OwnedWindowSurface = "book" | "displays";
+/** The three Flutter-owned top-level surfaces. They are singleton OS windows. */
+export type OwnedWindowSurface = "book" | "displays" | "chat";
 
 export function currentOwnedWindowSurface(location = window.location): OwnedWindowSurface | null {
   const surface = new URLSearchParams(location.search).get("surface");
-  return surface === "book" || surface === "displays" ? surface : null;
+  return surface === "book" || surface === "displays" || surface === "chat" ? surface : null;
 }
 
 /**
@@ -348,7 +406,10 @@ export async function summonOwnedWindow(surface: OwnedWindowSurface): Promise<vo
   if (import.meta.env.DEV) {
     const url = new URL(window.location.href);
     url.searchParams.set("surface", surface);
-    window.open(url, `astrolabe-${surface}`, surface === "book" ? "width=370,height=760" : "width=860,height=720");
+    const shape = surface === "book" ? "width=370,height=760"
+      : surface === "chat" ? "width=760,height=660"
+      : "width=860,height=720";
+    window.open(url, `astrolabe-${surface}`, shape);
   }
 }
 
@@ -400,11 +461,30 @@ export const loadingClientView: ClientView = {
   space: null,
   book: null,
   mcp: null,
+  correspondence: null,
   presentation: null,
   notices: [],
   failures: [],
   inFlight: [],
 };
+
+/**
+ * Native application-menu choices forwarded by the desktop host — the items
+ * that act on the model (refresh, theme) rather than summoning a window.
+ * Inert outside the desktop host, which is the only place a native menu is.
+ */
+export function watchMenu(listener: (id: string) => void): () => void {
+  if (!isTauri()) return () => undefined;
+  let active = true;
+  let unlisten: (() => void) | undefined;
+  void listen<string>("astrolabe://menu", (event) => {
+    if (active) listener(event.payload);
+  }).then((stop) => {
+    if (active) unlisten = stop;
+    else stop();
+  });
+  return () => { active = false; unlisten?.(); };
+}
 
 /**
  * Whether the desktop host owns the display. There, fullscreen is a window
@@ -527,6 +607,59 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
             notices: [{ said: "Stopped the local browser head.", launched: null }, ...current.notices],
           }));
           break;
+        case "openConversation":
+          complete(key, (current) => withCorrespondence(current, (facts) => ({
+            ...facts,
+            openTabs: facts.openTabs.includes(action.person) ? facts.openTabs : [...facts.openTabs, action.person],
+            activeTab: action.person,
+            contacts: facts.contacts.map((contact) => contact.id === action.person ? { ...contact, unread: 0 } : contact),
+            conversations: facts.conversations.some((conversation) => conversation.peerId === action.person)
+              ? facts.conversations
+              : [...facts.conversations, {
+                  peerId: action.person,
+                  peerName: facts.contacts.find((contact) => contact.id === action.person)?.name ?? action.person,
+                  messages: [],
+                }],
+          })));
+          break;
+        case "focusConversation":
+          complete(key, (current) => withCorrespondence(current, (facts) => ({ ...facts, activeTab: action.person })));
+          break;
+        case "closeConversation":
+          complete(key, (current) => withCorrespondence(current, (facts) => {
+            const openTabs = facts.openTabs.filter((tab) => tab !== action.person);
+            return { ...facts, openTabs, activeTab: facts.activeTab === action.person ? openTabs[0] ?? null : facts.activeTab };
+          }));
+          break;
+        case "sendMessage":
+          complete(key, (current) => withCorrespondence(current, (facts) => ({
+            ...facts,
+            conversations: facts.conversations.map((conversation) => conversation.peerId === action.to
+              ? {
+                  ...conversation,
+                  messages: [...conversation.messages, {
+                    mine: true, kind: "message", body: action.body,
+                    sentAt: Math.floor(Date.now() / 1000), fromDevice: "dev_this", provenanceAgrees: true,
+                  }],
+                }
+              : conversation),
+          })));
+          break;
+        case "acceptContact":
+          complete(key, (current) => withCorrespondence(current, (facts) => ({
+            ...facts,
+            contacts: facts.contacts.map((contact) => contact.id === action.person ? { ...contact, added: true } : contact),
+          })));
+          break;
+        case "blockSender":
+          complete(key, (current) => withCorrespondence(current, (facts) => ({
+            ...facts,
+            contacts: facts.contacts.filter((contact) => contact.id !== action.person),
+            conversations: facts.conversations.filter((conversation) => conversation.peerId !== action.person),
+            openTabs: facts.openTabs.filter((tab) => tab !== action.person),
+            activeTab: facts.activeTab === action.person ? null : facts.activeTab,
+          })));
+          break;
         case "enterPresentation":
           complete(key, (current) => ({
             ...current,
@@ -582,6 +715,10 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
       return view;
     },
   };
+}
+
+function withCorrespondence(view: ClientView, apply: (facts: CorrespondenceFacts) => CorrespondenceFacts): ClientView {
+  return view.correspondence === null ? view : { ...view, correspondence: apply(view.correspondence) };
 }
 
 function createUnavailableTransport(): ClientTransport {
@@ -701,6 +838,29 @@ export const fixtureClientView: ClientView = {
     }],
   },
   mcp: null,
+  correspondence: {
+    myDevice: "dev_this",
+    contacts: [
+      { id: "peer_ada", name: "Ada", devices: ["dev_ada"], added: true, isAgent: false, parentId: null, parentName: null, unread: 1 },
+      { id: "peer_scribe", name: "Scribe", devices: ["dev_scribe"], added: true, isAgent: true, parentId: "peer_ada", parentName: "Ada", unread: 0 },
+      { id: "peer_nix", name: "Nix", devices: ["dev_nix"], added: false, isAgent: false, parentId: null, parentName: null, unread: 2 },
+    ],
+    conversations: [{
+      peerId: "peer_ada",
+      peerName: "Ada",
+      messages: [
+        { mine: false, kind: "message", body: "The workshop notes are in.", sentAt: 1_755_465_600, fromDevice: "dev_ada", provenanceAgrees: true },
+        { mine: true, kind: "message", body: "Reading them now.", sentAt: 1_755_465_720, fromDevice: "dev_this", provenanceAgrees: true },
+        { mine: false, kind: "invitation", body: null, sentAt: 1_755_552_000, fromDevice: "dev_ada", provenanceAgrees: true },
+        { mine: false, kind: "message", body: "Sent you the Space invite.", sentAt: 1_755_552_060, fromDevice: "dev_ada_phone", provenanceAgrees: false },
+      ],
+    }],
+    // Pre-opened in the fixture so the dev chat window has a conversation to
+    // draw: each browser-preview window runs its own fixture, so a click in
+    // the book popup cannot reach this one the way the shared core does.
+    openTabs: ["peer_ada"],
+    activeTab: "peer_ada",
+  },
   presentation: null,
   inFlight: [],
   failures: [],
