@@ -2031,6 +2031,71 @@ impl Subprocess {
     }
 }
 
+impl Subprocess {
+    /// The child leads a group, so the group is addressable by the pid we hold.
+    ///
+    /// Without this there is nothing to signal but the child itself, and a
+    /// Handler that runs `sh -c` is the shape that forks: killing the shell
+    /// leaves its child running *and holding the stdout pipe*, so the collector
+    /// thread below blocks until that grandchild exits on its own. The wall
+    /// limit then measures the child's patience rather than bounding it — a
+    /// 400ms budget took 30.3s, the full length of what it was meant to stop.
+    #[cfg(unix)]
+    fn own_process_group(command: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt as _;
+        // `0` means "a new group whose id is the child's pid", which is what
+        // makes the group addressable by the pid we already hold.
+        command.process_group(0);
+    }
+
+    #[cfg(not(unix))]
+    fn own_process_group(_command: &mut std::process::Command) {}
+
+    /// Kill the child and everything it started.
+    ///
+    /// The group first, then the process alone. The fallback is not
+    /// belt-and-braces: `kill(-pid, …)` resolves only if the child actually
+    /// leads a group, so a platform without one still gets the child killed —
+    /// what it misses is the child's own children, which is worth saying rather
+    /// than worth failing over.
+    #[cfg(unix)]
+    fn stop_tree(child: &std::process::Child) {
+        let killed = i32::try_from(child.id())
+            .ok()
+            .and_then(i32::checked_neg)
+            .filter(|group| *group != 0)
+            .is_some_and(|group| {
+                // SAFETY: the documented POSIX form. `ESRCH` for a group that
+                // has already gone is a value, not undefined behaviour. The
+                // negation is checked because `kill(0, …)` would signal every
+                // process in *our* group, which includes the test runner.
+                unsafe { libc::kill(group, libc::SIGKILL) == 0 }
+            });
+        if !killed {
+            Self::stop_process(child);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn stop_tree(child: &std::process::Child) {
+        Self::stop_process(child);
+    }
+
+    /// `Child::kill` takes `&mut`, and every caller here holds the child behind
+    /// a shared borrow while its reader threads run.
+    fn stop_process(child: &std::process::Child) {
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: as above.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+        }
+    }
+}
+
 impl Handler for Subprocess {
     fn binding(&self) -> &HandlerBinding {
         &self.binding
@@ -2042,13 +2107,14 @@ impl Handler for Subprocess {
             return Err(Failure::Cancelled);
         }
         let wall = std::time::Duration::from_millis(context.limits().wall_millis);
-        let mut child = std::process::Command::new(&self.program)
+        let mut command = std::process::Command::new(&self.program);
+        command
             .args(&self.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|_| Failure::Handler)?;
+            .stderr(std::process::Stdio::null());
+        Self::own_process_group(&mut command);
+        let mut child = command.spawn().map_err(|_| Failure::Handler)?;
         let mut stdin = child.stdin.take().ok_or(Failure::Handler)?;
         let input = context.input_inline().to_vec();
         let feeder = std::thread::spawn(move || {
@@ -2082,7 +2148,7 @@ impl Handler for Subprocess {
                 Ok(Some(status)) => break status,
                 Ok(None) => {}
                 Err(_) => {
-                    let _ = child.kill();
+                    Self::stop_tree(&child);
                     let _ = child.wait();
                     let _ = feeder.join();
                     let _ = collector.join();
@@ -2090,14 +2156,14 @@ impl Handler for Subprocess {
                 }
             }
             if context.cancel_asked() {
-                let _ = child.kill();
+                Self::stop_tree(&child);
                 let _ = child.wait();
                 let _ = feeder.join();
                 let _ = collector.join();
                 return Err(Failure::Cancelled);
             }
             if began.elapsed() >= wall {
-                let _ = child.kill();
+                Self::stop_tree(&child);
                 let _ = child.wait();
                 let _ = feeder.join();
                 let _ = collector.join();
