@@ -639,6 +639,8 @@ pub struct ConversationRow {
 /// One message in a conversation. The chat draws a custom component per `kind`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessageRow {
+    /// For an invitation, the link body it carries; `None` for a message.
+    pub invitation: Option<String>,
     /// The deposit id for a received letter; `None` for one this identity sent.
     /// An invitation is acted on by naming this.
     pub id: Option<String>,
@@ -1850,6 +1852,7 @@ fn project(app: &App) -> ClientView {
                         .messages
                         .iter()
                         .map(|message| ChatMessageRow {
+                            invitation: message.invitation.clone(),
                             id: message.id.clone(),
                             mine: message.mine,
                             kind: message.kind.clone(),

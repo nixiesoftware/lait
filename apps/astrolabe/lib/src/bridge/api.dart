@@ -436,6 +436,9 @@ class CardRow {
 
 /// One message in a conversation. The chat draws a custom component per `kind`.
 class ChatMessageRow {
+  /// For an invitation, the link body it carries; `None` for a message.
+  final String? invitation;
+
   /// The deposit id for a received letter; `None` for one this identity sent.
   /// An invitation is acted on by naming this.
   final String? id;
@@ -461,6 +464,7 @@ class ChatMessageRow {
   final bool provenanceAgrees;
 
   const ChatMessageRow({
+    this.invitation,
     this.id,
     required this.mine,
     required this.kind,
@@ -472,6 +476,7 @@ class ChatMessageRow {
 
   @override
   int get hashCode =>
+      invitation.hashCode ^
       id.hashCode ^
       mine.hashCode ^
       kind.hashCode ^
@@ -485,6 +490,7 @@ class ChatMessageRow {
       identical(this, other) ||
       other is ChatMessageRow &&
           runtimeType == other.runtimeType &&
+          invitation == other.invitation &&
           id == other.id &&
           mine == other.mine &&
           kind == other.kind &&

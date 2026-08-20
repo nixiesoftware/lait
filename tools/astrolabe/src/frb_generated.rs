@@ -589,6 +589,7 @@ impl SseDecode for crate::api::CardRow {
 impl SseDecode for crate::api::ChatMessageRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_invitation = <Option<String>>::sse_decode(deserializer);
         let mut var_id = <Option<String>>::sse_decode(deserializer);
         let mut var_mine = <bool>::sse_decode(deserializer);
         let mut var_kind = <String>::sse_decode(deserializer);
@@ -597,6 +598,7 @@ impl SseDecode for crate::api::ChatMessageRow {
         let mut var_fromDevice = <String>::sse_decode(deserializer);
         let mut var_provenanceAgrees = <bool>::sse_decode(deserializer);
         return crate::api::ChatMessageRow {
+            invitation: var_invitation,
             id: var_id,
             mine: var_mine,
             kind: var_kind,
@@ -2266,6 +2268,7 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::CardRow> for crate::api::Card
 impl flutter_rust_bridge::IntoDart for crate::api::ChatMessageRow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
+            self.invitation.into_into_dart().into_dart(),
             self.id.into_into_dart().into_dart(),
             self.mine.into_into_dart().into_dart(),
             self.kind.into_into_dart().into_dart(),
@@ -3438,6 +3441,7 @@ impl SseEncode for crate::api::CardRow {
 impl SseEncode for crate::api::ChatMessageRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<String>>::sse_encode(self.invitation, serializer);
         <Option<String>>::sse_encode(self.id, serializer);
         <bool>::sse_encode(self.mine, serializer);
         <String>::sse_encode(self.kind, serializer);

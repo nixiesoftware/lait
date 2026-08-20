@@ -362,7 +362,6 @@ version = "0.1.0"
 dependencies = [
  "addressbook",
  "anyhow",
- "axum",
  "blake3",
  "correspondence",
  "data-encoding",
@@ -371,7 +370,6 @@ dependencies = [
  "fs2",
  "jiff",
  "lait",
- "lait-post",
  "lait-signage",
  "lait-signage-app",
  "lait-workbench",

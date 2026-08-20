@@ -2145,6 +2145,13 @@ pub struct LetterView {
     /// Whether the carrier's word about the sender matched that proof. Shown
     /// rather than resolved: the two disagreeing is a fact worth seeing.
     pub provenance_agrees: bool,
+    /// For an invitation, the link body it carries. `None` for a message.
+    ///
+    /// Carried in the view because acting on an invitation *is* using its
+    /// coordinates, and a caller that had to ask again for them would be asking
+    /// the mailbox to remember which letter it had just described.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation: Option<String>,
 }
 
 /// The identity's book, plus how far legacy alias import has got.

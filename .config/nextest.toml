@@ -264,7 +264,6 @@ default-filter = '''
         + (binary_id(lait::it) & test(content_ipc::))
         + binary_id(astrolabe::launch)
         + binary_id(astrolabe::packaging)
-        + binary_id(astrolabe::correspond)
     )
     - (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
 '''

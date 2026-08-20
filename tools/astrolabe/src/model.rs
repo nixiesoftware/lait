@@ -108,6 +108,9 @@ pub struct Conversation {
 /// One message in a conversation, sent or received.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
+    /// For an invitation, the link body it carries; `None` for a message.
+    /// Opening one is using these coordinates.
+    pub invitation: Option<String>,
     /// The carrier's deposit id, for a message that arrived. `None` for one this
     /// identity composed — a sent letter has no deposit until it lands, and
     /// nothing acts on one. What acts on an invitation names this.

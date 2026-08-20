@@ -33,6 +33,7 @@ use lait_workbench::{
     RemoveDeviceRequest, Signals, UpdateDeviceRequest, WorkbenchSnapshot,
 };
 
+use crate::client::correspondence::DemoCarrier;
 use crate::client::display::DisplayAssignmentInput;
 use crate::client::heads::{McpBinding, McpBindingOutcome};
 use crate::client::host::HostContext;
@@ -578,7 +579,7 @@ struct Worker {
     /// connected to any carrier and every correspondence action refuses
     /// honestly. Behind a `Mutex` because the `Worker` is shared across the
     /// tasks that answer actions.
-    correspondence: Option<std::sync::Mutex<crate::client::correspondence::Correspondent>>,
+    correspondence: Option<std::sync::Mutex<DemoCarrier>>,
 }
 
 /// Unix seconds, for the clocks the correspondence crate takes as arguments.
@@ -588,43 +589,28 @@ fn now_secs() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// Choose the correspondence backend: a real hosted-Post plane when one is
-/// named, else the fixture when opted in, else none (which refuses honestly).
-/// Post wins — real carriage beats a loopback one.
-/// Public because the composition is the thing worth testing.
+/// What the daemon's mailbox does not carry yet, said rather than pretended.
 ///
-/// A test that stood its own plane up would prove the plane and miss the wiring
-/// — and the two times this client's seams have been wrong, every component was
-/// correct and the composition was not. `identity_home` resolving the wrong
-/// directory is exactly that class of defect, and it is invisible to anything
-/// that does not come through here.
-pub fn build_correspondent(
-    identity: Option<&std::path::Path>,
-    post_url: Option<String>,
-    demo: bool,
-) -> Option<std::sync::Mutex<crate::client::correspondence::Correspondent>> {
-    use crate::client::correspondence::{Correspondent, DemoCarrier, PostBackend};
-    if let Some(base) = post_url {
-        // The identity's own seeds, so the address survives a restart. An
-        // identity with no key is not one this client may mint: leave
-        // correspondence unconnected, which refuses in words.
-        let Ok(home) = identity_home(identity) else {
-            return None;
-        };
-        let Ok(seeds) = lait::config::load_or_create_kinship_seeds(&home) else {
-            return None;
-        };
-        // A corrupt reach file is not "no correspondents": re-founding over it
-        // would change the address a person has already handed out.
-        let Ok(held) = addressbook::ReachStore::at(&home).load() else {
-            return None;
-        };
-        return match PostBackend::restore_at(seeds, held, base, now_secs(), Some(home)) {
-            Ok(backend) => Some(std::sync::Mutex::new(Correspondent::Post(backend))),
-            Err(_) => None,
-        };
-    }
-    demo.then(|| std::sync::Mutex::new(Correspondent::Demo(DemoCarrier::new(now_secs()))))
+/// The fixture models a chat surface — added flags, open tabs — and the mailbox
+/// does not: learning somebody is what puts them in the roster, and which tab a
+/// window has open is that window's business. A caller gets a refusal it can
+/// read instead of a success that the next view contradicts.
+async fn not_carried_yet(what: &str) -> ClientResult<crate::model::Correspondence> {
+    Err(ClientError::refused(format!("{what} is not carried yet")))
+}
+
+/// Blocking has a route at the Post and no request on the daemon's plane yet.
+async fn blocking_is_not_carried_yet() -> ClientResult<crate::model::Correspondence> {
+    Err(ClientError::refused("blocking is not carried yet"))
+}
+
+/// The opt-in front-end fixture, when one is asked for.
+///
+/// There is no hosted branch here any more. The mailbox is the daemon's, and
+/// this process reaches it like any other caller — which is what lets a World
+/// send at all, and what lets mail arrive while this window is closed.
+fn build_fixture(demo: bool) -> Option<std::sync::Mutex<DemoCarrier>> {
+    demo.then(|| std::sync::Mutex::new(DemoCarrier::new(now_secs())))
 }
 
 /// Where this identity's durable state lives. Public for the same reason as
@@ -694,7 +680,7 @@ async fn serve(
                 .map(Into::into),
         ),
         state_root,
-        correspondence: build_correspondent(identity.as_deref(), post_url, correspondence_demo),
+        correspondence: build_fixture(correspondence_demo),
     });
 
     // A machine that was a screen comes back as one, before the first read.
@@ -769,21 +755,30 @@ impl Worker {
     /// With the fixture absent — the default, no `LAIT_CORRESPONDENCE_DEMO` —
     /// correspondence is connected to no carrier, so this refuses honestly
     /// rather than pretending an action landed.
-    fn correspond(
+    /// Perform one correspondence act and push the view it produced.
+    ///
+    /// Two ways to be answered and one shape of answer. The fixture is this
+    /// process and cannot be out of reach; the daemon holds the real mailbox and
+    /// answers with the whole of it, so neither path leaves this side holding a
+    /// second copy of what was said.
+    async fn corresponding(
         &self,
-        act: impl FnOnce(&mut crate::client::correspondence::Correspondent) -> ClientResult<()>,
+        act: impl FnOnce(&mut DemoCarrier) -> ClientResult<()>,
+        hosted: impl std::future::Future<Output = ClientResult<crate::model::Correspondence>>,
     ) -> ClientResult<()> {
-        let Some(fixture) = self.correspondence.as_ref() else {
-            return Err(ClientError::refused("correspondence is not connected yet"));
-        };
-        let snapshot = {
-            let mut correspondence = fixture
-                .lock()
-                .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?;
-            act(&mut correspondence)?;
-            correspondence.snapshot()
-        };
-        self.send(Update::Correspondence(snapshot));
+        if let Some(fixture) = self.correspondence.as_ref() {
+            let snapshot = {
+                let mut fixture = fixture
+                    .lock()
+                    .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?;
+                act(&mut fixture)?;
+                fixture.snapshot()
+            };
+            self.send(Update::Correspondence(snapshot));
+            return Ok(());
+        }
+        let view = hosted.await?;
+        self.send(Update::Correspondence(view));
         Ok(())
     }
 
@@ -1091,46 +1086,83 @@ impl Worker {
                 }
             }
             Action::SendMessage { to, body } => {
-                // The loopback carrier holds the real seam: compose, sign, seal,
-                // and deposit under an unforgeable egress witness. When the
-                // daemon hands the client a Space-hosted carrier this same call
-                // points at it — the surface never learns which is underneath.
                 let now = now_secs();
-                self.correspond(|correspondence| correspondence.send(to, body, now))?;
+                self.corresponding(
+                    |fixture| fixture.send(to, body, now),
+                    client.correspond_send(to.clone(), body.clone()),
+                )
+                .await?;
                 Ok(Outcome::Silent)
             }
-            // Publishing and learning both change durable reach state, so they go
-            // through `correspond` like every other correspondence act — which
-            // is also what persists them.
             Action::ShareReach => {
-                // The card itself reaches the surface as `CorrespondenceFacts.
-                // my_reach`; the notice says what happened. Putting a kilobyte of
-                // base32 through a one-line status channel would be a second
+                // The artifact reaches the surface as `CorrespondenceFacts
+                // .my_reach`; the notice says what happened. Putting a kilobyte
+                // of base32 through a one-line status channel would be a second
                 // copy of a value the view already holds, in the place least
                 // able to show it.
-                self.correspond(|correspondence| correspondence.announce().map(|_| ()))?;
+                self.corresponding(
+                    // The fixture is a loopback world with no real reach to
+                    // publish; only the daemon has an address to hand out.
+                    |_| Err(ClientError::refused("the fixture has no address to share")),
+                    client.reach_share(),
+                )
+                .await?;
                 Ok(Outcome::Said("ready to hand over".into()))
             }
-            // An invitation is opaque here, exactly as it is to the carrier and
-            // to `crates/correspondence`: it verifies against its own Space at
-            // the receiver and needs no prior state. So this converts between
-            // the bytes a letter carries and the link body `space_enter` takes,
-            // and refuses nothing on its own — `host_space_enter` is what judges
-            // an invitation, and it is the only thing that should.
+            Action::AddCorrespondent { announcement } => {
+                self.corresponding(
+                    |_| {
+                        Err(ClientError::refused(
+                            "the fixture cannot learn a correspondent",
+                        ))
+                    },
+                    client.reach_learn(announcement.clone()),
+                )
+                .await?;
+                Ok(Outcome::Said("added".into()))
+            }
+            Action::CollectMail => {
+                let now = now_secs();
+                // A carrier that could not be asked answers as a retryable
+                // failure rather than as silence. Silence is what an empty
+                // mailbox looks like, and the two are not the same fact.
+                self.corresponding(
+                    |fixture| {
+                        fixture.collect(now);
+                        Ok(())
+                    },
+                    client.correspond_collect(),
+                )
+                .await?;
+                Ok(Outcome::Silent)
+            }
+            Action::SendInvitation { to, link } => {
+                self.corresponding(
+                    |_| {
+                        Err(ClientError::refused(
+                            "the fixture cannot carry an invitation",
+                        ))
+                    },
+                    client.correspond_invite(to.clone(), link.clone()),
+                )
+                .await?;
+                Ok(Outcome::Said("invitation sent".into()))
+            }
+            // An invitation is opaque the whole way. This asks the mailbox which
+            // letter was named, takes the coordinates it carries, and hands them
+            // to the entry path that already existed — `host_space_enter` is what
+            // judges an invitation, and it is the only thing that should.
             Action::OpenInvitation { message } => {
-                let coordinates = self
-                    .correspondence
-                    .as_ref()
-                    .ok_or_else(|| ClientError::refused("correspondence is not connected yet"))?
-                    .lock()
-                    .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?
-                    .invitation(message)
+                let view = client.reach_view().await?;
+                let link = view
+                    .conversations
+                    .iter()
+                    .flat_map(|conversation| conversation.messages.iter())
+                    .find(|letter| letter.id.as_deref() == Some(message.as_str()))
+                    .and_then(|letter| letter.invitation.clone())
                     .ok_or_else(|| {
                         ClientError::refused("that invitation is no longer in the transcript")
                     })?;
-                let link = data_encoding::BASE32_NOPAD
-                    .encode(&coordinates)
-                    .to_lowercase();
                 let context = client.host_context().await?;
                 client
                     .space_enter(&link, &context.spaces_root, None)
@@ -1139,63 +1171,62 @@ impl Worker {
                     "entered the Space you were invited to".into(),
                 ))
             }
-            Action::SendInvitation { to, link } => {
-                let body = link
-                    .trim()
-                    .strip_prefix("lait://join/")
-                    .unwrap_or_else(|| link.trim());
-                let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-                let coordinates = data_encoding::BASE32_NOPAD
-                    .decode(cleaned.to_uppercase().as_bytes())
-                    .map_err(|_| ClientError::invalid("that is not an invite link"))?;
-                let now = now_secs();
-                self.correspond(|correspondence| {
-                    correspondence.send_invitation(to, coordinates.clone(), now)
-                })?;
-                Ok(Outcome::Said("invitation sent".into()))
-            }
-            Action::AddCorrespondent { announcement } => {
-                let mut learned = String::new();
-                self.correspond(|correspondence| {
-                    learned = correspondence.learn(announcement)?;
-                    Ok(())
-                })?;
-                Ok(Outcome::Said(format!("added {learned}")))
-            }
-            Action::CollectMail => {
-                let now = now_secs();
-                // A carrier that could not be asked answers here as a retryable
-                // failure rather than as silence. Silence is what an empty
-                // mailbox looks like, and the two are not the same fact.
-                self.correspond(|correspondence| correspondence.collect(now))?;
-                Ok(Outcome::Silent)
-            }
             Action::BlockSender(person) => {
                 let now = now_secs();
-                self.correspond(|correspondence| correspondence.block(person, now))?;
+                self.corresponding(
+                    |fixture| fixture.block(person, now),
+                    blocking_is_not_carried_yet(),
+                )
+                .await?;
                 Ok(Outcome::Said(format!("blocked {person}")))
             }
-            // The four below say what they did only after the backend has said
-            // it did it. `correspond` propagates a refusal, so a backend that
-            // cannot carry the operation stops the notice with it — the shape
-            // `BlockSender` already had, and the reason it was the only one of
-            // the five that never claimed an act it had not performed.
+            // Accepting, opening, focusing and closing are the fixture's own
+            // model of a chat surface. The daemon's mailbox has no separate
+            // "added" flag and no tab state — learning somebody is what puts
+            // them in the roster — so these refuse rather than pretend, which is
+            // the shape `BlockSender` always had.
             Action::AcceptContact(person) => {
-                self.correspond(|correspondence| correspondence.accept(person))?;
+                self.corresponding(
+                    |fixture| {
+                        fixture.accept(person);
+                        Ok(())
+                    },
+                    not_carried_yet("adding a contact"),
+                )
+                .await?;
                 Ok(Outcome::Said(format!("added {person} to contacts")))
             }
-            // Opening, focusing and closing tabs are shared-model navigation:
-            // a click in one window moves the tab the chat window then draws.
             Action::OpenConversation(person) => {
-                self.correspond(|correspondence| correspondence.open(person))?;
+                self.corresponding(
+                    |fixture| {
+                        fixture.open(person);
+                        Ok(())
+                    },
+                    not_carried_yet("arranging conversations"),
+                )
+                .await?;
                 Ok(Outcome::Silent)
             }
             Action::FocusConversation(person) => {
-                self.correspond(|correspondence| correspondence.focus(person))?;
+                self.corresponding(
+                    |fixture| {
+                        fixture.focus(person);
+                        Ok(())
+                    },
+                    not_carried_yet("arranging conversations"),
+                )
+                .await?;
                 Ok(Outcome::Silent)
             }
             Action::CloseConversation(person) => {
-                self.correspond(|correspondence| correspondence.close(person))?;
+                self.corresponding(
+                    |fixture| {
+                        fixture.close(person);
+                        Ok(())
+                    },
+                    not_carried_yet("arranging conversations"),
+                )
+                .await?;
                 Ok(Outcome::Silent)
             }
             Action::SpaceFound { home, name, nick } => {

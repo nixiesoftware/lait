@@ -625,16 +625,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   ChatMessageRow dco_decode_chat_message_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return ChatMessageRow(
-      id: dco_decode_opt_String(arr[0]),
-      mine: dco_decode_bool(arr[1]),
-      kind: dco_decode_String(arr[2]),
-      body: dco_decode_opt_String(arr[3]),
-      sentAt: dco_decode_u_64(arr[4]),
-      fromDevice: dco_decode_String(arr[5]),
-      provenanceAgrees: dco_decode_bool(arr[6]),
+      invitation: dco_decode_opt_String(arr[0]),
+      id: dco_decode_opt_String(arr[1]),
+      mine: dco_decode_bool(arr[2]),
+      kind: dco_decode_String(arr[3]),
+      body: dco_decode_opt_String(arr[4]),
+      sentAt: dco_decode_u_64(arr[5]),
+      fromDevice: dco_decode_String(arr[6]),
+      provenanceAgrees: dco_decode_bool(arr[7]),
     );
   }
 
@@ -1973,6 +1974,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   @protected
   ChatMessageRow sse_decode_chat_message_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_invitation = sse_decode_opt_String(deserializer);
     var var_id = sse_decode_opt_String(deserializer);
     var var_mine = sse_decode_bool(deserializer);
     var var_kind = sse_decode_String(deserializer);
@@ -1981,6 +1983,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_fromDevice = sse_decode_String(deserializer);
     var var_provenanceAgrees = sse_decode_bool(deserializer);
     return ChatMessageRow(
+        invitation: var_invitation,
         id: var_id,
         mine: var_mine,
         kind: var_kind,
@@ -3662,6 +3665,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   void sse_encode_chat_message_row(
       ChatMessageRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.invitation, serializer);
     sse_encode_opt_String(self.id, serializer);
     sse_encode_bool(self.mine, serializer);
     sse_encode_String(self.kind, serializer);

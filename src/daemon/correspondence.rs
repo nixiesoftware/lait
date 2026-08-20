@@ -156,9 +156,17 @@ impl CorrespondenceService {
         // rather than being dropped.
         let mut arrived: BTreeMap<String, Vec<crate::control::LetterView>> = BTreeMap::new();
         for opened in plane.reach.opened() {
-            let (kind, body) = match &opened.content {
-                correspondence::Content::Message { body } => ("message", Some(body.clone())),
-                correspondence::Content::Invitation { .. } => ("invitation", None),
+            let (kind, body, invitation) = match &opened.content {
+                correspondence::Content::Message { body } => ("message", Some(body.clone()), None),
+                correspondence::Content::Invitation { coordinates } => (
+                    "invitation",
+                    None,
+                    Some(
+                        data_encoding::BASE32_NOPAD
+                            .encode(coordinates)
+                            .to_lowercase(),
+                    ),
+                ),
             };
             let peer = plane
                 .reach
@@ -175,6 +183,7 @@ impl CorrespondenceService {
                     sent_at: opened.sent_at,
                     from_device: opened.from.as_str().to_owned(),
                     provenance_agrees: opened.provenance_agrees,
+                    invitation,
                 });
         }
 
@@ -202,6 +211,8 @@ impl CorrespondenceService {
                         sent_at: sent.at,
                         from_device: my_device.clone(),
                         provenance_agrees: true,
+                        // A sent invitation is not acted on by the sender.
+                        invitation: None,
                     })
                     .collect();
                 letters.extend(arrived.remove(&peer).unwrap_or_default());
@@ -503,6 +514,171 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two identities on one carrier, and a third that learns nothing.
+    ///
+    /// The first assertion a reader looks for in something called sealed
+    /// correspondence, and one no test at this level made while the mailbox
+    /// lived in the client.
+    #[tokio::test]
+    async fn a_third_identity_on_the_same_carrier_gets_nothing() {
+        let world = World::new("bystander", &["ada", "grace", "eve"]).await;
+        world.introduce("ada", "grace").await;
+
+        world
+            .service("ada")
+            .handle(Request::CorrespondSend {
+                to: world.address("grace").await,
+                body: "for Grace only".into(),
+            })
+            .await;
+
+        world
+            .service("eve")
+            .handle(Request::CorrespondCollect)
+            .await;
+        let seen: Vec<String> = reach(&world.service("eve").handle(Request::ReachView).await)
+            .conversations
+            .iter()
+            .flat_map(|conversation| conversation.letters.iter())
+            .filter_map(|letter| letter.body.clone())
+            .collect();
+        assert!(seen.is_empty(), "a bystander collects nothing: {seen:?}");
+    }
+
+    /// An invitation crosses as an invitation, and arrives carrying the
+    /// coordinates a Space will judge.
+    #[tokio::test]
+    async fn an_invitation_arrives_as_one_with_its_coordinates_intact() {
+        let world = World::new("invite", &["ada", "grace"]).await;
+        world.introduce("ada", "grace").await;
+
+        let link = "lait://join/aebagbafaydqqcikbmga";
+        world
+            .service("ada")
+            .handle(Request::CorrespondInvite {
+                to: world.address("grace").await,
+                link: link.into(),
+            })
+            .await;
+        world
+            .service("grace")
+            .handle(Request::CorrespondCollect)
+            .await;
+
+        let ada_address = world.address("ada").await;
+        let view = reach(&world.service("grace").handle(Request::ReachView).await).clone();
+        let from_ada = view
+            .conversations
+            .iter()
+            .find(|c| c.peer == ada_address)
+            .expect("a conversation with Ada");
+        let letter = from_ada.letters.first().expect("one letter");
+        assert_eq!(letter.kind, "invitation");
+        assert!(letter.body.is_none(), "an invitation is acted on, not read");
+        assert_eq!(
+            letter.invitation.as_deref(),
+            Some("aebagbafaydqqcikbmga"),
+            "the coordinates crossed intact, which is what lets the Space judge them"
+        );
+    }
+
+    /// An address nobody has handed over is not reachable — a different answer
+    /// from the message failing, and the one a surface can act on.
+    #[tokio::test]
+    async fn a_stranger_is_not_reachable_rather_than_a_failed_send() {
+        let world = World::new("stranger", &["ada", "nobody"]).await;
+        let unknown = world.address("nobody").await;
+        let answer = world
+            .service("ada")
+            .handle(Request::CorrespondSend {
+                to: unknown,
+                body: "hello?".into(),
+            })
+            .await;
+        assert!(
+            matches!(&answer, Response::Error { message, .. } if message.contains("reach")),
+            "{answer:?}"
+        );
+    }
+
+    /// A carrier that cannot be asked is reported, never folded into "nothing
+    /// was waiting". The two look identical to a surface and only one is worth
+    /// acting on.
+    #[tokio::test]
+    async fn a_carrier_that_cannot_be_asked_is_not_an_empty_mailbox() {
+        let world = World::new("dark", &["ada"]).await;
+        world.carrier.seal_off("the carrier is down");
+        let answer = world
+            .service("ada")
+            .handle(Request::CorrespondCollect)
+            .await;
+        assert!(
+            matches!(&answer, Response::Error { message, .. } if message.contains("could not be asked")),
+            "{answer:?}"
+        );
+    }
+
+    /// Several identities, one carrier between them — the Post's shape without
+    /// the Post.
+    struct World {
+        root: std::path::PathBuf,
+        carrier: correspondence::SharedMem,
+        services: BTreeMap<String, CorrespondenceService>,
+    }
+
+    impl World {
+        async fn new(tag: &str, who: &[&str]) -> Self {
+            let root = std::env::temp_dir().join(format!("corr-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let carrier = correspondence::SharedMem::new();
+            let mut services = BTreeMap::new();
+            for name in who {
+                let home = root.join(name);
+                std::fs::create_dir_all(&home).unwrap();
+                crate::config::load_or_create_identity(&home).expect("identity");
+                let service = CorrespondenceService::open(&home);
+                service
+                    .carry_over(Box::new(carrier.clone()), now_secs())
+                    .expect("carry");
+                services.insert((*name).to_owned(), service);
+            }
+            Self {
+                root,
+                carrier,
+                services,
+            }
+        }
+
+        fn service(&self, who: &str) -> &CorrespondenceService {
+            self.services.get(who).expect("who")
+        }
+
+        async fn address(&self, who: &str) -> String {
+            reach(&self.service(who).handle(Request::ReachView).await)
+                .profile
+                .clone()
+        }
+
+        /// Each publishes, each takes the other in. Nothing else is shared.
+        async fn introduce(&self, one: &str, other: &str) {
+            for (a, b) in [(one, other), (other, one)] {
+                let card = reach(&self.service(a).handle(Request::ReachShare).await)
+                    .announcement
+                    .clone()
+                    .expect("published");
+                self.service(b)
+                    .handle(Request::ReachLearn { announcement: card })
+                    .await;
+            }
+        }
+    }
+
+    impl Drop for World {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 
     /// No carrier is not an empty mailbox. A service that answered "nothing
