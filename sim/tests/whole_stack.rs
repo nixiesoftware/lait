@@ -15,7 +15,7 @@ use std::sync::Arc;
 use mechanics::authorization::{
     AuthorizationDemand, AuthorizedBodyKey, PolicyCapability, Resource,
 };
-use mechanics::ids::SpaceId;
+use mechanics::ids::{ActorId, SpaceId};
 use replica::body::{
     BodyBinding, BodyId, BodyKey, EncodingId, Op, SchemaId, StaticBodyKeys, SupportedSchemas,
     WorldId, MUTATION_COLLABORATIVE,
@@ -29,6 +29,12 @@ use replica::Replica;
 const EPOCH: [u8; 16] = [5u8; 16];
 const EPOCH_KEY: [u8; 32] = [6u8; 32];
 const WRITER: [u8; 32] = [0x41; 32];
+
+/// A canonical `ActorId`, fixed rather than derived: `sign_with` refuses an
+/// actor that is not `act_` + 64 hex, and a replay needs the same 64 every run.
+fn actor() -> ActorId {
+    ActorId::from_incept_hash(&"ab".repeat(32))
+}
 
 fn space() -> SpaceId {
     SpaceId::from_digest([16u8; 16])
@@ -90,6 +96,7 @@ fn run(seed: u64) -> (Vec<String>, u64) {
     .encode_canonical()
     .expect("demand encodes");
 
+    let actor = actor();
     for round in 0..6u8 {
         let ctx = CommitContext {
             space: &space,
@@ -103,7 +110,7 @@ fn run(seed: u64) -> (Vec<String>, u64) {
             .commit_action(
                 &ctx,
                 &CommitAuthorization {
-                    actor: "actor",
+                    actor: actor.as_str(),
                     parent_manifest_root: NO_PARENT_ROOT,
                     demand: demand.clone(),
                     intent_digest: [1u8; 32],

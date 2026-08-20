@@ -64,46 +64,44 @@ impl Drop for OwnedReceiver {
     }
 }
 
-/// An identity home whose daemon stops when the test ends, however it ends.
+/// Stops the identity daemon however the test ends, panic included.
 ///
-/// The head starts a daemon *under* this home, and the tests that do so ask it
-/// to stop on their last line — which a panic skips, and every assertion here
-/// sits above that line. An abandoned one keeps the display coordinator's
-/// machine-scoped port, so the *next* run of this file fails on
-/// `0.0.0.0:7443` and reads as an environment problem rather than as the
-/// previous failure still being present. One red test made the following run
-/// red for an unrelated-looking reason, which is worth more than the leak.
-struct OwnedIdentity(tempfile::TempDir);
+/// `stop_daemon` at the foot of the body only runs when the body reaches it,
+/// and a panic is how this test reports every failure. The daemon it started
+/// then outlived it still holding the display coordinator's fixed port, so
+/// nextest's retry hit the port guard 23ms in and reported "something else on
+/// this machine holds it" — which was the previous attempt of this same test,
+/// and read as a dirty machine. The retry could not have passed, and the
+/// failure the log ended on was never the one worth reading.
+///
+/// Its own thread and its own runtime: a `Drop` running during an unwind cannot
+/// await, and must not panic — a panic here would abort the process and take
+/// the real failure with it.
+struct DaemonStopped(PathBuf);
 
-impl OwnedIdentity {
-    fn new() -> Self {
-        Self(tempfile::tempdir().expect("an identity home"))
-    }
-
-    fn path(&self) -> &Path {
-        self.0.path()
-    }
-}
-
-impl Drop for OwnedIdentity {
+impl Drop for DaemonStopped {
     fn drop(&mut self) {
-        let home = self.0.path().to_path_buf();
-        // Asking, never killing: the head owns that process, not this test —
-        // the same rule `stop_daemon` is written around. On its own thread
-        // because this drops inside the test's runtime, and a runtime cannot be
-        // built inside one.
+        let home = self.0.clone();
         let _ = std::thread::spawn(move || {
-            let Ok(runtime) = tokio::runtime::Runtime::new() else {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
                 return;
             };
             runtime.block_on(async move {
                 stop_daemon(&home).await;
-                for _ in 0..50 {
+                for _ in 0..100 {
                     let selection = lait::config::Selection::for_identity(&home);
-                    match lait::daemon::Client::for_selection(&selection) {
-                        Ok(daemon)
-                            if !matches!(daemon.probe().await, lait::control::Probe::Absent) => {}
-                        _ => return,
+                    let gone = match lait::daemon::Client::for_selection(&selection) {
+                        Ok(daemon) => {
+                            matches!(daemon.probe().await, lait::control::Probe::Absent)
+                                && lait::config::acquire_daemon_lock(daemon.home()).is_ok()
+                        }
+                        Err(_) => true,
+                    };
+                    if gone {
+                        return;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -251,6 +249,7 @@ async fn wait_for_revision_change(
 }
 
 async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &str) {
+    let mut last = String::from("the coordinator was never reached");
     for _ in 0..200 {
         let display = client.display_status().await.expect("read receiver health");
         if let Some(health) = display
@@ -271,9 +270,41 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
             assert!(health.pipeline_unobservable);
             return;
         }
+        last = match display.devices.iter().find(|row| row.device == device) {
+            None => format!(
+                "the coordinator lists no device {device} at all (it knows: [{known}])",
+                known = display
+                    .devices
+                    .iter()
+                    .map(|row| row.device.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(row) => match row.health.as_ref() {
+                None => format!("device {device} is paired but has reported no health yet"),
+                Some(health) => format!(
+                    "device {device} last reported revision {seen_revision}/item {seen_item} \
+                     (connection {connection}, playback {playback}, last_error {error}) \
+                     while this waited for {revision}/{item}",
+                    seen_revision = health.revision,
+                    seen_item = health.current_item,
+                    connection = health.connection,
+                    playback = health.playback,
+                    error = health.last_error,
+                ),
+            },
+        };
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("coordinator never observed health for the presented Signage revision");
+    // Three different bugs used to arrive as this one sentence: a receiver that
+    // never paired, one that paired and went silent, and one stuck presenting an
+    // older revision. Only the third is a Signage bug, and the message could not
+    // tell them apart — so a nightly failure on a platform nobody has in front of
+    // them named nothing and cost a bisect.
+    panic!(
+        "coordinator never observed health for the presented Signage revision \
+         after 20s. Last observation: {last}"
+    );
 }
 
 async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
@@ -667,7 +698,11 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     }
 
     let managed = tempfile::tempdir().expect("a managed root");
-    let identity = OwnedIdentity::new();
+    let identity = tempfile::tempdir().expect("an identity home");
+    // Declared before the client, so it drops after it: the daemon is asked to
+    // stop once nothing is still speaking to it, and before the temporary homes
+    // it is holding open are removed.
+    let _daemon_stopped = DaemonStopped(identity.path().to_path_buf());
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
