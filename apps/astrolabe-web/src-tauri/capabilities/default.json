@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Astrolabe's Library plus its owned Book and Displays windows.",
-  "windows": ["main", "address-book", "displays"],
+  "description": "Astrolabe's Library plus its owned Book, Displays, and per-World settings windows.",
+  "windows": ["main", "address-book", "displays", "world-settings*"],
   "permissions": ["core:default"]
 }

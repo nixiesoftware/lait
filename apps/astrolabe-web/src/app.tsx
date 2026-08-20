@@ -6,16 +6,20 @@ import {
   closeOwnedWindow,
   createClientTransport,
   currentOwnedWindowSurface,
+  currentWorldSettingsSnapshot,
   keyFor,
   loadingClientView,
   summonOwnedWindow,
+  summonWorldSettings,
   type ClientAction,
   type ClientTransport,
   type ClientView,
   type LibraryWorld,
   type OwnedWindowSurface,
 } from "./client";
-import { BookSurface, DisplaysSurface } from "./lifecycle";
+import { BookSurface } from "./book";
+import { DisplaysSurface } from "./displays";
+import { WorldSettingsSurface } from "./settings";
 import { resolvePlatform, type PlatformProfile } from "./platform";
 
 const utilityBarHeight = 32;
@@ -25,6 +29,18 @@ const heroHeight = 196;
 export function App() {
   const [platform] = useState<PlatformProfile>(() => resolvePlatform());
   const [dark, setDark] = useState(true);
+  // The settings window never attaches a transport: its snapshot arrived in
+  // the URL, complete, when the window was summoned.
+  const settingsSnapshot = useMemo(() => currentWorldSettingsSnapshot(), []);
+  if (settingsSnapshot !== null) {
+    return <main className="page owned-window" data-theme={settingsSnapshot.dark ? "dark" : "light"}>
+      <WorldSettingsSurface snapshot={settingsSnapshot} />
+    </main>;
+  }
+  return <ClientApp platform={platform} dark={dark} setDark={setDark} />;
+}
+
+function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dark: boolean; setDark(next: boolean): void }) {
   const transport = useMemo(() => createClientTransport(), []);
   const { view, dispatch } = useClient(transport);
   const [selected, setSelected] = useState<string | null>(null);
@@ -59,7 +75,7 @@ export function App() {
       <Caption platform={platform} dark={dark} setDark={setDark} onSummonWindow={summonOwnedWindow}
         refreshing={view.inFlight.includes(actionKey.refresh)} onRefresh={() => void dispatch({ type: "refresh" })} />
       <div className="client-body">
-        <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} />
+        <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} dark={dark} />
         <OperationalBar view={view} onSummonWindow={summonOwnedWindow} />
       </div>
     </section>
@@ -140,11 +156,12 @@ function Caption({ platform, dark, setDark, refreshing, onRefresh, onSummonWindo
   </header>;
 }
 
-function Library({ view, showing, onSelect, dispatch }: {
+function Library({ view, showing, onSelect, dispatch, dark }: {
   view: ClientView;
   showing: LibraryWorld | null;
   onSelect(key: string): void;
   dispatch(action: ClientAction): Promise<void>;
+  dark: boolean;
 }) {
   if (view.library === null) return <LoadingLibrary />;
   if (view.library.length === 0) return <EmptyLibrary />;
@@ -160,7 +177,7 @@ function Library({ view, showing, onSelect, dispatch }: {
         {unavailable.length > 0 && <WorldSection label="UNAVAILABLE" rows={unavailable} view={view} showing={showing} onSelect={onSelect} />}
       </div>
     </aside>
-    {showing !== null && <WorldDetail view={view} world={showing} dispatch={dispatch} />}
+    {showing !== null && <WorldDetail view={view} world={showing} dispatch={dispatch} dark={dark} />}
   </section>;
 }
 
@@ -177,7 +194,7 @@ function WorldSection({ label, rows, view, showing, onSelect }: {
   </section>;
 }
 
-function WorldDetail({ view, world, dispatch }: { view: ClientView; world: LibraryWorld; dispatch(action: ClientAction): Promise<void> }) {
+function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world: LibraryWorld; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
   const entryPath = world.opensAt;
   const opening = entryPath !== null && view.inFlight.includes(actionKey.open(entryPath));
   const serving = view.heads.filter((head) => head.orbit === null);
@@ -199,7 +216,15 @@ function WorldDetail({ view, world, dispatch }: { view: ClientView; world: Libra
         : state === "Ready" ? <Button className="launch-control" aria-label="Launch World" onPress={() => {
           if (world.opensAt !== null) void dispatch({ type: "open", entryPath: world.opensAt });
         }}>▶ <span>LAUNCH</span></Button> : <div className="lifecycle-state">ⓘ {state}</div>}
-      <Button className="world-settings" aria-label={`${world.displayName} settings`}>⚙</Button>
+      <Button className="world-settings" aria-label={`${world.displayName} settings`} onPress={() => void summonWorldSettings({
+        key: world.key,
+        name: world.displayName,
+        worldMount: world.worldMount,
+        entryPath: world.opensAt,
+        version: world.version,
+        activeOrigin: serving[0]?.origin ?? null,
+        dark,
+      })}>⚙</Button>
     </div>
     <div className="world-detail-content"><div className="glance-card">
       {world.people === null ? "The book has not been read." : "Nobody in the book is addressed here."}

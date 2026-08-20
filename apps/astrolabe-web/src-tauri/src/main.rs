@@ -825,6 +825,65 @@ fn client_dispatch(action: WebAction) -> WebClientView {
     api::dispatch(action.into()).into()
 }
 
+/// The per-World settings window. Unlike Book and Displays it is keyed per
+/// World, and it receives a read-only snapshot in its URL rather than a
+/// subscription: the settings page states what was true when it was opened,
+/// exactly like the Flutter client's `--world-settings=` argv payload.
+#[tauri::command]
+async fn summon_world_settings(
+    app: tauri::AppHandle,
+    key: String,
+    name: String,
+    snapshot: String,
+) -> Result<(), String> {
+    // A Tauri window label admits [a-zA-Z0-9-/:_] only; a World key is not
+    // bound by that alphabet, so anything else maps onto '-'.
+    let sanitized: String = key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '/' | ':' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let label = format!("world-settings:{sanitized}");
+    if let Some(window) = app.get_webview_window(&label) {
+        if window.is_minimized().map_err(|error| error.to_string())? {
+            window.unminimize().map_err(|error| error.to_string())?;
+        }
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    // The snapshot is base64url and needs no further escaping in a query.
+    let query = format!("surface=world-settings&snapshot={snapshot}");
+    let url = if let Some(mut dev_url) = app.config().build.dev_url.clone() {
+        dev_url.set_query(Some(&query));
+        WebviewUrl::External(dev_url)
+    } else {
+        WebviewUrl::CustomProtocol(
+            format!("tauri://localhost/index.html?{query}")
+                .parse()
+                .map_err(|error| format!("invalid settings-window URL: {error}"))?,
+        )
+    };
+
+    // Flutter's settings window opens 560×680 and narrows to 440×520.
+    WebviewWindowBuilder::new(&app, &label, url)
+        .title(format!("{name} settings — Astrolabe"))
+        .resizable(true)
+        .minimizable(true)
+        .visible(true)
+        .inner_size(560.0, 680.0)
+        .min_inner_size(440.0, 520.0)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn summon_owned_window(
     app: tauri::AppHandle,
@@ -896,7 +955,12 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![client_current, client_dispatch, summon_owned_window])
+        .invoke_handler(tauri::generate_handler![
+            client_current,
+            client_dispatch,
+            summon_owned_window,
+            summon_world_settings
+        ])
         .run(tauri::generate_context!())
         .expect("run Astrolabe Web desktop host");
 }

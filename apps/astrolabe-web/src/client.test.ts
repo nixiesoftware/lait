@@ -5,9 +5,13 @@ import {
   createClientTransport,
   createFixtureTransport,
   currentOwnedWindowSurface,
+  currentWorldSettingsSnapshot,
+  decodeWorldSettingsSnapshot,
+  encodeWorldSettingsSnapshot,
   fixtureClientView,
   keyFor,
   type AstrolabeClientBridge,
+  type WorldSettingsSnapshot,
 } from "./client";
 
 describe("client transport", () => {
@@ -60,6 +64,30 @@ describe("client transport", () => {
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=book") as unknown as Location)).toBe("book");
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=displays") as unknown as Location)).toBe("displays");
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=record") as unknown as Location)).toBeNull();
+  });
+
+  it("carries a World-settings snapshot through its window URL, whole", () => {
+    const snapshot: WorldSettingsSnapshot = {
+      key: "issues",
+      name: "Issues — Ünïcode",
+      worldMount: "issues",
+      entryPath: "/",
+      version: 3,
+      activeOrigin: "http://127.0.0.1:52713/",
+      dark: true,
+    };
+    const encoded = encodeWorldSettingsSnapshot(snapshot);
+    // The payload must survive a URL query without further escaping.
+    expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(decodeWorldSettingsSnapshot(encoded)).toEqual(snapshot);
+
+    const url = new URL(`https://astrolabe.test/?surface=world-settings&snapshot=${encoded}`);
+    expect(currentWorldSettingsSnapshot(url as unknown as Location)).toEqual(snapshot);
+    // The settings window is not one of the two owned singleton surfaces.
+    expect(currentOwnedWindowSurface(url as unknown as Location)).toBeNull();
+    // A mangled payload reads as no snapshot, never a crash or a guess.
+    expect(decodeWorldSettingsSnapshot("not-base64!@#")).toBeNull();
+    expect(decodeWorldSettingsSnapshot(encodeWorldSettingsSnapshot({ ...snapshot, key: undefined as unknown as string }))).toBeNull();
   });
 
   it("settles fixture-only lifecycle actions", async () => {

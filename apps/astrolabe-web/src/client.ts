@@ -227,6 +227,74 @@ export function currentOwnedWindowSurface(location = window.location): OwnedWind
 }
 
 /**
+ * A World-settings window is deliberately separate from the client: it
+ * receives a read-only snapshot at open time and never watches the core.
+ * The snapshot crosses in the window's own URL — the web spelling of the
+ * Flutter client's `--world-settings=` argv payload.
+ */
+export interface WorldSettingsSnapshot {
+  key: string;
+  name: string;
+  worldMount: string;
+  entryPath: string | null;
+  version: number | null;
+  activeOrigin: string | null;
+  dark: boolean;
+}
+
+export function encodeWorldSettingsSnapshot(snapshot: WorldSettingsSnapshot): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+export function decodeWorldSettingsSnapshot(encoded: string): WorldSettingsSnapshot | null {
+  try {
+    const binary = atob(encoded.replaceAll("-", "+").replaceAll("_", "/"));
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (typeof value !== "object" || value === null) return null;
+    const record = value as Record<string, unknown>;
+    if (typeof record.key !== "string" || typeof record.name !== "string"
+      || typeof record.worldMount !== "string" || typeof record.dark !== "boolean") return null;
+    return {
+      key: record.key,
+      name: record.name,
+      worldMount: record.worldMount,
+      entryPath: typeof record.entryPath === "string" ? record.entryPath : null,
+      version: typeof record.version === "number" ? record.version : null,
+      activeOrigin: typeof record.activeOrigin === "string" ? record.activeOrigin : null,
+      dark: record.dark,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function currentWorldSettingsSnapshot(location = window.location): WorldSettingsSnapshot | null {
+  const params = new URLSearchParams(location.search);
+  if (params.get("surface") !== "world-settings") return null;
+  const encoded = params.get("snapshot");
+  return encoded === null ? null : decodeWorldSettingsSnapshot(encoded);
+}
+
+/** Summon (or refocus) the per-World settings window carrying this snapshot. */
+export async function summonWorldSettings(snapshot: WorldSettingsSnapshot): Promise<void> {
+  const encoded = encodeWorldSettingsSnapshot(snapshot);
+  if (isTauri()) {
+    await invoke("summon_world_settings", { key: snapshot.key, name: snapshot.name, snapshot: encoded });
+    return;
+  }
+  if (import.meta.env.DEV) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("surface", "world-settings");
+    url.searchParams.set("snapshot", encoded);
+    window.open(url, `astrolabe-world-settings-${snapshot.key}`, "width=560,height=680");
+  }
+}
+
+/**
  * Ask the native host to create or restore the owned window. The browser
  * preview mirrors that shape with a named popup, never by replacing Library.
  */
@@ -414,13 +482,82 @@ export const fixtureClientView: ClientView = {
     update: null,
   }],
   heads: [],
-  host: null,
-  display: null,
+  host: {
+    version: "0.0.0-fixture",
+    identityHome: "/home/fixture/.lait",
+    spacesRoot: "/home/fixture/.lait/spaces",
+    orbitCount: 1,
+  },
+  display: {
+    instance: "dsp_fixture",
+    label: "This device",
+    origin: "https://192.168.1.20:7443",
+    certificateSha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    certificatePem: "-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----",
+    surfaces: [
+      { world: "issues", surface: "board", title: "Issue board", contractVersion: 1, outputs: [] },
+      { world: "com.lait.signage", surface: "signage.program", title: "Signage program", contractVersion: 1, outputs: [] },
+    ],
+    devices: [{
+      device: "rcv_lounge",
+      label: "Lounge TV",
+      platform: "android_tv",
+      build: "1.4.2",
+      issuedAtUnixMs: 1_755_000_000_000,
+      revokedAtUnixMs: null,
+      health: {
+        revision: "rev_9", currentItem: "itm_standup", elapsedMs: 5_400, connection: "connected",
+        playback: "playing", lastError: "none", stagedItems: 4, stagedBytes: 8_192,
+        driftResidualMs: 12, correctionEvents: 2, pipelineUnobservable: false,
+      },
+    }],
+    assignments: [{
+      assignment: "asg_lounge", device: "rcv_lounge", orbit: "orb_fixture", space: "orb_fixture",
+      program: "prg_standup", world: "issues", surface: "board", controller: "ctl_fixture",
+      theme: "dark", syncGroup: "lobby-wall", syncMode: "stayInSync", staticDelayMs: 0,
+      expiresAtUnixMs: null, revokedAtUnixMs: null,
+    }],
+    pendingPairings: [{
+      pairing: "pair_kitchen",
+      confirmationPhrase: ["ember", "quartz", "linen", "harbor", "violet", "spruce"],
+      certificateSha256: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+      platform: "fire_tv",
+      build: "1.4.0",
+      createdAtUnixMs: 1_755_000_000_000,
+      expiresAtUnixMs: 1_755_000_600_000,
+    }],
+  },
   devices: [],
   storage: [],
-  orbits: [],
+  orbits: [{ space: "orb_fixture", name: "Fixture Space", path: "/home/fixture/.lait/spaces/orb_fixture", lastOpened: null }],
   space: null,
-  book: { cards: [], migrationComplete: true, migrationPending: 0, migrationImported: 0, suggestions: [] },
+  book: {
+    cards: [
+      {
+        card: "crd_me", name: "You", note: "", handles: ["actor:orb_fixture:you"], addresses: ["actor:orb_fixture:you"],
+        devices: ["dev_this"], agents: [], picture: null, groups: [], selfClaim: true, presence: null,
+      },
+      {
+        card: "crd_ada", name: "Ada", note: "Met at the workshop", handles: ["actor:orb_fixture:ada"],
+        addresses: ["actor:orb_fixture:ada"], devices: [], agents: [], picture: null, groups: [],
+        selfClaim: false, presence: "online",
+      },
+      {
+        card: "crd_scribe", name: "Scribe", note: "", handles: ["agent:1f2e:scribe"], addresses: [],
+        devices: [], agents: ["agent:1f2e:scribe"], picture: null, groups: ["Agents"], selfClaim: false, presence: "away",
+      },
+      {
+        card: "crd_brin", name: "Brin", note: "", handles: ["actor:orb_fixture:brin"], addresses: ["actor:orb_fixture:brin"],
+        devices: [], agents: [], picture: null, groups: [], selfClaim: false, presence: "offline",
+      },
+    ],
+    migrationComplete: true,
+    migrationPending: 0,
+    migrationImported: 0,
+    suggestions: [{
+      suggestion: "sug_cole", name: "Cole", note: "From cards.json", handles: ["actor:orb_fixture:cole"],
+    }],
+  },
   mcp: null,
   inFlight: [],
   failures: [],
