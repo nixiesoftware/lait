@@ -136,17 +136,24 @@ async fn an_exec_dial_is_judged_answered_and_serves_no_flow_yet() {
     // The admitted connection serves no flow vocabulary yet: a probe is
     // stopped loudly, not left to a deadline.
     let (mut probe_send, mut probe_recv) = connection.open_bi().await.expect("probe flow");
-    probe_send
-        .write_all(b"anything")
-        .await
-        .expect("probe write");
-    let refused = tokio::time::timeout(ANSWERED, probe_recv.read_to_end(bounds::MAX_OPENING_BYTES))
-        .await
-        .expect("the refusal arrives within the deadline");
-    assert!(
-        refused.is_err(),
-        "a foundation-plane flow must be reset, not answered or left open"
-    );
+    // The reset races the write, and which side observes it first is the
+    // scheduler's choice rather than the property's. A write that fails *is*
+    // the refusal — the peer stopped the flow before this end finished
+    // offering it. Insisting the write succeed made a loud, prompt refusal
+    // look like a broken test, which is what a fast runner produced.
+    //
+    // What would falsify the property is a probe that is answered, or one left
+    // open. Both are still caught below.
+    if probe_send.write_all(b"anything").await.is_ok() {
+        let refused =
+            tokio::time::timeout(ANSWERED, probe_recv.read_to_end(bounds::MAX_OPENING_BYTES))
+                .await
+                .expect("the refusal arrives within the deadline");
+        assert!(
+            refused.is_err(),
+            "a foundation-plane flow must be reset, not answered or left open"
+        );
+    }
 
     cancel.cancel();
 }
