@@ -51,11 +51,17 @@ const PROGRESS_SAMPLE: std::time::Duration = std::time::Duration::from_millis(50
 
 /// An operation id as a browser-stable key.
 fn hex(bytes: &[u8; 16]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    fn nibble(value: u8) -> char {
+        if value < 10 {
+            (b'0' + value) as char
+        } else {
+            (b'a' + value - 10) as char
+        }
+    }
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push(DIGITS[usize::from(byte >> 4)] as char);
-        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+        out.push(nibble(byte >> 4));
+        out.push(nibble(byte & 0x0f));
     }
     out
 }
