@@ -141,6 +141,22 @@ impl Drop for Node {
 }
 
 fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> Node {
+    node_with_quota(net, tag, seed, serving, 1 << 30)
+}
+
+/// A node whose cache quota is its own, for the demand-paging tests.
+///
+/// The residency's quota and the fetcher's have to be the same number: the
+/// fetcher refuses against one and the sweep reclaims against the other, so a
+/// tighter fetcher quota would refuse forever against a cache that never feels
+/// pressure.
+fn node_with_quota(
+    net: &comms::mem::MemNet,
+    tag: &str,
+    seed: [u8; 32],
+    serving: bool,
+    quota: u64,
+) -> Node {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("lait-2node-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -154,7 +170,7 @@ fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> N
     .unwrap();
     replica.set_supported(supported());
     let core = Arc::new(runtime::session::StationCore::for_test(replica));
-    let cache = Arc::new(Residency::open(dir.join("cache"), 1 << 30).unwrap());
+    let cache = Arc::new(Residency::open(dir.join("cache"), quota).unwrap());
     let host = Arc::new(ContentHost::new(core.clone(), cache));
     let device = mechanics::actor::device_from_seed(&seed);
     let station = Key::from_device(&device).expect("station");
@@ -1438,4 +1454,157 @@ async fn a_dropped_dial_is_unreachable_rather_than_a_hang() {
             tokio::time::advance(Duration::from_millis(100)).await;
         })
         .await;
+}
+
+/// What a cursor asked for, so the driver can go and get it.
+///
+/// Duct tape, and named as such: the production supply spawns the fetch and
+/// answers immediately, which needs a provider-assembly path that does not
+/// exist yet. This records the ask and lets the test do the fetching, which
+/// exercises the same chain — cursor asks, window is fetched, cursor reads —
+/// without inventing that path under a test's convenience.
+#[derive(Default)]
+struct Wanted(std::sync::Mutex<Vec<u32>>);
+
+impl runtime::content_cursor::ChunkSupply for Wanted {
+    fn request(
+        &self,
+        _content: &ContentRef,
+        _operation: [u8; 16],
+        chunks: &[u32],
+    ) -> runtime::content_cursor::Gap {
+        if let Ok(mut wanted) = self.0.lock() {
+            wanted.extend_from_slice(chunks);
+        }
+        runtime::content_cursor::Gap::Fetching
+    }
+
+    fn abandon(&self, _content: &ContentRef, _operation: [u8; 16]) {}
+}
+
+impl Wanted {
+    fn take(&self) -> Vec<u32> {
+        self.0
+            .lock()
+            .map(|mut w| std::mem::take(&mut *w))
+            .unwrap_or_default()
+    }
+}
+
+/// Read a whole content through a cursor, fetching each hole as it is reached.
+///
+/// Returns the plaintext and how many windows had to be fetched.
+async fn page_through(
+    seeker: &Node,
+    holder: &Node,
+    content: &ContentRef,
+    session: u8,
+    quota: u64,
+) -> (Vec<u8>, usize) {
+    use runtime::content_cursor::{Advance, ContentCursor};
+
+    let space = space();
+    let allow = |_: ContentAction<'_>| Ok(());
+    let policy = seeker.policy(&space, &allow);
+    let supply = Arc::new(Wanted::default());
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [session; 16],
+    )
+    .await
+    .expect("admitted");
+    let providers = std::slice::from_ref(&provider);
+    let mut fetcher = fetcher(seeker);
+    fetcher.cache_quota_bytes = quota;
+    let cancel = CancelToken::new();
+
+    let mut cursor =
+        ContentCursor::open(seeker.host.clone(), &policy, content, supply.clone()).expect("open");
+    let mut out = Vec::new();
+    let mut windows = 0usize;
+    let mut operation = 0u8;
+    loop {
+        match cursor.next(&policy) {
+            Advance::Yielded { cursor: next, span } => {
+                out.extend_from_slice(span.bytes());
+                cursor = next;
+            }
+            Advance::Blocked { cursor: next, .. } => {
+                let chunks = supply.take();
+                assert!(!chunks.is_empty(), "a hole names the chunk it is missing");
+                operation = operation.wrapping_add(1);
+                fetcher
+                    .fetch_chunks(
+                        content,
+                        &chunks,
+                        providers,
+                        [session.wrapping_add(operation); 16],
+                        Acquisition::Stream,
+                        &cancel,
+                        &anyone,
+                    )
+                    .await
+                    .expect("the window arrives");
+                windows += 1;
+                cursor = next;
+            }
+            Advance::Finished { .. } => break,
+            Advance::Refused(failure) => panic!("paging refused: {failure:?}"),
+        }
+    }
+    (out, windows)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_content_larger_than_the_cache_pages_through_a_cursor_from_a_peer() {
+    // The claim this whole line of work exists to make: file size stops
+    // bounding playability, and only the window does. The seeker's quota is a
+    // fraction of the content, so it cannot hold what it is reading.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "paging-holder", [21u8; 32], true);
+    let seeker = node_with_quota(&net, "paging-seeker", [22u8; 32], false, 2 * 1024 * 1024);
+
+    let plaintext = filler(9, 8 * 1024 * 1024);
+    let content = seed_content(&holder, 9, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    // A quarter of what it is about to read.
+    let quota = 2 * 1024 * 1024;
+    let (read, windows) = page_through(&seeker, &holder, &content, 9, quota).await;
+
+    assert_eq!(read.len(), plaintext.len(), "every byte arrived");
+    assert!(read == plaintext, "and they are the bytes that were sealed");
+    assert!(
+        windows > 1,
+        "a content this size cannot have arrived in one window under this quota"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn paging_holds_only_the_chunk_it_is_reading() {
+    // The memory claim: one step is one chunk, whatever the content's size. If
+    // the reader accumulated, a long film would be a long download wearing a
+    // cursor's clothes.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "paging-bound-holder", [23u8; 32], true);
+    let seeker = node_with_quota(&net, "paging-bound-seeker", [24u8; 32], false, 1024 * 1024);
+
+    let plaintext = filler(11, 4 * 1024 * 1024);
+    let content = seed_content(&holder, 11, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    let before = seeker.host.cache().resident_bytes();
+    let (read, _) = page_through(&seeker, &holder, &content, 11, 1024 * 1024).await;
+    assert_eq!(read.len(), plaintext.len());
+
+    // Whatever is resident afterwards, it is bounded by the quota the fetch was
+    // admitted against — not by the size of what was read.
+    let after = seeker.host.cache().resident_bytes();
+    assert!(
+        after.saturating_sub(before) < plaintext.len() as u64,
+        "a paged read left the whole content resident: {before} -> {after}"
+    );
 }

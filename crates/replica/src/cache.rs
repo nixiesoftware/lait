@@ -773,6 +773,21 @@ impl Residency {
     /// eligible victims at all. `over_quota_bytes` is what an operator needs to
     /// see to know the answer is "unpin or forget something", not "wait".
     pub fn sweep(&self) -> Result<SweepReport, Failure> {
+        self.sweep_to(self.quota_bytes)
+    }
+
+    /// Reclaim until `bytes` of headroom exists beneath the quota.
+    ///
+    /// [`Self::sweep`] reclaims *to* the quota, which is the wrong question for
+    /// anything about to add to it: a caller admitting a transfer is over only
+    /// once the bytes land, so a sweep that stops at the line always answers
+    /// "nothing to do" and the caller refuses itself. Demand-paged reads fill
+    /// the cache with their own wake and need exactly this.
+    pub fn reclaim_for(&self, bytes: u64) -> Result<SweepReport, Failure> {
+        self.sweep_to(self.quota_bytes.saturating_sub(bytes))
+    }
+
+    fn sweep_to(&self, target: u64) -> Result<SweepReport, Failure> {
         let mut report = SweepReport::default();
         self.reclaim_incomplete()?;
 
@@ -790,13 +805,13 @@ impl Residency {
                 }
             }
         }
-        if total <= self.quota_bytes {
+        if total <= target {
             return Ok(report);
         }
 
         candidates.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
         for (hash, len) in candidates {
-            if total <= self.quota_bytes {
+            if total <= target {
                 break;
             }
             // Only count what actually went. A removal that failed leaves the

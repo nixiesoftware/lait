@@ -623,11 +623,23 @@ impl Fetcher {
         chunks: &[u32],
     ) -> Result<(), Failure> {
         let cache = self.host.cache();
-        let projected = cache
-            .resident_bytes()
-            .saturating_add(cache.staged_bytes())
-            .saturating_add(window_bytes(descriptor, chunks));
-        if projected > self.cache_quota_bytes {
+        let wanted = window_bytes(descriptor, chunks);
+        let projected = |cache: &replica::content::Residency| {
+            cache
+                .resident_bytes()
+                .saturating_add(cache.staged_bytes())
+                .saturating_add(wanted)
+        };
+        if projected(cache) <= self.cache_quota_bytes {
+            return Ok(());
+        }
+        // Reclaim before refusing. A demand-paged read leaves every window it
+        // has passed resident but unheld, so it fills the quota with its own
+        // wake and then refuses itself — and whether maintenance had run
+        // recently would decide whether a film played. Sweeping here couples
+        // the two: what nothing holds goes, and a reader's own window is held.
+        let _ = cache.reclaim_for(wanted);
+        if projected(cache) > self.cache_quota_bytes {
             return Err(Failure::OverQuota);
         }
         Ok(())
