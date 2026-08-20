@@ -56,8 +56,6 @@
 .handle-section { display:grid; gap:5px; }
 .handle-row { display:flex; justify-content:space-between; align-items:center; gap:10px; }.handle-row code { min-width:0; overflow-wrap:anywhere; color:var(--text); font-size:11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 .profile-actions { display:flex; flex-wrap:wrap; gap:7px; }
-.book-actions-foot { display:grid; gap:10px; margin-top:18px; padding-top:14px; border-top:1px solid var(--border); }.book-actions-foot > .quiet-button { justify-self:start; }
-.exchange-forms { display:grid; gap:8px; }.exchange-forms .inline-form { padding:9px; }
 
 /* Displays — the coordinator, its pairings and receivers. */
 .coordinator-title { display:flex; justify-content:space-between; align-items:center; gap:10px; }

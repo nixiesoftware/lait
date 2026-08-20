@@ -40,7 +40,7 @@ export function partCards(cards: Card[]): { contacts: Card[]; offline: Card[] } 
 }
 
 type BookDialog =
-  | { kind: "edit"; card: Card | null }
+  | { kind: "edit"; card: Card }
   | { kind: "link"; card: Card }
   | { kind: "picture"; card: Card }
   | { kind: "merge"; card: Card }
@@ -135,10 +135,6 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
                   {offline.map((card) => <PersonRow key={card.card} card={card} onOpen={() => setProfile(card.card)} />)}
                 </>}
               </>}
-            <div className="book-actions-foot">
-              <button className="quiet-button" onClick={() => setDialog({ kind: "edit", card: null })}>New card</button>
-              <ExchangeForms dispatch={dispatch} />
-            </div>
           </div>
         </>}
     {dialog !== null && <BookDialogs dialog={dialog} all={book?.cards ?? []} dispatch={dispatch} onDismiss={() => setDialog(null)} />}
@@ -265,30 +261,6 @@ function SuggestionBand({ book, busy, dispatch }: { book: Book; busy(key: string
   </section>;
 }
 
-/**
- * Card-exchange staging and export. The Flutter book carries no such controls
- * yet; this is the web client's only door to those existing core actions, so
- * it stays — compact, at the foot of the list.
- */
-function ExchangeForms({ dispatch }: { dispatch: Dispatch }) {
-  const [importPath, setImportPath] = useState("");
-  const [exportPath, setExportPath] = useState("");
-  return <div className="exchange-forms">
-    <div className="inline-form">
-      <input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="/path/to/cards.json"
-        aria-label="Card-exchange file to stage" />
-      <button className="quiet-button" disabled={importPath.trim() === ""}
-        onClick={() => void dispatch({ type: "bookImport", path: importPath.trim() })}>Stage import</button>
-    </div>
-    <div className="inline-form">
-      <input value={exportPath} onChange={(event) => setExportPath(event.target.value)} placeholder="/path/to/export.json"
-        aria-label="Path to export this book to" />
-      <button className="quiet-button" disabled={exportPath.trim() === ""}
-        onClick={() => void dispatch({ type: "bookExport", path: exportPath.trim(), cards: null })}>Export all</button>
-    </div>
-  </div>;
-}
-
 function BookDialogs({ dialog, all, dispatch, onDismiss }: {
   dialog: BookDialog; all: Card[]; dispatch: Dispatch; onDismiss(): void;
 }) {
@@ -301,16 +273,16 @@ function BookDialogs({ dialog, all, dispatch, onDismiss }: {
   }
 }
 
-function EditDialog({ card, dispatch, onDismiss }: { card: Card | null; dispatch: Dispatch; onDismiss(): void }) {
-  const [name, setName] = useState(card?.name ?? "");
-  const [note, setNote] = useState(card?.note ?? "");
+function EditDialog({ card, dispatch, onDismiss }: { card: Card; dispatch: Dispatch; onDismiss(): void }) {
+  const [name, setName] = useState(card.name);
+  const [note, setNote] = useState(card.note);
   const save = () => {
     const trimmed = name.trim();
     if (trimmed === "") return;
-    void dispatch({ type: "bookPut", card: card?.card ?? null, name: trimmed, note: note.trim() || null });
+    void dispatch({ type: "bookPut", card: card.card, name: trimmed, note: note.trim() || null });
     onDismiss();
   };
-  return <AppDialog title={card === null ? "New card" : "Edit card"}
+  return <AppDialog title="Edit card"
     description="A name is an authored label. It never selects an authority target." onDismiss={onDismiss}>
     <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
     <label>Note<input value={note} onChange={(event) => setNote(event.target.value)} /></label>
