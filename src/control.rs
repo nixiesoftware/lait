@@ -1565,6 +1565,9 @@ pub enum ContentErrorCode {
     Unknown,
     /// The descriptor is here and the bytes are not. Retryable, after a fetch.
     NotResident,
+    /// The bytes are here and sealed to an epoch this Station has no key for.
+    /// A fetch cannot help.
+    Sealed,
     /// A range past the content, or a length past what one call may return.
     Bounds,
     /// The store or the cache failed. Ours, not the caller's.

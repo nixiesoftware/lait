@@ -11,6 +11,11 @@
 //! it verifies. Re-opening content that is already here costs nothing on the
 //! wire, which is the property the whole plane exists for.
 //!
+//! **A fetch is scoped by its caller.** [`Fetcher::fetch_chunks`] moves the
+//! chunks it is named and prices the quota on those; [`Fetcher::fetch`] is that
+//! call with every missing chunk named. Watching one second of a film must not
+//! cost the film.
+//!
 //! **Nothing is trusted until it verifies.** Bytes arriving from a peer are
 //! staged — never resident, never servable, never readable — until they hash to
 //! the leaf a proof binds to this content's committed Merkle root. A provider
@@ -35,7 +40,8 @@ use mechanics::{ids::SpaceId, station::Key};
 use replica::content::{ChunkProof, ContentDescriptor, ContentRef};
 
 use crate::budget::{deadline, slots};
-use crate::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
+use crate::content_host::{Acquisition, ContentAction, ContentHost, ContentKeys, ContentPolicy};
+use crate::lifecycle::CancelToken;
 use crate::plane::freight::{frame, read_frame};
 use crate::plane::{bounds, Accept, FreightFrame, Open, Plane, SPACE_ID_LEN};
 use crate::transfer::{TransferHandle, TransferRegistry, TransferState};
@@ -54,6 +60,8 @@ pub enum Failure {
     Incomplete { missing: usize },
     /// Local storage refused.
     Storage,
+    /// The caller withdrew. Not a failure to fetch — a decision not to.
+    Cancelled,
     /// This operation is already in flight, or this Station is already moving
     /// as much as it will at once.
     Busy,
@@ -74,6 +82,15 @@ struct ProviderScore {
 
 /// How long a refusal or timeout keeps a provider out of the running.
 const PROBATION: Duration = Duration::from_secs(30);
+
+/// How many times a fetch re-asks for what it still wants.
+///
+/// A throttled provider refuses now and serves shortly; one pass would report
+/// the chunk missing when the only thing missing was patience.
+const MAX_FETCH_PASSES: usize = 8;
+
+/// Added per pass, so eight passes wait under two seconds in total.
+const PASS_BACKOFF: Duration = Duration::from_millis(50);
 
 /// A connected, admitted provider.
 pub struct Provider {
@@ -306,7 +323,7 @@ pub struct Fetcher {
 impl Fetcher {
     fn policy<'a>(
         &'a self,
-        authorize: &'a dyn Fn(ContentAction) -> Result<(), Vec<u8>>,
+        authorize: &'a dyn for<'c> Fn(ContentAction<'c>) -> Result<(), Vec<u8>>,
     ) -> ContentPolicy<'a> {
         ContentPolicy {
             space: &self.space,
@@ -317,26 +334,62 @@ impl Fetcher {
     }
 
     /// Fetch everything missing, from whoever will serve it.
+    ///
+    /// The whole-content case of [`Self::fetch_chunks`]: every chunk named, and
+    /// kept once it lands.
     pub async fn fetch(
         &self,
         content: &ContentRef,
         operation: [u8; 16],
         providers: &[Provider],
+        authorize: &dyn for<'c> Fn(ContentAction<'c>) -> Result<(), Vec<u8>>,
     ) -> Result<(), Failure> {
-        let allow = |_: ContentAction| Ok(());
-        let policy = self.policy(&allow);
+        let policy = self.policy(authorize);
+        let descriptor = self
+            .host
+            .descriptor_of(&policy, content)
+            .map_err(|_| Failure::UnknownContent)?;
+        let whole: Vec<u32> = (0..descriptor.chunk_count).collect();
+        self.fetch_chunks(
+            content,
+            &whole,
+            providers,
+            operation,
+            Acquisition::Keep,
+            &CancelToken::new(),
+            authorize,
+        )
+        .await
+    }
+
+    /// Fetch the named chunks and nothing else, until told to stop.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every one is a decision only the caller can make"
+    )]
+    pub async fn fetch_chunks(
+        &self,
+        content: &ContentRef,
+        chunks: &[u32],
+        providers: &[Provider],
+        operation: [u8; 16],
+        intent: Acquisition,
+        cancel: &CancelToken,
+        authorize: &dyn for<'c> Fn(ContentAction<'c>) -> Result<(), Vec<u8>>,
+    ) -> Result<(), Failure> {
+        let policy = self.policy(authorize);
         let descriptor = self
             .host
             .descriptor_of(&policy, content)
             .map_err(|_| Failure::UnknownContent)?;
 
-        let missing = self.missing_chunks(&policy, content, &descriptor);
+        let missing = self.missing_among(&descriptor, chunks)?;
         if missing.is_empty() {
             // Already here. The second open of a content costs no wire at all,
             // which is the point.
             return Ok(());
         }
-        self.admit_by_quota(&descriptor)?;
+        self.admit_by_quota(&descriptor, &missing)?;
         if providers.is_empty() {
             return Err(Failure::NoProvider);
         }
@@ -356,18 +409,29 @@ impl Fetcher {
         // for every chunk would turn one question into thousands.
         let mut offers: BTreeMap<Key, BTreeSet<u32>> = BTreeMap::new();
         let mut scores: BTreeMap<Key, ProviderScore> = BTreeMap::new();
-        for provider in providers {
-            match provider.have(content, &missing).await {
-                Ok(chunks) if !chunks.is_empty() => {
-                    offers.insert(provider.station.clone(), chunks.into_iter().collect());
-                    scores.insert(provider.station.clone(), ProviderScore::default());
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    scores
-                        .entry(provider.station.clone())
-                        .or_default()
-                        .probation_until = Some(Instant::now() + PROBATION);
+        // Asked under the same patience as a chunk. An availability question is
+        // charged like a chunk by the serving gate, so it is throttled like one
+        // — and one refused round here reported that nobody held the content.
+        for pass in 0..MAX_FETCH_PASSES {
+            if !offers.is_empty() {
+                break;
+            }
+            if pass > 0 {
+                tokio::time::sleep(PASS_BACKOFF.saturating_mul(pass as u32)).await;
+            }
+            for provider in providers {
+                match provider.have(content, &missing).await {
+                    Ok(chunks) if !chunks.is_empty() => {
+                        offers.insert(provider.station.clone(), chunks.into_iter().collect());
+                        scores.insert(provider.station.clone(), ProviderScore::default());
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        scores
+                            .entry(provider.station.clone())
+                            .or_default()
+                            .probation_until = Some(Instant::now() + PROBATION);
+                    }
                 }
             }
         }
@@ -378,7 +442,7 @@ impl Fetcher {
 
         let mut outstanding = missing.clone();
         let mut moved: u64 = 0;
-        let total = descriptor.plaintext_len;
+        let total = window_bytes(&descriptor, &missing);
 
         // Scarcest first. A chunk only one peer holds is the one that decides
         // whether this fetch can finish at all, so it is fetched while that
@@ -387,53 +451,81 @@ impl Fetcher {
         outstanding
             .sort_by_key(|index| offers.values().filter(|held| held.contains(index)).count());
 
-        for index in outstanding.clone() {
-            let candidates = self.rank(&offers, &scores, index);
-            if candidates.is_empty() {
-                continue;
+        let mut remaining = outstanding;
+        for pass in 0..MAX_FETCH_PASSES {
+            if remaining.is_empty() {
+                break;
             }
-            let mut installed = false;
-            for station in candidates {
-                let Some(provider) = providers.iter().find(|p| p.station == station) else {
+            if pass > 0 {
+                // A refused chunk is worth waiting for: the refusal a rate gate
+                // sends and the one an unwilling peer sends are the same frame,
+                // so the only safe reading is "not now". Linear, and bounded by
+                // the pass count, so a peer that means it still ends the fetch.
+                tokio::time::sleep(PASS_BACKOFF.saturating_mul(pass as u32)).await;
+            }
+            let mut still_wanted = Vec::new();
+            for index in std::mem::take(&mut remaining) {
+                if cancel.is_cancelled() {
+                    // Drop would release the same things and call it Failed.
+                    handle.finish(TransferState::Cancelled, Instant::now());
+                    return Err(Failure::Cancelled);
+                }
+                let candidates = self.rank(&offers, &scores, index);
+                if candidates.is_empty() {
                     continue;
-                };
-                match self
-                    .fetch_one(&policy, content, &descriptor, provider, index, operation)
-                    .await
-                {
-                    Ok(bytes) => {
-                        moved += bytes;
-                        handle.advance(
-                            TransferState::Transferring {
-                                bytes: moved,
-                                total: Some(total),
-                            },
-                            Instant::now(),
-                        );
-                        installed = true;
-                        break;
-                    }
-                    Err(lied) => {
-                        // A proof failure is attributable to exactly one peer,
-                        // and it costs a whole chunk — so that peer is out for
-                        // this content immediately rather than after a budget.
-                        // A refusal or a timeout only earns decaying probation.
-                        let score = scores.entry(station.clone()).or_default();
-                        if lied {
-                            offers.remove(&station);
-                        } else {
-                            score.probation_until = Some(Instant::now() + PROBATION);
+                }
+                let mut installed = false;
+                for station in candidates {
+                    let Some(provider) = providers.iter().find(|p| p.station == station) else {
+                        continue;
+                    };
+                    match self
+                        .fetch_one(
+                            &policy,
+                            content,
+                            &descriptor,
+                            provider,
+                            index,
+                            operation,
+                            intent,
+                        )
+                        .await
+                    {
+                        Ok(bytes) => {
+                            moved += bytes;
+                            handle.advance(
+                                TransferState::Transferring {
+                                    bytes: moved,
+                                    total: Some(total),
+                                },
+                                Instant::now(),
+                            );
+                            installed = true;
+                            break;
+                        }
+                        Err(lied) => {
+                            // A proof failure is attributable to exactly one peer,
+                            // and it costs a whole chunk — so that peer is out for
+                            // this content immediately rather than after a budget.
+                            // A refusal or a timeout only earns decaying probation.
+                            let score = scores.entry(station.clone()).or_default();
+                            if lied {
+                                offers.remove(&station);
+                            } else {
+                                score.probation_until = Some(Instant::now() + PROBATION);
+                            }
                         }
                     }
                 }
+                if !installed {
+                    still_wanted.push(index);
+                }
             }
-            if !installed {
-                continue;
-            }
+            remaining = still_wanted;
         }
 
         handle.advance(TransferState::Verifying, Instant::now());
-        let still_missing = self.missing_chunks(&policy, content, &descriptor);
+        let still_missing = self.missing_among(&descriptor, &missing)?;
         if still_missing.is_empty() {
             handle.succeed(Instant::now());
             Ok(())
@@ -452,6 +544,10 @@ impl Fetcher {
     /// already staged and names the leaf the previous round validated, so a
     /// provider that changes its mind about which content this is gets refused
     /// before a byte is appended.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one chunk's whole context, threaded from the caller"
+    )]
     async fn fetch_one(
         &self,
         policy: &ContentPolicy<'_>,
@@ -460,6 +556,7 @@ impl Fetcher {
         provider: &Provider,
         index: u32,
         operation: [u8; 16],
+        intent: Acquisition,
     ) -> Result<u64, bool> {
         let cache = self.host.cache();
         let part = index;
@@ -515,35 +612,69 @@ impl Fetcher {
         // the committed root. Until it returns, these bytes are staged: not
         // resident, not servable, not readable.
         self.host
-            .install_staged_chunk(policy, content, operation, part, &proof)
+            .install_staged_chunk(policy, content, operation, intent, part, &proof)
             .map_err(|_| true)?;
         Ok(moved)
     }
 
-    fn missing_chunks(
+    /// Which of the named chunks are not here, in order and without repeats.
+    ///
+    /// Asked of the cache rather than of `resident_among`: residency is a local
+    /// fact about this disk, and routing the question through the provider
+    /// surface would demand `content.serve` of a Station that is only
+    /// downloading.
+    /// A probe that could not be taken fails the fetch rather than guessing.
+    /// Calling it missing refetches bytes already here; calling it present
+    /// skips a chunk the caller needs.
+    fn missing_among(
         &self,
-        policy: &ContentPolicy<'_>,
-        content: &ContentRef,
         descriptor: &ContentDescriptor,
-    ) -> Vec<u32> {
-        let all: Vec<u32> = (0..descriptor.chunk_count).collect();
-        let held: BTreeSet<u32> = self
-            .host
-            .resident_among(policy, content, &all)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        all.into_iter().filter(|i| !held.contains(i)).collect()
+        chunks: &[u32],
+    ) -> Result<Vec<u32>, Failure> {
+        let cache = self.host.cache();
+        let mut missing = Vec::new();
+        for index in chunks
+            .iter()
+            .copied()
+            .filter(|index| *index < descriptor.chunk_count)
+            .collect::<BTreeSet<u32>>()
+        {
+            let slot = replica::content::chunk_slot(descriptor, index);
+            if !cache.is_resident(&slot).map_err(|_| Failure::Storage)? {
+                missing.push(index);
+            }
+        }
+        Ok(missing)
     }
 
     /// Refuse before staging rather than after moving bytes.
-    fn admit_by_quota(&self, descriptor: &ContentDescriptor) -> Result<(), Failure> {
+    ///
+    /// Priced on the window about to be staged. Pricing the whole content
+    /// refuses a film outright on a Station whose cache could hold the scene
+    /// being watched a hundred times over.
+    fn admit_by_quota(
+        &self,
+        descriptor: &ContentDescriptor,
+        chunks: &[u32],
+    ) -> Result<(), Failure> {
         let cache = self.host.cache();
-        let projected = cache
-            .resident_bytes()
-            .saturating_add(cache.staged_bytes())
-            .saturating_add(descriptor.plaintext_len);
-        if projected > self.cache_quota_bytes {
+        let wanted = window_bytes(descriptor, chunks);
+        let projected = |cache: &replica::content::Residency| {
+            cache
+                .resident_bytes()
+                .saturating_add(cache.staged_bytes())
+                .saturating_add(wanted)
+        };
+        if projected(cache) <= self.cache_quota_bytes {
+            return Ok(());
+        }
+        // Reclaim before refusing. A demand-paged read leaves every window it
+        // has passed resident but unheld, so it fills the quota with its own
+        // wake and then refuses itself — and whether maintenance had run
+        // recently would decide whether a film played. Sweeping here couples
+        // the two: what nothing holds goes, and a reader's own window is held.
+        let _ = cache.reclaim_for(wanted);
+        if projected(cache) > self.cache_quota_bytes {
             return Err(Failure::OverQuota);
         }
         Ok(())
@@ -572,6 +703,29 @@ impl Fetcher {
                     .is_none_or(|until| until <= now)
             })
             .collect();
+        if able.is_empty() {
+            // Everyone able is on probation. Probation exists so a blip does
+            // not blacklist everybody — banning the only peer that holds a
+            // chunk does exactly that, and a throttled provider is
+            // indistinguishable from an unwilling one by design. Soonest out of
+            // probation first.
+            let mut waiting: Vec<&Key> = offers
+                .iter()
+                .filter(|(_, held)| held.contains(&index))
+                .map(|(station, _)| station)
+                .collect();
+            waiting.sort_by_key(|station| {
+                scores
+                    .get(*station)
+                    .and_then(|s| s.probation_until)
+                    .unwrap_or(now)
+            });
+            return waiting
+                .into_iter()
+                .take(slots::MAX_INFLIGHT_CHUNKS_PER_PROVIDER)
+                .cloned()
+                .collect();
+        }
         able.sort_by(|a, b| {
             let sa = scores.get(*a).cloned().unwrap_or_default();
             let sb = scores.get(*b).cloned().unwrap_or_default();
@@ -584,6 +738,15 @@ impl Fetcher {
             .cloned()
             .collect()
     }
+}
+
+/// What these chunks weigh in plaintext, the last one clamped to what is left.
+fn window_bytes(descriptor: &ContentDescriptor, chunks: &[u32]) -> u64 {
+    let chunk = u64::from(descriptor.chunk_plaintext_len);
+    chunks.iter().fold(0u64, |total, index| {
+        let start = chunk.saturating_mul(u64::from(*index));
+        total.saturating_add(descriptor.plaintext_len.saturating_sub(start).min(chunk))
+    })
 }
 
 /// How many short answers one chunk may take before the provider is giving up

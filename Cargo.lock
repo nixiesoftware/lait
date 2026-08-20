@@ -4060,13 +4060,17 @@ name = "lait-signage"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "data-encoding",
+ "fabric",
  "jiff",
  "mechanics",
+ "register",
  "replica",
  "runtime",
  "schedule",
  "serde",
  "serde_json",
+ "world-interface",
 ]
 
 [[package]]
@@ -5926,6 +5930,13 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "register"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "reloadable-core"

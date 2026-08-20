@@ -104,8 +104,26 @@ founded="$(host "{\"cmd\":\"host_space_found\",\"home\":\"$(printf '%s' "$STORE"
 has "$founded" '"host":"founded"'
 
 # The catalog is what turns a store path into the id every Space route takes.
+#
+# Founding writes a store; it does not place a Station. Listing is passive by
+# design — opening the picker must not wake every registered Orbit — so there is
+# no Station here yet to read a Catalog name from, and the row says which
+# absence it hit rather than serving the name the registry remembers from
+# founding. Serving that is what let a renamed Space answer to its birth name
+# whenever a probe missed.
 spaces_json="$(curl -sS --fail-with-body "http://127.0.0.1:${PORT}/api/spaces" -H "Authorization: Bearer ${TOKEN}")"
-has "$spaces_json" "Smoke"
+# Which of the two no-reading paths this run took depends on whether the 300ms
+# probe beat a loaded runner, so assert what holds either way: no invented name,
+# a stated reason, and — the thing that was wrong — no claim of a Station.
+has "$spaces_json" '"name":null'
+has "$spaces_json" '"unnamed":'
+case "$spaces_json" in
+  *'"status":"up"'*)
+    echo "::error::an Orbit with nothing placed at it reported a running Station:"
+    echo "$spaces_json"
+    exit 1
+    ;;
+esac
 ORBIT="$(printf '%s' "$spaces_json" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 [ -n "$ORBIT" ] || { echo "::error::no orbit id in:"; echo "$spaces_json"; exit 1; }
 
@@ -124,6 +142,20 @@ SECOND_ISSUE="$(printf '%s' "$second_created" | sed -n 's/.*"reff":"\([^"]*\)".*
 board="$(issues '{"cmd":"board","project":"ENG","page":{}}')"
 has "$board" "fix login race"
 has "$board" "add dark mode"
+
+# The other half of the naming rule. Those World calls placed the Station, so
+# the same passive listing now reads a real name off the Catalog, reports the
+# Orbit up, and drops the reason it had no name. A name here is a reading.
+placed="$(curl -sS --fail-with-body "http://127.0.0.1:${PORT}/api/spaces" -H "Authorization: Bearer ${TOKEN}")"
+has "$placed" '"name":"Smoke"'
+has "$placed" '"status":"up"'
+case "$placed" in
+  *'"unnamed"'*)
+    echo "::error::a named row still carries a reason it has no name:"
+    echo "$placed"
+    exit 1
+    ;;
+esac
 
 # The work loop: start assigns + activates; done completes (S§5.7).
 started="$(issues "{\"cmd\":\"issue_start\",\"reff\":\"$FIRST_ISSUE\"}")"

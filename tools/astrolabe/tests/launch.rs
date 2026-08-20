@@ -64,6 +64,53 @@ impl Drop for OwnedReceiver {
     }
 }
 
+/// Stops the identity daemon however the test ends, panic included.
+///
+/// `stop_daemon` at the foot of the body only runs when the body reaches it,
+/// and a panic is how this test reports every failure. The daemon it started
+/// then outlived it still holding the display coordinator's fixed port, so
+/// nextest's retry hit the port guard 23ms in and reported "something else on
+/// this machine holds it" — which was the previous attempt of this same test,
+/// and read as a dirty machine. The retry could not have passed, and the
+/// failure the log ended on was never the one worth reading.
+///
+/// Its own thread and its own runtime: a `Drop` running during an unwind cannot
+/// await, and must not panic — a panic here would abort the process and take
+/// the real failure with it.
+struct DaemonStopped(PathBuf);
+
+impl Drop for DaemonStopped {
+    fn drop(&mut self) {
+        let home = self.0.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                stop_daemon(&home).await;
+                for _ in 0..100 {
+                    let selection = lait::config::Selection::for_identity(&home);
+                    let gone = match lait::daemon::Client::for_selection(&selection) {
+                        Ok(daemon) => {
+                            matches!(daemon.probe().await, lait::control::Probe::Absent)
+                                && lait::config::acquire_daemon_lock(daemon.home()).is_ok()
+                        }
+                        Err(_) => true,
+                    };
+                    if gone {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        })
+        .join();
+    }
+}
+
 async fn wait_for_daemon_stop(home: &Path) {
     for _ in 0..100 {
         let selection = lait::config::Selection::for_identity(home);
@@ -202,6 +249,7 @@ async fn wait_for_revision_change(
 }
 
 async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &str) {
+    let mut last = String::from("the coordinator was never reached");
     for _ in 0..200 {
         let display = client.display_status().await.expect("read receiver health");
         if let Some(health) = display
@@ -222,9 +270,41 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
             assert!(health.pipeline_unobservable);
             return;
         }
+        last = match display.devices.iter().find(|row| row.device == device) {
+            None => format!(
+                "the coordinator lists no device {device} at all (it knows: [{known}])",
+                known = display
+                    .devices
+                    .iter()
+                    .map(|row| row.device.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(row) => match row.health.as_ref() {
+                None => format!("device {device} is paired but has reported no health yet"),
+                Some(health) => format!(
+                    "device {device} last reported revision {seen_revision}/item {seen_item} \
+                     (connection {connection}, playback {playback}, last_error {error}) \
+                     while this waited for {revision}/{item}",
+                    seen_revision = health.revision,
+                    seen_item = health.current_item,
+                    connection = health.connection,
+                    playback = health.playback,
+                    error = health.last_error,
+                ),
+            },
+        };
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("coordinator never observed health for the presented Signage revision");
+    // Three different bugs used to arrive as this one sentence: a receiver that
+    // never paired, one that paired and went silent, and one stuck presenting an
+    // older revision. Only the third is a Signage bug, and the message could not
+    // tell them apart — so a nightly failure on a platform nobody has in front of
+    // them named nothing and cost a bisect.
+    panic!(
+        "coordinator never observed health for the presented Signage revision \
+         after 20s. Last observation: {last}"
+    );
 }
 
 async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
@@ -311,6 +391,18 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
                 .is_ok_and(|path| path == canonical_store)
         })
         .expect("founded Signage Orbit is registered");
+    let welcome = signage_card(
+        10,
+        "Astrolabe is coordinating this display",
+        "This frame came from the durable Signage World.",
+        "102030",
+    );
+    let coordinated = signage_card(
+        11,
+        "Receivers share this program boundary",
+        "Astrolabe supplied one group-aligned cursor.",
+        "305010",
+    );
     let program = signage::SignageProgram {
         id: replica::body::BodyId::from_bytes([9; 16]).render(),
         name: "Restart proof".into(),
@@ -318,26 +410,21 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
         items: vec![
             signage::SignageItem {
                 id: "welcome".into(),
-                title: "Astrolabe is coordinating this display".into(),
-                body: "This frame came from the durable Signage World.".into(),
-                background: "102030".into(),
-                foreground: "ffffff".into(),
-                live_resource: None,
+                media: welcome.id.clone(),
                 duration_ms: Some(2_000),
             },
             signage::SignageItem {
                 id: "coordinated".into(),
-                title: "Receivers share this program boundary".into(),
-                body: "Astrolabe supplied one group-aligned cursor.".into(),
-                background: "305010".into(),
-                foreground: "ffffff".into(),
-                live_resource: None,
+                media: coordinated.id.clone(),
                 duration_ms: Some(2_000),
             },
         ],
         windows: Vec::new(),
     };
-    write_signage_program(client, store, &orbit.space, program.clone()).await;
+    for entry in [&welcome, &coordinated] {
+        write_signage_media(client, &orbit.space, entry.clone()).await;
+    }
+    write_signage_program(client, &orbit.space, program.clone()).await;
     (orbit.space.clone(), program.id)
 }
 
@@ -359,12 +446,60 @@ async fn registered_store(client: &Client, space: &str) -> String {
         .expect("the Space has a registered local Orbit")
 }
 
-async fn write_signage_program(
-    client: &Client,
-    store: &Path,
-    space: &str,
-    program: signage::SignageProgram,
-) {
+/// A library entry holding one authored card.
+///
+/// Items name library entries rather than carrying content, so a program that
+/// draws anything needs the library written first.
+fn signage_card(tag: u8, title: &str, body: &str, background: &str) -> signage::SignageMedia {
+    signage::SignageMedia {
+        id: replica::body::BodyId::from_bytes([tag; 16]).render(),
+        name: title.into(),
+        source: signage::contract::MediaSource::Card {
+            title: title.into(),
+            body: body.into(),
+            background: background.into(),
+            foreground: "ffffff".into(),
+        },
+        duration_ms: Some(2_000),
+        width: None,
+        height: None,
+    }
+}
+
+/// Put one library entry through the same real World adapter.
+async fn write_signage_media(client: &Client, space: &str, media: signage::SignageMedia) {
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let store = registered_store(client, space).await;
+    let call = signage_app::encode_call(&signage_app::SignageRequest::MediaPut {
+        media: media.clone(),
+    })
+    .expect("encode Signage media write");
+    let reply = client
+        .daemon()
+        .expect("identity daemon for Signage write")
+        .call_world(
+            lait::control::ControlRoute::World {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&store),
+                    space_id,
+                ),
+                world: signage::contract::PRODUCT_WORLD.into(),
+            },
+            call.clone(),
+            None,
+        )
+        .await
+        .expect("write the Signage library entry through its real World adapter");
+    let decoded = signage_app::decode_reply(&call, reply).expect("decode Signage media reply");
+    let response: signage_app::SignageResponse =
+        serde_json::from_value(decoded).expect("typed Signage media reply");
+    assert!(
+        matches!(response, signage_app::SignageResponse::MediaSaved { media: ref saved } if saved == &media.id),
+        "Signage World did not save the library entry: {response:?}"
+    );
+}
+
+async fn write_signage_program(client: &Client, space: &str, program: signage::SignageProgram) {
     let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
     // Address the Orbit by the path the *daemon* registered, never by the one
     // this test happens to hold. The Orbit id is derived from the path as
@@ -406,12 +541,7 @@ async fn write_signage_program(
     );
 }
 
-async fn schedule_signage_boundary(
-    client: &Client,
-    store: &Path,
-    space: &str,
-    program: &str,
-) -> u64 {
+async fn schedule_signage_boundary(client: &Client, space: &str, program: &str) -> u64 {
     let now = mechanics::wallclock::now_millis();
     let boundary = now
         .checked_add(10_999)
@@ -425,6 +555,18 @@ async fn schedule_signage_boundary(
             .datetime()
             .to_string()
     };
+    let before = signage_card(
+        12,
+        "Before the schedule boundary",
+        "The coordinator is holding an exact wake deadline.",
+        "102030",
+    );
+    let after = signage_card(
+        13,
+        "After the schedule boundary",
+        "This revision arrived without another World write.",
+        "305010",
+    );
     let scheduled = signage::SignageProgram {
         id: program.to_owned(),
         name: "Boundary proof".into(),
@@ -432,20 +574,12 @@ async fn schedule_signage_boundary(
         items: vec![
             signage::SignageItem {
                 id: "before-boundary".into(),
-                title: "Before the schedule boundary".into(),
-                body: "The coordinator is holding an exact wake deadline.".into(),
-                background: "102030".into(),
-                foreground: "ffffff".into(),
-                live_resource: None,
+                media: before.id.clone(),
                 duration_ms: Some(60_000),
             },
             signage::SignageItem {
                 id: "after-boundary".into(),
-                title: "After the schedule boundary".into(),
-                body: "This revision arrived without another World write.".into(),
-                background: "305010".into(),
-                foreground: "ffffff".into(),
-                live_resource: None,
+                media: after.id.clone(),
                 duration_ms: Some(60_000),
             },
         ],
@@ -481,7 +615,10 @@ async fn schedule_signage_boundary(
         ],
     };
     assert!(scheduled.validate(), "scheduled Signage program is valid");
-    write_signage_program(client, store, space, scheduled).await;
+    for entry in [&before, &after] {
+        write_signage_media(client, space, entry.clone()).await;
+    }
+    write_signage_program(client, space, scheduled).await;
     boundary
 }
 
@@ -562,6 +699,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
+    // Declared before the client, so it drops after it: the daemon is asked to
+    // stop once nothing is still speaking to it, and before the temporary homes
+    // it is holding open are removed.
+    let _daemon_stopped = DaemonStopped(identity.path().to_path_buf());
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
@@ -822,13 +963,8 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         // pushes the first semantic revision; after that, no actor or World
         // mutation occurs. The package's exact boundary deadline completes the
         // held long poll, recompiles, and pushes the second semantic revision.
-        let boundary = schedule_signage_boundary(
-            &client,
-            identity.path(),
-            &assignment.space,
-            &signage_program,
-        )
-        .await;
+        let boundary =
+            schedule_signage_boundary(&client, &assignment.space, &signage_program).await;
         let (before_revision, _) = wait_for_revision_change(
             &output_path.join("active.json"),
             &assignment_id,

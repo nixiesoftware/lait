@@ -226,7 +226,7 @@ impl Lease {
         }
     }
 
-    fn tag_name(&self) -> String {
+    pub(crate) fn tag_name(&self) -> String {
         format!(
             "{}.{}.{}",
             self.kind.prefix(),
@@ -404,10 +404,18 @@ impl Residency {
     /// and it verifies before it publishes — an entry that exists was validated
     /// when it landed. This is a cheap check by design; [`Self::read`] is the
     /// one that re-verifies, and it is what actually serves bytes.
-    pub fn is_resident(&self, entry: &[u8; 32]) -> bool {
+    /// Whether these bytes are here.
+    ///
+    /// `Result` because `exists()` answers `false` for a directory it could not
+    /// read, and a Station that cannot probe its own cache would report holding
+    /// nothing — then refetch everything it already has. `held` refuses to
+    /// answer "nothing" on error for the same reason; this used not to.
+    pub fn is_resident(&self, entry: &[u8; 32]) -> Result<bool, Failure> {
         self.probes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.entry_path(entry).exists()
+        self.entry_path(entry)
+            .try_exists()
+            .map_err(|error| io_err(Operation::Read, error).into())
     }
 
     /// How many times [`Self::is_resident`] has been asked, since this cache
@@ -495,6 +503,30 @@ impl Residency {
     /// sixteen bytes is a different kind of promise and survives.
     pub fn release_operation(&self, operation: &[u8; 16]) -> Result<u64, Failure> {
         self.release_holder(LeaseKind::Operation, operation)
+    }
+
+    /// Release one holder's hold on one entry.
+    ///
+    /// The symmetric partner of `hold_*`, which a sliding window needs: a
+    /// reader letting go of what it has passed must not let go of what it has
+    /// not reached. Pins cannot express it — they are per entry, so one reader
+    /// unpinning would unpin another's chunk.
+    pub fn release_operation_entry(
+        &self,
+        operation: [u8; 16],
+        entry: [u8; 32],
+    ) -> Result<(), Failure> {
+        let path = self
+            .root
+            .join(TAGS_DIR)
+            .join(Lease::operation(operation, entry).tag_name());
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(Operation::Remove, e).into()),
+        }
+        let _ = sync_dir(&self.root.join(TAGS_DIR));
+        Ok(())
     }
 
     /// Release every hold one content's nonce took, which is what forgetting a
@@ -741,6 +773,21 @@ impl Residency {
     /// eligible victims at all. `over_quota_bytes` is what an operator needs to
     /// see to know the answer is "unpin or forget something", not "wait".
     pub fn sweep(&self) -> Result<SweepReport, Failure> {
+        self.sweep_to(self.quota_bytes)
+    }
+
+    /// Reclaim until `bytes` of headroom exists beneath the quota.
+    ///
+    /// [`Self::sweep`] reclaims *to* the quota, which is the wrong question for
+    /// anything about to add to it: a caller admitting a transfer is over only
+    /// once the bytes land, so a sweep that stops at the line always answers
+    /// "nothing to do" and the caller refuses itself. Demand-paged reads fill
+    /// the cache with their own wake and need exactly this.
+    pub fn reclaim_for(&self, bytes: u64) -> Result<SweepReport, Failure> {
+        self.sweep_to(self.quota_bytes.saturating_sub(bytes))
+    }
+
+    fn sweep_to(&self, target: u64) -> Result<SweepReport, Failure> {
         let mut report = SweepReport::default();
         self.reclaim_incomplete()?;
 
@@ -758,13 +805,13 @@ impl Residency {
                 }
             }
         }
-        if total <= self.quota_bytes {
+        if total <= target {
             return Ok(report);
         }
 
         candidates.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
         for (hash, len) in candidates {
-            if total <= self.quota_bytes {
+            if total <= target {
                 break;
             }
             // Only count what actually went. A removal that failed leaves the

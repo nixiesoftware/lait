@@ -9,14 +9,18 @@ publish = false
 
 [dependencies]
 blake3 = "1"
+data-encoding = "2.6"
 mechanics = { path = "../../crates/mechanics" }
+register = { path = "../../crates/register" }
 replica = { path = "../../crates/replica" }
 runtime = { path = "../../crates/runtime" }
 schedule = { path = "../../crates/schedule" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+world-interface = { path = "../../crates/world-interface" }
 
 [dev-dependencies]
+fabric = { path = "../../crates/fabric" }
 jiff = "0.2.35"
 
 [lints]
