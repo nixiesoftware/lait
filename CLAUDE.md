@@ -46,19 +46,40 @@ project, reachable from **SUB-4** and **CLIENT-22**.
 ## Astrolabe — the client above all of it
 
 Astrolabe is the local client through which a person reaches the Worlds their
-device serves — a **Flutter interface** (`apps/astrolabe`) over a **Rust core**
-(`tools/astrolabe`), joined by flutter_rust_bridge 2.12.0. Reference shape is
-the Steam client — a library, a launcher, an identity — that **never draws a
+device serves, over a **Rust core** (`tools/astrolabe`). Reference shape is the
+Steam client — a library, a launcher, an identity — that **never draws a
 World**. `Open` is a handoff to the person's browser; `products/issues` ships
-its own head and stays the authority on its own presentation. The egui
-interface that preceded revision 7 is deleted; the Flutter client is the only
-one.
+its own head and stays the authority on its own presentation.
+
+**Tauri is the canonical interface** (`apps/astrolabe-web`, TypeScript/React
+over `src-tauri`). The Flutter interface (`apps/astrolabe`, joined by
+flutter_rust_bridge 2.12.0) still builds and still works; it is no longer the
+one to reach for. The egui interface that preceded revision 7 is deleted.
+
+The two differ in one way worth knowing before touching either. Tauri's host
+takes `api::ClientView` apart by **exhaustive destructuring**, so a field added
+to the boundary stops compiling there until somebody decides what the client
+does with it. Flutter's half is generated, and its drift check
+(`ci/bridge-drift.sh`) is real, works, and **is wired to no workflow** — so a
+change to `api/mod.rs` with no regeneration produces a Dart binding that
+compiles, runs, and disagrees with the model, and no machine will say so. Run
+it by hand when you touch the api module.
+
+Both clients are gated: `astrolabe-web (client)` typechecks and tests the
+TypeScript, `astrolabe-web (host)` compiles the Rust behind a webview
+toolchain, and both are in `orbital-complete`'s dependency list. `src-tauri` is
+deliberately **outside the cargo workspace** so the main build needs no webview
+libraries — which is why it needs a job of its own rather than none.
 
 ```sh
-cd apps/astrolabe
-flutter run -d macos            # or -d windows; builds + stages the Rust core
-flutter analyze && flutter test # the widget/interaction suite
+cd apps/astrolabe-web           # the canonical client
+npm ci && npm run tauri dev     # builds + stages the Rust core behind a webview
+npm run check && npm test       # tsc, then the vitest suite
 cargo test -p astrolabe         # the core: model, client, launch seam
+
+cd apps/astrolabe               # the Flutter one, still building
+flutter run -d macos            # or -d windows
+flutter analyze && flutter test # the widget/interaction suite
 ```
 
 The core is layered, and the boundary is the bridge and nothing else:
@@ -94,6 +115,13 @@ The core is layered, and the boundary is the bridge and nothing else:
 a control is disabled the moment it is clicked. Widget tests press a real
 control against `Client.canned` and read what the surface asked for — no
 bridge, no core, no daemon, no window (`apps/astrolabe/test/`).
+
+The same rule, spelled the same way, in Tauri: a control reads
+`view.inFlight.includes(actionKey.…)` and disables itself on the frame it was
+clicked. The keys live in `actionKey` and are pinned by test against
+`Action::key` in `tools/astrolabe/src/runtime.rs` — a key that disagrees fails
+*nowhere*, it just never matches `inFlight`, so the control stays live through
+its own action and can be pressed twice.
 
 ### The Library is the install list
 
