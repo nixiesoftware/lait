@@ -125,6 +125,83 @@ jobs:
 
   # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
   # src/serve/assets because `include_dir!` embeds it at compile time and
+  # The Astrolabe client. It had no gate at all — 19k lines, and neither half
+  # was compiled, typechecked or tested by anything. What that cost was visible:
+  # `src-tauri` is not a workspace member, so `cargo check --workspace` never
+  # touched it, and the app could not build on Windows *at any point* because
+  # `tauri-build` wants an `icons/icon.ico` that did not exist. That sat in a
+  # green pull request.
+  #
+  # The TypeScript half is gated here, which needs nothing but node. The Rust
+  # host is gated by `astrolabe-web-host` below, which does need system
+  # libraries — kept a separate job so a missing webkit package fails as
+  # itself rather than as "the client is broken".
+  astrolabe-web:
+    name: astrolabe-web (client)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/astrolabe-web/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: apps/astrolabe-web
+
+      - name: Typecheck
+        run: npm run check
+        working-directory: apps/astrolabe-web
+
+      - name: Test
+        run: npm test
+        working-directory: apps/astrolabe-web
+
+  # The client's Rust host, which `cargo check --workspace` cannot reach: it is
+  # deliberately outside the workspace so that the main build does not require
+  # a webview toolchain. That exclusion is the reason it needs a job of its own
+  # rather than the reason it needs none.
+  astrolabe-web-host:
+    name: astrolabe-web (host)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: apps/astrolabe-web/src-tauri
+
+      # What tauri links against on Linux. Pinned to the 4.1 series because
+      # tauri 2 does not build against 4.0.
+      - name: Install the webview toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/astrolabe-web/package-lock.json
+
+      # `tauri-build` reads `frontendDist`, so the host does not compile until
+      # the frontend has been built once.
+      - name: Build the frontend the host embeds
+        run: npm ci && npm run build
+        working-directory: apps/astrolabe-web
+
+      - name: Check
+        run: cargo check --all-targets
+        working-directory: apps/astrolabe-web/src-tauri
+
   # `cargo install lait` must not need npm (docs/SERVE.md). Committed build output
   # goes stale the first time someone edits viewer/ and forgets to rebuild — and
   # it would go stale *silently*, shipping a binary whose UI predates its API. So
@@ -595,7 +672,8 @@ jobs:
   orbital-complete:
     name: orbital-complete
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [test, platform, viewer, receivers, coverage-manifest, schema-contract]
+    needs: [test, platform, viewer, receivers, coverage-manifest, schema-contract,
+            astrolabe-web, astrolabe-web-host]
     if: always()
     steps:
       - name: Assert every dependency succeeded

@@ -35,7 +35,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use flutter_rust_bridge::frb;
 
@@ -1395,10 +1395,32 @@ pub fn watch(sink: StreamSink<ClientView>) {
     let Ok(mut sinks) = sinks.lock() else {
         return;
     };
-    sinks.attach(sink, current());
+    sinks.attach(Box::new(sink), current());
 }
 
-static SINKS: OnceLock<Mutex<Watchers<StreamSink<ClientView>>>> = OnceLock::new();
+/// Attach a native host to the same projection stream Flutter receives.
+///
+/// The host is an output-only subscriber: it gets every complete view and
+/// cannot inspect or mutate the model. That keeps a desktop WebView adapter
+/// from becoming a second client protocol beside the existing bridge.
+///
+/// Hidden from the bridge deliberately. A Rust host calls this directly and has
+/// no use for a generated binding — and the generator cannot make one anyway:
+/// `impl Fn` is not a wire type, so it reports "error during generation" and
+/// skips the function while still emitting `CallbackSink` as an opaque Dart
+/// class. That would put this seam's private plumbing on the Dart API surface,
+/// which is the one thing `api` is supposed to be: one view out, one request
+/// back, and nothing else.
+#[flutter_rust_bridge::frb(ignore)]
+pub fn subscribe(listener: impl Fn(ClientView) + Send + Sync + 'static) {
+    let sinks = SINKS.get_or_init(|| Mutex::new(Watchers::new()));
+    let Ok(mut sinks) = sinks.lock() else {
+        return;
+    };
+    sinks.attach(Box::new(CallbackSink(Arc::new(listener))), current());
+}
+
+static SINKS: OnceLock<Mutex<Watchers<Box<dyn ViewPush + Send>>>> = OnceLock::new();
 
 fn emit(view: ClientView) {
     let Some(sinks) = SINKS.get() else {
@@ -1415,9 +1437,25 @@ trait ViewPush {
     fn push(&self, view: &ClientView) -> bool;
 }
 
+impl ViewPush for Box<dyn ViewPush + Send> {
+    fn push(&self, view: &ClientView) -> bool {
+        (**self).push(view)
+    }
+}
+
 impl ViewPush for StreamSink<ClientView> {
     fn push(&self, view: &ClientView) -> bool {
         self.add(view.clone()).is_ok()
+    }
+}
+
+#[flutter_rust_bridge::frb(ignore)]
+struct CallbackSink(Arc<dyn Fn(ClientView) + Send + Sync>);
+
+impl ViewPush for CallbackSink {
+    fn push(&self, view: &ClientView) -> bool {
+        (self.0)(view.clone());
+        true
     }
 }
 

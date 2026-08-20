@@ -1,0 +1,19 @@
+[package]
+name = "astrolabe-web-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2.5.1", features = [] }
+
+[dependencies]
+astrolabe = { path = "../../../tools/astrolabe" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+
+# This desktop shell stays independently buildable while it matures beside the
+# Flutter client. It links the workspace's Astrolabe core as a normal path
+# dependency rather than adding Tauri to every workspace-wide build.
+[workspace]
