@@ -409,18 +409,29 @@ impl Fetcher {
         // for every chunk would turn one question into thousands.
         let mut offers: BTreeMap<Key, BTreeSet<u32>> = BTreeMap::new();
         let mut scores: BTreeMap<Key, ProviderScore> = BTreeMap::new();
-        for provider in providers {
-            match provider.have(content, &missing).await {
-                Ok(chunks) if !chunks.is_empty() => {
-                    offers.insert(provider.station.clone(), chunks.into_iter().collect());
-                    scores.insert(provider.station.clone(), ProviderScore::default());
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    scores
-                        .entry(provider.station.clone())
-                        .or_default()
-                        .probation_until = Some(Instant::now() + PROBATION);
+        // Asked under the same patience as a chunk. An availability question is
+        // charged like a chunk by the serving gate, so it is throttled like one
+        // — and one refused round here reported that nobody held the content.
+        for pass in 0..MAX_FETCH_PASSES {
+            if !offers.is_empty() {
+                break;
+            }
+            if pass > 0 {
+                tokio::time::sleep(PASS_BACKOFF.saturating_mul(pass as u32)).await;
+            }
+            for provider in providers {
+                match provider.have(content, &missing).await {
+                    Ok(chunks) if !chunks.is_empty() => {
+                        offers.insert(provider.station.clone(), chunks.into_iter().collect());
+                        scores.insert(provider.station.clone(), ProviderScore::default());
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        scores
+                            .entry(provider.station.clone())
+                            .or_default()
+                            .probation_until = Some(Instant::now() + PROBATION);
+                    }
                 }
             }
         }
