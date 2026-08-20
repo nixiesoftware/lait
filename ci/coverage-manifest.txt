@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2378
-pr-platform    1930
-nightly        2406
+pr             2381
+pr-platform    1933
+nightly        2409
 mutants        106
 
 [gates]
@@ -17,7 +17,7 @@ orbital-clean-break          18
 orbital-authority            19
 orbital-formats              241
 core-fabric-foundations      56
-core-plane-shapes            81
+core-plane-shapes            84
 orbital-faults               38
 orbital-contact-real         5
 orbital-bootstrap-real       15
@@ -2079,17 +2079,21 @@ runtime internal_tests::freight_transfer::the_active_set_is_bounded_because_a_ca
 runtime internal_tests::freight_transfer::the_completed_tail_is_bounded_and_keeps_the_recent_end
 runtime internal_tests::freight_transfer::two_operations_over_one_content_do_not_collect_each_others_staged_bytes
 runtime internal_tests::freight_two_node::a_cancelled_fetch_leaves_no_staged_bytes_and_no_lease
+runtime internal_tests::freight_two_node::a_content_larger_than_the_cache_pages_through_a_cursor_from_a_peer
 runtime internal_tests::freight_two_node::a_descriptor_that_arrived_without_bytes_fetches_only_what_is_missing
 runtime internal_tests::freight_two_node::a_dropped_dial_is_unreachable_rather_than_a_hang
 runtime internal_tests::freight_two_node::a_fetch_completes_under_a_paused_clock
 runtime internal_tests::freight_two_node::a_fetch_that_would_cross_the_quota_is_refused_before_anything_is_staged
 runtime internal_tests::freight_two_node::a_fetch_without_a_descriptor_cannot_start
 runtime internal_tests::freight_two_node::a_named_window_moves_and_the_rest_of_the_content_stays_missing
+runtime internal_tests::freight_two_node::a_partition_stops_a_paged_read_and_healing_resumes_it
 runtime internal_tests::freight_two_node::a_restart_re_fetches_at_chunk_granularity
 runtime internal_tests::freight_two_node::a_restart_reclaims_a_dead_transfer_and_keeps_what_was_installed
 runtime internal_tests::freight_two_node::a_window_is_admitted_where_the_whole_content_is_refused
 runtime internal_tests::freight_two_node::an_interrupted_transfer_resumes_and_installs_only_after_verification
 runtime internal_tests::freight_two_node::housekeeping_reclaims_dead_staging_and_reports_what_it_cannot
+runtime internal_tests::freight_two_node::paging_at_media_sizes
+runtime internal_tests::freight_two_node::paging_holds_only_the_chunk_it_is_reading
 runtime internal_tests::freight_two_node::two_providers_serve_disjoint_chunks_and_a_liar_is_discarded
 runtime internal_tests::freight_wire::a_declared_length_past_the_ceiling_is_refused_before_a_buffer_exists
 runtime internal_tests::freight_wire::a_resume_naming_another_leaf_is_refused_before_a_byte_is_written
