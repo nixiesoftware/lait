@@ -614,7 +614,11 @@ impl StationHost {
                         // between two already-updated machines.
                         runtime::correspondence::CORRESPONDENCE_ALPN,
                     ],
-                    session: &[runtime::plane::FREIGHT_ALPN, runtime::plane::LIVE_ALPN],
+                    session: &[
+                        runtime::plane::FREIGHT_ALPN,
+                        runtime::plane::LIVE_ALPN,
+                        runtime::plane::EXEC_ALPN,
+                    ],
                 },
                 &space,
             )
@@ -702,6 +706,7 @@ impl StationHost {
         advertise.dedup();
         advertise.truncate(runtime::beacon::MAX_ROUTE_HINTS);
         let activation = Activation {
+            exec: Default::default(),
             content: Default::default(),
             find: Default::default(),
             // Both planes on, which is what `lait/freight/1` being advertised
@@ -1089,6 +1094,81 @@ impl StationHost {
                 reply
             }
             Err(error) => Reply::error(call, error.code, error.message()),
+        }
+    }
+
+    /// Drain the local Exec outbox for this Session's World.
+    ///
+    /// Product submit already committed any `Started` Run. Dispatch is a
+    /// separate durable step owned by this Station activation, not by the
+    /// product RPC that staged the Start.
+    fn drain_exec_session(&self, session: &Session, identity: &LocalIdentity) {
+        let world = session.world_id();
+        let Ok(implementation) = self.station.active_implementation(world, identity) else {
+            return;
+        };
+        let Some(host) = self.worlds.host_for(world, implementation) else {
+            return;
+        };
+        if let Err(error) = host.perform(session, |bytes| {
+            let mut reader = std::io::Cursor::new(bytes);
+            self.station
+                .content_write(
+                    identity,
+                    runtime::world::RequestId::mint().as_bytes(),
+                    &mut reader,
+                )
+                .map_err(|error| runtime::world::Failure::PersistenceCause {
+                    operation: "exec.perform.output",
+                    reason: error.to_string(),
+                })
+        }) {
+            tracing::warn!(%error, world = %world, "local Exec perform did not complete");
+        }
+    }
+
+    fn drain_exec(&self) {
+        let worlds: Vec<_> = self.worlds.world_ids().cloned().collect();
+        for world in worlds {
+            if !self.ensure_world_session(&world) {
+                continue;
+            }
+            self.worlds.with_primary(&world, |session| {
+                self.drain_exec_session(session, &self.identity);
+            });
+        }
+    }
+
+    async fn exec_drain_loop(self: Arc<Self>) {
+        let mut stop_rx = self.stop_tx.subscribe();
+        let mut tick = self.station.exec_tick();
+        let mut interval = tokio::time::interval(self.station.exec_pacing().drain_interval);
+        // Retention rides a slow beat of its own: hygiene must happen whether
+        // or not anything is being performed, and never at drain frequency.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first interval tick is immediate; skip it so activation and the
+        // first control call are not racing a perform pass.
+        interval.tick().await;
+        loop {
+            if *stop_rx.borrow() {
+                break;
+            }
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = self.shutdown.notified() => break,
+                _ = tick.changed() => {
+                    let _ = *tick.borrow_and_update();
+                }
+                _ = interval.tick() => {}
+            }
+            if *stop_rx.borrow() {
+                break;
+            }
+            self.drain_exec();
         }
     }
 
@@ -3443,8 +3523,18 @@ impl StationHost {
         let idle_window = idle_window_from_env();
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
         let mut connections = tokio::task::JoinSet::new();
+        let drain = tokio::spawn(self.clone().exec_drain_loop());
+        let mut stop_rx = self.stop_tx.subscribe();
         loop {
+            if *stop_rx.borrow() {
+                break;
+            }
             tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
                 _ = self.shutdown.notified() => break,
                 _ = idle_tick.tick() => {
                     // The store watchdog (LOCAL-9): a daemon must never
@@ -3487,6 +3577,12 @@ impl StationHost {
         // Wake and join every task retaining the host before the runner tries
         // to consume it and return the Station to Orbit.
         self.begin_stop();
+        if tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .is_err()
+        {
+            tracing::warn!("exec drain loop did not stop during shutdown");
+        }
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(result) = connections.join_next().await {
                 if let Err(error) = result {
@@ -4089,6 +4185,10 @@ impl StationHost {
         // spawned but not yet have subscribed, so shutdown must replace the
         // latched value for late receivers as well.
         self.stop_tx.send_replace(true);
+        // Wake every waiter. `notify_one` alone stores a single permit, so
+        // the serve loop and the exec drain loop would race for it and the
+        // loser would keep the StationHost off the dormancy path.
+        self.shutdown.notify_waiters();
         self.shutdown.notify_one();
     }
 }

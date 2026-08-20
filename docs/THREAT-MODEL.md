@@ -289,25 +289,31 @@ claims, or resource claims trustworthy.
   root adapter transports the exact Runtime types and invokes the same
   `lower_exec` validator rather than implementing a second lifecycle path.
 - Work projections expose World/Run/Attempt/Event/Build/Spec ids and lifecycle
-  facts only. They omit inputs, outputs, digests, evidence, resources, and World
-  Bodies. Inspect and watch are read-classified; cancel and later transitions
+  facts only, including failure class and returned output ContentRefs. They omit
+  input/output bytes, digests, evidence, resources, and World Bodies. Inspect and watch are read-classified; cancel and later transitions
   retain the delegated-agent partial-view guard. Watch is a causal-head
   comparison, not a promise of a live stream. Continue and resume may derive a
   new fenced Attempt only from a completed Attempt's committed scheduling
   evidence in the same Station activation; service-backed work requires a new
   Role lease. Resume also requires a committed checkpoint and a matching Spec
-  contract. A Started-only Run fails explicitly until a scheduler publishes its
-  first Offer; the host never reconstructs or guesses coordinates from product
-  state.
+  contract. A Started-only Run waits for this Station's exclusive drain, which
+  commits a Station-only first `Try` (no Offer, no enforcement artifact)
+  rather than minting a derived OfferId or guessing scheduling coordinates
+  from product state. Signed Offer news remains E4 evidence when it exists; it
+  is never ownership and is not required for a local first Attempt.
 - The Issues reference adopter makes that split concrete. `issues_verify`
-  carries a committed source ContentRef and caller-supplied BuildId through a
-  semantic issue action. Issues writes its check record only in the transaction
-  that writes Runtime's `Started` event, and rejects a Run link that differs
-  from the request-derived coordinate. Build publication and publisher
-  attestation are still required before a dispatcher may execute that Run; the
-  reference adopter does not treat an arbitrary 32-byte BuildId as trusted
-  executable material. `issues_accept_check` similarly accepts only typed
-  Outcome facts from the pinned snapshot and makes the report, verdict,
+  carries a committed source ContentRef and a BuildId through a semantic issue
+  action. When the caller omits `build`, the application package fills the
+  bundled in-process verifier and the check records `package_filled`; a named
+  Build is recorded as caller-selected. Issues writes its check record only in
+  the transaction that writes Runtime's `Started` event, and rejects a Run
+  link that differs from the request-derived coordinate. The bundled handler
+  binds the pinned source; it does not compile the repository, isolate the
+  host, or turn an advisory backend into attestation. Build publication is
+  durable identity, not a dispatch gate: the local dispatcher selects the
+  exact package handler for the pinned Build id. The reference adopter does
+  not treat an arbitrary 32-byte BuildId as trusted executable material. `issues_accept_check` similarly accepts only
+  typed Outcome facts from the pinned snapshot and makes the report, verdict,
   workflow transition, history, and protected `Accepted` event one commit.
 - Handler code receives a bounded `exec::Context`, never a Session, Replica,
   unrestricted filesystem, process environment, transport, clock, random
@@ -331,7 +337,12 @@ claims, or resource claims trustworthy.
 - `Cancel` records `CancelAsked` and makes no claim that handler work stopped.
   Every admitted retry is a new visible Attempt id derived from its persistent
   command coordinates; command batches account for already-staged Attempts and
-  cannot spend the same remaining Attempt allowance twice.
+  cannot spend the same remaining Attempt allowance twice. An inherited or
+  unclaimed `Began`, and a prior-epoch `Leased` that never began, are committed
+  `Failed` with `FailureClass::Unknown` and are never re-invoked under that
+  Attempt id. Automatic outbox retry is only a later `Try` after that unknown
+  failure, `Resume::Restart`, remaining Attempt budget, and no later Return or
+  handler/protocol failure.
 - The first trusted in-process backend explicitly reports resource enforcement
   as advisory. It validates selected coordinates and candidate output and
   contains a Rust unwind, but shares the host process and therefore claims no
@@ -371,8 +382,13 @@ claims, or resource claims trustworthy.
   Attempt cannot widen that intersection, ask for latest mutable state, or lend
   ambient query authority to a child Run.
 - Offers are private, bounded, signed, and advisory. They reveal only the exact
-  capabilities the protocol permits and confer no reservation or ownership. A
-  lying or stalled Station cannot prevent another authorized Attempt.
+  capabilities the protocol permits and confer no reservation or ownership.
+  `Session::announce` evaluates each claimed Spec's offer demand. A first-use
+  Try that cites an Offer consumes its Ready only after `Leased` is durable.
+  Continue with live news does not demand a new Ready; continue without news
+  still pays the offer demand. A prior-epoch `Leased` that never began is
+  failed `Unknown` so another Attempt can proceed. A Station that only
+  advertises, or that leases and then dies, cannot imprison the Run.
 - Remote incorporation is inert: adopting `Started`, `Began`, or any other Run
   event never launches a handler. Dispatch is a local act after the complete
   committed root becomes active. The unresolved-Run scan accepts only an

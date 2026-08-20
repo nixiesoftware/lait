@@ -1747,6 +1747,12 @@ impl<'a> IssueRouter<'a> {
                 source,
                 build,
             } => {
+                let package_filled = build.trim().is_empty();
+                let build = if package_filled {
+                    issues::contract::verify_build_hex(crate::lifecycle::implementation_id())
+                } else {
+                    build
+                };
                 let doc = self.resolve(&selectors, &reff)?;
                 let request = RequestId::mint();
                 let run = runtime::exec::derive_run_id(
@@ -1764,6 +1770,7 @@ impl<'a> IssueRouter<'a> {
                             run: run.clone(),
                             source,
                             build,
+                            package_filled,
                             actor: facts.actor.clone(),
                             device: facts.device.clone(),
                             ts: facts.now,

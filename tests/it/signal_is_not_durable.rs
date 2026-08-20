@@ -314,6 +314,7 @@ mod behaviour {
 
     fn options() -> Activation {
         Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),

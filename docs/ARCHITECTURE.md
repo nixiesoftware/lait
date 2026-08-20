@@ -421,12 +421,29 @@ same transaction. `issues_work` is the separate generic lifecycle facade for
 inspect, watch, cancel, continue, and resume. Astrolabe may present either
 surface, but neither contract is owned by Astrolabe or requires its harness.
 Continue commits a fresh visible Attempt by deriving a bounded `Try` from a
-completed Attempt's durable Offer, enforcement, limit, and fence evidence.
-Resume additionally requires the exact committed checkpoint and a Spec whose
-resume contract is `Checkpoint`; the current Issues verification Spec is
-`Restart`, so its supported next action is continue. A Started-only Run still
-waits for a scheduler to publish its first Offer: the application control seam
-never invents scheduling coordinates from issue state.
+completed Attempt's durable Offer (when one exists), enforcement, limit, and
+fence evidence. Resume additionally requires the exact committed checkpoint
+and a Spec whose resume contract is `Checkpoint`; the current Issues
+verification Spec is `Restart`, so its supported next action is continue. A
+Started-only Run waits for this Station's exclusive drain. The drain cites
+live Offer news and a Ready when both exist; otherwise it commits a
+Station-only first `Try` — no Offer, no derived OfferId, no enforcement
+artifact. A prior-epoch `Leased` that never began is failed `Unknown` so
+another Attempt can proceed. The application control seam never invents
+scheduling coordinates from issue state. Signed Offer news is a standalone
+envelope (`exec::Offer`) that a `Try` may cite as evidence; it is not a
+reserved Body, not a reservation, and not a ranking of Stations.
+`Session::announce` holds that news on the Station activation and evaluates
+the claimed Specs' offer demand. First-use Tries that cite an Offer must
+find live news and a nonce-bound Ready; the Ready is consumed only after
+`Leased` is durable. Continue copies historical Offer coordinates: live
+news still authorizes the offer demand but does not require a new Ready;
+expired news still pays the offer demand. `Session::publish_build` writes a
+signed Build envelope into the reserved Build Body. That is identity, not a
+dispatch gate and not a ranking of Builds.
+Inspect/watch expose failure class and returned output ContentRefs so an
+attached actor can continue, cancel, or `issues_accept_check` from those
+facts without reading output bytes.
 Returned verification evidence becomes issue truth only through
 `issues_accept_check`, which validates Runtime's typed Outcome and atomically
 records the report, verdict, optional Done transition, history, and `Accepted`

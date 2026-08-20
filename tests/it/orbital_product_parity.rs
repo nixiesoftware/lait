@@ -511,6 +511,7 @@ fn verification_binds_the_issue_and_started_run_in_one_effect() {
         run: bad_run,
         source: source.clone(),
         build: build.clone(),
+        package_filled: false,
         actor: my_actor().as_str().into(),
         device: my_device().as_str().into(),
         ts: bad_ts,
@@ -544,6 +545,7 @@ fn verification_binds_the_issue_and_started_run_in_one_effect() {
         run: run_text.clone(),
         source: source.clone(),
         build: build.clone(),
+        package_filled: false,
         actor: my_actor().as_str().into(),
         device: my_device().as_str().into(),
         ts,
@@ -578,6 +580,7 @@ fn verification_binds_the_issue_and_started_run_in_one_effect() {
     assert_eq!(check.build, build);
     assert_eq!(check.source, source);
     assert_eq!(check.state, "started");
+    assert!(!check.package_filled);
 
     let state = driver
         .session
@@ -596,6 +599,129 @@ fn verification_binds_the_issue_and_started_run_in_one_effect() {
     assert_eq!(state.event_count, 1);
     assert!(state.unresolved);
     assert!(state.attempts.is_empty());
+}
+
+#[test]
+fn verification_is_performed_locally_to_a_returned_outcome() {
+    let root = temp_root("verification-perform");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (_project, doc, _) = seed_space(&mut driver);
+    let source_ref = station
+        .content_write(
+            &driver.writer,
+            [0x61; 16],
+            &mut std::io::Cursor::new(b"pinned repository source"),
+        )
+        .unwrap();
+    let source = data_encoding::HEXLOWER.encode(source_ref.as_bytes());
+    let build = issues::contract::verify_build(driver.session.implementation());
+    let build_hex = data_encoding::HEXLOWER.encode(&build.id.as_bytes());
+    let request = RequestId::from_bytes([0x62; 16]);
+    let run = runtime::exec::derive_run_id(
+        station.space_id(),
+        &contract::world_id(),
+        driver.writer.device(),
+        request.as_bytes(),
+        0,
+    );
+    let run_text = data_encoding::HEXLOWER.encode(&run.as_bytes());
+    let ts = driver.ts();
+    driver
+        .session
+        .submit(driver.signed_at(
+            request,
+            &IssueIntent::Verify {
+                doc: doc.clone(),
+                run: run_text.clone(),
+                source,
+                build: build_hex,
+                package_filled: false,
+                actor: my_actor().as_str().into(),
+                device: my_device().as_str().into(),
+                ts,
+            },
+        ))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    let package = runtime::exec::Package::new()
+        .with_spec(issues::contract::verify_spec())
+        .with_build(build.clone())
+        .with_handler(issues::handler::verify_handler(&build));
+    let report = driver
+        .session
+        .perform(&package, |bytes| {
+            station
+                .content_write(
+                    &driver.writer,
+                    runtime::world::RequestId::mint().as_bytes(),
+                    &mut std::io::Cursor::new(bytes),
+                )
+                .map_err(|error| runtime::world::Failure::PersistenceCause {
+                    operation: "exec.perform.output",
+                    reason: error.to_string(),
+                })
+                .inspect(|content| reports.push(*content))
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        runtime::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    assert_eq!(reports.len(), 1);
+
+    let state = driver
+        .session
+        .work(
+            runtime::exec::WorkRequest::Inspect {
+                world: contract::world_id(),
+                run,
+            },
+            [0x63; 16],
+        )
+        .unwrap();
+    let runtime::exec::WorkReply::State(state) = state else {
+        panic!("inspect must return the performed verification Run");
+    };
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].returned.len(), 1);
+    assert_eq!(
+        state.attempts[0].returned[0].output_content.as_slice(),
+        reports.as_slice()
+    );
+    assert!(state.unresolved);
+    assert!(state.accepted.is_empty());
+
+    let attempt = state.attempts[0].attempt;
+    let report = state.attempts[0].returned[0].output_content[0];
+    let ts = driver.ts();
+    driver
+        .session
+        .submit(driver.signed_at(
+            RequestId::from_bytes([0x64; 16]),
+            &IssueIntent::AcceptCheck {
+                doc: doc.clone(),
+                run: run_text,
+                attempt: data_encoding::HEXLOWER.encode(&attempt.as_bytes()),
+                report: data_encoding::HEXLOWER.encode(&report.content_id),
+                verdict: "pass".into(),
+                move_to_done: false,
+                id: issues::ids::mint_attachment_id(&SystemUlidSource),
+                actor: my_actor().as_str().into(),
+                device: my_device().as_str().into(),
+                ts,
+            },
+        ))
+        .unwrap();
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
+        doc,
+        me: None,
+        pages: contract::IssueDetailPages::default(),
+    });
+    assert_eq!(detail.checks.items.len(), 1);
+    assert_eq!(detail.checks.items[0].state, "accepted");
+    assert_eq!(detail.checks.items[0].verdict.as_deref(), Some("pass"));
 }
 
 #[test]
@@ -1350,6 +1476,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -1365,6 +1492,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),

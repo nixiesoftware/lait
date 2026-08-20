@@ -1279,6 +1279,7 @@ pub fn issue_view(
                 spec: check.spec.clone(),
                 version: check.v,
                 build: check.build.clone(),
+                package_filled: check.package_filled,
                 source: check.source.clone(),
                 state: check.state.clone(),
                 by: check.by.clone(),

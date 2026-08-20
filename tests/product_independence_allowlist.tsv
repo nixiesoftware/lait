@@ -46,5 +46,7 @@ src/composition.rs	signage	D
 src/composition.rs	signage_app	D
 src/composition.rs	status	D
 src/composition.rs	upgrade_step	D
+src/composition.rs	verify_build	D
+src/composition.rs	verify_handler	D
 src/composition.rs	verify_spec	D
 src/composition.rs	world_id	D

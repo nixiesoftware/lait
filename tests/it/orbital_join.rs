@@ -91,6 +91,7 @@ fn activate(
         .materialize(coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
