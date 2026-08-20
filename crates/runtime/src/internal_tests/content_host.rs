@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::content::ContentRef;
 use replica::content::Residency;
 use replica::content::CHUNK_PLAINTEXT_LEN;
 use runtime::content_host::{
-    ContentAction, ContentHost, ContentKeys, ContentPolicy, Failure, MAX_RANGE_BYTES,
+    Acquisition, ContentAction, ContentHost, ContentKeys, ContentPolicy, Failure, MAX_RANGE_BYTES,
 };
 
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -46,20 +47,37 @@ impl ContentKeys for Keys {
 }
 
 /// Records every action the host asked about, and refuses the ones named.
+///
+/// Keyed by capability so a test refuses "serving" without naming which bytes,
+/// while `asked` keeps the content each gate was told about.
 #[derive(Default)]
 struct Authorizer {
-    asked: Mutex<Vec<ContentAction>>,
-    refuse: Vec<ContentAction>,
+    asked: Mutex<Vec<(&'static str, Option<ContentRef>)>>,
+    refuse: Vec<&'static str>,
 }
 
 impl Authorizer {
-    fn check(&self, action: ContentAction) -> Result<(), Vec<u8>> {
-        self.asked.lock().unwrap().push(action);
-        if self.refuse.contains(&action) {
-            Err(action.capability().as_bytes().to_vec())
+    fn check(&self, action: ContentAction<'_>) -> Result<(), Vec<u8>> {
+        let capability = action.capability();
+        self.asked
+            .lock()
+            .unwrap()
+            .push((capability, action.content().copied()));
+        if self.refuse.contains(&capability) {
+            Err(capability.as_bytes().to_vec())
         } else {
             Ok(())
         }
+    }
+
+    /// The capabilities asked about, in order.
+    fn capabilities(&self) -> Vec<&'static str> {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(capability, _)| *capability)
+            .collect()
     }
 }
 
@@ -103,7 +121,7 @@ fn fixture(tag: &str) -> Fixture {
 
 fn policy<'a>(
     space: &'a SpaceId,
-    authorize: &'a dyn Fn(ContentAction) -> Result<(), Vec<u8>>,
+    authorize: &'a dyn for<'c> Fn(ContentAction<'c>) -> Result<(), Vec<u8>>,
 ) -> ContentPolicy<'a> {
     ContentPolicy {
         space,
@@ -129,7 +147,7 @@ fn content_ingests_from_a_reader_and_reads_back_in_ranges() {
     let fx = fixture("range");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -189,7 +207,7 @@ fn every_operation_is_its_own_authorization_question() {
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
     let permissive = Authorizer::default();
-    let allow = |a| permissive.check(a);
+    let allow = |a: ContentAction<'_>| permissive.check(a);
     let content = fx
         .host
         .ingest(
@@ -200,20 +218,16 @@ fn every_operation_is_its_own_authorization_question() {
         )
         .expect("ingest");
     assert_eq!(
-        permissive.asked.lock().unwrap().as_slice(),
-        &[ContentAction::Publish],
+        permissive.capabilities().as_slice(),
+        &["content.publish"],
         "ingest asks exactly once, about publishing"
     );
 
     let strict = Authorizer {
-        refuse: vec![
-            ContentAction::Read,
-            ContentAction::Pin,
-            ContentAction::RemoveLocal,
-        ],
+        refuse: vec!["content.read", "content.pin", "content.remove-local"],
         ..Default::default()
     };
-    let refuse = |a| strict.check(a);
+    let refuse = |a: ContentAction<'_>| strict.check(a);
     let policy = policy(&space, &refuse);
     assert!(matches!(
         fx.host.stat(&policy, &content),
@@ -237,7 +251,7 @@ fn every_operation_is_its_own_authorization_question() {
     let Err(Failure::Denied { demand }) = fx.host.read_range(&policy, &content, 0, 1) else {
         panic!("expected a denial");
     };
-    assert_eq!(demand, ContentAction::Read.capability().as_bytes());
+    assert_eq!(demand, b"content.read");
 }
 
 #[test]
@@ -245,7 +259,7 @@ fn a_range_larger_than_the_bound_is_refused_before_anything_is_read() {
     let fx = fixture("bound");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
     let content = fx
@@ -269,7 +283,7 @@ fn ingest_past_the_operator_ceiling_is_refused_and_leaves_nothing() {
     let fx = fixture("ceiling");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let mut policy = policy(&space, &check);
     policy.max_content_len = 1_000;
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
@@ -297,7 +311,7 @@ fn removing_locally_keeps_the_name_and_drops_the_bytes() {
     let fx = fixture("remove");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
     let content = fx
@@ -329,7 +343,7 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
     let sender = fixture("provider");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
     let plaintext = filler(4, CHUNK_PLAINTEXT_LEN as usize + 200);
@@ -361,7 +375,14 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
         .and_then(|_| {
             receiver
                 .host
-                .install_chunk(&policy, &content, [9u8; 16], &proof, &ciphertext)
+                .install_chunk(
+                    &policy,
+                    &content,
+                    [9u8; 16],
+                    Acquisition::Keep,
+                    &proof,
+                    &ciphertext,
+                )
                 .err()
                 .map(Err)
                 .unwrap_or(Ok(()))
@@ -376,7 +397,14 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
     tampered[0] ^= 0xFF;
     assert!(sender
         .host
-        .install_chunk(&policy, &content, [9u8; 16], &proof, &tampered)
+        .install_chunk(
+            &policy,
+            &content,
+            [9u8; 16],
+            Acquisition::Keep,
+            &proof,
+            &tampered
+        )
         .is_err());
 
     let _ = receiver.dir;
@@ -418,7 +446,7 @@ fn serving_a_chunk_is_authorized_and_costs_only_this_content() {
     let fx = fixture("serve");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -455,10 +483,10 @@ fn serving_a_chunk_is_authorized_and_costs_only_this_content() {
     // And a Station that may read its own files has not thereby agreed to
     // serve them to peers.
     let refuse = Authorizer {
-        refuse: vec![ContentAction::Serve],
+        refuse: vec!["content.serve"],
         ..Default::default()
     };
-    let deny = |a| refuse.check(a);
+    let deny = |a: ContentAction<'_>| refuse.check(a);
     let denied = ContentPolicy {
         space: &space,
         keys: Arc::new(Keys),
@@ -482,7 +510,7 @@ fn a_pin_is_reported_by_stat() {
     let fx = fixture("pinned");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -514,7 +542,7 @@ fn an_availability_answer_costs_what_was_asked_not_what_is_held() {
     let fx = fixture("among");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -568,7 +596,7 @@ fn a_ranged_chunk_carries_the_proof_for_the_whole_chunk() {
     let fx = fixture("ranged");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -613,7 +641,7 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
     let receiver = fixture("staged-receiver");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -659,7 +687,14 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
 
     receiver
         .host
-        .install_staged_chunk(&policy, &content, operation, 1, &proofs[1])
+        .install_staged_chunk(
+            &policy,
+            &content,
+            operation,
+            Acquisition::Keep,
+            1,
+            &proofs[1],
+        )
         .expect("install the middle chunk");
 
     assert_eq!(
@@ -675,6 +710,73 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
 }
 
 #[test]
+fn a_streamed_chunk_is_reclaimable_when_its_operation_ends_and_a_kept_one_is_not() {
+    // The difference between "I want this file" and "I am watching this now".
+    // A kept chunk outlives the transfer that fetched it, because the content's
+    // own hold is what survives; a streamed one is the operation's to release,
+    // which is what lets a playhead move without the cache growing behind it.
+    let sender = fixture("intent-sender");
+    let receiver = fixture("intent-receiver");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a: ContentAction<'_>| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::transaction::SeedSigner(&WRITER_SEED);
+
+    let content = sender
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(5, CHUNK_PLAINTEXT_LEN as usize + 128)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    let descriptor = sender.host.descriptor_of(&policy, &content).unwrap();
+    assert_eq!(descriptor.chunk_count, 2);
+    receiver
+        .core
+        .with_replica_metadata(|replica| {
+            replica.commit_content(
+                &commit_ctx(&signer, &space),
+                std::slice::from_ref(&descriptor),
+            )
+        })
+        .expect("the receiver commits the descriptor it learned");
+
+    let operation = [11u8; 16];
+    for (index, intent) in [(0u32, Acquisition::Keep), (1, Acquisition::Stream)] {
+        let (bytes, proof) = sender.host.chunk(&policy, &content, index).unwrap();
+        receiver
+            .host
+            .install_chunk(&policy, &content, operation, intent, &proof, &bytes)
+            .expect("install");
+    }
+    let kept = replica::content::chunk_slot(&descriptor, 0);
+    let streamed = replica::content::chunk_slot(&descriptor, 1);
+    assert!(receiver.host.cache().is_held(&kept).unwrap());
+    assert!(
+        receiver.host.cache().is_held(&streamed).unwrap(),
+        "while the operation runs, both are held"
+    );
+
+    receiver.host.cache().release_operation(&operation).unwrap();
+
+    assert!(
+        !receiver.host.cache().evict(&kept).unwrap(),
+        "the content's hold keeps what was kept"
+    );
+    assert!(
+        receiver.host.cache().evict(&streamed).unwrap(),
+        "and nothing holds what was only being watched"
+    );
+    assert_eq!(
+        receiver.host.resident_indices(&policy, &content).unwrap(),
+        vec![0]
+    );
+}
+
+#[test]
 fn a_range_read_costs_the_span_and_not_the_content() {
     // The same rule `resident_among` follows, applied to reading. A seek into
     // one chunk of a large file must cost one chunk's worth of questions —
@@ -683,7 +785,7 @@ fn a_range_read_costs_the_span_and_not_the_content() {
     let fx = fixture("span-cost");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -747,7 +849,7 @@ fn a_hole_in_the_span_is_reported_before_any_chunk_is_opened() {
     let fx = fixture("hole-first");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
 
@@ -807,7 +909,7 @@ fn an_ingest_holds_its_content_until_something_declares_it() {
     let fx = fixture("pending");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
     let ctx = commit_ctx(&signer, &space);
@@ -866,7 +968,7 @@ fn a_zero_length_read_is_an_empty_answer_and_not_an_underflow() {
     let fx = fixture("zero-span");
     let space = space();
     let auth = Authorizer::default();
-    let check = |a| auth.check(a);
+    let check = |a: ContentAction<'_>| auth.check(a);
     let policy = policy(&space, &check);
     let signer = replica::transaction::SeedSigner(&WRITER_SEED);
     let content = fx
@@ -893,4 +995,115 @@ fn a_zero_length_read_is_an_empty_answer_and_not_an_underflow() {
     let before = fx.host.cache().residency_probes();
     let _ = fx.host.read_range(&policy, &content, 0, 0).unwrap();
     assert_eq!(fx.host.cache().residency_probes(), before);
+}
+
+#[test]
+fn serving_can_be_refused_for_the_bytes_named_and_allowed_for_others() {
+    // The gate is told which content it is about, so a predicate can scope to
+    // the bytes rather than only to the Space. Nothing shipping scopes yet --
+    // no member holds `content.serve` -- but a plane that cannot express the
+    // decision could not adopt the grant without changing shape.
+    let fx = fixture("serve-scope");
+    let space = space();
+    let signer = replica::transaction::SeedSigner(&WRITER_SEED);
+
+    let permissive = Authorizer::default();
+    let allow = |a: ContentAction<'_>| permissive.check(a);
+    let open = policy(&space, &allow);
+
+    let withheld = fx
+        .host
+        .ingest(
+            &open,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(1, 64)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    let shared = fx
+        .host
+        .ingest(
+            &open,
+            [2u8; 16],
+            &mut std::io::Cursor::new(filler(2, 64)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    let scoped = |a: ContentAction<'_>| match a {
+        ContentAction::Serve(content) if content == &withheld => {
+            Err(a.capability().as_bytes().to_vec())
+        }
+        _ => Ok(()),
+    };
+    let policy = policy(&space, &scoped);
+
+    assert!(
+        matches!(
+            fx.host.chunk(&policy, &withheld, 0),
+            Err(Failure::Denied { .. })
+        ),
+        "the named content is refused"
+    );
+    let (bytes, _) = fx.host.chunk(&policy, &shared, 0).expect("serve the other");
+    assert!(!bytes.is_empty(), "an unnamed content is unaffected");
+
+    // The other gates on the same bytes are a separate question, and refusing
+    // to serve is not refusing to read.
+    assert!(fx.host.read_range(&policy, &withheld, 0, 8).is_ok());
+}
+
+/// A Station that can seal but holds no opening key: lazy revocation, arrived.
+struct NoKeys;
+impl ContentKeys for NoKeys {
+    fn sealing_key(&self) -> Option<AuthorizedBodyKey> {
+        Some(AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY))
+    }
+    fn opening_key(&self, _epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
+        None
+    }
+}
+
+#[test]
+fn sealed_bytes_are_not_reported_as_missing_ones() {
+    // The two absences call for opposite moves, so a demand-paged read that
+    // cannot tell them apart retries a fetch that can never help.
+    let fx = fixture("sealed");
+    let space = space();
+    let signer = replica::transaction::SeedSigner(&WRITER_SEED);
+    let auth = Authorizer::default();
+    let allow = |a: ContentAction<'_>| auth.check(a);
+
+    let content = fx
+        .host
+        .ingest(
+            &policy(&space, &allow),
+            [1u8; 16],
+            &mut std::io::Cursor::new(b"sealed to an epoch we will forget".to_vec()),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    // Every byte is resident; only the key is gone.
+    let stranger = ContentPolicy {
+        space: &space,
+        keys: Arc::new(NoKeys),
+        authorize: &allow,
+        max_content_len: u64::MAX,
+    };
+    assert_eq!(
+        fx.host.read_range(&stranger, &content, 0, 8),
+        Err(Failure::Sealed)
+    );
+    assert!(
+        !Failure::Sealed.fetchable(),
+        "no transfer produces a key, so a paging loop must not retry"
+    );
+    assert!(Failure::NotResident.fetchable());
+
+    // And the same bytes open for a Station that holds the epoch.
+    assert!(fx
+        .host
+        .read_range(&policy(&space, &allow), &content, 0, 8)
+        .is_ok());
 }

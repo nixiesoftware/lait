@@ -1119,7 +1119,9 @@ impl Station {
     fn content_policy<'a>(
         &'a self,
         keys: &Arc<dyn crate::content_host::ContentKeys>,
-        authorize: &'a dyn Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
+        authorize: &'a dyn for<'c> Fn(
+            crate::content_host::ContentAction<'c>,
+        ) -> Result<(), Vec<u8>>,
     ) -> crate::content_host::ContentPolicy<'a> {
         crate::content_host::ContentPolicy {
             space: self.store.space(),
@@ -1156,11 +1158,11 @@ impl Station {
         &self,
         identity: &crate::world::LocalIdentity,
     ) -> Result<
-        impl Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
+        impl for<'c> Fn(crate::content_host::ContentAction<'c>) -> Result<(), Vec<u8>>,
         crate::content_host::Failure,
     > {
         self.identity_frontier(identity)?;
-        Ok(|_action| Ok(()))
+        Ok(|_action: crate::content_host::ContentAction<'_>| Ok(()))
     }
 
     /// The Space this Station serves.

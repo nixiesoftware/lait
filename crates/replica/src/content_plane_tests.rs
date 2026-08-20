@@ -57,6 +57,18 @@ fn body(n: u8) -> BodyKey {
     BodyKey::new(world(), BodyId::from_bytes([n; 16]))
 }
 
+/// A second World in the same Space, for the declaring-world index.
+///
+/// It sorts before [`world`], so a test asserting the index's order is reading
+/// the map's own ordering rather than the order the declarations happened in.
+fn other_world() -> WorldId {
+    WorldId::parse("com.example.gallery").unwrap()
+}
+
+fn other_body(n: u8) -> BodyKey {
+    BodyKey::new(other_world(), BodyId::from_bytes([n; 16]))
+}
+
 fn key() -> AuthorizedBodyKey {
     AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY)
 }
@@ -69,6 +81,13 @@ fn supported() -> SupportedSchemas {
     let mut s = SupportedSchemas::new();
     s.declare(
         world(),
+        SchemaId::parse("blob").unwrap(),
+        1,
+        EncodingId::parse("bytes").unwrap(),
+        MUTATION_ATOMIC,
+    );
+    s.declare(
+        other_world(),
         SchemaId::parse("blob").unwrap(),
         1,
         EncodingId::parse("bytes").unwrap(),
@@ -324,7 +343,10 @@ fn losing_a_resident_chunk_costs_that_chunk_and_nothing_more() {
             .join(data_encoding::HEXLOWER.encode(&entry)),
     )
     .unwrap();
-    assert!(!fx.cache.is_resident(&entry), "not advertisable without it");
+    assert!(
+        !fx.cache.is_resident(&entry).unwrap(),
+        "not advertisable without it"
+    );
     assert_eq!(
         open_resident_chunk(&out.descriptor, &key(), &fx.cache, &entry),
         Err(Invalid::NotResident)
@@ -455,7 +477,7 @@ fn unreferenced_content_is_swept_and_leaves_no_residue() {
     // And the residency behind it goes with a cache sweep.
     let cache = Residency::open(fx.cache.root(), 0).unwrap();
     cache.sweep().unwrap();
-    assert!(!cache.is_resident(&dropped.leases[0].entry));
+    assert!(!cache.is_resident(&dropped.leases[0].entry).unwrap());
 
     // The catalog is genuinely smaller after a reopen — no tombstone residue.
     drop(fx.replica);
@@ -1081,5 +1103,88 @@ fn abandoning_a_hold_makes_its_content_collectable_at_once() {
             .sweep_unreferenced_content(&ctx(&signer, &space), Some(&fx.cache))
             .unwrap(),
         vec![out.content_ref]
+    );
+}
+
+#[test]
+fn the_declaring_world_index_names_who_the_bytes_belong_to_and_forgets_exactly() {
+    // Serving a content is meant to become a decision about what the bytes
+    // belong to, not only about who is asking. A ContentId is a hash with no
+    // hierarchy and no equality oracle, so the content plane carries no
+    // resource to scope that decision against — the Bodies declaring it do,
+    // and each one names its World.
+    //
+    // The subtle half is forgetting. One World may declare one descriptor from
+    // several Bodies, so dropping *a* declaration must not drop the World, and
+    // dropping the last one must.
+    let mut fx = fixture("declaring-worlds");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+
+    commit_body(&mut fx.replica, 1, &body(1), b"notes, one");
+    commit_body(&mut fx.replica, 2, &body(2), b"notes, two");
+    commit_body(&mut fx.replica, 3, &other_body(3), b"gallery, one");
+
+    let shared = ingest(&fx, 1, b"bytes two Worlds both point at");
+    fx.replica
+        .commit_content(&ctx(&signer, &space), &[shared.descriptor.clone()])
+        .unwrap();
+    fx.cache.release_operation(&[1u8; 16]).unwrap();
+
+    assert!(
+        fx.replica.declaring_worlds(&shared.content_ref).is_empty(),
+        "committed but undeclared bytes belong to nobody yet"
+    );
+
+    // Two Bodies of one World, and one of another.
+    let mut declarations = BTreeMap::new();
+    declarations.insert(body(1), vec![shared.content_ref]);
+    declarations.insert(body(2), vec![shared.content_ref]);
+    declarations.insert(other_body(3), vec![shared.content_ref]);
+    fx.replica
+        .declare_content(&ctx(&signer, &space), declarations)
+        .unwrap();
+
+    assert_eq!(
+        fx.replica.declaring_worlds(&shared.content_ref),
+        vec![other_world(), world()],
+        "both Worlds, once each, in the index's own order"
+    );
+
+    // One of the two notes Bodies stops referencing it. The World does not
+    // leave, because its other Body still declares the same bytes.
+    let mut declarations = BTreeMap::new();
+    declarations.insert(body(1), Vec::new());
+    fx.replica
+        .declare_content(&ctx(&signer, &space), declarations)
+        .unwrap();
+    assert_eq!(
+        fx.replica.declaring_worlds(&shared.content_ref),
+        vec![other_world(), world()],
+        "a World with one declaration left still declares"
+    );
+
+    // The last one does leave.
+    let mut declarations = BTreeMap::new();
+    declarations.insert(body(2), Vec::new());
+    fx.replica
+        .declare_content(&ctx(&signer, &space), declarations)
+        .unwrap();
+    assert_eq!(
+        fx.replica.declaring_worlds(&shared.content_ref),
+        vec![other_world()],
+        "the World goes when its last declaration does"
+    );
+
+    // And when nothing declares them, the bytes belong to nobody again —
+    // the same answer the reachability sweep acts on.
+    let mut declarations = BTreeMap::new();
+    declarations.insert(other_body(3), Vec::new());
+    fx.replica
+        .declare_content(&ctx(&signer, &space), declarations)
+        .unwrap();
+    assert!(
+        fx.replica.declaring_worlds(&shared.content_ref).is_empty(),
+        "no live Body names these bytes, so no World does either"
     );
 }

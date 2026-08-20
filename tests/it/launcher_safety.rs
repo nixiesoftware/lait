@@ -50,10 +50,52 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_lait")
 }
 
+/// A home that stops whatever daemon is serving it when it goes out of scope.
+///
+/// These tests run daemons with idle-shutdown disabled, so nothing reclaims one
+/// that is merely abandoned — an abandoned daemon here lives until the machine
+/// is rebooted, holding a lock, a socket and whatever ports its build binds.
+///
+/// Two ways one gets abandoned, and neither is a mistake a call site can be
+/// trusted to avoid. A panic between the spawn and the stop skips the stop, and
+/// every assertion in these tests sits in that gap. Worse, the launcher spawns
+/// its daemon *behind* the process a test can see, so killing the child it
+/// holds a handle to does not touch it — `takes_over_fake_daemon` did exactly
+/// that and leaked one real daemon per run, on the passing path.
+///
+/// Ownership is the boundary: the home owns the daemon, so unwinding stops it.
+struct TmpHome(std::path::PathBuf);
+
+impl std::ops::Deref for TmpHome {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for TmpHome {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for TmpHome {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl Drop for TmpHome {
+    fn drop(&mut self) {
+        stop_daemon(&self.0, Duration::from_secs(5));
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 /// A short-lived home. Kept short on purpose: the control socket lives inside it
 /// on unix and `sun_path` caps at 104 bytes (100 here), so a long temp path would
 /// silently push the socket to the hashed temp-dir fallback.
-fn tmp_home(tag: &str) -> std::path::PathBuf {
+fn tmp_home(tag: &str) -> TmpHome {
     let d = std::env::temp_dir().join(format!("lt-{}-{}", tag, std::process::id()));
     std::fs::remove_dir_all(&d).ok();
     std::fs::create_dir_all(&d).unwrap();
@@ -67,7 +109,7 @@ fn tmp_home(tag: &str) -> std::path::PathBuf {
     // prepends `/private` to every temp path.
     #[cfg(windows)]
     let d = lait::config::canonical(&d);
-    d
+    TmpHome(d)
 }
 
 /// The per-test config root. `$LAIT_HOME` isolates the *store*, but the Orbit
@@ -103,8 +145,21 @@ fn serve(home: &std::path::Path) -> std::process::Child {
 
 /// Stop the daemon serving `home`, so it cannot outlive the test.
 fn shutdown(home: &std::path::Path) {
+    stop_daemon(home, Duration::from_secs(15));
+}
+
+/// Ask the daemon serving `home` to stop, and wait `patience` for it to go.
+///
+/// Best-effort by construction: some of these tests put a *fake* daemon on that
+/// socket, which will never answer `Stop` and never become absent. Waiting the
+/// full patience on one of those is the cost of not having to know which is
+/// which at the call site, so the drop path spends less of it than a test that
+/// is deliberately proving a daemon stopped.
+fn stop_daemon(home: &std::path::Path, patience: Duration) {
     let daemon_home = home.join("daemon");
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let Ok(runtime) = tokio::runtime::Runtime::new() else {
+        return;
+    };
     runtime.block_on(async {
         let client = lait::daemon::Client::at(daemon_home.clone());
         let _ = client
@@ -114,7 +169,7 @@ fn shutdown(home: &std::path::Path) {
                 None,
             )
             .await;
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + patience;
         while !matches!(
             lait::control::probe(&daemon_home).await,
             lait::control::Probe::Absent
@@ -166,7 +221,6 @@ fn a_spawned_daemon_does_not_hold_our_stdout_open() {
     // Before any assert: a live daemon is what wedges the reader, and on failure
     // it would otherwise outlive the test and hold the *runner's* pipe too.
     shutdown(&home);
-    std::fs::remove_dir_all(&home).ok();
 
     let read = read.expect(
         "the server exited but its stdout never reached EOF — the daemon it spawned \
@@ -261,7 +315,6 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
             None => panic!("a stopped daemon was never reported as exited"),
         }
     }
-    std::fs::remove_dir_all(&home).ok();
 }
 
 /// A selector that matches nothing is a not-found, and must answer like one on
@@ -317,8 +370,6 @@ fn an_unresolvable_orbit_is_refused_in_one_voice() {
         "the DTO must carry the typed kind, not just prose: {v}",
     );
     assert_eq!(out.status.code(), Some(2));
-
-    std::fs::remove_dir_all(&home).ok();
 }
 
 /// An argv that is not one of the three modes is refused, and the refusal says
@@ -454,10 +505,16 @@ fn takes_over_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Duration)
     let line = rx.recv_timeout(Duration::from_secs(30)).unwrap_or_default();
     let elapsed = started.elapsed();
 
+    // Killing the launcher is not killing the daemon. When the launcher takes
+    // over it spawns one that this process never holds a handle to, and it
+    // outlives everything here unless the home stops it — which `TmpHome` does
+    // on the way out of this function.
     child.kill().ok();
     child.wait().ok();
-    std::fs::remove_file(&sock).ok();
-    std::fs::remove_dir_all(&home).ok();
+    // The socket stays until `TmpHome` has used it. Unlinking it here is what
+    // made the guard silently useless: `Stop` is delivered *through* that path,
+    // so removing it first left the taken-over daemon unreachable and immortal.
+    // The guard removes the whole home, socket included, after it has stopped.
     (line, elapsed)
 }
 

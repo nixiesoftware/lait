@@ -895,6 +895,11 @@ export interface StatusInfo {
   scopes: number;
   /** True means zero counts are unavailable, not an empty space. */
   counts_unavailable?: boolean;
+  /**
+   * `true` when `name` is UNAVAILABLE rather than empty — the World is not
+   * docked, so nobody read a name. Never render it, and never substitute one.
+   */
+  name_unavailable?: boolean;
   /** `admin` | `member` | `pending`. */
   membership: string;
   degraded_recovery?: DegradedHolder[];
@@ -980,14 +985,21 @@ export interface ProjectBrief {
 export interface SpaceRow {
   id: string;
   space: string;
-  name: string;
+  /**
+   * The Catalog name, read from a live Station. `null` when it could not be
+   * read — `unnamed` then says why. There is no remembered fallback: rendering
+   * one is what made a renamed Space answer to its founding name.
+   */
+  name: string | null;
+  /** Why `name` is null. Absent when a name was read. */
+  unnamed?: "store-missing" | "not-probed" | "unreachable" | "not-docked";
   path: string;
   origin: string;
   last_opened: number;
-  /** `up` | `idle` | `missing`. */
-  status: "up" | "idle" | "missing";
+  /** `up` | `idle` | `missing` | `unknown` — where `unknown` is the absence of
+   * a reading, never a fourth degree of down. */
+  status: "up" | "idle" | "missing" | "unknown";
   identity: SpaceIdentity;
-  projects: ProjectBrief[];
 }
 
 export interface SpacesReply {

@@ -42,6 +42,86 @@ jobs:
   #
   # Left as a comment rather than a disabled job on purpose. A job that cannot
   # pass trains people to ignore red, which costs more than the check catches.
+  #
+  # That same secret — not an oversight — is what keeps `ci/bridge-drift.sh` and
+  # `ci/dart-licences.sh` out of this file, and it is worth naming because both
+  # read as merely "not wired yet". `bridge-drift` runs
+  # `flutter_rust_bridge_codegen generate` inside `apps/astrolabe`, and
+  # `dart-licences` runs `flutter pub deps` there; each needs that project to
+  # resolve, so each needs the credential above. Wiring them today would add two
+  # more jobs that cannot pass. Until then they are hand-run, and the drift they
+  # catch — a `tools/astrolabe/src/api/mod.rs` change with no regeneration,
+  # producing a binding that compiles, runs and disagrees with the model — has
+  # no machine watching for it.
+  #
+  # The iOS boundary is a third, and it is a *cost* decision rather than a
+  # credential one. `apps/astrolabe-ios/build-core.sh` says CI's drift check is
+  # `git diff --exit-code` over `Generated/` after it runs, and no workflow does
+  # that. The `platform` matrix below already pays for a macos-latest runner, so
+  # checkout and toolchain are sunk; what is not sunk is an Apple target install
+  # plus the staticlib build, and that build is the one the script's own comment
+  # calls "the ~2 GB archive nobody on the host links". Adding it to the macOS
+  # leg is a few minutes and several GB on every run. Worth it or not is a call
+  # for whoever owns CI spend — it is recorded here so it stays a decision
+  # instead of decaying back into an oversight.
+
+  # The five television receivers. Their conformance suites existed and nothing
+  # ran them, so `crates/display-protocol`'s language-neutral fixtures were
+  # verified on the Rust side only — the independent implementations they exist
+  # to hold honest were checked by hand or not at all.
+  #
+  # Cheap enough that there was never a reason to leave them out: the shared,
+  # webOS, Tizen, tvOS and Android TV suites are bare `node --test` with no npm
+  # dependencies of any kind. Only Roku installs anything, for the BrightScript
+  # compiler its `check` script runs before the tests.
+  #
+  # These are the *conformance* half, not qualification. Nothing here touches a
+  # television; `receivers/QUALIFICATION.md` is still the gate for that, and it
+  # is still unrecorded.
+  receivers:
+    name: receivers (conformance)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: receivers/roku/package-lock.json
+
+      # The Rust-owned fixtures, run against the shared web implementation the
+      # webOS and Tizen packages both copy from.
+      - name: Shared web protocol
+        run: npm test
+        working-directory: receivers
+
+      - name: webOS
+        run: npm test
+        working-directory: receivers/webos
+
+      - name: Tizen
+        run: npm test
+        working-directory: receivers/tizen
+
+      - name: Android TV
+        run: node --test
+        working-directory: receivers/android-tv
+
+      - name: Apple TV
+        run: npm test
+        working-directory: receivers/tvos
+
+      # `npm ci` (not `install`) so the lockfile is authoritative, matching the
+      # viewer job. Roku's `test` runs the BrightScript compiler first, which is
+      # the one receiver dependency in the tree.
+      - name: Install Roku toolchain
+        run: npm ci
+        working-directory: receivers/roku
+
+      - name: Roku
+        run: npm test
+        working-directory: receivers/roku
 
   # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
   # src/serve/assets because `include_dir!` embeds it at compile time and
@@ -515,7 +595,7 @@ jobs:
   orbital-complete:
     name: orbital-complete
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [test, platform, viewer, coverage-manifest, schema-contract]
+    needs: [test, platform, viewer, receivers, coverage-manifest, schema-contract]
     if: always()
     steps:
       - name: Assert every dependency succeeded

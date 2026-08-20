@@ -8,6 +8,7 @@
 //! per-home IPC remains only as an internal compatibility adapter.
 
 pub(crate) mod address_book;
+pub(crate) mod correspondence;
 pub(crate) mod host;
 pub(crate) mod scope;
 pub(crate) mod sponsorship;

@@ -136,7 +136,11 @@ sandbox guarantee.
 - **Freight residency is Space-wide.** The serve predicate authorizes any
   admitted member. This is deliberate and it is a compromise: no member holds
   `content.serve` on day one, so a grant-gated plane would refuse universally,
-  which is not caution but the feature not working. Until that grant is seeded,
+  which is not caution but the feature not working. The predicate is now *able*
+  to scope — `ContentAction::Serve` names the bytes, and
+  `Replica::declaring_worlds` resolves them to the Worlds whose live Bodies
+  declare them, which is the resource a grant would be weighed against. It does
+  not yet scope, so nothing below has changed. Until that grant is seeded,
   any per-resource read restriction on attached content is advisory against a
   member — a member can pull the ciphertext of content attached to a project
   they hold no read grant on. What they gain is the ciphertext itself, plus

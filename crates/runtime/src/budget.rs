@@ -472,11 +472,25 @@ pub mod gates {
     /// Deliberately generous: this is bulk transfer, and the whole point of the
     /// plane is that it moves files. It bounds a peer that asks for everything
     /// at once, not one that asks steadily.
+    ///
+    /// Derived from [`FREIGHT_REQUESTS`] rather than chosen, because the two
+    /// have to agree about what an honest peer may do. Every request is charged
+    /// `MAX_CHUNK_FRAME_BYTES` — the ceiling, since the answer is produced
+    /// elsewhere — so 64 requests a second is 20 MiB/s of charge, and a byte
+    /// budget under that makes this gate bind first and the request gate's own
+    /// "saturates a gigabit link long before it saturates this" untrue. It was
+    /// 8 MiB/s, which bound at about 51 Mbit/s and closed a demand-paged read
+    /// partway through a film.
+    ///
+    /// The ceiling charge is also why this cannot be tightened by reasoning
+    /// about payload: an availability query carries a few hundred bytes and is
+    /// charged like a chunk, so a tight budget throttles the question that
+    /// finds providers and the fetcher reads that as nobody having the bytes.
     pub const FREIGHT_BYTES: ByteGateSpec = ByteGateSpec {
         messages_per_second: 64,
         message_burst: 256,
-        bytes_per_second: 8 * 1024 * 1024,
-        byte_burst: 32 * 1024 * 1024,
+        bytes_per_second: 64 * (320 * 1024),
+        byte_burst: 256 * (320 * 1024),
         strike_limit: 128,
     };
 

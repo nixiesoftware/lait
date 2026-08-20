@@ -54,6 +54,7 @@ pub(crate) mod body_image;
 mod budget;
 pub mod change;
 mod contact_driver;
+mod content_cursor;
 mod content_host;
 pub mod coordinates;
 pub(crate) mod corpus;
