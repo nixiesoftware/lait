@@ -132,6 +132,9 @@ function ChatBody({ view, facts, active, dispatch }: {
   // One draft per peer, so switching tabs never loses a half-written line.
   const drafts = useRef(new Map<string, string>());
   const [, bump] = useState(0);
+  // The invitation being carried, per peer, for the same reason.
+  const invites = useRef(new Map<string, string>());
+  const [carrying, setCarrying] = useState<string | null>(null);
 
   if (facts === null || active === null) {
     // Nothing open is the moment reach is worth offering: a person with no
@@ -168,8 +171,26 @@ function ChatBody({ view, facts, active, dispatch }: {
         onClick={() => void dispatch({ type: "blockSender", person: active })}>Block</button>
     </div>
     <Transcript conversation={conversation} view={view} dispatch={dispatch} />
+    {carrying === active && <InvitationComposer
+      to={active}
+      link={invites.current.get(active) ?? ""}
+      sending={view.inFlight.includes(actionKey.sendInvitation(active))}
+      onChange={(link) => { invites.current.set(active, link); bump((n) => n + 1); }}
+      onSend={(link) => {
+        void dispatch({ type: "sendInvitation", to: active, link });
+        invites.current.delete(active);
+        setCarrying(null);
+      }}
+      onCancel={() => setCarrying(null)}
+    />}
     <div className="chat-composer">
       <button className="rail-button" aria-label="Attach a file">📎</button>
+      <button
+        className="rail-button"
+        aria-label="Carry an invitation"
+        aria-pressed={carrying === active}
+        onClick={() => setCarrying(carrying === active ? null : active)}
+      >✉</button>
       <button className="rail-button" aria-label="Emoji">🙂</button>
       <textarea className="chat-input" placeholder="Message" rows={1} value={draft}
         onChange={(event) => { drafts.current.set(active, event.target.value); bump((n) => n + 1); }}
@@ -283,6 +304,45 @@ function InvitationCard({ message, view, dispatch }: {
 }
 
 /**
+ * Carry an invitation somebody already holds to a correspondent.
+ *
+ * Only carrying. Minting one is the Space's authority and stays there, which is
+ * why this takes a link rather than offering a list of Spaces to invite to —
+ * offering that list would imply this client can mint, and it cannot.
+ *
+ * The link is not parsed here. It is opaque the whole way: the recipient's
+ * `OpenInvitation` hands it to `host_space_enter`, which is the only thing that
+ * judges an invitation. Validating it here would be a second opinion that can
+ * disagree with the one that matters.
+ */
+function InvitationComposer({ to, link, sending, onChange, onSend, onCancel }: {
+  to: string;
+  link: string;
+  sending: boolean;
+  onChange(link: string): void;
+  onSend(link: string): void;
+  onCancel(): void;
+}) {
+  const ready = link.trim() !== "" && !sending;
+  return <div className="invitation-composer" aria-label={`Carry an invitation to ${to}`}>
+    <input
+      className="invitation-link"
+      placeholder="Paste an invite link"
+      value={link}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && ready) onSend(link.trim());
+        if (event.key === "Escape") onCancel();
+      }}
+    />
+    <button className="primary-button" disabled={!ready} onClick={() => onSend(link.trim())}>
+      {sending ? "Sending…" : "Send invitation"}
+    </button>
+    <button className="quiet-button" onClick={onCancel}>Cancel</button>
+  </div>;
+}
+
+/**
  * Swap once, over any channel already shared. Yours names your devices; theirs
  * names theirs.
  *
@@ -315,7 +375,7 @@ export function ReachPanel({ view, dispatch }: {
     </p>
     {card === null
       ? <button
-          className="secondary-button"
+          className="quiet-button"
           disabled={sharing}
           onClick={() => dispatch({ type: "shareReach" })}
         >{sharing ? "Publishing…" : "Show how to reach me"}</button>
