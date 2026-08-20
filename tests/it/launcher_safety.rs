@@ -511,7 +511,10 @@ fn takes_over_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Duration)
     // on the way out of this function.
     child.kill().ok();
     child.wait().ok();
-    std::fs::remove_file(&sock).ok();
+    // The socket stays until `TmpHome` has used it. Unlinking it here is what
+    // made the guard silently useless: `Stop` is delivered *through* that path,
+    // so removing it first left the taken-over daemon unreachable and immortal.
+    // The guard removes the whole home, socket included, after it has stopped.
     (line, elapsed)
 }
 
