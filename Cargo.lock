@@ -3896,6 +3896,7 @@ dependencies = [
  "blake3",
  "bytes",
  "comms",
+ "correspondence",
  "ctor",
  "data-encoding",
  "directories",
@@ -3947,6 +3948,14 @@ dependencies = [
  "windows-sys 0.61.2",
  "world-interface",
  "zip",
+]
+
+[[package]]
+name = "lait-directory"
+version = "0.7.8"
+dependencies = [
+ "addressbook",
+ "mechanics",
 ]
 
 [[package]]

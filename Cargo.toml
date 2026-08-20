@@ -7,6 +7,7 @@ members = [
     "crates/addressbook",
     "crates/comms",
     "crates/correspondence",
+    "crates/directory",
     "crates/post",
     "crates/relay",
     "crates/replica",
@@ -126,6 +127,10 @@ mechanics = { path = "crates/mechanics" }
 # dependency edge.
 fabric = { path = "crates/fabric" }
 addressbook = { path = "crates/addressbook" }
+# The correspondence plane. Here because the daemon is where it belongs: the
+# same plane serves issue notifications, invitation delivery, agent messages and
+# a chat client, and every one of those is a caller rather than the owner.
+correspondence = { path = "crates/correspondence" }
 # The orbital runtime + Replica semantics. The product adopts the orbital
 # lifecycle through these — hosting a World, docking Sessions, and committing
 # through the Replica/Fabric path — the same public API any consumer uses. This

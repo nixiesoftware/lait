@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `env_flag`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -125,6 +125,35 @@ sealed class ActionRequest with _$ActionRequest {
     required String to,
     required String body,
   }) = ActionRequest_SendMessage;
+
+  /// Publish this identity's reach so it can be handed to somebody. Acts on
+  /// nobody — showing a friend code is not befriending anyone.
+  const factory ActionRequest.shareReach() = ActionRequest_ShareReach;
+
+  /// Take a correspondent in, by the announcement they handed over. The one
+  /// of the pair that creates a relationship, which is why it is named for
+  /// the person rather than for the artifact.
+  const factory ActionRequest.addCorrespondent({
+    required String announcement,
+  }) = ActionRequest_AddCorrespondent;
+
+  /// Enter the Space an arriving invitation names.
+  ///
+  /// `message` is the invitation's deposit id in the transcript. Its
+  /// coordinates verify against their own Space, so accepting is the same act
+  /// as following an invite link — delivery was never admission.
+  const factory ActionRequest.openInvitation({
+    required String message,
+  }) = ActionRequest_OpenInvitation;
+
+  /// Carry an invitation this identity already holds to a correspondent.
+  ///
+  /// `link` is an invite as a person receives one. Minting one is the Space's
+  /// authority and stays there; this only carries what somebody was given.
+  const factory ActionRequest.sendInvitation({
+    required String to,
+    required String link,
+  }) = ActionRequest_SendInvitation;
 
   /// Ask the carrier for anything waiting, and file it into conversations.
   const factory ActionRequest.collectMail() = ActionRequest_CollectMail;
@@ -407,6 +436,13 @@ class CardRow {
 
 /// One message in a conversation. The chat draws a custom component per `kind`.
 class ChatMessageRow {
+  /// For an invitation, the link body it carries; `None` for a message.
+  final String? invitation;
+
+  /// The deposit id for a received letter; `None` for one this identity sent.
+  /// An invitation is acted on by naming this.
+  final String? id;
+
   /// True if this identity sent it — which side of the chat it is drawn on.
   final bool mine;
 
@@ -428,6 +464,8 @@ class ChatMessageRow {
   final bool provenanceAgrees;
 
   const ChatMessageRow({
+    this.invitation,
+    this.id,
     required this.mine,
     required this.kind,
     this.body,
@@ -438,6 +476,8 @@ class ChatMessageRow {
 
   @override
   int get hashCode =>
+      invitation.hashCode ^
+      id.hashCode ^
       mine.hashCode ^
       kind.hashCode ^
       body.hashCode ^
@@ -450,6 +490,8 @@ class ChatMessageRow {
       identical(this, other) ||
       other is ChatMessageRow &&
           runtimeType == other.runtimeType &&
+          invitation == other.invitation &&
+          id == other.id &&
           mine == other.mine &&
           kind == other.kind &&
           body == other.body &&
@@ -668,6 +710,15 @@ class CorrespondenceFacts {
   /// writes to. `None` until the plane is known.
   final String? myDevice;
 
+  /// What this identity hands somebody so they can reach it, rendered for
+  /// copying. `None` until something has been published. Not a Card (that is
+  /// the address book's, and asserts nothing) and not an address (that is the
+  /// directory's, and is short and spoken).
+  final String? myReach;
+
+  /// Which conversation is this identity's own, when the backend has one.
+  final String? me;
+
   /// The people this identity can reach. A person folds all their devices into
   /// one contact, and a click on one opens a chat.
   final List<ContactRow> contacts;
@@ -684,6 +735,8 @@ class CorrespondenceFacts {
 
   const CorrespondenceFacts({
     this.myDevice,
+    this.myReach,
+    this.me,
     required this.contacts,
     required this.conversations,
     required this.openTabs,
@@ -693,6 +746,8 @@ class CorrespondenceFacts {
   @override
   int get hashCode =>
       myDevice.hashCode ^
+      myReach.hashCode ^
+      me.hashCode ^
       contacts.hashCode ^
       conversations.hashCode ^
       openTabs.hashCode ^
@@ -704,6 +759,8 @@ class CorrespondenceFacts {
       other is CorrespondenceFacts &&
           runtimeType == other.runtimeType &&
           myDevice == other.myDevice &&
+          myReach == other.myReach &&
+          me == other.me &&
           contacts == other.contacts &&
           conversations == other.conversations &&
           openTabs == other.openTabs &&

@@ -1,0 +1,21 @@
+[package]
+name = "lait-directory"
+version = "0.7.8"
+edition = "2021"
+rust-version = "1.92"
+description = "The directory: a mirror of self-authorised device events, resolving an issued address to a device set."
+license = "PolyForm-Noncommercial-1.0.0"
+# Not published, for the same reason `lait-post` is not: one of lait's internal
+# boundaries made runnable, rather than a library surface.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Identity and signature verification. Like the Post, this service holds no key
+# of its own — verifying what a publisher signed is its whole authorization
+# model, and it is what keeps a compromise a denial rather than a forgery.
+mechanics = { path = "../mechanics" }
+# The announcement is the published artifact; the directory carries it unchanged.
+addressbook = { path = "../addressbook" }
