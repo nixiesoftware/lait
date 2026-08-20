@@ -30,7 +30,7 @@ impl SignageWorld {
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
             2,
-            *blake3::hash(b"lait.signage.policy-table.v1").as_bytes(),
+            *blake3::hash(b"lait.signage.policy-table.v2:scoped-resources").as_bytes(),
             *blake3::hash(b"lait.signage.program.v2:rolling-windows:live-resources").as_bytes(),
         )
     }
@@ -73,18 +73,20 @@ impl World for SignageWorld {
         }
         let intent: SignageIntent =
             serde_json::from_slice(&intent.payload).map_err(|_| Rejection::InvalidRequest)?;
-        let (key, operation) = match intent {
+        let (key, operation, program) = match intent {
             SignageIntent::Put { program } => {
                 if !program.validate() {
                     return Err(Rejection::InvalidRequest);
                 }
                 let key = program.body_key().ok_or(Rejection::InvalidRequest)?;
+                let id = program.id.clone();
                 let value = serde_json::to_vec(&program).map_err(|_| Rejection::InvalidRequest)?;
-                (key, Op::ReplaceAtomic { value })
+                (key, Op::ReplaceAtomic { value }, id)
             }
             SignageIntent::Delete { program } => (
                 contract::body_key(&program).ok_or(Rejection::InvalidRequest)?,
                 Op::Tombstone,
+                program,
             ),
         };
         Ok(Effect {
@@ -94,7 +96,7 @@ impl World for SignageWorld {
             bodies: vec![key],
             effect: Vec::new(),
             declarations: Vec::new(),
-            demand: contract::demand_manage(),
+            demand: contract::demand_manage_program(&program),
         })
     }
 
@@ -106,8 +108,9 @@ impl World for SignageWorld {
         }
         let query: SignageQuery =
             serde_json::from_slice(&query.payload).map_err(|_| Rejection::InvalidRequest)?;
-        let projection = match query {
+        let (projection, demand) = match query {
             SignageQuery::Program { program } => {
+                let scope = contract::demand_read_program(&program);
                 let program = match contract::body_key(&program)
                     .map(|key| ctx.read_body(&key))
                     .transpose()?
@@ -123,7 +126,7 @@ impl World for SignageWorld {
                         Some(program)
                     }
                 };
-                SignageProjection::Program { program }
+                (SignageProjection::Program { program }, scope)
             }
             SignageQuery::Programs => {
                 let mut programs = Vec::new();
@@ -140,7 +143,10 @@ impl World for SignageWorld {
                 }
                 programs
                     .sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
-                SignageProjection::Programs { programs }
+                (
+                    SignageProjection::Programs { programs },
+                    contract::demand_read(),
+                )
             }
         };
         Ok(Projection {
@@ -149,7 +155,7 @@ impl World for SignageWorld {
             bytes: serde_json::to_vec(&projection).map_err(|_| Rejection::ContractViolation)?,
             frontier: ReplicaFrontier::EMPTY,
             publication: None,
-            demand: contract::demand_read(),
+            demand,
         })
     }
 }

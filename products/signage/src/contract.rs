@@ -265,24 +265,97 @@ pub fn body_key(program: &str) -> Option<BodyKey> {
     BodyId::parse(program).map(|body| BodyKey::new(world_id(), body))
 }
 
+/// The things a Signage grant can be about.
+///
+/// Segments are matched byte-exactly, so these spellings are the grant format:
+/// a holder granted on `screen/scr_a` is not granted on `screens/scr_a`, and
+/// nothing warns. They are pinned by test for that reason.
+///
+/// There is no wildcard — Mechanics refuses one. A fleet-wide permission is a
+/// grant on [`root_resource`]; "these screens" is a grant on a group, whose
+/// membership this World resolves and Mechanics never learns.
+pub mod resource {
+    use super::{Resource, PRODUCT_WORLD};
+
+    /// Everything this World owns. Fleet-wide.
+    pub fn root() -> Resource {
+        Resource::root(PRODUCT_WORLD)
+    }
+
+    /// One authored program.
+    pub fn program(id: &str) -> Resource {
+        segments("program", id)
+    }
+
+    /// One screen, by the identity the display coordinator enrolled it under.
+    pub fn screen(id: &str) -> Resource {
+        segments("screen", id)
+    }
+
+    /// A named set of screens. The indirection that replaces a wildcard.
+    pub fn group(id: &str) -> Resource {
+        segments("group", id)
+    }
+
+    /// One item in the media library.
+    pub fn media(id: &str) -> Resource {
+        segments("media", id)
+    }
+
+    /// An over-long or malformed id degrades to the root resource, which is
+    /// *narrower* in effect: it demands fleet-wide standing rather than
+    /// silently granting on a truncated name.
+    fn segments(kind: &str, id: &str) -> Resource {
+        Resource::segments(PRODUCT_WORLD, [kind, id]).unwrap_or_else(|_| root())
+    }
+}
+
 fn root_resource() -> Resource {
-    Resource::root(PRODUCT_WORLD)
+    resource::root()
 }
 
 fn capability(name: &str) -> PolicyCapability {
     PolicyCapability::new(PRODUCT_WORLD, name)
 }
 
+/// Fleet-wide authority to author.
 pub fn demand_manage() -> Vec<u8> {
     AuthorizationDemand::require(capability("space.signage.manage"), root_resource())
         .encode_canonical()
         .expect("canonical Signage manage demand")
 }
 
+/// Authority to author one program: granted on the program, or fleet-wide.
+///
+/// `Any` rather than a second capability, so a per-program grant is an
+/// attenuation of the fleet-wide one rather than a parallel vocabulary that has
+/// to be kept in step with it.
+pub fn demand_manage_program(program: &str) -> Vec<u8> {
+    AuthorizationDemand::Any(vec![
+        AuthorizationDemand::require(
+            capability("space.signage.manage"),
+            resource::program(program),
+        ),
+        AuthorizationDemand::require(capability("space.signage.manage"), root_resource()),
+    ])
+    .encode_canonical()
+    .expect("canonical Signage program manage demand")
+}
+
 pub fn demand_read() -> Vec<u8> {
     AuthorizationDemand::require(capability("space.signage.read"), root_resource())
         .encode_canonical()
         .expect("canonical Signage read demand")
+}
+
+/// Authority to read one program: granted on the program, or fleet-wide.
+pub fn demand_read_program(program: &str) -> Vec<u8> {
+    AuthorizationDemand::Any(vec![
+        AuthorizationDemand::require(capability("space.signage.read"), resource::program(program)),
+        AuthorizationDemand::require(capability("space.signage.read"), root_resource()),
+    ])
+    .encode_canonical()
+    .expect("canonical Signage program read demand")
 }
 
 pub fn founder_capabilities() -> Vec<(PolicyCapability, Resource)> {
@@ -417,5 +490,68 @@ mod tests {
                 .unwrap()
             )
         );
+    }
+
+    /// The grant format, pinned.
+    ///
+    /// Segments match byte-exactly, so a rename here silently stops matching
+    /// every grant already minted against the old spelling. Nothing else in the
+    /// system would report it.
+    #[test]
+    fn the_resource_spellings_are_the_grant_format() {
+        assert_eq!(resource::root().segments, Vec::<String>::new());
+        assert_eq!(resource::program("prg_1").segments, ["program", "prg_1"]);
+        assert_eq!(resource::screen("scr_1").segments, ["screen", "scr_1"]);
+        assert_eq!(
+            resource::group("grp_lobby").segments,
+            ["group", "grp_lobby"]
+        );
+        assert_eq!(resource::media("med_1").segments, ["media", "med_1"]);
+        for r in [
+            resource::program("p"),
+            resource::screen("s"),
+            resource::group("g"),
+            resource::media("m"),
+        ] {
+            assert_eq!(r.world, PRODUCT_WORLD);
+            assert!(r.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn an_unusable_id_demands_fleet_wide_standing_rather_than_a_truncated_grant() {
+        let absurd = "x".repeat(mechanics::authorization::MAX_SEGMENT_BYTES + 1);
+        assert_eq!(
+            resource::screen(&absurd),
+            resource::root(),
+            "narrower, not wider"
+        );
+    }
+
+    #[test]
+    fn a_program_grant_and_a_fleet_grant_both_satisfy_writing_that_program() {
+        let demand = AuthorizationDemand::decode_canonical(&demand_manage_program("prg_7"))
+            .expect("canonical");
+        let AuthorizationDemand::Any(options) = demand else {
+            panic!("a scoped write is satisfied either way");
+        };
+        assert_eq!(options.len(), 2);
+        assert!(options.contains(&AuthorizationDemand::require(
+            capability("space.signage.manage"),
+            resource::program("prg_7"),
+        )));
+        assert!(options.contains(&AuthorizationDemand::require(
+            capability("space.signage.manage"),
+            resource::root(),
+        )));
+    }
+
+    #[test]
+    fn one_programs_grant_does_not_reach_another() {
+        assert_ne!(
+            demand_manage_program("prg_1"),
+            demand_manage_program("prg_2")
+        );
+        assert_ne!(demand_manage_program("prg_1"), demand_manage());
     }
 }
