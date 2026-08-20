@@ -805,6 +805,12 @@ const fn declared_count_retained_estimate() -> u64 {
     32 + 8 + 160
 }
 
+const fn declared_world_retained_estimate() -> u64 {
+    // `WorldId` is an `Arc<str>`, so this is a pointer and a refcount bump and
+    // never a second copy of the name — plus a BTree node/allocator share.
+    8 + 8 + 160
+}
+
 impl RecordDirectory {
     fn len(&self) -> usize {
         self.entries.len()
@@ -1489,6 +1495,14 @@ pub struct Replica {
     /// index makes a candidate read image update its content view from only the
     /// touched declarations instead of rescanning every Body in the Space.
     declared_content_counts: BTreeMap<[u8; 32], u64>,
+    /// The reverse of [`Self::declared_content`], narrowed to the World: which
+    /// Worlds declare each descriptor, and how many of their live Bodies do.
+    ///
+    /// World rather than Body, because runtime cannot name a finer resource
+    /// without borrowing product vocabulary — and because this stays bounded by
+    /// installed Worlds where a `BodyKey` set would not. The inner count is
+    /// what makes removal exact.
+    declared_content_worlds: BTreeMap<[u8; 32], BTreeMap<WorldId, u64>>,
     /// O(1) physical upper estimate for the two declaration directories.
     /// Updated only by `replace_declared_content`, the single mutation seam.
     declared_content_retained_bytes: u64,
@@ -4117,6 +4131,7 @@ impl Replica {
             content_index_root: None,
             declared_content: BTreeMap::new(),
             declared_content_counts: BTreeMap::new(),
+            declared_content_worlds: BTreeMap::new(),
             declared_content_retained_bytes: 0,
             pending_content: BTreeMap::new(),
             receipt_index_root: None,
@@ -6516,6 +6531,7 @@ impl Replica {
                     }
                     None => {}
                 }
+                self.release_declaring_world(&content, &key.world);
             }
         }
         if refs.is_empty() {
@@ -6532,11 +6548,57 @@ impl Replica {
                     0
                 });
             *count = count.saturating_add(1);
+            let worlds = self.declared_content_worlds.entry(*content).or_default();
+            match worlds.get_mut(&key.world) {
+                Some(declaring) => *declaring = declaring.saturating_add(1),
+                None => {
+                    worlds.insert(key.world.clone(), 1);
+                    self.declared_content_retained_bytes = self
+                        .declared_content_retained_bytes
+                        .saturating_add(declared_world_retained_estimate());
+                }
+            }
         }
         self.declared_content_retained_bytes = self
             .declared_content_retained_bytes
             .saturating_add(declared_body_retained_estimate(&refs));
         self.declared_content.insert(key.clone(), refs);
+    }
+
+    /// Drop one of `world`'s declarations of `content`, and drop the World
+    /// itself when that was its last.
+    fn release_declaring_world(&mut self, content: &[u8; 32], world: &WorldId) {
+        let Some(worlds) = self.declared_content_worlds.get_mut(content) else {
+            return;
+        };
+        let drop_world = match worlds.get_mut(world) {
+            Some(declaring) if *declaring > 1 => {
+                *declaring = declaring.saturating_sub(1);
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if drop_world {
+            worlds.remove(world);
+            self.declared_content_retained_bytes = self
+                .declared_content_retained_bytes
+                .saturating_sub(declared_world_retained_estimate());
+        }
+        if worlds.is_empty() {
+            self.declared_content_worlds.remove(content);
+        }
+    }
+
+    /// The Worlds whose live Bodies declare `content`, sorted and unique.
+    ///
+    /// Empty means nothing declares these bytes — the same answer reachability
+    /// acts on, and so no resource to authorize against.
+    pub fn declaring_worlds(&self, content: &crate::content::ContentRef) -> Vec<WorldId> {
+        self.declared_content_worlds
+            .get(content.as_bytes())
+            .map(|worlds| worlds.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// The content a reader through this snapshot can see.

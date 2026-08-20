@@ -41,6 +41,19 @@ ignore = [
     "RUSTSEC-2026-0247", # bitmaps: unmaintained (transitive via loro -> im)
     "RUSTSEC-2026-0248", # im: unmaintained (transitive via loro)
     "RUSTSEC-2026-0251", # sized-chunks: unmaintained (transitive via loro -> im)
+    # arrayref: STAY ON THE YANKED 0.3.9. Its maintainer account was
+    # compromised on 2026-08-20 — 0.3.10 was published that day and every
+    # release from 0.3.5 to 0.3.9 was yanked in one go, which is what forces a
+    # `cargo update` onto the new one. 0.3.10 adds a dependency on
+    # `proc-macro1`, a copy of proc-macro2's source with a build script that
+    # base64-hides `https://23.254.165.112:9089/`, disables certificate
+    # verification, downloads a per-platform binary and runs it — at *compile*
+    # time, under `blake3`, which is to say under this entire workspace.
+    #
+    # 0.3.9 is yanked but sound, and Cargo.lock pins its checksum, so the bytes
+    # we build are the bytes that were always there. `proc-macro1` is banned
+    # outright below. Revisit only when arrayref is back in known-good hands.
+    { crate = "arrayref", reason = "0.3.10 is a compromised release; 0.3.9 is yanked but sound and checksum-pinned" },
 ]
 
 [bans]
@@ -52,6 +65,13 @@ deny = [
     { name = "aws-lc-rs" },
     { name = "aws-lc-sys" },
     { name = "aws-lc-fips-sys" },
+    # A typosquat of proc-macro2, one character off, carrying a verbatim copy of
+    # its source plus a build script that fetches and executes a remote binary.
+    # It entered the tree on 2026-08-20 as a new dependency of a compromised
+    # arrayref release (see the advisories note above). Nothing legitimate here
+    # wants it, and a name this close to a crate everything depends on is worth
+    # refusing permanently rather than only until the lockfile moves.
+    { name = "proc-macro1" },
 ]
 
 [licenses]

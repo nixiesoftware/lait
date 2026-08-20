@@ -129,7 +129,6 @@ pub fn found(home: &Path, identity_dir: &Path, name: &str, nick: Option<&str>) -
         origin: Origin::Founded,
         host_nick: String::new(),
         last_opened: mechanics::wallclock::now_secs(),
-        projects: vec![project.clone()],
     });
 
     Ok(Founded {
@@ -191,7 +190,6 @@ pub fn enter(home: &Path, identity_dir: &Path, link: &str, nick: Option<&str>) -
         origin: Origin::Joined,
         host_nick: verified.approach_nick_hint.clone(),
         last_opened: mechanics::wallclock::now_secs(),
-        projects: vec![],
     });
 
     Ok(Entered {
@@ -922,7 +920,6 @@ mod tests {
                     origin: Origin::Founded,
                     host_nick: String::new(),
                     last_opened: 0,
-                    projects: vec![],
                 }],
             ),
             crate::world::packages(),
@@ -984,7 +981,6 @@ mod tests {
             origin: Origin::Joined,
             host_nick: String::new(),
             last_opened: 0,
-            projects: vec![],
         };
         let router = Router::new(
             orbits::Catalog::with_entries(

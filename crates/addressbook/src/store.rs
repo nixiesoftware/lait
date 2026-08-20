@@ -9,6 +9,7 @@ use fabric::BodyExport;
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{decode, encode, SCHEMA_VERSION};
+use crate::durable::atomic_replace;
 use crate::engine::BookEngine;
 use crate::types::Book;
 use crate::{bounds, Error};
@@ -218,23 +219,4 @@ fn read_limited(path: &Path) -> Result<Vec<u8>, Error> {
         return Err(Error::Corrupt("trailing or truncated bytes"));
     }
     Ok(bytes)
-}
-
-fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("bin.tmp");
-    let bak = path.with_extension("bin.bak");
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    if path.exists() {
-        fs::copy(path, &bak)?;
-        fs::remove_file(path)?;
-    }
-    fs::rename(&tmp, path)?;
-    Ok(())
 }

@@ -612,6 +612,7 @@ pub struct Router {
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
+    correspondence: Arc<crate::daemon::correspondence::CorrespondenceService>,
     asks: crate::daemon::sponsorship::SponsorshipAsks,
 }
 
@@ -632,6 +633,19 @@ impl Router {
         let book = crate::daemon::address_book::AddressBookService::open(&identity)
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        let correspondence = Arc::new(crate::daemon::correspondence::CorrespondenceService::open(
+            &identity,
+        ));
+        // Carried over a hosted Post when one is named. Absent, the plane stands
+        // but carries nothing, and every operation says so — which is a
+        // different fact from an empty mailbox and the only one worth acting on.
+        if let Some(base) = crate::daemon::correspondence::configured_carrier() {
+            if let Err(error) =
+                correspondence.carry_over(base, crate::daemon::correspondence::now_secs())
+            {
+                tracing::warn!(%error, "correspondence could not be carried");
+            }
+        }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
         Self {
             catalog,
@@ -643,6 +657,7 @@ impl Router {
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
             book,
+            correspondence,
             asks,
         }
     }
@@ -653,6 +668,10 @@ impl Router {
 
     pub(crate) fn book(&self) -> Result<&crate::daemon::address_book::AddressBookService, String> {
         self.book.as_ref().map(Arc::as_ref).map_err(Clone::clone)
+    }
+
+    pub(crate) fn correspondence(&self) -> &crate::daemon::correspondence::CorrespondenceService {
+        &self.correspondence
     }
 
     pub(crate) fn asks(&self) -> &crate::daemon::sponsorship::SponsorshipAsks {
@@ -1155,7 +1174,6 @@ mod tests {
                 origin: Origin::Founded,
                 host_nick: String::new(),
                 last_opened: 1,
-                projects: Vec::new(),
             }],
         );
         (home, directory, id)

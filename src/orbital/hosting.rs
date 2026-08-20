@@ -2500,7 +2500,13 @@ impl StationHost {
     }
 
     fn status(&self) -> Response {
+        // `counts()` answers `None` when the World is not docked, and the name
+        // rides in the same tuple — so an undocked Station has no name to give,
+        // exactly as it has no counts. Both absences are reported as absences;
+        // blanking `name` without saying so is what let a caller mistake
+        // "could not ask" for "unnamed" and reach for a remembered value.
         let counts = self.counts();
+        let unavailable = counts.is_none();
         let (items, scopes, name, description) =
             counts
                 .clone()
@@ -2509,10 +2515,11 @@ impl StationHost {
             id: mechanics::actor::device_from_seed(&self.device_seed).to_string(),
             nick: String::new(),
             name,
+            name_unavailable: unavailable,
             description,
             online_peers: self.online_peers(),
             space: Some(self.station.space_id().as_str().to_string()),
-            counts_unavailable: counts.is_none(),
+            counts_unavailable: unavailable,
             items,
             scopes,
             membership: if self.mechanics.am_i_admin() {
@@ -3502,10 +3509,17 @@ impl StationHost {
             .name(control)
             .create_tokio()
             .context("bind control channel")?;
-        tracing::info!(
-            "Station host online in space {}",
-            self.station.space_id().as_str()
-        );
+        let space = self.station.space_id().as_str().to_string();
+        tracing::info!("Station host online in space {}", space);
+        // Record the open. `last_opened` orders the picker newest-first, and
+        // this is the only thing that advances it — the registry is otherwise
+        // written only at founding and entering. Best-effort: a Station that is
+        // serving is serving whether or not the index caught up, and an
+        // unregistered space is left unregistered rather than fabricated here
+        // (`touch` reports `false` and we do not care).
+        if let Err(error) = crate::orbits::touch(&space) {
+            tracing::warn!(%error, "Orbit registry open-time update failed");
+        }
         let idle_window = idle_window_from_env();
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
         let mut connections = tokio::task::JoinSet::new();
@@ -4496,6 +4510,10 @@ fn content_refusal(error: &runtime::plane::freight::content::Failure) -> Content
         E::NotResident => (
             ContentErrorCode::NotResident,
             "the descriptor is here and the bytes are not".to_string(),
+        ),
+        E::Sealed => (
+            ContentErrorCode::Sealed,
+            "the bytes are here and this Station holds no key for them".to_string(),
         ),
         E::Bounds => (
             ContentErrorCode::Bounds,

@@ -571,6 +571,50 @@ pub fn daemon_pid(home: &Path) -> Option<u32> {
 mod tests {
     use super::*;
 
+    /// An identity's correspondence address has to survive a restart, so the
+    /// seeds behind it are read back rather than minted twice. Two homes share
+    /// nothing, which is what keeps two profiles from publicly linking.
+    #[test]
+    fn kinship_seeds_are_the_identitys_own_and_outlive_the_run() {
+        let root = std::env::temp_dir().join(format!("gc-kin-{}", std::process::id()));
+        let (one, two) = (root.join("one"), root.join("two"));
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+
+        let identity = load_or_create_identity(&one).expect("mint an identity");
+        let first = load_or_create_kinship_seeds(&one).expect("mint the second seed");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0], identity, "the identity's own key is one of them");
+        assert_ne!(
+            first[0], first[1],
+            "a genesis link needs two distinct devices"
+        );
+
+        assert_eq!(
+            load_or_create_kinship_seeds(&one).expect("read them back"),
+            first,
+            "a second launch is the same identity"
+        );
+
+        load_or_create_identity(&two).expect("mint a second identity");
+        let other = load_or_create_kinship_seeds(&two).expect("its own seeds");
+        assert!(
+            other.iter().all(|seed| !first.contains(seed)),
+            "two identity homes overlap in nothing"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Reading is never minting: an identity with no key is reported, not made.
+    #[test]
+    fn kinship_seeds_are_refused_where_there_is_no_identity() {
+        let empty = std::env::temp_dir().join(format!("gc-kin-none-{}", std::process::id()));
+        fs::create_dir_all(&empty).unwrap();
+        assert!(load_or_create_kinship_seeds(&empty).is_err());
+        let _ = fs::remove_dir_all(&empty);
+    }
+
     #[test]
     fn the_lock_holder_stays_identifiable_while_it_holds_the_lock() {
         let dir = std::env::temp_dir().join(format!("gc-lock-{}", std::process::id()));
@@ -742,6 +786,53 @@ mod tests {
 
 fn secret_key_path(home: &Path) -> PathBuf {
     home.join("secret.key")
+}
+
+fn kinship_key_path(home: &Path) -> PathBuf {
+    home.join("kinship.key")
+}
+
+/// This identity's correspondence device seeds, creating the second on first run.
+///
+/// A kinship profile's genesis is a mutual link between two *distinct* devices,
+/// and an identity home holds one key. The second is a real key on this machine,
+/// not a derivation of the first — it must be able to be retired independently
+/// once a second machine joins.
+///
+/// Order is not rank: which device composes is [`ReachPlane::canonical`], and it
+/// moves. The profile is the hash of the link, which names no primary, so a
+/// handover leaves the address alone.
+pub fn load_or_create_kinship_seeds(home: &Path) -> Result<Vec<[u8; 32]>> {
+    let identity = load_identity(home)?;
+    let path = kinship_key_path(home);
+    // `create_new`, because this runs on every client launch and two of them
+    // racing would otherwise mint two profiles for one identity. The loser of
+    // the race reads what the winner wrote.
+    let seed = mechanics::actor::random_seed().context("generate kinship key")?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(data_encoding::HEXLOWER.encode(&seed).as_bytes())
+                .context("write kinship key")?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(anyhow::Error::new(e).context("create kinship key")),
+    }
+    Ok(vec![identity, read_seed(&path)?])
+}
+
+fn read_seed(path: &Path) -> Result<[u8; 32]> {
+    let hex = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let raw = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(hex.trim().as_bytes())
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    raw.as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{} must be 32 bytes", path.display()))
 }
 
 /// Load the persistent identity **seed** (32 bytes), creating one on first run.

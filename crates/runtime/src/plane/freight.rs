@@ -155,9 +155,13 @@ impl FreightService {
 /// hold no read grant on. It is ciphertext — the Body key still gates reading —
 /// but it is a real gap, and the fix is a `content.serve` grant slotting into
 /// exactly this closure without `ContentHost` changing shape.
+///
+/// The action now names the bytes, so scoping is expressible here. This
+/// predicate still does not scope: nobody holds `content.serve`, so gating on
+/// it would refuse everything.
 fn serve_predicate(
     peer: &AdmittedPeer,
-) -> impl Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>> + '_ {
+) -> impl for<'c> Fn(crate::content_host::ContentAction<'c>) -> Result<(), Vec<u8>> + '_ {
     move |action| {
         let _ = (peer, action);
         Ok(())
@@ -249,6 +253,29 @@ impl crate::plane_driver::PlaneService for FreightService {
                 }
             }
 
+            // Charged with the ceiling of what the answer may carry, because
+            // the answer is produced in another task and the gate lives here.
+            // Conservative in the peer's favour would be worse: it would let a
+            // peer pull at any rate it liked.
+            //
+            // Answered like the request gate above, and for its reason: a
+            // discarded `Drop` serves the request anyway and banks a strike, so
+            // the gate stops being a throttle and becomes a countdown to
+            // closing an honest peer. A demand-paged read is exactly that peer
+            // — it asks steadily and fast, and being refused a chunk is
+            // something it can pace against where a closed connection is not.
+            match bytes_gate.check(Instant::now(), bounds::MAX_CHUNK_FRAME_BYTES) {
+                Verdict::Allow => {}
+                Verdict::Drop => {
+                    refuse_now(send).await;
+                    continue;
+                }
+                Verdict::Close => {
+                    connection.close(REFUSED, b"");
+                    break;
+                }
+            }
+
             // The permit before the spawn — both of them. A peer that opens
             // flows faster than we serve them queues on a semaphore rather than
             // on the task scheduler, and a full one refuses rather than
@@ -279,14 +306,6 @@ impl crate::plane_driver::PlaneService for FreightService {
                 };
                 serve_request(host.as_ref(), &policy, send, recv).await;
             });
-            // Charged with the ceiling of what the answer may carry, because
-            // the answer is produced in another task and the gate lives here.
-            // Conservative in the peer's favour would be worse: it would let a
-            // peer pull at any rate it liked.
-            if bytes_gate.check(Instant::now(), bounds::MAX_CHUNK_FRAME_BYTES) == Verdict::Close {
-                connection.close(REFUSED, b"");
-                break;
-            }
             while requests.try_join_next().is_some() {}
         }
 

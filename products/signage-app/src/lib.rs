@@ -20,6 +20,7 @@
 //! Product-owned application and display package for Signage.
 
 mod display;
+mod host;
 mod protocol;
 
 pub use protocol::{
@@ -43,6 +44,7 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         world_interface::AgentSurface::designed(Vec::new(), "", &[]),
         decode_client_reply,
     )?
+    .with_web_parser(host::parse_web)
     .with_display(DISPLAY_NAME, Some("▣"), None)?
     .with_tagline("Author durable programs for managed displays")?
     .with_accent(0x009B_5DE5)?

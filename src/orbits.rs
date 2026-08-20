@@ -1,14 +1,30 @@
 //! The Orbit catalog persisted in `spaces.json` (see `docs/UI.md`, joining).
 //!
 //! A small global index, `spaces.json` under [`crate::config::config_root`],
-//! mapping each **store path** to the space it holds. Written at every
-//! chokepoint a space becomes bound to a path — `HostSpaceFound` (founding),
-//! `HostSpaceEnter` (bootstrapping), and every successful application open — so
-//! founders and joiners alike are listed by `GET /api/spaces` and addressable
-//! via `--orbit`. It carries **no secrets and no trust** (the signed ACL still gates
-//! every op); it is pure navigation state: the `name` and `projects` fields are
-//! advisory snapshots refreshed on open, a corrupt/absent file degrades to "no
-//! known spaces", and nothing here is ever a source of truth.
+//! mapping each **store path** to the space it holds, so founders and joiners
+//! alike are listed by `GET /api/spaces` and addressable via `--orbit`. It
+//! carries **no secrets and no trust** (the signed ACL still gates every op);
+//! a corrupt or absent file degrades to "no known spaces".
+//!
+//! **The registry persists coordinates, never contents.** A coordinate is a
+//! fact this device owns and no other node can change: the space id, the store
+//! path, whether we founded or joined, the inviter's nick, and when we last
+//! opened it. Contents — the space's name, its projects — belong to the
+//! Catalog, and a copy kept here can only ever be a cache that nothing
+//! invalidates.
+//!
+//! That is not hypothetical. A `projects` snapshot lived here, written once at
+//! founding and never refreshed, and it still named a space's single genesis
+//! project years of work later. The name beside it was saved by a live probe
+//! that happened to answer; when the probe missed, the founding name was served
+//! in its place and no surface could tell the difference. Both fields were
+//! documented as "refreshed on open" and there was no such refresh: [`upsert`]
+//! is reached only from founding and entering.
+//!
+//! So the rule is structural rather than remembered. Contents are not fields
+//! here, which is why they cannot drift. A surface that wants a name asks a
+//! live Station and reports an absence when it cannot — see
+//! [`crate::serve::orbits`].
 //!
 //! A v0.5.x `workspaces.json` beside this file is simply not read, and is not
 //! migrated. That is the right outcome precisely because this is navigation
@@ -64,7 +80,13 @@ pub struct ProjectBrief {
 pub struct Entry {
     /// The space id (`ws_…`) bound in this store.
     pub space: String,
-    /// The space display name at last open (advisory; may lag a rename).
+    /// The name recorded when this device founded or entered the store — a
+    /// device-owned historical fact, like `host_nick`, and the only thing a
+    /// by-name `--orbit` selector can match without a running daemon.
+    ///
+    /// **Never a display value.** It is not refreshed, so it lags a rename for
+    /// good: the Catalog owns the name, and a surface that wants one asks a
+    /// live Station (`StatusInfo::name`) or reports that it could not.
     #[serde(default)]
     pub name: String,
     /// The absolute store path (the `.lait/` dir, or a `$LAIT_HOME`).
@@ -75,13 +97,10 @@ pub struct Entry {
     /// The inviter's nick from the ticket (joined only). May be empty.
     #[serde(default)]
     pub host_nick: String,
-    /// Unix seconds of the last init/join/daemon-open — newest-first ordering.
+    /// Unix seconds of the last open — newest-first ordering. Written by
+    /// [`touch`] when a Station begins serving this store.
     #[serde(default)]
     pub last_opened: u64,
-    /// Advisory project snapshot (key + name), refreshed on open and on
-    /// project-config changes. Display only.
-    #[serde(default)]
-    pub projects: Vec<ProjectBrief>,
 }
 
 /// Filesystem-level status of a registered entry. Whether a daemon is *up* is
@@ -139,7 +158,7 @@ fn save(entries: &[Entry]) -> Result<()> {
 
 /// Insert or refresh an entry, keyed by **store path** (one store holds exactly
 /// one space). A refresh preserves fields the caller didn't recompute: an
-/// empty `name`/`projects`/`host_nick` on the new entry keeps the old value, and
+/// empty `name`/`host_nick` on the new entry keeps the old value, and
 /// `origin` sticks once founded (a daemon-open upsert must not relabel a founder
 /// as joined). Best-effort persistence; callers treat failure as non-fatal (the
 /// registry is a convenience, not a source of truth).
@@ -150,9 +169,6 @@ pub fn upsert(mut entry: Entry) -> Result<()> {
         if old.space == entry.space {
             if entry.name.is_empty() {
                 entry.name = old.name.clone();
-            }
-            if entry.projects.is_empty() {
-                entry.projects = old.projects.clone();
             }
             if entry.host_nick.is_empty() {
                 entry.host_nick = old.host_nick.clone();
@@ -416,7 +432,6 @@ mod tests {
             origin: Origin::Joined,
             host_nick: "host".into(),
             last_opened,
-            projects: vec![],
         }
     }
 
@@ -440,18 +455,39 @@ mod tests {
         assert_eq!(got[0].space, "ws_B", "re-register replaces the row");
     }
 
+    /// The persisted shape is the guard rail.
+    ///
+    /// `name` is here because a by-name `--orbit` selector has nothing else to
+    /// match before a daemon is up, and it is documented as a formation-time
+    /// hint no surface may display. Everything else is a coordinate. A field
+    /// naming Catalog content — a project list, a description, a member count —
+    /// must not join them: nothing here is ever refreshed, so it would be wrong
+    /// from the first rename onward and no surface could tell.
+    #[test]
+    fn a_row_persists_coordinates_and_no_contents() {
+        let row = serde_json::to_value(entry("ws_A", "/tmp/a", 10)).expect("encode an entry");
+        let mut keys: Vec<&str> = row
+            .as_object()
+            .expect("an entry encodes as an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["host_nick", "last_opened", "name", "origin", "path", "space"],
+            "the registry persists coordinates; a new field here is Catalog              content unless it is a fact this device owns"
+        );
+    }
+
     #[test]
     fn refresh_merges_instead_of_blanking() {
         let _root = ScopedRoot::new("merge");
         let mut founded = entry("ws_A", "/tmp/a", 10);
         founded.origin = Origin::Founded;
-        founded.projects = vec![ProjectBrief {
-            key: "ENG".into(),
-            name: "Engineering".into(),
-        }];
         upsert(founded).unwrap();
-        // A later daemon-open upsert that didn't recompute name/projects and
-        // defaulted origin must keep the founded origin and the old snapshots.
+        // A later daemon-open upsert that didn't recompute the name and
+        // defaulted origin must keep the founded origin and the old name.
         upsert(Entry {
             space: "ws_A".into(),
             name: String::new(),
@@ -459,17 +495,11 @@ mod tests {
             origin: Origin::Joined,
             host_nick: String::new(),
             last_opened: 20,
-            projects: vec![],
         })
         .unwrap();
         let got = list();
         assert_eq!(got[0].origin, Origin::Founded, "founded origin sticks");
         assert_eq!(got[0].name, "demo", "empty name keeps the old value");
-        assert_eq!(
-            got[0].projects.len(),
-            1,
-            "empty projects keeps the old value"
-        );
         assert_eq!(got[0].last_opened, 20, "freshness does update");
 
         assert!(touch("ws_A").unwrap(), "a known Orbit can be touched");
