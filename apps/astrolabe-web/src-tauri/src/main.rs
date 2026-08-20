@@ -5,6 +5,7 @@
 //! the WebView, and forwards its already-existing whole-view stream.
 
 use astrolabe::api::{self, ActionRequest, ClientView, Staleness};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -820,6 +821,33 @@ fn client_current() -> WebClientView {
     api::current().into()
 }
 
+/// The artwork one World ships, as data URIs. Not part of the view, and the
+/// omission is the core's design: artwork is a build constant that cannot
+/// change while the process runs, so a surface asks once per mount and caches.
+/// An unknown mount answers with no artwork, not an error.
+#[derive(Serialize)]
+struct WebWorldArtwork {
+    mark: Option<String>,
+    hero: Option<String>,
+}
+
+#[tauri::command]
+fn world_artwork(mount: String) -> WebWorldArtwork {
+    let art = api::world_artwork(mount);
+    let uri = |bytes: Option<Vec<u8>>| {
+        bytes.map(|png| {
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png)
+            )
+        })
+    };
+    WebWorldArtwork {
+        mark: uri(art.mark),
+        hero: uri(art.hero),
+    }
+}
+
 #[tauri::command]
 fn client_dispatch(action: WebAction) -> WebClientView {
     api::dispatch(action.into()).into()
@@ -958,6 +986,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             client_current,
             client_dispatch,
+            world_artwork,
             summon_owned_window,
             summon_world_settings
         ])

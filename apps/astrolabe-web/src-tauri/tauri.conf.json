@@ -17,7 +17,7 @@
         "width": 640,
         "height": 720,
         "resizable": true,
-        "maximizable": true,
+        "maximizable": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "visible": true

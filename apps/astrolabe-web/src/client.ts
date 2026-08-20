@@ -319,6 +319,32 @@ export async function closeOwnedWindow(): Promise<void> {
   window.close();
 }
 
+/**
+ * The artwork one World ships, as data URIs. Not part of the view, and the
+ * omission is the core's design: artwork is a build constant that cannot
+ * change while the process runs, so a surface asks once per mount and this
+ * module caches the answer for the life of the window.
+ */
+export interface WorldArtwork {
+  mark: string | null;
+  hero: string | null;
+}
+
+const noArtwork: WorldArtwork = { mark: null, hero: null };
+const artworkCache = new Map<string, Promise<WorldArtwork>>();
+
+export function worldArtwork(mount: string): Promise<WorldArtwork> {
+  const cached = artworkCache.get(mount);
+  if (cached !== undefined) return cached;
+  // An unknown mount — or a host with no artwork command — answers with no
+  // artwork, not an error: the accent plate is a first-class face.
+  const asked = isTauri()
+    ? invoke<WorldArtwork>("world_artwork", { mount }).catch(() => noArtwork)
+    : Promise.resolve(noArtwork);
+  artworkCache.set(mount, asked);
+  return asked;
+}
+
 export const loadingClientView: ClientView = {
   loading: true,
   stale: { kind: "neverLoaded" },
@@ -478,7 +504,12 @@ export const fixtureClientView: ClientView = {
     version: null,
     tagline: null,
     accent: 0x5b8def,
-    people: [],
+    people: [
+      { name: "Ada", picture: null, presence: "online", agent: false, here: true },
+      { name: "Scribe", picture: null, presence: "away", agent: true, here: false },
+      { name: "Cole", picture: null, presence: null, agent: false, here: false },
+      { name: "Brin", picture: null, presence: "offline", agent: false, here: false },
+    ],
     update: null,
   }],
   heads: [],
