@@ -68,10 +68,22 @@ pub enum Storage {
     Encoding,
 }
 
+/// A residency probe that could not be taken is this Station's problem, and
+/// never an answer about the content.
+fn probed(answer: Result<bool, replica::content::residency::Failure>) -> Result<bool, Failure> {
+    answer.map_err(|_| Failure::Storage(Storage::Cache))
+}
+
 impl Failure {
     /// Whether fetching could change this answer.
     ///
     /// The question a demand-paged read asks before retrying.
+    ///
+    /// `Invalid` is deliberately not fetchable, though corrupt local bytes are
+    /// repairable in principle: the entry stays resident, so a fetch would
+    /// install beside it and the next read would find the same bad bytes. The
+    /// repair is evict-then-refetch, and evicting is a data-dropping act that
+    /// wants its own authorization rather than being a side effect of reading.
     pub fn fetchable(&self) -> bool {
         matches!(self, Failure::NotResident)
     }
@@ -323,7 +335,7 @@ impl ContentHost {
                 .cache
                 .release_content(&ingested.descriptor.content_nonce);
             let _ = self.cache.release_operation(&operation);
-            for (_, slot) in self.resident_entries(&ingested.descriptor) {
+            for (_, slot) in self.resident_entries(&ingested.descriptor)? {
                 let _ = self.cache.evict(&slot);
             }
             return Err(Failure::Storage(Storage::Replica));
@@ -355,14 +367,14 @@ impl ContentHost {
         // read path may use it: a Range request is about a span, and paying
         // chunk_count to answer a question about three chunks is how a 4 GiB
         // file makes every seek cost sixteen thousand existence checks.
-        let resident = self.resident_entries(&descriptor).len() as u32;
+        let resident = self.resident_entries(&descriptor)?.len() as u32;
         Ok(ContentStatus {
             content: *content,
             plaintext_len: descriptor.plaintext_len,
             chunk_count: descriptor.chunk_count,
             chunk_plaintext_len: descriptor.chunk_plaintext_len,
             resident_chunks: resident,
-            pinned: self.is_pinned(&descriptor),
+            pinned: self.is_pinned(&descriptor)?,
         })
     }
 
@@ -427,7 +439,7 @@ impl ContentHost {
         let mut spanned = Vec::with_capacity((last - first + 1) as usize);
         for index in first..=last {
             let slot = replica::content::chunk_slot(&descriptor, index);
-            if !self.cache.is_resident(&slot) {
+            if !probed(self.cache.is_resident(&slot))? {
                 return Err(Failure::NotResident);
             }
             spanned.push(slot);
@@ -456,7 +468,7 @@ impl ContentHost {
         (policy.authorize)(ContentAction::Pin(content))
             .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        for (_, entry) in self.resident_entries(&descriptor) {
+        for (_, entry) in self.resident_entries(&descriptor)? {
             self.cache
                 .pin(&entry)
                 .map_err(|_| Failure::Storage(Storage::Cache))?;
@@ -468,7 +480,7 @@ impl ContentHost {
         (policy.authorize)(ContentAction::Pin(content))
             .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        for (_, entry) in self.resident_entries(&descriptor) {
+        for (_, entry) in self.resident_entries(&descriptor)? {
             self.cache
                 .unpin(&entry)
                 .map_err(|_| Failure::Storage(Storage::Cache))?;
@@ -487,7 +499,7 @@ impl ContentHost {
         (policy.authorize)(ContentAction::RemoveLocal(content))
             .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        let entries = self.resident_entries(&descriptor);
+        let entries = self.resident_entries(&descriptor)?;
         self.cache
             .release_content(&descriptor.content_nonce)
             .map_err(|_| Failure::Storage(Storage::Cache))?;
@@ -550,15 +562,17 @@ impl ContentHost {
             // nothing" would have a fetcher cache that answer and stop asking.
             Err(other) => return Err(other),
         };
-        let mut answer: Vec<u32> = wanted
+        let mut answer: Vec<u32> = Vec::new();
+        for index in wanted
             .iter()
             .copied()
             .filter(|index| *index < descriptor.chunk_count)
-            .filter(|index| {
-                self.cache
-                    .is_resident(&replica::content::chunk_slot(&descriptor, *index))
-            })
-            .collect();
+        {
+            let slot = replica::content::chunk_slot(&descriptor, index);
+            if probed(self.cache.is_resident(&slot))? {
+                answer.push(index);
+            }
+        }
         answer.sort_unstable();
         answer.dedup();
         Ok(answer)
@@ -715,7 +729,7 @@ impl ContentHost {
             .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         Ok(self
-            .resident_entries(&descriptor)
+            .resident_entries(&descriptor)?
             .into_iter()
             .map(|(index, _)| index)
             .collect())
@@ -738,20 +752,27 @@ impl ContentHost {
     ///
     /// Presence is the answer here; the proof is checked when the bytes are
     /// actually used, by [`Self::chunk`] and by `open_resident_chunk`.
-    fn resident_entries(&self, descriptor: &ContentDescriptor) -> Vec<(u32, [u8; 32])> {
-        (0..descriptor.chunk_count)
-            .map(|index| (index, replica::content::chunk_slot(descriptor, index)))
-            .filter(|(_, slot)| self.cache.is_resident(slot))
-            .collect()
+    fn resident_entries(
+        &self,
+        descriptor: &ContentDescriptor,
+    ) -> Result<Vec<(u32, [u8; 32])>, Failure> {
+        let mut out = Vec::new();
+        for index in 0..descriptor.chunk_count {
+            let slot = replica::content::chunk_slot(descriptor, index);
+            if probed(self.cache.is_resident(&slot))? {
+                out.push((index, slot));
+            }
+        }
+        Ok(out)
     }
 
     /// Whether every resident chunk of this content is pinned.
     ///
     /// Pinning is per entry, so a content with no resident chunks is not
     /// pinned — there is nothing holding anything.
-    fn is_pinned(&self, descriptor: &ContentDescriptor) -> bool {
-        let entries = self.resident_entries(descriptor);
-        !entries.is_empty() && entries.iter().all(|(_, slot)| self.cache.is_pinned(slot))
+    fn is_pinned(&self, descriptor: &ContentDescriptor) -> Result<bool, Failure> {
+        let entries = self.resident_entries(descriptor)?;
+        Ok(!entries.is_empty() && entries.iter().all(|(_, slot)| self.cache.is_pinned(slot)))
     }
 }
 

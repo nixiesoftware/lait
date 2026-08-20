@@ -343,7 +343,10 @@ fn losing_a_resident_chunk_costs_that_chunk_and_nothing_more() {
             .join(data_encoding::HEXLOWER.encode(&entry)),
     )
     .unwrap();
-    assert!(!fx.cache.is_resident(&entry), "not advertisable without it");
+    assert!(
+        !fx.cache.is_resident(&entry).unwrap(),
+        "not advertisable without it"
+    );
     assert_eq!(
         open_resident_chunk(&out.descriptor, &key(), &fx.cache, &entry),
         Err(Invalid::NotResident)
@@ -474,7 +477,7 @@ fn unreferenced_content_is_swept_and_leaves_no_residue() {
     // And the residency behind it goes with a cache sweep.
     let cache = Residency::open(fx.cache.root(), 0).unwrap();
     cache.sweep().unwrap();
-    assert!(!cache.is_resident(&dropped.leases[0].entry));
+    assert!(!cache.is_resident(&dropped.leases[0].entry).unwrap());
 
     // The catalog is genuinely smaller after a reopen — no tombstone residue.
     drop(fx.replica);

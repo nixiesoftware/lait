@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use replica::content::{ContentDescriptor, ContentRef, Invalid as ContentInvalid};
 
-use crate::content_host::{ContentAction, ContentHost, ContentPolicy, Failure};
+use crate::content_host::{ContentAction, ContentHost, ContentPolicy, Failure, Storage};
 
 /// Verified plaintext, and where in the content it starts.
 ///
@@ -317,8 +317,10 @@ impl ContentCursor {
                 return Readiness::Refused(Failure::Bounds);
             };
             let slot = replica::content::chunk_slot(&self.descriptor, index);
-            if !self.host.cache().is_resident(&slot) {
-                return Readiness::Absent { chunk: index };
+            match self.host.cache().is_resident(&slot) {
+                Ok(true) => {}
+                Ok(false) => return Readiness::Absent { chunk: index },
+                Err(_) => return Readiness::Refused(Failure::Storage(Storage::Cache)),
             }
         }
         Readiness::Resident
@@ -355,8 +357,12 @@ impl ContentCursor {
         }
 
         let slot = replica::content::chunk_slot(&self.descriptor, index);
-        if !self.host.cache().is_resident(&slot) {
-            return self.ask(index);
+        match self.host.cache().is_resident(&slot) {
+            Ok(true) => {}
+            Ok(false) => return self.ask(index),
+            // A probe that could not be taken is this Station's problem, not an
+            // answer about the content — asking a peer would not mend it.
+            Err(_) => return Advance::Refused(Failure::Storage(Storage::Cache)),
         }
         self.hold(index, &slot);
         let plaintext = match replica::content::open_resident_chunk(

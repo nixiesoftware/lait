@@ -404,10 +404,18 @@ impl Residency {
     /// and it verifies before it publishes — an entry that exists was validated
     /// when it landed. This is a cheap check by design; [`Self::read`] is the
     /// one that re-verifies, and it is what actually serves bytes.
-    pub fn is_resident(&self, entry: &[u8; 32]) -> bool {
+    /// Whether these bytes are here.
+    ///
+    /// `Result` because `exists()` answers `false` for a directory it could not
+    /// read, and a Station that cannot probe its own cache would report holding
+    /// nothing — then refetch everything it already has. `held` refuses to
+    /// answer "nothing" on error for the same reason; this used not to.
+    pub fn is_resident(&self, entry: &[u8; 32]) -> Result<bool, Failure> {
         self.probes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.entry_path(entry).exists()
+        self.entry_path(entry)
+            .try_exists()
+            .map_err(|error| io_err(Operation::Read, error).into())
     }
 
     /// How many times [`Self::is_resident`] has been asked, since this cache

@@ -374,7 +374,7 @@ impl Fetcher {
             .descriptor_of(&policy, content)
             .map_err(|_| Failure::UnknownContent)?;
 
-        let missing = self.missing_among(&descriptor, chunks);
+        let missing = self.missing_among(&descriptor, chunks)?;
         if missing.is_empty() {
             // Already here. The second open of a content costs no wire at all,
             // which is the point.
@@ -490,7 +490,7 @@ impl Fetcher {
         }
 
         handle.advance(TransferState::Verifying, Instant::now());
-        let still_missing = self.missing_among(&descriptor, &missing);
+        let still_missing = self.missing_among(&descriptor, &missing)?;
         if still_missing.is_empty() {
             handle.succeed(Instant::now());
             Ok(())
@@ -588,16 +588,28 @@ impl Fetcher {
     /// fact about this disk, and routing the question through the provider
     /// surface would demand `content.serve` of a Station that is only
     /// downloading.
-    fn missing_among(&self, descriptor: &ContentDescriptor, chunks: &[u32]) -> Vec<u32> {
+    /// A probe that could not be taken fails the fetch rather than guessing.
+    /// Calling it missing refetches bytes already here; calling it present
+    /// skips a chunk the caller needs.
+    fn missing_among(
+        &self,
+        descriptor: &ContentDescriptor,
+        chunks: &[u32],
+    ) -> Result<Vec<u32>, Failure> {
         let cache = self.host.cache();
-        let mut wanted: BTreeSet<u32> = chunks
+        let mut missing = Vec::new();
+        for index in chunks
             .iter()
             .copied()
             .filter(|index| *index < descriptor.chunk_count)
-            .collect();
-        wanted
-            .retain(|index| !cache.is_resident(&replica::content::chunk_slot(descriptor, *index)));
-        wanted.into_iter().collect()
+            .collect::<BTreeSet<u32>>()
+        {
+            let slot = replica::content::chunk_slot(descriptor, index);
+            if !cache.is_resident(&slot).map_err(|_| Failure::Storage)? {
+                missing.push(index);
+            }
+        }
+        Ok(missing)
     }
 
     /// Refuse before staging rather than after moving bytes.

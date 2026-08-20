@@ -486,7 +486,7 @@ fn the_ingest_hold_and_the_content_hold_hand_over() {
 
     cache.sweep().unwrap();
     assert!(
-        cache.is_resident(&out.leases[0].entry),
+        cache.is_resident(&out.leases[0].entry).unwrap(),
         "the ingest holds it"
     );
 
@@ -497,7 +497,7 @@ fn the_ingest_hold_and_the_content_hold_hand_over() {
     cache.release_operation(&[7u8; 16]).unwrap();
     cache.sweep().unwrap();
     assert!(
-        cache.is_resident(&out.leases[0].entry),
+        cache.is_resident(&out.leases[0].entry).unwrap(),
         "the content hold outlives the ingest that created it"
     );
 
@@ -509,14 +509,14 @@ fn the_ingest_hold_and_the_content_hold_hand_over() {
         .unwrap();
     cache.sweep().unwrap();
     assert!(
-        cache.is_resident(&out.leases[0].entry),
+        cache.is_resident(&out.leases[0].entry).unwrap(),
         "an operation release cannot drop a content hold"
     );
     cache
         .release_content(&out.descriptor.content_nonce)
         .unwrap();
     cache.sweep().unwrap();
-    assert!(!cache.is_resident(&out.leases[0].entry));
+    assert!(!cache.is_resident(&out.leases[0].entry).unwrap());
 }
 
 #[test]
