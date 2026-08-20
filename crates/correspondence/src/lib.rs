@@ -83,12 +83,13 @@ use serde::{Deserialize, Serialize};
 pub mod letter;
 pub mod mailbox;
 pub mod mem;
+pub mod plane;
 pub mod post;
 pub mod watch;
 
 pub use letter::{Content, Letter};
 pub use mailbox::{Mailbox, Received};
-pub use mem::MemCarrier;
+pub use mem::{MemCarrier, SharedMem};
 pub use post::PostCarrier;
 
 /// The largest sealed envelope this plane will carry.

@@ -2095,6 +2095,18 @@ pub struct BookSuggestionView {
     pub handles: Vec<String>,
 }
 
+/// What the daemon answers about this identity's correspondence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReachView {
+    /// The artifact a person hands somebody so they can reach this identity.
+    /// `None` until something has been published.
+    pub announcement: Option<String>,
+    /// This identity's own address on the plane.
+    pub profile: String,
+    /// The correspondents it holds, as address spellings.
+    pub correspondents: Vec<String>,
+}
+
 /// The identity's book, plus how far legacy alias import has got.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookView {
@@ -2184,6 +2196,10 @@ pub enum Response {
         entries: Vec<MemberLogEntry>,
     },
     /// Identity-scoped address book (reply to the `Book*` requests).
+    /// This identity's reach: the artifact to hand over, its own address, and
+    /// the correspondents it holds. One shape answers every reach request, so a
+    /// caller never asks twice to see what a write changed.
+    Reach(Box<ReachView>),
     Book(Box<BookView>),
     /// Scoped handle decoration. Never a Card-existence bit for a handle
     /// outside the named Orbit's non-placing snapshot.

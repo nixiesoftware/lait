@@ -585,3 +585,68 @@ mod tests {
 
     use crate::{MAX_RETENTION, MAX_SEALED};
 }
+
+/// One in-memory carrier, shared by everybody carrying through it.
+///
+/// The Post is a place two people both deposit into; a `MemCarrier` owned by one
+/// of them is not that. This is the same store behind a handle, so two planes
+/// can correspond with no service anywhere — which is what the contractor seam
+/// exists to make possible, and the only way this plane stays testable without
+/// standing something up.
+#[derive(Debug, Clone, Default)]
+pub struct SharedMem(std::sync::Arc<std::sync::Mutex<MemCarrier>>);
+
+impl SharedMem {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Answer as if the carrier were unreachable, from now on.
+    pub fn seal_off(&self, why: impl Into<String>) {
+        if let Ok(mut held) = self.0.lock() {
+            held.seal_off(why);
+        }
+    }
+}
+
+impl Carrier for SharedMem {
+    fn deposit(&mut self, from: &Egress<'_>, sealed: &Sealed, now: u64) -> Result<String, Refused> {
+        match self.0.lock() {
+            Ok(mut held) => held.deposit(from, sealed, now),
+            Err(_) => Err(Refused::Unreachable("the carrier is poisoned".into())),
+        }
+    }
+
+    fn collect(&mut self, device: &DeviceId, now: u64) -> Missed {
+        match self.0.lock() {
+            Ok(mut held) => held.collect(device, now),
+            Err(_) => Missed::Unasked("the carrier is poisoned".into()),
+        }
+    }
+
+    fn acknowledge(
+        &mut self,
+        device: &DeviceId,
+        ids: &[String],
+        now: u64,
+    ) -> Result<usize, Refused> {
+        match self.0.lock() {
+            Ok(mut held) => held.acknowledge(device, ids, now),
+            Err(_) => Err(Refused::Unreachable("the carrier is poisoned".into())),
+        }
+    }
+
+    fn block(
+        &mut self,
+        by: &Egress<'_>,
+        sender: &DeviceId,
+        blocked: bool,
+        now: u64,
+    ) -> Result<(), Refused> {
+        match self.0.lock() {
+            Ok(mut held) => held.block(by, sender, blocked, now),
+            Err(_) => Err(Refused::Unreachable("the carrier is poisoned".into())),
+        }
+    }
+}
