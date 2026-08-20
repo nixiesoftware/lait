@@ -134,7 +134,13 @@ function ChatBody({ view, facts, active, dispatch }: {
   const [, bump] = useState(0);
 
   if (facts === null || active === null) {
-    return <div className="chat-empty">Open a conversation from the address book.</div>;
+    // Nothing open is the moment reach is worth offering: a person with no
+    // correspondents cannot open a conversation, so a bare "open one" is a
+    // dead end for exactly the person who needs this most.
+    return <div className="chat-empty">
+      <p>Open a conversation from the address book.</p>
+      <ReachPanel view={view} dispatch={dispatch} />
+    </div>;
   }
   const conversation = facts.conversations.find((row) => row.peerId === active);
   if (conversation === undefined) return <div className="chat-empty" />;
@@ -161,7 +167,7 @@ function ChatBody({ view, facts, active, dispatch }: {
       <button className="danger-button" disabled={view.inFlight.includes(actionKey.blockSender(active))}
         onClick={() => void dispatch({ type: "blockSender", person: active })}>Block</button>
     </div>
-    <Transcript conversation={conversation} />
+    <Transcript conversation={conversation} view={view} dispatch={dispatch} />
     <div className="chat-composer">
       <button className="rail-button" aria-label="Attach a file">📎</button>
       <button className="rail-button" aria-label="Emoji">🙂</button>
@@ -180,7 +186,11 @@ function ChatBody({ view, facts, active, dispatch }: {
 }
 
 /** The messages, grouped by sender and parted by day and long quiet. */
-function Transcript({ conversation }: { conversation: Conversation }) {
+function Transcript({ conversation, view, dispatch }: {
+  conversation: Conversation;
+  view: ClientView;
+  dispatch: Dispatch;
+}) {
   if (conversation.messages.length === 0) {
     return <div className="chat-empty">No messages yet.</div>;
   }
@@ -190,7 +200,7 @@ function Transcript({ conversation }: { conversation: Conversation }) {
       if (item.kind === "day") return <div className="chat-day" key={index}><span>{item.label}</span></div>;
       if (item.kind === "gap") return <hr className="chat-gap" key={index} />;
       return <MessageRow key={index} message={item.message} peerName={conversation.peerName}
-        groupStarts={item.groupStarts} groupEnds={item.groupEnds} />;
+        groupStarts={item.groupStarts} groupEnds={item.groupEnds} view={view} dispatch={dispatch} />;
     })}
   </div>;
 }
@@ -200,13 +210,14 @@ function Transcript({ conversation }: { conversation: Conversation }) {
  * with the sender's name+time above the first of a group and their face below
  * the last.
  */
-function MessageRow({ message, peerName, groupStarts, groupEnds }: {
+function MessageRow({ message, peerName, groupStarts, groupEnds, view, dispatch }: {
   message: ChatMessage; peerName: string; groupStarts: boolean; groupEnds: boolean;
+  view: ClientView; dispatch: Dispatch;
 }) {
   const at = atOf(message);
   if (message.mine) {
     return <div className="chat-row mine" data-group-ends={groupEnds || undefined}>
-      <MessageComponent message={message} />
+      <MessageComponent message={message} view={view} dispatch={dispatch} />
       {groupEnds && <small className="chat-time">{timeLabel(at)}</small>}
     </div>;
   }
@@ -214,7 +225,7 @@ function MessageRow({ message, peerName, groupStarts, groupEnds }: {
     <span className="chat-gutter">{groupEnds && <FacePlate picture={null} name={peerName} size={28} />}</span>
     <div className="chat-column">
       {groupStarts && <span className="chat-byline"><strong>{peerName}</strong><small>{timeLabel(at)}</small></span>}
-      <MessageComponent message={message} />
+      <MessageComponent message={message} view={view} dispatch={dispatch} />
     </div>
   </div>;
 }
@@ -223,9 +234,13 @@ function MessageRow({ message, peerName, groupStarts, groupEnds }: {
  * The seam where a message kind chooses its component. A new kind adds a case
  * here and its own widget; nothing else in the chat changes.
  */
-function MessageComponent({ message }: { message: ChatMessage }) {
+function MessageComponent({ message, view, dispatch }: {
+  message: ChatMessage;
+  view: ClientView;
+  dispatch: Dispatch;
+}) {
   switch (message.kind) {
-    case "invitation": return <InvitationCard message={message} />;
+    case "invitation": return <InvitationCard message={message} view={view} dispatch={dispatch} />;
     default: return <TextBubble message={message} />;
   }
 }
@@ -241,16 +256,81 @@ function TextBubble({ message }: { message: ChatMessage }) {
 /**
  * An invitation to a Space — a widget acted on, not read. The chatbot model:
  * a message that is a card with its own affordances.
+ *
+ * Opening it is the same act as following an invite link: the coordinates
+ * verify against their own Space, so delivery was never admission. One this
+ * identity *sent* carries no deposit id, and there is nothing there to accept —
+ * which is why the control is absent rather than present and dead.
  */
-function InvitationCard({ message }: { message: ChatMessage }) {
+function InvitationCard({ message, view, dispatch }: {
+  message: ChatMessage;
+  view: ClientView;
+  dispatch: Dispatch;
+}) {
+  const id = message.id;
+  const opening = id !== null && view.inFlight.includes(actionKey.openInvitation(id));
   return <div className={message.mine ? "invitation-card mine" : "invitation-card"}>
     <strong>✉ Invitation to a Space</strong>
-    <p>Signed by the sender. Opening it comes next.</p>
-    <span className="button-row">
-      <button className="primary-button">Open</button>
-      <button className="quiet-button">Decline</button>
-    </span>
+    <p>Signed by the sender. Opening it enters the Space it names.</p>
+    {!message.mine && id !== null && <span className="button-row">
+      <button
+        className="primary-button"
+        disabled={opening}
+        onClick={() => dispatch({ type: "openInvitation", message: id })}
+      >{opening ? "Opening…" : "Open"}</button>
+    </span>}
   </div>;
+}
+
+/**
+ * Swap once, over any channel already shared. Yours names your devices; theirs
+ * names theirs.
+ *
+ * Sharing acts on nobody — showing a friend code is not befriending anyone — so
+ * it is `myReach` being absent that makes this a control rather than a render.
+ * Adding is the half that creates a relationship, which is why it is named for
+ * the person and not for the artifact.
+ */
+export function ReachPanel({ view, dispatch }: {
+  view: ClientView;
+  dispatch: Dispatch;
+}) {
+  const [draft, setDraft] = useState("");
+  const card = view.correspondence?.myReach ?? null;
+  const sharing = view.inFlight.includes(actionKey.shareReach);
+  const adding = view.inFlight.includes(actionKey.addCorrespondent);
+
+  const add = () => {
+    const pasted = draft.trim();
+    if (pasted === "") return;
+    dispatch({ type: "addCorrespondent", announcement: pasted });
+    setDraft("");
+  };
+
+  return <section className="reach-panel">
+    <h3>Reach someone new</h3>
+    <p>
+      Swap these once, over any channel you already share. Yours names your
+      devices; theirs names theirs.
+    </p>
+    {card === null
+      ? <button
+          className="secondary-button"
+          disabled={sharing}
+          onClick={() => dispatch({ type: "shareReach" })}
+        >{sharing ? "Publishing…" : "Show how to reach me"}</button>
+      : <textarea className="reach-card" readOnly rows={4} value={card} />}
+    <textarea
+      className="reach-paste"
+      rows={3}
+      placeholder="Paste theirs"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+    />
+    <button className="primary-button" disabled={adding} onClick={add}>
+      {adding ? "Adding…" : "Add them"}
+    </button>
+  </section>;
 }
 
 function nameOf(facts: CorrespondenceFacts, id: string): string {

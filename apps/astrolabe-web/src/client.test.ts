@@ -31,6 +31,19 @@ describe("client transport", () => {
     expect(keyFor({ type: "displayAssignmentPut", device: "receiver", orbit: "space", world: "issues", surface: "board", inputJson: "{}", theme: "dark", staleAfterMs: 60_000, onStale: "keepWithNativeBanner", syncGroup: null, syncMode: "stayInSync", staticDelayMs: 0, expiresAtUnixMs: null })).toBe("display.assignment.put:receiver");
   });
 
+  // These four are spelled in `Action::key` in tools/astrolabe/src/runtime.rs.
+  // A key that disagrees does not fail anywhere — it just never matches
+  // `inFlight`, so the control stays live through its own action and can be
+  // pressed twice. That is a silent defect, so the spelling is pinned.
+  it("spells the reach and invitation keys the way the core does", () => {
+    expect(keyFor({ type: "shareReach" })).toBe("reach.share");
+    expect(keyFor({ type: "addCorrespondent", announcement: "…" })).toBe("reach.add");
+    expect(keyFor({ type: "openInvitation", message: "dep_7" })).toBe("invitation.open:dep_7");
+    expect(keyFor({ type: "sendInvitation", to: "peer_ada", link: "lait://…" })).toBe(
+      "invitation.send:peer_ada",
+    );
+  });
+
   it("returns the in-flight snapshot before publishing the later completion", async () => {
     vi.useFakeTimers();
     const transport = createFixtureTransport(fixtureClientView);

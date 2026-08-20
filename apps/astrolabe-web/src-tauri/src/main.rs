@@ -48,6 +48,13 @@ struct WebClientView {
 #[serde(rename_all = "camelCase")]
 struct WebCorrespondenceFacts {
     my_device: Option<String>,
+    /// What this identity hands somebody so they can reach it, rendered for
+    /// copying. `None` until something has been published. Not a Card — that is
+    /// the address book's and asserts nothing — and not an address, which is
+    /// the directory's and is short and spoken.
+    my_reach: Option<String>,
+    /// Which conversation is this identity's own, when the backend has one.
+    me: Option<String>,
     contacts: Vec<WebContact>,
     conversations: Vec<WebConversation>,
     open_tabs: Vec<String>,
@@ -81,6 +88,11 @@ struct WebChatMessage {
     mine: bool,
     kind: String,
     body: Option<String>,
+    /// For an invitation, the link body it carries; `None` for a message.
+    invitation: Option<String>,
+    /// The deposit id for a received letter; `None` for one this identity sent.
+    /// An invitation is acted on by naming this.
+    id: Option<String>,
     sent_at: u64,
     from_device: String,
     provenance_agrees: bool,
@@ -651,6 +663,8 @@ impl From<ClientView> for WebClientView {
                     .collect(),
             }),
             correspondence: view.correspondence.map(|corr| WebCorrespondenceFacts {
+                my_reach: corr.my_reach.clone(),
+                me: corr.me.clone(),
                 my_device: corr.my_device,
                 contacts: corr
                     .contacts
@@ -676,6 +690,8 @@ impl From<ClientView> for WebClientView {
                             .messages
                             .into_iter()
                             .map(|message| WebChatMessage {
+                                invitation: message.invitation.clone(),
+                                id: message.id.clone(),
                                 mine: message.mine,
                                 kind: message.kind,
                                 body: message.body,
@@ -865,6 +881,20 @@ enum WebAction {
     CollectMail,
     BlockSender { person: String },
     AcceptContact { person: String },
+    /// Publish this identity's reach so it can be handed to somebody. Acts on
+    /// nobody — showing a friend code is not befriending anyone.
+    ShareReach,
+    /// Take a correspondent in, by the announcement they handed over. The one
+    /// of the pair that creates a relationship, which is why it is named for
+    /// the person rather than for the artifact.
+    AddCorrespondent { announcement: String },
+    /// Enter the Space an arriving invitation names. `message` is its deposit
+    /// id; the coordinates verify against their own Space, so accepting is the
+    /// same act as following an invite link — delivery was never admission.
+    OpenInvitation { message: String },
+    /// Carry an invitation this identity already holds to a correspondent.
+    /// Minting one is the Space's authority and stays there.
+    SendInvitation { to: String, link: String },
     OpenConversation { person: String },
     FocusConversation { person: String },
     CloseConversation { person: String },
@@ -1015,6 +1045,12 @@ impl From<WebAction> for ActionRequest {
             WebAction::CollectMail => Self::CollectMail,
             WebAction::BlockSender { person } => Self::BlockSender { person },
             WebAction::AcceptContact { person } => Self::AcceptContact { person },
+            WebAction::ShareReach => Self::ShareReach,
+            WebAction::AddCorrespondent { announcement } => {
+                Self::AddCorrespondent { announcement }
+            }
+            WebAction::OpenInvitation { message } => Self::OpenInvitation { message },
+            WebAction::SendInvitation { to, link } => Self::SendInvitation { to, link },
             WebAction::OpenConversation { person } => Self::OpenConversation { person },
             WebAction::FocusConversation { person } => Self::FocusConversation { person },
             WebAction::CloseConversation { person } => Self::CloseConversation { person },

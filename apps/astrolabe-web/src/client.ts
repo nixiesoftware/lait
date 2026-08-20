@@ -98,6 +98,17 @@ export interface McpBinding { path: string; detail: string; note: string | null;
 export interface CorrespondenceFacts {
   /** This identity's own device id on the plane, or null until it is known. */
   myDevice: string | null;
+  /**
+   * What this identity hands somebody so they can reach it, rendered for
+   * copying. `null` until something has been published — which is why the
+   * control that publishes it is a control and not a render.
+   *
+   * Not a Card (that is the address book's, and asserts nothing) and not an
+   * address (that is the directory's, and is short and spoken).
+   */
+  myReach: string | null;
+  /** Which conversation is this identity's own, when the backend has one. */
+  me: string | null;
   contacts: Contact[];
   conversations: Conversation[];
   openTabs: string[];
@@ -121,6 +132,14 @@ export interface ChatMessage {
   /** `message` (text) or `invitation` — each drawn with its own component. */
   kind: string;
   body: string | null;
+  /** For an invitation, the link body it carries; `null` for a message. */
+  invitation: string | null;
+  /**
+   * The deposit id for a received letter; `null` for one this identity sent.
+   * An invitation is acted on by naming this, so a card without an id is one
+   * that can be read and not accepted.
+   */
+  id: string | null;
   /** When it was written, unix seconds. */
   sentAt: number;
   fromDevice: string;
@@ -202,6 +221,9 @@ export type ClientAction =
   | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
+  | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
+  | { type: "openInvitation"; message: string }
+  | { type: "sendInvitation"; to: string; link: string }
   | { type: "blockSender"; person: string } | { type: "acceptContact"; person: string }
   | { type: "openConversation"; person: string } | { type: "focusConversation"; person: string }
   | { type: "closeConversation"; person: string }
@@ -240,6 +262,13 @@ export const actionKey = {
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
   sendMessage: (to: string) => `correspondence.send:${to}`,
   collectMail: "correspondence.collect",
+  // Spelled to match `Action::key` in tools/astrolabe/src/runtime.rs. A key that
+  // disagrees does not fail — it silently never matches `inFlight`, so the
+  // control stays live through its own action and can be pressed twice.
+  shareReach: "reach.share",
+  addCorrespondent: "reach.add",
+  openInvitation: (message: string) => `invitation.open:${message}`,
+  sendInvitation: (to: string) => `invitation.send:${to}`,
   blockSender: (person: string) => `correspondence.block:${person}`,
   acceptContact: (person: string) => `correspondence.accept:${person}`,
   openConversation: (person: string) => `correspondence.open:${person}`,
@@ -284,6 +313,10 @@ export function keyFor(action: ClientAction): string {
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
     case "sendMessage": return actionKey.sendMessage(action.to);
+    case "shareReach": return actionKey.shareReach;
+    case "addCorrespondent": return actionKey.addCorrespondent;
+    case "openInvitation": return actionKey.openInvitation(action.message);
+    case "sendInvitation": return actionKey.sendInvitation(action.to);
     case "collectMail": return actionKey.collectMail;
     case "blockSender": return actionKey.blockSender(action.person);
     case "acceptContact": return actionKey.acceptContact(action.person);
@@ -638,7 +671,7 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
               ? {
                   ...conversation,
                   messages: [...conversation.messages, {
-                    mine: true, kind: "message", body: action.body,
+                    mine: true, invitation: null, id: null, kind: "message", body: action.body,
                     sentAt: Math.floor(Date.now() / 1000), fromDevice: "dev_this", provenanceAgrees: true,
                   }],
                 }
@@ -840,6 +873,8 @@ export const fixtureClientView: ClientView = {
   mcp: null,
   correspondence: {
     myDevice: "dev_this",
+    myReach: null,
+    me: null,
     contacts: [
       { id: "peer_ada", name: "Ada", devices: ["dev_ada"], added: true, isAgent: false, parentId: null, parentName: null, unread: 1 },
       { id: "peer_scribe", name: "Scribe", devices: ["dev_scribe"], added: true, isAgent: true, parentId: "peer_ada", parentName: "Ada", unread: 0 },
@@ -849,10 +884,10 @@ export const fixtureClientView: ClientView = {
       peerId: "peer_ada",
       peerName: "Ada",
       messages: [
-        { mine: false, kind: "message", body: "The workshop notes are in.", sentAt: 1_755_465_600, fromDevice: "dev_ada", provenanceAgrees: true },
-        { mine: true, kind: "message", body: "Reading them now.", sentAt: 1_755_465_720, fromDevice: "dev_this", provenanceAgrees: true },
-        { mine: false, kind: "invitation", body: null, sentAt: 1_755_552_000, fromDevice: "dev_ada", provenanceAgrees: true },
-        { mine: false, kind: "message", body: "Sent you the Space invite.", sentAt: 1_755_552_060, fromDevice: "dev_ada_phone", provenanceAgrees: false },
+        { mine: false, invitation: null, id: null, kind: "message", body: "The workshop notes are in.", sentAt: 1_755_465_600, fromDevice: "dev_ada", provenanceAgrees: true },
+        { mine: true, invitation: null, id: null, kind: "message", body: "Reading them now.", sentAt: 1_755_465_720, fromDevice: "dev_this", provenanceAgrees: true },
+        { mine: false, invitation: null, id: null, kind: "invitation", body: null, sentAt: 1_755_552_000, fromDevice: "dev_ada", provenanceAgrees: true },
+        { mine: false, invitation: null, id: null, kind: "message", body: "Sent you the Space invite.", sentAt: 1_755_552_060, fromDevice: "dev_ada_phone", provenanceAgrees: false },
       ],
     }],
     // Pre-opened in the fixture so the dev chat window has a conversation to

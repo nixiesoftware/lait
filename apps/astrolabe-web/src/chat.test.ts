@@ -5,7 +5,7 @@ import type { ChatMessage } from "./client";
 
 const at = (iso: string): number => Math.floor(new Date(iso).getTime() / 1000);
 const message = (sentAt: number, mine: boolean): ChatMessage =>
-  ({ mine, kind: "message", body: "hi", sentAt, fromDevice: "dev", provenanceAgrees: true });
+  ({ mine, kind: "message", body: "hi", invitation: null, id: null, sentAt, fromDevice: "dev", provenanceAgrees: true });
 
 const shape = (items: TranscriptItem[]) => items.map((item) =>
   item.kind === "message" ? `msg:${item.groupStarts ? "S" : "-"}${item.groupEnds ? "E" : "-"}` : item.kind);

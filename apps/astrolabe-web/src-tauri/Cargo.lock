@@ -1177,6 +1177,7 @@ dependencies = [
 name = "correspondence"
 version = "0.7.8"
 dependencies = [
+ "addressbook",
  "blake3",
  "data-encoding",
  "getrandom 0.3.4",
@@ -4434,6 +4435,7 @@ dependencies = [
  "blake3",
  "bytes",
  "comms",
+ "correspondence",
  "data-encoding",
  "directories",
  "display-protocol",
@@ -4445,6 +4447,7 @@ dependencies = [
  "hyper-util",
  "include_dir",
  "interprocess",
+ "lait-directory",
  "lait-issues",
  "lait-issues-app",
  "lait-signage",
@@ -4478,6 +4481,23 @@ dependencies = [
  "windows-sys 0.61.2",
  "world-interface",
  "zip",
+]
+
+[[package]]
+name = "lait-directory"
+version = "0.7.8"
+dependencies = [
+ "addressbook",
+ "anyhow",
+ "axum",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "mechanics",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]
@@ -4529,6 +4549,7 @@ dependencies = [
  "blake3",
  "data-encoding",
  "getrandom 0.3.4",
+ "lait-directory",
  "mechanics",
  "serde",
  "serde_json",
@@ -4542,12 +4563,15 @@ name = "lait-signage"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "data-encoding",
  "mechanics",
+ "register",
  "replica",
  "runtime",
  "schedule",
  "serde",
  "serde_json",
+ "world-interface",
 ]
 
 [[package]]
@@ -6731,6 +6755,13 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "register"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "replica"
