@@ -37,7 +37,7 @@ const GENESIS_EPOCH: u64 = 1;
 
 /// Why a plane operation did not apply.
 #[derive(Debug)]
-pub enum ReachError {
+pub enum Failure {
     /// The plane needs at least two device seeds to found a profile — a device
     /// set is assembled by mutual link, and a single device cannot link to
     /// itself.
@@ -58,7 +58,7 @@ pub enum ReachError {
     Egress(String),
 }
 
-impl std::fmt::Display for ReachError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooFewDevices => write!(f, "a profile needs two devices to be founded"),
@@ -71,7 +71,7 @@ impl std::fmt::Display for ReachError {
     }
 }
 
-impl From<registry::Failure> for ReachError {
+impl From<registry::Failure> for Failure {
     fn from(error: registry::Failure) -> Self {
         Self::Kinship(error)
     }
@@ -167,7 +167,7 @@ impl ReachPlane {
     ///
     /// `_now` is reserved: the genesis carries a fixed epoch today, and the
     /// daemon-backed path will stamp it from the wall clock.
-    pub fn found(seeds: Vec<[u8; 32]>, now: u64) -> Result<Self, ReachError> {
+    pub fn found(seeds: Vec<[u8; 32]>, now: u64) -> Result<Self, Failure> {
         Self::restore(seeds, None, now)
     }
 
@@ -181,15 +181,15 @@ impl ReachPlane {
         seeds: Vec<[u8; 32]>,
         state: Option<addressbook::ReachState>,
         _now: u64,
-    ) -> Result<Self, ReachError> {
+    ) -> Result<Self, Failure> {
         if seeds.len() < 2 {
-            return Err(ReachError::TooFewDevices);
+            return Err(Failure::TooFewDevices);
         }
         // Named rather than indexed: the length check above is what makes the
         // pair present, and a bare index asks the reader to hold that in their
         // head at every later edit.
         let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
-            return Err(ReachError::TooFewDevices);
+            return Err(Failure::TooFewDevices);
         };
         let (first, second) = (*first, *second);
         // The nonce and epoch are fixed, and that is load-bearing: the profile
@@ -198,7 +198,7 @@ impl ReachPlane {
         // naming them. Changing either constant invalidates every issued
         // address in existence.
         let genesis = DeviceLink::seal(&first, &second, GENESIS_NONCE, GENESIS_EPOCH)
-            .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
         let mut sent = std::collections::BTreeMap::new();
         let mut address = None;
         let (mut registry, epoch, canonical) = match state {
@@ -221,7 +221,7 @@ impl ReachPlane {
                 GENESIS_NONCE,
                 GENESIS_EPOCH.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
             )
-            .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
             registry.extend(&profile, Entry::Link(link))?;
         }
 
@@ -234,7 +234,7 @@ impl ReachPlane {
             // different key than the state recorded, silently.
             canonical: {
                 if canonical >= seeds.len() {
-                    return Err(ReachError::NotReachable);
+                    return Err(Failure::NotReachable);
                 }
                 canonical
             },
@@ -339,7 +339,7 @@ impl ReachPlane {
         &mut self,
         audience: Audience,
         reader: &Standing,
-    ) -> Result<Announcement, ReachError> {
+    ) -> Result<Announcement, Failure> {
         self.epoch = self.epoch.saturating_add(1);
         // Derived from the epoch rather than sampled, so a republication is
         // reproducible from durable state alone. It carries 8 bits and repeats
@@ -393,7 +393,7 @@ impl ReachPlane {
         &mut self,
         announcement: Announcement,
         reader: &Standing,
-    ) -> Result<ProfileId, ReachError> {
+    ) -> Result<ProfileId, Failure> {
         Ok(self
             .registry
             .absorb(announcement.projection, &announcement.genesis, reader)?)
@@ -457,12 +457,12 @@ impl ReachPlane {
     ///
     /// The profile is unchanged — it is the hash of a genesis link that names no
     /// primary. Refuses a device this identity does not hold the seed for.
-    pub fn make_canonical(&mut self, device: &DeviceId) -> Result<(), ReachError> {
+    pub fn make_canonical(&mut self, device: &DeviceId) -> Result<(), Failure> {
         let at = self
             .seeds
             .iter()
             .position(|seed| &device_from_seed(seed) == device)
-            .ok_or(ReachError::NotReachable)?;
+            .ok_or(Failure::NotReachable)?;
         self.canonical = at;
         Ok(())
     }
@@ -489,7 +489,7 @@ impl ReachPlane {
         recipient: &ProfileId,
         body: &str,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         self.send_content(
             carrier,
             recipient,
@@ -508,7 +508,7 @@ impl ReachPlane {
         recipient: &ProfileId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         let remembered = match &content {
             Content::Message { body } => Some(addressbook::reach_store::Sent {
                 at: now,
@@ -538,7 +538,7 @@ impl ReachPlane {
         recipient: &ProfileId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         let mut carrier = contractor.carrier_for(&self.canonical_seed());
         self.send_content(&mut *carrier, recipient, content, now)
     }
@@ -579,9 +579,9 @@ impl ReachPlane {
         recipient: &ProfileId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
-        let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
-        let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
+    ) -> Result<String, Failure> {
+        let devices = self.resolve(recipient).ok_or(Failure::NotReachable)?;
+        let addressed = devices.first().ok_or(Failure::NotReachable)?.clone();
         self.send_addressed(carrier, recipient, &addressed, content, now)
     }
 
@@ -598,21 +598,21 @@ impl ReachPlane {
         addressed: &DeviceId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
-        let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
+    ) -> Result<String, Failure> {
+        let devices = self.resolve(recipient).ok_or(Failure::NotReachable)?;
         if !devices.contains(addressed) {
-            return Err(ReachError::NotReachable);
+            return Err(Failure::NotReachable);
         }
         let letter = Letter::compose(&self.canonical_seed(), content, now);
         let sealed = letter
             .seal_to_devices(&devices, addressed, now.saturating_add(RETENTION))
-            .map_err(ReachError::Seal)?;
+            .map_err(Failure::Seal)?;
         let plane = actor::replay(&self.egress_space, &self.egress_events);
         let witness = egress::authorize(&plane, &self.egress_actor, &self.canonical_device())
-            .map_err(|refused| ReachError::Egress(refused.to_string()))?;
+            .map_err(|refused| Failure::Egress(refused.to_string()))?;
         carrier
             .deposit(&witness, &sealed, now)
-            .map_err(ReachError::Carrier)
+            .map_err(Failure::Carrier)
     }
 
     /// Collect on exactly one device, with the seed that opens for it — what a
@@ -752,7 +752,7 @@ pub struct PostReach {
 
 impl PostReach {
     /// Stand up the plane from this identity's device seeds, pointed at a Post.
-    pub fn found(seeds: Vec<[u8; 32]>, base: String, now: u64) -> Result<Self, ReachError> {
+    pub fn found(seeds: Vec<[u8; 32]>, base: String, now: u64) -> Result<Self, Failure> {
         Ok(Self {
             plane: ReachPlane::found(seeds, now)?,
             base,
@@ -783,7 +783,7 @@ impl PostReach {
     /// Addressed at the primary device — the same device the egress authorizes
     /// and the same one `collect` fetches on — so signer, sender, and reader all
     /// agree under the hosted carrier's custody fence.
-    pub fn send_self(&self, body: &str, now: u64) -> Result<String, ReachError> {
+    pub fn send_self(&self, body: &str, now: u64) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
         let seed = self.plane.canonical_seed();
         let primary = self.plane.canonical_device();
@@ -806,7 +806,7 @@ impl PostReach {
         state: Option<addressbook::ReachState>,
         base: String,
         now: u64,
-    ) -> Result<Self, ReachError> {
+    ) -> Result<Self, Failure> {
         Ok(Self {
             plane: ReachPlane::restore(seeds, state, now)?,
             base,
@@ -825,7 +825,7 @@ impl PostReach {
         &mut self,
         audience: Audience,
         reader: &Standing,
-    ) -> Result<Announcement, ReachError> {
+    ) -> Result<Announcement, Failure> {
         self.plane.announce(audience, reader)
     }
 
@@ -834,7 +834,7 @@ impl PostReach {
         &mut self,
         announcement: Announcement,
         reader: &Standing,
-    ) -> Result<ProfileId, ReachError> {
+    ) -> Result<ProfileId, Failure> {
         self.plane.learn(announcement, reader)
     }
 
@@ -894,7 +894,7 @@ impl PostReach {
         recipient: &ProfileId,
         body: &str,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
         let mut carrier =
             PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
@@ -911,13 +911,10 @@ impl PostReach {
         recipient: &ProfileId,
         coordinates: Vec<u8>,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
-        let devices = self
-            .plane
-            .resolve(recipient)
-            .ok_or(ReachError::NotReachable)?;
-        let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
+        let devices = self.plane.resolve(recipient).ok_or(Failure::NotReachable)?;
+        let addressed = devices.first().ok_or(Failure::NotReachable)?.clone();
         let mut carrier =
             PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
         self.plane.send_addressed(
@@ -1264,7 +1261,7 @@ mod tests {
         let mut carrier = MemCarrier::new();
         assert!(matches!(
             alice.send(&mut carrier, &stranger.profile().clone(), "hi", NOW),
-            Err(ReachError::NotReachable)
+            Err(Failure::NotReachable)
         ));
     }
 
@@ -1310,7 +1307,7 @@ mod tests {
     fn one_device_cannot_found_a_profile() {
         assert!(matches!(
             ReachPlane::found(vec![ALICE_A], NOW),
-            Err(ReachError::TooFewDevices)
+            Err(Failure::TooFewDevices)
         ));
     }
 }
