@@ -7,16 +7,19 @@
   "description": "The browser-first Astrolabe desktop and kiosk client.",
   "scripts": {
     "dev": "vite",
+    "tauri": "tauri",
     "build": "tsc -b && vite build",
     "check": "tsc -b --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "react": "^19.1.0",
     "react-aria-components": "^1.8.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.3.4",

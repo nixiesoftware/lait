@@ -1,7 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Menu, MenuItem, MenuTrigger, Popover, Separator } from "react-aria-components";
 
-import { actionKey, cannedClientView, type ClientView, type LibraryWorld } from "./client";
+import {
+  actionKey,
+  createClientTransport,
+  keyFor,
+  loadingClientView,
+  type ClientAction,
+  type ClientTransport,
+  type ClientView,
+  type LibraryWorld,
+} from "./client";
 import { resolvePlatform, type PlatformProfile } from "./platform";
 
 const utilityBarHeight = 32;
@@ -11,7 +20,8 @@ const heroHeight = 196;
 export function App() {
   const [platform] = useState<PlatformProfile>(() => resolvePlatform());
   const [dark, setDark] = useState(true);
-  const [view, setView] = useState<ClientView>(cannedClientView);
+  const transport = useMemo(() => createClientTransport(), []);
+  const { view, dispatch } = useClient(transport);
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => { document.documentElement.dataset.platform = platform; }, [platform]);
@@ -19,11 +29,11 @@ export function App() {
     const refresh = (event: KeyboardEvent) => {
       if (event.key !== "F5") return;
       event.preventDefault();
-      void dispatchRefresh(setView);
+      void dispatch({ type: "refresh" });
     };
     window.addEventListener("keydown", refresh);
     return () => window.removeEventListener("keydown", refresh);
-  }, []);
+  }, [dispatch]);
 
   const worlds = view.library;
   const showing = useMemo(
@@ -34,20 +44,62 @@ export function App() {
   return <main className="page" data-theme={dark ? "dark" : "light"}>
     <section className="astrolabe-window" aria-label="Astrolabe">
       <Caption platform={platform} dark={dark} setDark={setDark}
-        refreshing={view.inFlight.includes(actionKey.refresh)} onRefresh={() => void dispatchRefresh(setView)} />
+        refreshing={view.inFlight.includes(actionKey.refresh)} onRefresh={() => void dispatch({ type: "refresh" })} />
       <div className="client-body">
-        <Library view={view} showing={showing} onSelect={setSelected} />
+        <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} />
         <OperationalBar view={view} />
       </div>
     </section>
   </main>;
 }
 
+/** Attaches the primary surface to whole snapshots from the desktop bridge. */
+function useClient(transport: ClientTransport) {
+  const [view, setView] = useState<ClientView>(loadingClientView);
+
+  useEffect(() => {
+    let alive = true;
+    const stop = transport.watch((next) => { if (alive) setView(next); });
+    void transport.current().then(
+      (next) => { if (alive) setView(next); },
+      (error: unknown) => {
+        if (!alive) return;
+        setView((current) => withDispatchFailure(current, "Read local state", error));
+      },
+    );
+    return () => { alive = false; stop(); };
+  }, [transport]);
+
+  const dispatch = useCallback(async (action: ClientAction) => {
+    const key = keyFor(action);
+    // The core returns this snapshot itself. This short optimistic overlay only
+    // covers the IPC turn, preserving Flutter's disabled-on-click invariant.
+    setView((current) => current.inFlight.includes(key)
+      ? current
+      : { ...current, inFlight: [...current.inFlight, key] });
+    try {
+      setView(await transport.dispatch(action));
+    } catch (error) {
+      setView((current) => withDispatchFailure(current, `Dispatch ${action.type}`, error, key));
+    }
+  }, [transport]);
+
+  return { view, dispatch };
+}
+
+function withDispatchFailure(view: ClientView, what: string, error: unknown, actionKeyToClear?: string): ClientView {
+  return {
+    ...view,
+    inFlight: actionKeyToClear === undefined ? view.inFlight : view.inFlight.filter((key) => key !== actionKeyToClear),
+    failures: [{ what, error: error instanceof Error ? error.message : String(error), retryable: true }, ...view.failures],
+  };
+}
+
 function Caption({ platform, dark, setDark, refreshing, onRefresh }: {
   platform: PlatformProfile; dark: boolean; setDark(next: boolean): void; refreshing: boolean; onRefresh(): void;
 }) {
   const systemMenu = platform === "macos";
-  return <header className="caption" style={{ height: utilityBarHeight }}>
+  return <header className="caption" data-tauri-drag-region style={{ height: utilityBarHeight }}>
     {systemMenu ? <div className="traffic-light-clearance" /> : <MenuTrigger>
       <Button className="wordmark" aria-label="Astrolabe settings">ASTROLABE</Button>
       <Popover className="settings-popover"><Menu className="settings-menu" aria-label="Astrolabe settings">
@@ -66,7 +118,12 @@ function Caption({ platform, dark, setDark, refreshing, onRefresh }: {
   </header>;
 }
 
-function Library({ view, showing, onSelect }: { view: ClientView; showing: LibraryWorld | null; onSelect(key: string): void }) {
+function Library({ view, showing, onSelect, dispatch }: {
+  view: ClientView;
+  showing: LibraryWorld | null;
+  onSelect(key: string): void;
+  dispatch(action: ClientAction): Promise<void>;
+}) {
   if (view.library === null) return <LoadingLibrary />;
   if (view.library.length === 0) return <EmptyLibrary />;
   const running = view.library.filter((world) => isRunning(view));
@@ -81,7 +138,7 @@ function Library({ view, showing, onSelect }: { view: ClientView; showing: Libra
         {unavailable.length > 0 && <WorldSection label="UNAVAILABLE" rows={unavailable} view={view} showing={showing} onSelect={onSelect} />}
       </div>
     </aside>
-    {showing !== null && <WorldDetail view={view} world={showing} />}
+    {showing !== null && <WorldDetail view={view} world={showing} dispatch={dispatch} />}
   </section>;
 }
 
@@ -92,23 +149,33 @@ function WorldSection({ label, rows, view, showing, onSelect }: {
     {label !== undefined && <h2>{label}</h2>}
     {rows.map((world) => <Button key={world.key} className="world-row" data-selected={world.key === showing?.key || undefined}
       onPress={() => onSelect(world.key)} aria-label={`${world.displayName} — ${lifecycle(view, world)}`}>
-      <span className="world-mark" style={{ background: world.accent ?? "var(--surface-500)" }}>{world.worldMount.slice(0, 1).toUpperCase()}</span>
+      <span className="world-mark" style={{ background: accentColor(world) }}>{world.worldMount.slice(0, 1).toUpperCase()}</span>
       <span>{world.displayName}</span>
     </Button>)}
   </section>;
 }
 
-function WorldDetail({ view, world }: { view: ClientView; world: LibraryWorld }) {
-  const [opening, setOpening] = useState(false);
+function WorldDetail({ view, world, dispatch }: { view: ClientView; world: LibraryWorld; dispatch(action: ClientAction): Promise<void> }) {
+  const entryPath = world.opensAt;
+  const opening = entryPath !== null && view.inFlight.includes(actionKey.open(entryPath));
+  const serving = view.heads.filter((head) => head.orbit === null);
+  const running = !opening && serving.length > 0;
+  const stoppable = serving.find((head) => head.owned);
+  const stopping = stoppable !== undefined && view.inFlight.includes(actionKey.stopHead(stoppable.id));
+  const updating = view.inFlight.includes(actionKey.updateWorld(world.worldMount));
   const state = lifecycle(view, world);
-  const running = !opening && isRunning(view);
   return <section className="world-detail">
-    <div className="world-hero" style={{ height: heroHeight, "--world-accent": world.accent ?? "#53667d" } as React.CSSProperties}><h1>{world.displayName}</h1></div>
+    <div className="world-hero" style={{ height: heroHeight, "--world-accent": accentColor(world) } as React.CSSProperties}><h1>{world.displayName}</h1></div>
     <div className="world-action-band">
-      {opening ? <PendingAction label="LAUNCHING" /> : running ? <RunningAction owned={view.heads.some((head) => head.owned && head.orbit === null)} />
+      {stopping ? <PendingAction label="STOPPING" />
+        : running ? <RunningAction owned={stoppable !== undefined}
+          onOpen={entryPath === null ? undefined : () => void dispatch({ type: "open", entryPath })}
+          onStop={() => { if (stoppable !== undefined) void dispatch({ type: "stopHead", id: stoppable.id }); }} />
+        : opening ? <PendingAction label="LAUNCHING" />
+        : updating ? <PendingAction label="UPDATING" />
+        : world.update?.behind ? <Button className="update-control" aria-label={`Update ${world.displayName}`} onPress={() => void dispatch({ type: "updateWorld", world: world.worldMount })}>↻ <span>UPDATE</span></Button>
         : state === "Ready" ? <Button className="launch-control" aria-label="Launch World" onPress={() => {
-          if (world.opensAt === null) return;
-          setOpening(true); window.setTimeout(() => setOpening(false), 900);
+          if (world.opensAt !== null) void dispatch({ type: "open", entryPath: world.opensAt });
         }}>▶ <span>LAUNCH</span></Button> : <div className="lifecycle-state">ⓘ {state}</div>}
       <Button className="world-settings" aria-label={`${world.displayName} settings`}>⚙</Button>
     </div>
@@ -118,10 +185,10 @@ function WorldDetail({ view, world }: { view: ClientView; world: LibraryWorld })
   </section>;
 }
 
-function RunningAction({ owned }: { owned: boolean }) {
+function RunningAction({ owned, onOpen, onStop }: { owned: boolean; onOpen?: () => void; onStop(): void }) {
   return <div className="running-control">
-    {owned && <Button className="stop-control" aria-label="Stop the head">× <span>STOP</span></Button>}
-    <Button className="open-control" aria-label="Go to running World">{owned ? "↗" : <><span>OPEN</span> ↗</>}</Button>
+    {owned && <Button className="stop-control" aria-label="Stop the head" onPress={onStop}>× <span>STOP</span></Button>}
+    <Button className="open-control" aria-label="Go to running World" onPress={onOpen} isDisabled={onOpen === undefined}>{owned ? "↗" : <><span>OPEN</span> ↗</>}</Button>
   </div>;
 }
 
@@ -131,7 +198,7 @@ function EmptyLibrary() { return <section className="empty-library"><h1>Library<
 
 function OperationalBar({ view }: { view: ClientView }) {
   const status = view.loading ? "Connecting to local identity" : view.failures.length > 0 ? "Needs attention" : view.stale ? "Local identity degraded" : view.host === null ? "Local identity unavailable" : "Local identity online";
-  const activity = view.inFlight.includes(actionKey.refresh) ? "Reading local state…" : view.notices[0] ?? "All local systems current";
+  const activity = view.inFlight.includes(actionKey.refresh) ? "Reading local state…" : view.notices[0]?.said ?? "All local systems current";
   const spaces = view.host?.orbitCount ?? 0;
   return <footer className="operational-bar" aria-live={view.inFlight.length > 0 || view.failures.length > 0 ? "polite" : "off"}>
     <span className="identity-status"><span className="status-icon">⌁</span>{status}</span><span className="bar-divider" />
@@ -147,8 +214,6 @@ function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Runnin
   return isRunning(view) ? "Running" : "Ready";
 }
 function isRunning(view: ClientView): boolean { return view.heads.some((head) => head.orbit === null); }
-async function dispatchRefresh(setView: (recipe: (current: ClientView) => ClientView) => void): Promise<void> {
-  setView((current) => ({ ...current, inFlight: [...current.inFlight, actionKey.refresh] }));
-  await new Promise((resolve) => window.setTimeout(resolve, 500));
-  setView((current) => ({ ...current, inFlight: current.inFlight.filter((key) => key !== actionKey.refresh) }));
+function accentColor(world: LibraryWorld): string {
+  return world.accent === null ? "var(--surface-500)" : `#${world.accent.toString(16).padStart(6, "0")}`;
 }
