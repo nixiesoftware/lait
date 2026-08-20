@@ -135,6 +135,7 @@ function ChatBody({ view, facts, active, dispatch }: {
   // The invitation being carried, per peer, for the same reason.
   const invites = useRef(new Map<string, string>());
   const [carrying, setCarrying] = useState<string | null>(null);
+  const [showReach, setShowReach] = useState(false);
 
   if (facts === null || active === null) {
     // Nothing open is the moment reach is worth offering: a person with no
@@ -164,12 +165,16 @@ function ChatBody({ view, facts, active, dispatch }: {
       <strong>{conversation.peerName}</strong>
       {isAgent(facts, active) && <Badge label="AI" />}
       <span className="chat-header-spring" />
+      <button className="quiet-button" title="Reach someone new"
+        aria-pressed={showReach}
+        onClick={() => setShowReach(!showReach)}>✚</button>
       <button className="quiet-button" title="Check for messages"
         disabled={view.inFlight.includes(actionKey.collectMail)}
         onClick={() => void dispatch({ type: "collectMail" })}>↻</button>
       <button className="danger-button" disabled={view.inFlight.includes(actionKey.blockSender(active))}
         onClick={() => void dispatch({ type: "blockSender", person: active })}>Block</button>
     </div>
+    {showReach && <ReachPanel view={view} dispatch={dispatch} />}
     <Transcript conversation={conversation} view={view} dispatch={dispatch} />
     {carrying === active && <InvitationComposer
       to={active}
