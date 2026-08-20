@@ -571,6 +571,26 @@ impl NeighborRegistry {
         due.into_iter().map(|(_, k)| k.clone()).collect()
     }
 
+    /// Neighbors dialable now: a live route and no backoff.
+    ///
+    /// Unlike [`NeighborRegistry::eligible`] this does not require `pending`.
+    /// That flag means "advertised a frontier we have not taken" and
+    /// [`NeighborRegistry::record_success`] clears it — which is exactly when a
+    /// peer's content becomes nameable here, so a fetch keyed on `eligible`
+    /// could only ever ask a peer it still owed a convergence.
+    pub fn reachable(&self, now_ms: u64) -> Vec<Key> {
+        let mut due: Vec<&Key> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| {
+                e.next_attempt_ms <= now_ms && e.routes.iter().any(|r| r.expires_at_ms > now_ms)
+            })
+            .map(|(k, _)| k)
+            .collect();
+        due.sort();
+        due.into_iter().cloned().collect()
+    }
+
     /// Record a successful Contact: backoff resets, the pending mark clears,
     /// reachability turns advisory-reachable.
     pub fn record_success(&mut self, station: &Key, now_ms: u64) -> Result<(), Failure> {

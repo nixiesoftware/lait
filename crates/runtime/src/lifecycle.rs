@@ -48,6 +48,21 @@ use replica::body::BodyKeySource;
 use replica::body::WorldId;
 use replica::convergence::ConvergenceOutcome;
 
+/// How often [`Station::content_acquire`] looks again while a chunk is in flight.
+const ACQUIRE_POLL: Duration = Duration::from_millis(25);
+
+/// What a demand-paged read returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Acquired {
+    /// Every byte of the window.
+    Whole(Vec<u8>),
+    /// The read stopped inside the window.
+    Short {
+        bytes: Vec<u8>,
+        gap: crate::content_cursor::Gap,
+    },
+}
+
 /// The authority view a Runtime without one falls back to: nobody resolves, so
 /// nothing can dock. Membership exists only when the deployment supplies a real
 /// mechanics view.
@@ -970,14 +985,10 @@ impl Orbit {
                     transport: plane_transport.clone(),
                     local: local_station.clone(),
                     authority: Box::new(crate::peer_supply::MemberMayAcquire),
-                    // `eligible` rather than `snapshot`: a Station in backoff is
-                    // one this node has already failed to reach, and a fetch
-                    // behind a playhead is the worst place to spend a dial
-                    // finding that out again.
                     candidates: Arc::new(move || {
                         neighbours
                             .lock_recovering()
-                            .eligible(mechanics::wallclock::now_millis())
+                            .reachable(mechanics::wallclock::now_millis())
                     }),
                     cancel: station.cancel.clone(),
                 };
@@ -1218,6 +1229,56 @@ impl Station {
         let allow = self.content_authorization(identity)?;
         self.content
             .read_range(&self.content_policy(&keys, &allow), content, offset, len)
+    }
+
+    /// One bounded range of a content's plaintext, fetching what is missing.
+    ///
+    /// [`Station::content_read`] answers only from what is already here.
+    /// `patience` bounds the wait, not the read: a caller streaming a body is
+    /// told where the bytes stopped rather than made to hang behind a slow
+    /// peer.
+    pub fn content_acquire(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::content::ContentRef,
+        offset: u64,
+        len: u64,
+        patience: Duration,
+    ) -> Result<Acquired, crate::content_host::Failure> {
+        use crate::content_cursor::{Advance, ContentCursor, NoSupply};
+
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        let policy = self.content_policy(&keys, &allow);
+        let supply: Arc<dyn crate::content_cursor::ChunkSupply> =
+            match self.supply.lock_recovering().clone() {
+                Some(supply) => supply,
+                None => Arc::new(NoSupply),
+            };
+        let mut cursor =
+            ContentCursor::open_range(self.content.clone(), &policy, content, offset, len, supply)?;
+
+        let deadline = std::time::Instant::now().checked_add(patience);
+        let mut bytes = Vec::new();
+        loop {
+            match cursor.next(&policy) {
+                Advance::Yielded { cursor: next, span } => {
+                    bytes.extend_from_slice(span.bytes());
+                    cursor = next;
+                }
+                Advance::Finished { .. } => return Ok(Acquired::Whole(bytes)),
+                Advance::Blocked { cursor: next, gap } => {
+                    if !gap.is_pending()
+                        || deadline.is_none_or(|deadline| std::time::Instant::now() >= deadline)
+                    {
+                        return Ok(Acquired::Short { bytes, gap });
+                    }
+                    cursor = next;
+                    std::thread::sleep(ACQUIRE_POLL);
+                }
+                Advance::Refused(failure) => return Err(failure),
+            }
+        }
     }
 
     /// Seal and commit content read from `reader`.
