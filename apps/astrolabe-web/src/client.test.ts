@@ -20,6 +20,9 @@ describe("client transport", () => {
     expect(keyFor({ type: "open", entryPath: "/issues" })).toBe("open:/issues");
     expect(keyFor({ type: "updateWorld", world: "issues" })).toBe("world.update:issues");
     expect(keyFor({ type: "stopHead", id: "identity:default" })).toBe("head.stop:identity:default");
+    expect(keyFor({ type: "bookMerge", from: "old", into: "new" })).toBe("book.merge:old:new");
+    expect(keyFor({ type: "installMcp", client: "claude", scope: null, name: "lait", agent: null, noAgent: false, project: "/project", world: null, preview: true })).toBe("mcp.preview");
+    expect(keyFor({ type: "displayAssignmentPut", device: "receiver", orbit: "space", world: "issues", surface: "board", inputJson: "{}", theme: "dark", staleAfterMs: 60_000, onStale: "keepWithNativeBanner", syncGroup: null, syncMode: "stayInSync", staticDelayMs: 0, expiresAtUnixMs: null })).toBe("display.assignment.put:receiver");
   });
 
   it("returns the in-flight snapshot before publishing the later completion", async () => {
@@ -50,5 +53,14 @@ describe("client transport", () => {
     const transport = createClientTransport();
     expect(transport.mode).toBe("host");
     expect(await transport.current()).toBe(fixtureClientView);
+  });
+
+  it("settles fixture-only lifecycle actions", async () => {
+    vi.useFakeTimers();
+    const transport = createFixtureTransport(fixtureClientView);
+    const starting = await transport.dispatch({ type: "bookImport", path: "/cards.json" });
+    expect(starting.inFlight).toEqual(["book.import"]);
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await transport.current()).inFlight).toEqual([]);
   });
 });

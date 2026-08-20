@@ -59,6 +59,36 @@ export interface Failure {
   retryable: boolean;
 }
 
+export interface Device {
+  id: string; label: string; state: string; owned: boolean; degraded: string | null;
+  home: string; pid: number | null; canForceStop: boolean; lastError: string | null;
+}
+
+export interface Storage { orbit: string; name: string | null; bytesOnDisk: number | null; objectCount: number | null; lastVerifiedMs: number | null; missing: "notPlaced" | "unreachable" | null; }
+export interface Orbit { space: string; name: string; path: string; lastOpened: number | null; }
+export interface Member { id: string; nick: string | null; authoredName: string | null; admin: boolean; }
+export interface Gate { id: string; label: string; state: "pass" | "wait" | "fail" | "warn" | "skip"; detail: string; }
+export interface Space { space: string; whoami: string | null; admin: boolean; members: Member[]; devices: string[]; diagnosis: { gates: Gate[]; blockedOn: string | null; summary: string } | null; }
+
+export interface Card {
+  card: string; name: string; note: string; handles: string[]; addresses: string[];
+  devices: string[]; agents: string[]; picture: string | null; groups: string[];
+  selfClaim: boolean; presence: "online" | "away" | "offline" | null;
+}
+export interface Suggestion { suggestion: string; name: string; note: string; handles: string[]; }
+export interface Book { cards: Card[]; migrationComplete: boolean; migrationPending: number; migrationImported: number; suggestions: Suggestion[]; }
+
+export type DisplayTheme = "light" | "dark" | "highContrast";
+export type DisplaySyncMode = "stayInSync" | "positional";
+export type DisplayStaleAction = "keepWithNativeBanner" | "blank";
+export interface DisplaySurface { world: string; surface: string; title: string; contractVersion: number; outputs: string[]; }
+export interface DisplayHealth { revision: string; currentItem: string; elapsedMs: number; connection: string; playback: string; lastError: string; stagedItems: number; stagedBytes: number; driftResidualMs: number; correctionEvents: number; pipelineUnobservable: boolean; }
+export interface DisplayReceiver { device: string; label: string; platform: string; build: string; issuedAtUnixMs: number; revokedAtUnixMs: number | null; health: DisplayHealth | null; }
+export interface DisplayAssignment { assignment: string; device: string; orbit: string; space: string; program: string; world: string; surface: string; controller: string; theme: DisplayTheme; syncGroup: string | null; syncMode: DisplaySyncMode | null; staticDelayMs: number; expiresAtUnixMs: number | null; revokedAtUnixMs: number | null; }
+export interface DisplayPairing { pairing: string; confirmationPhrase: string[]; certificateSha256: string; platform: string; build: string; createdAtUnixMs: number; expiresAtUnixMs: number; }
+export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; }
+export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
+
 export type Staleness =
   | { kind: "neverLoaded" }
   | { kind: "signalled"; reason: string };
@@ -70,7 +100,14 @@ export interface ClientView {
   /** null means unread; [] means authoritatively empty. */
   library: LibraryWorld[] | null;
   host: HostFacts | null;
+  display: Display | null;
   heads: Head[];
+  devices: Device[];
+  storage: Storage[];
+  orbits: Orbit[];
+  space: Space | null;
+  book: Book | null;
+  mcp: McpBinding | null;
   notices: Notice[];
   failures: Failure[];
   /** Core action keys, not UI-local flags. */
@@ -81,13 +118,48 @@ export type ClientAction =
   | { type: "refresh" }
   | { type: "open"; entryPath: string }
   | { type: "updateWorld"; world: string }
-  | { type: "stopHead"; id: string };
+  | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
+  | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
+  | { type: "startHead" } | { type: "stopHead"; id: string } | { type: "forgetOrbit"; space: string }
+  | { type: "bookPut"; card: string | null; name: string; note: string | null } | { type: "bookDelete"; card: string }
+  | { type: "bookSetPicture"; card: string; path: string | null } | { type: "bookMerge"; from: string; into: string }
+  | { type: "bookClaimSelf"; card: string } | { type: "bookLink"; card: string; handle: string } | { type: "bookUnlink"; card: string; handle: string }
+  | { type: "bookExport"; path: string; cards: string[] | null } | { type: "bookImport"; path: string }
+  | { type: "bookAccept"; suggestion: string } | { type: "bookDismiss"; suggestion: string }
+  | { type: "installMcp"; client: string; scope: string | null; name: string; agent: string | null; noAgent: boolean; project: string; world: string | null; preview: boolean }
+  | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
+  | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
+  | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string };
 
 export const actionKey = {
   refresh: "refresh",
   open: (entryPath: string) => `open:${entryPath}`,
   updateWorld: (world: string) => `world.update:${world}`,
+  startDevice: (id: string) => `device.start:${id}`,
+  stopDevice: (id: string) => `device.stop:${id}`,
+  restartDevice: (id: string) => `device.restart:${id}`,
+  forceStopDevice: (id: string) => `device.force-stop:${id}`,
+  removeDevice: (id: string) => `device.remove:${id}`,
+  readSpace: (orbit: string) => `space.read:${orbit}`,
+  startHead: "head.start",
   stopHead: (id: string) => `head.stop:${id}`,
+  forgetOrbit: (space: string) => `orbit.forget:${space}`,
+  bookPut: (card: string | null) => card === null ? "book.put" : `book.put:${card}`,
+  bookDelete: (card: string) => `book.delete:${card}`,
+  bookSetPicture: (card: string) => `book.picture:${card}`,
+  bookMerge: (from: string, into: string) => `book.merge:${from}:${into}`,
+  bookClaimSelf: (card: string) => `book.claim:${card}`,
+  bookLink: (card: string) => `book.link:${card}`,
+  bookUnlink: (card: string) => `book.unlink:${card}`,
+  bookExport: "book.export", bookImport: "book.import",
+  bookAccept: (suggestion: string) => `book.accept:${suggestion}`,
+  bookDismiss: (suggestion: string) => `book.dismiss:${suggestion}`,
+  installMcp: (preview: boolean) => preview ? "mcp.preview" : "mcp.install",
+  displayPairingApprove: (pairing: string) => `display.pairing.approve:${pairing}`,
+  displayPairingReject: (pairing: string) => `display.pairing.reject:${pairing}`,
+  displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
+  displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
+  displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
 } as const;
 
 export function keyFor(action: ClientAction): string {
@@ -95,7 +167,33 @@ export function keyFor(action: ClientAction): string {
     case "refresh": return actionKey.refresh;
     case "open": return actionKey.open(action.entryPath);
     case "updateWorld": return actionKey.updateWorld(action.world);
+    case "startDevice": return actionKey.startDevice(action.id);
+    case "stopDevice": return actionKey.stopDevice(action.id);
+    case "restartDevice": return actionKey.restartDevice(action.id);
+    case "forceStopDevice": return actionKey.forceStopDevice(action.id);
+    case "stopAllOwned": return "device.stop-all";
+    case "removeDevice": return actionKey.removeDevice(action.id);
+    case "readSpace": return actionKey.readSpace(action.orbit);
+    case "startHead": return actionKey.startHead;
     case "stopHead": return actionKey.stopHead(action.id);
+    case "forgetOrbit": return actionKey.forgetOrbit(action.space);
+    case "bookPut": return actionKey.bookPut(action.card);
+    case "bookDelete": return actionKey.bookDelete(action.card);
+    case "bookSetPicture": return actionKey.bookSetPicture(action.card);
+    case "bookMerge": return actionKey.bookMerge(action.from, action.into);
+    case "bookClaimSelf": return actionKey.bookClaimSelf(action.card);
+    case "bookLink": return actionKey.bookLink(action.card);
+    case "bookUnlink": return actionKey.bookUnlink(action.card);
+    case "bookExport": return actionKey.bookExport;
+    case "bookImport": return actionKey.bookImport;
+    case "bookAccept": return actionKey.bookAccept(action.suggestion);
+    case "bookDismiss": return actionKey.bookDismiss(action.suggestion);
+    case "installMcp": return actionKey.installMcp(action.preview);
+    case "displayPairingApprove": return actionKey.displayPairingApprove(action.pairing);
+    case "displayPairingReject": return actionKey.displayPairingReject(action.pairing);
+    case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
+    case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
+    case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
   }
 }
 
@@ -125,7 +223,14 @@ export const loadingClientView: ClientView = {
   stale: { kind: "neverLoaded" },
   library: null,
   host: null,
+  display: null,
   heads: [],
+  devices: [],
+  storage: [],
+  orbits: [],
+  space: null,
+  book: null,
+  mcp: null,
   notices: [],
   failures: [],
   inFlight: [],
@@ -133,8 +238,9 @@ export const loadingClientView: ClientView = {
 
 /**
  * The standalone build never silently pretends that it has a local identity.
- * The fixture is a development transport only; packaged desktop builds must
- * inject `window.__ASTROLABE_CLIENT__` before this bundle runs.
+ * The fixture is a development transport only; packaged desktop builds use
+ * the Tauri command/event bridge (or an embedding host bridge) before this
+ * bundle considers the development fallback.
  */
 export function createClientTransport(): ClientTransport {
   const bridge = window.__ASTROLABE_CLIENT__;
@@ -228,6 +334,12 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
             notices: [{ said: `Updated ${action.world}.`, launched: null }, ...current.notices],
           }));
           break;
+        // The fixture only models the library launch path.  The remaining
+        // actions still complete so every desktop destination can be explored
+        // without leaving its controls permanently pending.
+        default:
+          complete(key, (current) => current);
+          break;
       }
       return view;
     },
@@ -270,6 +382,13 @@ export const fixtureClientView: ClientView = {
   }],
   heads: [],
   host: null,
+  display: null,
+  devices: [],
+  storage: [],
+  orbits: [],
+  space: null,
+  book: { cards: [], migrationComplete: true, migrationPending: 0, migrationImported: 0, suggestions: [] },
+  mcp: null,
   inFlight: [],
   failures: [],
   notices: [],
