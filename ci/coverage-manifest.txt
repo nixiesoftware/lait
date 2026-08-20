@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2381
-pr-platform    1933
-nightly        2409
+pr             2403
+pr-platform    1955
+nightly        2431
 mutants        106
 
 [gates]
@@ -27,6 +27,10 @@ convergence-simulation       6
 orbital-product-parity       27
 
 [tests]
+addressbook announce::tests::a_substituted_device_set_is_caught_by_the_reader
+addressbook announce::tests::a_version_this_build_does_not_speak_is_refused
+addressbook announce::tests::an_announcement_survives_the_trip_a_person_carries_it_on
+addressbook announce::tests::an_oversized_announcement_is_refused_before_it_is_parsed
 addressbook bundle::tests::a_local_agent_handle_in_an_import_is_refused
 addressbook bundle::tests::actor_handles_round_trip
 addressbook bundle::tests::empty_name_is_refused
@@ -35,6 +39,10 @@ addressbook bundle::tests::my_card_claim_does_not_travel
 addressbook bundle::tests::oversize_declared_bytes_fail_before_decode
 addressbook bundle::tests::unknown_version_fails_before_cards_apply
 addressbook mapping::tests::the_body_key_and_paths_are_the_frozen_v1_spellings
+addressbook reach_store::tests::a_corrupt_file_fails_closed_rather_than_re_founding_the_profile
+addressbook reach_store::tests::a_crash_between_the_remove_and_the_rename_recovers_the_survivor
+addressbook reach_store::tests::an_epoch_that_moved_backwards_is_refused_rather_than_written
+addressbook reach_store::tests::reach_state_survives_a_round_trip_and_an_absent_file_is_not_an_error
 addressbook registry::tests::a_correspondent_resolves_the_devices_avowed_to_them
 addressbook registry::tests::a_device_retired_after_avowing_is_dropped_on_the_next_publication
 addressbook registry::tests::a_link_adds_a_device_and_a_retirement_removes_one
@@ -87,7 +95,6 @@ astrolabe browser::tests::only_a_web_address_is_ever_handed_to_the_shell
 astrolabe client::config_tests::the_correspondence_fixture_is_off_by_default
 astrolabe client::correspondence::tests::ada_folds_two_devices_into_one_conversation
 astrolabe client::correspondence::tests::blocking_a_person_stops_their_messages_landing
-astrolabe client::correspondence::tests::post_backend_round_trips_a_self_message_over_the_deployed_post
 astrolabe client::correspondence::tests::sending_appends_to_the_conversation_as_mine
 astrolabe client::correspondence::tests::the_mock_covers_the_whole_matrix
 astrolabe client::correspondence::tests::unread_clears_on_open
@@ -108,11 +115,6 @@ astrolabe client::library::tests::the_library_lists_what_this_build_installs
 astrolabe client::presence::tests::an_unasked_space_is_recorded_as_unasked
 astrolabe client::presence::tests::an_unresolved_station_measures_only_its_device
 astrolabe client::presence::tests::the_best_observation_of_an_identity_wins
-astrolabe client::reach::tests::a_plane_reaches_over_the_deployed_post
-astrolabe client::reach::tests::one_device_cannot_found_a_profile
-astrolabe client::reach::tests::post_reach_self_round_trips_over_the_deployed_post
-astrolabe client::reach::tests::sending_to_an_unlearned_profile_is_not_reachable
-astrolabe client::reach::tests::two_planes_reach_each_other_over_a_carrier
 astrolabe client::space::tests::a_device_line_that_is_not_a_device_offers_nothing_to_revoke
 astrolabe client::space::tests::a_role_change_says_which_direction_it_went
 astrolabe client::space::tests::sponsoring_two_agents_are_two_things_in_flight
@@ -278,6 +280,14 @@ correspondence mem::tests::a_mailbox_is_bounded_and_a_retry_is_not_a_duplicate
 correspondence mem::tests::a_malformed_envelope_is_refused_by_what_is_wrong_with_it
 correspondence mem::tests::a_sealed_letter_reaches_its_recipient_and_nobody_else
 correspondence mem::tests::the_deposit_is_attributed_to_the_witness_and_not_to_a_claim
+correspondence plane::tests::a_collect_asks_every_device_the_identity_holds
+correspondence plane::tests::a_device_outside_the_genesis_pair_cannot_publish_a_head_anyone_will_take
+correspondence plane::tests::a_plane_reaches_over_the_deployed_post
+correspondence plane::tests::one_device_cannot_found_a_profile
+correspondence plane::tests::post_reach_self_round_trips_over_the_deployed_post
+correspondence plane::tests::sending_to_an_unlearned_profile_is_not_reachable
+correspondence plane::tests::the_canonical_device_moves_and_the_profile_does_not
+correspondence plane::tests::two_planes_reach_each_other_over_a_carrier
 correspondence watch::tests::a_healthy_poll_waits_one_period_plus_jitter
 correspondence watch::tests::a_poll_tells_waiting_quiet_and_unreachable_apart
 correspondence watch::tests::failure_backs_off_and_caps
@@ -460,6 +470,8 @@ lait config::tests::config_map_roundtrips_and_degrades_to_empty
 lait config::tests::discovery_never_creates_but_init_path_does
 lait config::tests::find_store_dir_walks_up_to_the_nearest_lait
 lait config::tests::key_table_rejects_unknown_and_reserves_space_namespace
+lait config::tests::kinship_seeds_are_refused_where_there_is_no_identity
+lait config::tests::kinship_seeds_are_the_identitys_own_and_outlive_the_run
 lait config::tests::second_daemon_lock_fails_while_first_is_held
 lait config::tests::settings_store_layer_wins_over_global
 lait config::tests::socket_path_stays_under_the_unix_limit
@@ -486,6 +498,13 @@ lait daemon::address_book::tests::a_fully_imported_aliases_file_is_retired
 lait daemon::address_book::tests::a_short_prefix_alias_stays_pending
 lait daemon::address_book::tests::members_and_presence_are_decorated_from_the_book
 lait daemon::address_book::tests::migration_imports_full_ids_and_keeps_prefixes_pending
+lait daemon::correspondence::tests::a_carrier_that_cannot_be_asked_is_not_an_empty_mailbox
+lait daemon::correspondence::tests::a_stranger_is_not_reachable_rather_than_a_failed_send
+lait daemon::correspondence::tests::a_third_identity_on_the_same_carrier_gets_nothing
+lait daemon::correspondence::tests::an_invitation_arrives_as_one_with_its_coordinates_intact
+lait daemon::correspondence::tests::every_correspondence_request_reaches_this_service_and_nothing_else_does
+lait daemon::correspondence::tests::the_daemon_carries_a_letter_between_two_identities_with_no_service
+lait daemon::correspondence::tests::with_no_carrier_every_operation_refuses_in_words
 lait daemon::host::tests::host_rejects_a_stale_space_expectation_before_placement
 lait daemon::host::tests::one_host_endpoint_places_routes_streams_and_drains_an_orbit
 lait daemon::host::tests::restart_drift_skips_an_unbound_space_and_keeps_operation_progress
@@ -806,6 +825,9 @@ lait update::world::tests::only_a_known_newer_bundle_this_build_can_run_is_behin
 lait update::world::tests::the_standing_is_recorded_beside_the_served_tree_and_never_within_it
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
+lait-directory address::tests::a_million_issued_addresses_still_cost_a_prober_millions_of_guesses_each
+lait-directory address::tests::a_spelling_that_is_not_canonical_is_refused_rather_than_normalised
+lait-directory address::tests::a_well_formed_address_parses_and_keeps_its_spelling
 lait-feed::bin/lait-feed tests::a_bundle_that_declares_another_world_or_version_is_refused
 lait-feed::bin/lait-feed tests::a_bundle_with_no_declaration_is_refused_at_publish_time
 lait-feed::bin/lait-feed tests::a_stable_channel_never_takes_a_prerelease
