@@ -64,6 +64,55 @@ impl Drop for OwnedReceiver {
     }
 }
 
+/// An identity home whose daemon stops when the test ends, however it ends.
+///
+/// The head starts a daemon *under* this home, and the tests that do so ask it
+/// to stop on their last line — which a panic skips, and every assertion here
+/// sits above that line. An abandoned one keeps the display coordinator's
+/// machine-scoped port, so the *next* run of this file fails on
+/// `0.0.0.0:7443` and reads as an environment problem rather than as the
+/// previous failure still being present. One red test made the following run
+/// red for an unrelated-looking reason, which is worth more than the leak.
+struct OwnedIdentity(tempfile::TempDir);
+
+impl OwnedIdentity {
+    fn new() -> Self {
+        Self(tempfile::tempdir().expect("an identity home"))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for OwnedIdentity {
+    fn drop(&mut self) {
+        let home = self.0.path().to_path_buf();
+        // Asking, never killing: the head owns that process, not this test —
+        // the same rule `stop_daemon` is written around. On its own thread
+        // because this drops inside the test's runtime, and a runtime cannot be
+        // built inside one.
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Runtime::new() else {
+                return;
+            };
+            runtime.block_on(async move {
+                stop_daemon(&home).await;
+                for _ in 0..50 {
+                    let selection = lait::config::Selection::for_identity(&home);
+                    match lait::daemon::Client::for_selection(&selection) {
+                        Ok(daemon)
+                            if !matches!(daemon.probe().await, lait::control::Probe::Absent) => {}
+                        _ => return,
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        })
+        .join();
+    }
+}
+
 async fn wait_for_daemon_stop(home: &Path) {
     for _ in 0..100 {
         let selection = lait::config::Selection::for_identity(home);
@@ -618,7 +667,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     }
 
     let managed = tempfile::tempdir().expect("a managed root");
-    let identity = tempfile::tempdir().expect("an identity home");
+    let identity = OwnedIdentity::new();
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
