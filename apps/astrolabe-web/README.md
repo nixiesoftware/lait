@@ -12,18 +12,33 @@ Astrolabe has two backend modes:
 - **workbench** — local development supervision through `lait-workbench`'s
   authenticated loopback API.
 
-The initial slice ports the primary Library window: platform caption, Library
-rail, selected World hero, lifecycle action band, people glance, and operational
-bar. It fills its host; native window size remains an OS-shell concern.
+The port covers the Flutter client's surfaces whole:
+
+- **Library** (`src/app.tsx`) — the rail with World marks and artwork heroes,
+  the lifecycle action band, the people glance, the operational bar, and the
+  Present-here control. Window controls are the OS header's own; closing the
+  primary window hides it to the tray, where Quit is the one act that stops
+  the client.
+- **Address book** (`src/book.tsx`) — the portrait rolodex: canonical card,
+  presence-parted list, search, the profile subsurface, plus the Messages
+  section and the Incoming door into correspondence.
+- **Chat** (`src/chat.tsx`) — conversations, never an inbox: tab chrome,
+  grouped transcript with day pills and quiet dividers, per-kind message
+  components, the composer.
+- **Displays** (`src/displays.tsx`) — the coordinator, pairing approval, and
+  the full assignment dialog.
+- **Big Picture** (`src/present.tsx`) — this machine as a screen: the chooser,
+  frame pacing, source/delivery banners, durable fullscreen (taken inside the
+  entering gesture, watched, retakeable in a browser) and a screen wake lock.
+- **World settings** (`src/settings.tsx`) — a read-only snapshot carried in
+  its own window's URL.
 
 ## Client bridge
 
-`src/client.ts` defines the exact primary-window seam: whole `ClientView`
-snapshots arrive through `current()` and `watch()`, and `dispatch()` returns
-the immediate post-request snapshot. The host must inject
-`window.__ASTROLABE_CLIENT__` before loading the bundle. It carries only the
-actions this surface currently exposes: refresh, open, update a World, and
-stop a head.
+`src/client.ts` defines the exact client seam: whole `ClientView` snapshots
+arrive through `current()` and `watch()`, and `dispatch()` returns the
+immediate post-request snapshot. The host must inject
+`window.__ASTROLABE_CLIENT__` before loading the bundle.
 
 Development uses a stateful fixture transport that follows the same protocol.
 Production deliberately reports a missing host bridge rather than presenting
@@ -32,8 +47,10 @@ fixture data as a local identity.
 The included Tauri host in `src-tauri/` is that production bridge. It starts
 the existing `tools/astrolabe` core, calls its existing `current` and
 `dispatch` functions, and relays its native subscriber stream as a WebView
-event. Its JSON DTO deliberately contains only the projection the primary
-Library window renders.
+event. It also owns what only a host can: the owned windows (book, displays,
+chat, per-World settings), window fullscreen, the tray, and the macOS
+application menu. World artwork crosses through its own `world_artwork`
+command — a build constant, asked once per mount and cached.
 
 ## Run
 
