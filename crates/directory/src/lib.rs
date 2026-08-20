@@ -39,12 +39,15 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod firestore;
+pub mod http;
 pub mod service;
 pub mod store;
 pub mod wire;
 mod words;
 
 pub use address::Address;
+pub use firestore::{Credentials, FirestoreStore};
 pub use service::Service;
 pub use store::{MemStore, Published, Store};
 pub use wire::{sign, Challenge, SignedPublish, SignedResolve};

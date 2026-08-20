@@ -3956,13 +3956,16 @@ version = "0.7.8"
 dependencies = [
  "addressbook",
  "anyhow",
+ "axum",
  "data-encoding",
  "getrandom 0.3.4",
  "mechanics",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
+ "ureq",
 ]
 
 [[package]]
@@ -4032,6 +4035,7 @@ dependencies = [
  "blake3",
  "data-encoding",
  "getrandom 0.3.4",
+ "lait-directory",
  "mechanics",
  "serde",
  "serde_json",

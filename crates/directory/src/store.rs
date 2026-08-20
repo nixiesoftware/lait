@@ -37,8 +37,13 @@ pub struct Published {
 ///
 /// Sync, matching `lait_post::Store`, because the one implementation that talks
 /// to a network does so with `ureq` — the same blocking client the rest of this
-/// tree uses — and the HTTP surface hands it to `spawn_blocking` rather than
-/// making every caller async for one deployment's benefit.
+/// tree uses.
+///
+/// **Every method takes `&mut self`, including the reads.** Not an oversight: a
+/// store that reaches a network holds a credential it has to refresh, and a
+/// read that could not touch that cache would either re-authenticate on every
+/// lookup or hide a lock inside itself. Saying so in the signature is cheaper
+/// than either, and the caller is `&mut` at every one of these sites anyway.
 pub trait Store {
     /// Claim `address` for `profile` if and only if nothing holds it yet.
     ///
@@ -53,7 +58,7 @@ pub trait Store {
     /// What makes publishing idempotent: an address is *"minted on first publish
     /// and stable afterwards"*, so a republish reads back rather than minting a
     /// second.
-    fn address_of(&self, profile: &ProfileId) -> anyhow::Result<Option<Address>>;
+    fn address_of(&mut self, profile: &ProfileId) -> anyhow::Result<Option<Address>>;
 
     /// Record a publication. `Ok(false)` when `epoch` does not advance what is
     /// already held, which is how a replayed older announcement is refused
@@ -61,7 +66,7 @@ pub trait Store {
     fn record(&mut self, profile: &ProfileId, published: &Published) -> anyhow::Result<bool>;
 
     /// What an address currently answers with.
-    fn published(&self, address: &Address) -> anyhow::Result<Option<Published>>;
+    fn published(&mut self, address: &Address) -> anyhow::Result<Option<Published>>;
 
     /// Remember an issued challenge.
     fn open(&mut self, challenge: &Challenge) -> anyhow::Result<()>;
@@ -74,7 +79,7 @@ pub trait Store {
     fn spend(&mut self, nonce: &[u8; 32], now: u64) -> anyhow::Result<Option<Challenge>>;
 
     /// How many unexpired challenges this device is holding open.
-    fn open_for(&self, device: &DeviceId, now: u64) -> anyhow::Result<usize>;
+    fn open_for(&mut self, device: &DeviceId, now: u64) -> anyhow::Result<usize>;
 
     /// Record one resolution by `asker` and answer how many it has made inside
     /// the window, this one included.
@@ -122,7 +127,7 @@ impl Store for MemStore {
         Ok(true)
     }
 
-    fn address_of(&self, profile: &ProfileId) -> anyhow::Result<Option<Address>> {
+    fn address_of(&mut self, profile: &ProfileId) -> anyhow::Result<Option<Address>> {
         Ok(self.addresses.get(profile.as_str()).cloned())
     }
 
@@ -137,7 +142,7 @@ impl Store for MemStore {
         Ok(true)
     }
 
-    fn published(&self, address: &Address) -> anyhow::Result<Option<Published>> {
+    fn published(&mut self, address: &Address) -> anyhow::Result<Option<Published>> {
         let Some(profile) = self.holders.get(address.as_str()) else {
             return Ok(None);
         };
@@ -161,7 +166,7 @@ impl Store for MemStore {
         Ok(Some(challenge))
     }
 
-    fn open_for(&self, device: &DeviceId, now: u64) -> anyhow::Result<usize> {
+    fn open_for(&mut self, device: &DeviceId, now: u64) -> anyhow::Result<usize> {
         Ok(self
             .challenges
             .values()

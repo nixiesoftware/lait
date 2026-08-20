@@ -22,6 +22,12 @@ path = "src/main.rs"
 # mints no credentials, which is what keeps a compromised carrier able to
 # withhold and unable to impersonate.
 mechanics = { path = "../mechanics" }
+# The directory rides in this binary rather than a second one. AUTH-25 chose
+# that once, deliberately: "Auth's service becomes three functions — directory,
+# carriage, registry", and one deployment instead of two infrastructures is the
+# trade it made. The two routers are disjoint (`/directory/...`), and the Post
+# runs perfectly well with the directory unconfigured.
+lait-directory = { path = "../directory" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

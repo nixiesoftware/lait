@@ -8,7 +8,13 @@
 //!
 //! ```sh
 //! lait-post --http 127.0.0.1:8090 --root /var/lib/lait-post
+//! lait-post --http 127.0.0.1:8090 --root /var/lib/lait-post //!           --directory-project the-foundation-498604
 //! ```
+//!
+//! With `--directory-project`, the identity directory is mounted under
+//! `/directory` in this same process, over Firestore in that project. Without
+//! it the Post runs exactly as it did, which is what keeps the directory from
+//! becoming a thing the carrier depends on.
 //!
 //! It holds no keys, mints no credentials, and terminates no TLS: put it behind
 //! something that does. A carrier that cannot read what it carries does not need
@@ -37,6 +43,7 @@ async fn main() -> Result<()> {
 
     let mut http: Option<SocketAddr> = None;
     let mut root: Option<String> = None;
+    let mut directory_project: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -49,8 +56,16 @@ async fn main() -> Result<()> {
                 );
             }
             "--root" => root = Some(args.next().ok_or_else(|| anyhow!("--root needs a path"))?),
+            "--directory-project" => {
+                directory_project = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--directory-project needs a GCP project id"))?,
+                );
+            }
             "--help" | "-h" => {
-                println!("lait-post --http <addr> --root <dir>");
+                println!(
+                    "lait-post --http <addr> --root <dir> [--directory-project <gcp-project>]"
+                );
                 return Ok(());
             }
             other => return Err(anyhow!("unrecognized argument `{other}`")),
@@ -77,7 +92,20 @@ async fn main() -> Result<()> {
         }
     });
 
-    let app = router(shared);
+    let mut app = router(shared);
+
+    // Mounted only when asked for. A default would point every operator at a
+    // project they do not own, and — worse for this service in particular — a
+    // directory that answers "not available" because it was misconfigured is
+    // indistinguishable at the client from a person who does not exist.
+    if let Some(project) = directory_project {
+        let store =
+            lait_directory::FirestoreStore::open(&project, lait_directory::Credentials::Metadata);
+        let directory: lait_directory::http::Shared<lait_directory::FirestoreStore> =
+            Arc::new(Mutex::new(lait_directory::Service::new(store)));
+        app = app.merge(lait_directory::http::router(directory));
+        tracing::info!(project, "the directory is mounted under /directory");
+    }
 
     let listener = tokio::net::TcpListener::bind(http)
         .await
