@@ -2096,6 +2096,11 @@ pub struct BookSuggestionView {
 }
 
 /// What the daemon answers about this identity's correspondence.
+///
+/// The whole of it, every time. A caller draws from this and holds nothing:
+/// the mailbox is the identity's and lives here, so a surface keeping its own
+/// copy would be a second model, disagreeing precisely when a letter lands
+/// while that surface was not running.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReachView {
     /// The artifact a person hands somebody so they can reach this identity.
@@ -2105,6 +2110,41 @@ pub struct ReachView {
     pub profile: String,
     /// The correspondents it holds, as address spellings.
     pub correspondents: Vec<String>,
+    /// One transcript per correspondent, in send order.
+    pub conversations: Vec<ConversationView>,
+}
+
+/// Everything said with one correspondent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationView {
+    /// Their address.
+    pub peer: String,
+    pub letters: Vec<LetterView>,
+}
+
+/// One letter in a transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LetterView {
+    /// The carrier's deposit id, for a letter that arrived. `None` for one this
+    /// identity composed — a sent letter has no deposit until it lands, and
+    /// nothing acts on one. An invitation is acted on by naming this.
+    pub id: Option<String>,
+    /// Whether this identity wrote it.
+    pub mine: bool,
+    /// `message` or `invitation`. A string rather than an enum for the same
+    /// reason the lifecycle states are: a kind added later should widen a
+    /// caller's match rather than break its decoding.
+    pub kind: String,
+    /// The text, for a message. `None` for an invitation, which is acted on
+    /// rather than read.
+    pub body: Option<String>,
+    pub sent_at: u64,
+    /// The device that signed it, proven by the letter rather than claimed by
+    /// the carrier.
+    pub from_device: String,
+    /// Whether the carrier's word about the sender matched that proof. Shown
+    /// rather than resolved: the two disagreeing is a fact worth seeing.
+    pub provenance_agrees: bool,
 }
 
 /// The identity's book, plus how far legacy alias import has got.

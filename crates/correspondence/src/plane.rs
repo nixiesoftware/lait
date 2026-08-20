@@ -137,6 +137,10 @@ pub struct ReachPlane {
     egress_events: Vec<SignedEvent>,
     mailbox: Mailbox,
     epoch: u64,
+    /// What this identity has sent, by recipient address. The carrier forgets a
+    /// letter once it is acknowledged, so this is the only durable copy of the
+    /// half a person wrote.
+    sent: std::collections::BTreeMap<String, Vec<addressbook::reach_store::Sent>>,
 }
 
 impl ReachPlane {
@@ -178,8 +182,12 @@ impl ReachPlane {
         // address in existence.
         let genesis = DeviceLink::seal(&first, &second, GENESIS_NONCE, GENESIS_EPOCH)
             .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
+        let mut sent = std::collections::BTreeMap::new();
         let (mut registry, epoch, canonical) = match state {
-            Some(held) => (held.registry, held.epoch, held.canonical),
+            Some(held) => {
+                sent = held.sent;
+                (held.registry, held.epoch, held.canonical)
+            }
             None => (Registry::new(), 1, 0),
         };
         let profile = registry.found(genesis.clone())?;
@@ -220,6 +228,7 @@ impl ReachPlane {
             egress_events,
             mailbox: Mailbox::new(),
             epoch,
+            sent,
         })
     }
 
@@ -230,6 +239,7 @@ impl ReachPlane {
             epoch: self.epoch,
             canonical: self.canonical,
             registry: self.registry.clone(),
+            sent: self.sent.clone(),
         }
     }
 
@@ -401,7 +411,7 @@ impl ReachPlane {
     /// deposit reaches the addressed device today; CORR-28's multi-reader rework
     /// collapses the set to one envelope any of the recipient's devices fetches.
     pub fn send(
-        &self,
+        &mut self,
         carrier: &mut (impl Carrier + ?Sized),
         recipient: &ProfileId,
         body: &str,
@@ -420,6 +430,77 @@ impl ReachPlane {
     /// Seal any content to a resolved recipient. A message and an invitation
     /// travel the same way; only one of them is read.
     pub fn send_content(
+        &mut self,
+        carrier: &mut (impl Carrier + ?Sized),
+        recipient: &ProfileId,
+        content: Content,
+        now: u64,
+    ) -> Result<String, ReachError> {
+        let remembered = match &content {
+            Content::Message { body } => Some(addressbook::reach_store::Sent {
+                at: now,
+                body: body.clone(),
+                invitation: false,
+            }),
+            Content::Invitation { .. } => Some(addressbook::reach_store::Sent {
+                at: now,
+                body: String::new(),
+                invitation: true,
+            }),
+        };
+        let deposited = self.send_content_inner(carrier, recipient, content, now)?;
+        if let Some(remembered) = remembered {
+            self.sent
+                .entry(recipient.as_str().to_owned())
+                .or_default()
+                .push(remembered);
+        }
+        Ok(deposited)
+    }
+
+    /// Send through a contractor, signing as the device that composes.
+    pub fn send_via(
+        &mut self,
+        contractor: &dyn crate::Contractor,
+        recipient: &ProfileId,
+        content: Content,
+        now: u64,
+    ) -> Result<String, ReachError> {
+        let mut carrier = contractor.carrier_for(&self.canonical_seed());
+        self.send_content(&mut *carrier, recipient, content, now)
+    }
+
+    /// Collect through a contractor, asking as **every** device this identity
+    /// holds.
+    ///
+    /// A sender addresses whichever device resolution named, and a carrier may
+    /// only fetch its own signer's mailbox — so asking as one device leaves the
+    /// rest of the mail to expire unread, which a surface cannot tell from
+    /// nobody having written.
+    pub fn collect_via(&mut self, contractor: &dyn crate::Contractor, now: u64) -> Collected {
+        let mut collected = Collected {
+            filed: 0,
+            unasked: None,
+        };
+        for seed in self.seeds.clone() {
+            let device = device_from_seed(&seed);
+            let mut carrier = contractor.carrier_for(&seed);
+            let one = self.collect_on(&mut *carrier, &device, &seed, now);
+            collected.filed = collected.filed.saturating_add(one.filed);
+            if let Some(why) = one.unasked {
+                collected.unasked.get_or_insert(why);
+            }
+        }
+        collected
+    }
+
+    /// What this identity has sent to one correspondent.
+    #[must_use]
+    pub fn sent_to(&self, recipient: &str) -> &[addressbook::reach_store::Sent] {
+        self.sent.get(recipient).map_or(&[], Vec::as_slice)
+    }
+
+    fn send_content_inner(
         &self,
         carrier: &mut (impl Carrier + ?Sized),
         recipient: &ProfileId,
@@ -1061,7 +1142,7 @@ mod tests {
     /// a silent success.
     #[test]
     fn sending_to_an_unlearned_profile_is_not_reachable() {
-        let alice = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("alice");
+        let mut alice = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("alice");
         let stranger = ReachPlane::found(vec![BOB_A, BOB_B], NOW).expect("bob");
         let mut carrier = MemCarrier::new();
         assert!(matches!(

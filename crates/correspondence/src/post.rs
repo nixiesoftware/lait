@@ -410,3 +410,32 @@ fn urlencode(value: &str) -> String {
         })
         .collect()
 }
+
+/// A hosted Post, as something a holder configures once.
+///
+/// One base URL, and a carrier minted per device: the Post authorises a fetch by
+/// the asking device's own signature, so asking as a different device means
+/// signing as it.
+#[derive(Debug, Clone)]
+pub struct PostContractor {
+    base: String,
+}
+
+impl PostContractor {
+    #[must_use]
+    pub fn new(base: impl Into<String>) -> Self {
+        Self {
+            base: into_base(base.into()),
+        }
+    }
+}
+
+fn into_base(base: String) -> String {
+    base.trim().trim_end_matches('/').to_owned()
+}
+
+impl crate::Contractor for PostContractor {
+    fn carrier_for(&self, seed: &[u8; 32]) -> Box<dyn crate::Carrier + Send> {
+        Box::new(PostCarrier::new(self.base.clone(), Signer::new(*seed)))
+    }
+}

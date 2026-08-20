@@ -39,6 +39,25 @@ pub struct ReachState {
     /// The kinship registry: this identity's own log, and every correspondent
     /// profile it has absorbed.
     pub registry: Registry,
+    /// What this identity has sent, keyed by the address it was sent to.
+    ///
+    /// Here because the carrier drops a letter once its recipient acknowledges,
+    /// so the sender's copy is the only durable one there will ever be. Without
+    /// it, acknowledging on collect would silently destroy half of every
+    /// conversation.
+    #[serde(default)]
+    pub sent: std::collections::BTreeMap<String, Vec<Sent>>,
+}
+
+/// One letter this identity composed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sent {
+    pub at: u64,
+    pub body: String,
+    /// Whether it was an invitation rather than a message. Kept so a transcript
+    /// redraws what it was, not what it looked like.
+    #[serde(default)]
+    pub invitation: bool,
 }
 
 /// Where reach state lives for one identity.
@@ -144,6 +163,7 @@ mod tests {
             epoch,
             canonical: 0,
             registry,
+            sent: std::collections::BTreeMap::new(),
         }
     }
 

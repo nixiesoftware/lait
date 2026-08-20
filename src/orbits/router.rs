@@ -636,6 +636,16 @@ impl Router {
         let correspondence = Arc::new(crate::daemon::correspondence::CorrespondenceService::open(
             &identity,
         ));
+        // Carried over a hosted Post when one is named. Absent, the plane stands
+        // but carries nothing, and every operation says so — which is a
+        // different fact from an empty mailbox and the only one worth acting on.
+        if let Some(base) = crate::daemon::correspondence::configured_carrier() {
+            if let Err(error) =
+                correspondence.carry_over(base, crate::daemon::correspondence::now_secs())
+            {
+                tracing::warn!(%error, "correspondence could not be carried");
+            }
+        }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
         Self {
             catalog,

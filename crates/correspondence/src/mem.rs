@@ -650,3 +650,11 @@ impl Carrier for SharedMem {
         }
     }
 }
+
+/// One store, whichever device is asking. In memory there is no custody fence
+/// to respect, so every device reads the same shared carrier.
+impl crate::Contractor for SharedMem {
+    fn carrier_for(&self, _seed: &[u8; 32]) -> Box<dyn Carrier + Send> {
+        Box::new(self.clone())
+    }
+}

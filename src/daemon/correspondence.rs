@@ -23,15 +23,31 @@
 //! invitation it delivers is verified at the Space that issued it, and delivery
 //! was never admission.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use correspondence::Carrier;
+use correspondence::Contractor;
 use mechanics::kinship::{Audience, ProfileId};
 
 use crate::control::{Request, Response};
 
-fn now_secs() -> u64 {
+/// The carrier this deployment is pointed at, if any.
+///
+/// `LAIT_POST_URL` names a hosted Post. Nothing is assumed absent it: a default
+/// would point every install at a host, and an unreachable host read as an empty
+/// mailbox is the defect this plane is most careful about.
+#[must_use]
+pub fn configured_carrier() -> Option<Box<dyn Contractor>> {
+    let base = std::env::var("LAIT_POST_URL").ok()?;
+    let base = base.trim();
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        return None;
+    }
+    Some(Box::new(correspondence::post::PostContractor::new(base)))
+}
+
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
@@ -79,7 +95,7 @@ pub struct CorrespondenceService {
 /// a hosted Post today, a direct peer later — and the plane never learns which.
 struct Plane {
     reach: correspondence::plane::ReachPlane,
-    carrier: Box<dyn Carrier + Send>,
+    contractor: Box<dyn Contractor>,
 }
 
 impl CorrespondenceService {
@@ -103,7 +119,7 @@ impl CorrespondenceService {
     /// Founding is deterministic from this identity's own seeds, so the address
     /// a person hands out names them on every start. Durable reach state is
     /// read here and written back by anything that changes it.
-    pub fn carry_over(&self, carrier: Box<dyn Carrier + Send>, now: u64) -> Result<(), String> {
+    pub fn carry_over(&self, contractor: Box<dyn Contractor>, now: u64) -> Result<(), String> {
         let seeds = crate::config::load_or_create_kinship_seeds(&self.identity)
             .map_err(|error| error.to_string())?;
         let held = addressbook::ReachStore::at(&self.identity)
@@ -115,7 +131,7 @@ impl CorrespondenceService {
             .plane
             .lock()
             .map_err(|_| "the correspondence plane is poisoned".to_string())?;
-        *plane = Some(Plane { reach, carrier });
+        *plane = Some(Plane { reach, contractor });
         Ok(())
     }
 
@@ -126,15 +142,82 @@ impl CorrespondenceService {
             .map_err(|error| error.to_string())
     }
 
-    /// This identity's reach, as every answer reports it.
+    /// This identity's reach and everything said on it, as every answer
+    /// reports it. Whole rather than incremental: a caller that had to
+    /// reconstruct a transcript from deltas would be keeping a second copy of
+    /// the mailbox, which is the thing this service exists to stop.
     fn reach_view(&self, plane: &Plane) -> Response {
+        let mine = plane.reach.profile().as_str().to_owned();
+        let held = correspondents(&plane.reach);
+
+        // Received letters file under whoever signed them. A letter from a
+        // device no held profile avows is a stranger writing first; it has
+        // nobody to file under, so it goes to this identity's own transcript
+        // rather than being dropped.
+        let mut arrived: BTreeMap<String, Vec<crate::control::LetterView>> = BTreeMap::new();
+        for opened in plane.reach.opened() {
+            let (kind, body) = match &opened.content {
+                correspondence::Content::Message { body } => ("message", Some(body.clone())),
+                correspondence::Content::Invitation { .. } => ("invitation", None),
+            };
+            let peer = plane
+                .reach
+                .profile_of_device(&opened.from)
+                .map_or_else(|| mine.clone(), |profile| profile.as_str().to_owned());
+            arrived
+                .entry(peer)
+                .or_default()
+                .push(crate::control::LetterView {
+                    id: Some(opened.id.clone()),
+                    mine: false,
+                    kind: kind.into(),
+                    body,
+                    sent_at: opened.sent_at,
+                    from_device: opened.from.as_str().to_owned(),
+                    provenance_agrees: opened.provenance_agrees,
+                });
+        }
+
+        let my_device = plane.reach.canonical_device().as_str().to_owned();
+        let mut peers: std::collections::BTreeSet<String> = held.iter().cloned().collect();
+        peers.extend(arrived.keys().cloned());
+        peers.insert(mine.clone());
+
+        let conversations = peers
+            .into_iter()
+            .map(|peer| {
+                let mut letters: Vec<crate::control::LetterView> = plane
+                    .reach
+                    .sent_to(&peer)
+                    .iter()
+                    .map(|sent| crate::control::LetterView {
+                        id: None,
+                        mine: true,
+                        kind: if sent.invitation {
+                            "invitation".into()
+                        } else {
+                            "message".into()
+                        },
+                        body: (!sent.invitation).then(|| sent.body.clone()),
+                        sent_at: sent.at,
+                        from_device: my_device.clone(),
+                        provenance_agrees: true,
+                    })
+                    .collect();
+                letters.extend(arrived.remove(&peer).unwrap_or_default());
+                letters.sort_by_key(|letter| letter.sent_at);
+                crate::control::ConversationView { peer, letters }
+            })
+            .collect();
+
         Response::Reach(Box::new(crate::control::ReachView {
             announcement: plane
                 .reach
                 .card(&plane.reach.standing())
                 .and_then(|card| card.render().ok()),
-            profile: plane.reach.profile().as_str().to_owned(),
-            correspondents: correspondents(&plane.reach),
+            profile: mine,
+            correspondents: held,
+            conversations,
         }))
     }
 
@@ -192,9 +275,17 @@ impl CorrespondenceService {
                 let content = correspondence::Content::Message { body };
                 match plane
                     .reach
-                    .send_content(&mut *plane.carrier, &profile, content, now)
+                    .send_via(plane.contractor.as_ref(), &profile, content, now)
                 {
-                    Ok(_) => self.reach_view(plane),
+                    // Durable before it is reported. The carrier forgets a
+                    // letter once its recipient acknowledges, so this copy is
+                    // the only one there will ever be — and a send that answered
+                    // before keeping it would lose the half a person wrote on
+                    // the next restart, with nothing to say it had.
+                    Ok(_) => match self.keep(plane) {
+                        Ok(()) => self.reach_view(plane),
+                        Err(error) => Response::err(error),
+                    },
                     Err(error) => Response::err(format!("{error}")),
                 }
             }
@@ -219,15 +310,23 @@ impl CorrespondenceService {
                 let content = correspondence::Content::Invitation { coordinates };
                 match plane
                     .reach
-                    .send_content(&mut *plane.carrier, &profile, content, now)
+                    .send_via(plane.contractor.as_ref(), &profile, content, now)
                 {
-                    Ok(_) => self.reach_view(plane),
+                    // Durable before it is reported. The carrier forgets a
+                    // letter once its recipient acknowledges, so this copy is
+                    // the only one there will ever be — and a send that answered
+                    // before keeping it would lose the half a person wrote on
+                    // the next restart, with nothing to say it had.
+                    Ok(_) => match self.keep(plane) {
+                        Ok(()) => self.reach_view(plane),
+                        Err(error) => Response::err(error),
+                    },
                     Err(error) => Response::err(format!("{error}")),
                 }
             }
 
             Request::CorrespondCollect => {
-                let collected = plane.reach.collect(&mut *plane.carrier, now);
+                let collected = plane.reach.collect_via(plane.contractor.as_ref(), now);
                 if let Err(error) = self.keep(plane) {
                     return Response::err(error);
                 }
@@ -344,14 +443,63 @@ mod tests {
         );
 
         let collected = grace.handle(Request::CorrespondCollect).await;
-        assert!(
-            matches!(collected, Response::Reach(_)),
-            "a collect that reached the carrier answers, got {collected:?}"
+        let view = reach(&collected).clone();
+        assert_eq!(
+            view.correspondents,
+            vec![ada_address.clone()],
+            "Grace still holds exactly the one correspondent she learned"
+        );
+
+        // The letter is filed under whoever signed it, in the transcript the
+        // daemon holds — not under Grace's own conversation, and not nowhere.
+        let from_ada = view
+            .conversations
+            .iter()
+            .find(|c| c.peer == ada_address)
+            .expect("a conversation with Ada");
+        assert_eq!(from_ada.letters.len(), 1);
+        let letter = &from_ada.letters[0];
+        assert!(!letter.mine);
+        assert_eq!(letter.kind, "message");
+        assert_eq!(letter.body.as_deref(), Some("carried by the daemon"));
+        assert!(letter.id.is_some(), "an arrived letter names itself");
+        assert!(letter.provenance_agrees);
+
+        // Ada's own copy of what she wrote, which the carrier will forget the
+        // moment it is acknowledged.
+        let ada_side = reach(&ada.handle(Request::ReachView).await).clone();
+        let to_grace = ada_side
+            .conversations
+            .iter()
+            .find(|c| c.peer == grace_view.profile)
+            .expect("Ada's side of it");
+        assert_eq!(to_grace.letters.len(), 1);
+        assert!(to_grace.letters[0].mine, "the half she wrote");
+        assert_eq!(
+            to_grace.letters[0].body.as_deref(),
+            Some("carried by the daemon")
+        );
+
+        // The daemon goes away entirely and comes back from disk.
+        drop(ada);
+        let ada = CorrespondenceService::open(&ada_home);
+        ada.carry_over(Box::new(shared.clone()), now)
+            .expect("ada again");
+        let after = reach(&ada.handle(Request::ReachView).await).clone();
+        assert_eq!(
+            after.profile, ada_side.profile,
+            "the address Ada handed out still names her"
         );
         assert_eq!(
-            reach(&collected).correspondents,
-            vec![ada_address],
-            "and Grace still holds exactly the one correspondent she learned"
+            after
+                .conversations
+                .iter()
+                .find(|c| c.peer == grace_view.profile)
+                .expect("still there")
+                .letters
+                .len(),
+            1,
+            "and what she wrote survived the restart"
         );
 
         let _ = std::fs::remove_dir_all(&root);
