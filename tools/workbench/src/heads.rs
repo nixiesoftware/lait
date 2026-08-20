@@ -871,10 +871,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn asking_reaches_the_childs_children() {
+        // Readiness is printed *after* the child is forked, so reading it proves
+        // there is a descendant to reach. Spawning and asking straight away
+        // raced the shell: a group TERM arriving after `trap` but before the
+        // fork was ignored by the shell and missed the child entirely, and the
+        // stop escalated to a force — failing on this assertion, under load,
+        // for a reason that is not the property. `deaf_to_term` below already
+        // waits for a readiness line; this one did not.
         let mut command = Command::new("sh");
-        command.args(["-c", "trap '' TERM; sleep 60"]);
+        command.args(["-c", "trap '' TERM; sleep 60 & echo ready; wait"]);
+        command.stdout(Stdio::piped());
         own_process_group(&mut command);
-        let child = command.spawn().expect("spawn a parent with a child");
+        let mut child = command.spawn().expect("spawn a parent with a child");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read the fixture's readiness line");
+        assert_eq!(line.trim(), "ready", "the child must exist before we ask");
 
         let mut head = OwnedHead {
             facts: HeadFacts {
