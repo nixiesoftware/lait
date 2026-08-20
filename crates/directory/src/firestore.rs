@@ -201,8 +201,12 @@ impl FirestoreStore {
     /// two callers would both believe they had spent the same nonce.
     fn delete_if_present(&mut self, collection: &str, id: &str) -> Result<bool> {
         let token = self.token()?;
-        let name = format!("{}/{collection}/{}", self.resource, id);
-        let url = format!("{}:commit", self.base.trim_end_matches("/documents"));
+        let name = format!("{}/{collection}/{}", self.resource, encode(id));
+        // `:commit` hangs off `documents`, not off the database — the API is
+        // `POST /v1/{database=projects/*/databases/*}/documents:commit`. Getting
+        // this wrong answers 404, which reads as "no such document" and is
+        // really "no such method".
+        let url = format!("{}:commit", self.base);
         match self
             .agent
             .post(&url)
