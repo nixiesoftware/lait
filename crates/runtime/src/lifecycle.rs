@@ -981,15 +981,12 @@ impl Orbit {
                     }),
                     cancel: station.cancel.clone(),
                 };
-                match crate::peer_supply::PeerSupply::spawn(supply) {
-                    Ok(supply) => *station.supply.lock_recovering() = Some(Arc::new(supply)),
-                    // A Station that cannot start its fetch thread still serves
-                    // and still reads what it holds. What it cannot do is
-                    // acquire — and a cursor built with no supply answers
-                    // `Unsupplied`, which is the truthful end rather than a
-                    // stall.
-                    Err(_) => *station.supply.lock_recovering() = None,
-                }
+                let (supply, driver) = crate::peer_supply::PeerSupply::mount(supply);
+                // Tracked, so `drain_tasks` joins it. A fetch thread per
+                // Station that nothing joins is a leak that only ever shows up
+                // as a slow machine.
+                station.spawn_tracked(driver)?;
+                *station.supply.lock_recovering() = Some(Arc::new(supply));
             }
         }
         Ok(station)

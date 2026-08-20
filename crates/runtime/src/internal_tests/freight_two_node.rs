@@ -1755,22 +1755,27 @@ async fn a_cursor_reads_from_a_peer_without_the_test_fetching() {
     // The one thing the test tells it: who is out there. Discovery in
     // production reads the neighbour registry; here the answer is the peer.
     let peer = holder.station.clone();
-    let supply = Arc::new(
-        PeerSupply::spawn(SupplyContext {
-            fetcher: fetcher(&seeker),
-            transport: seeker.transport.clone(),
-            local: seeker.station.clone(),
-            authority: Box::new(MemberMayAcquire),
-            candidates: Arc::new(move || vec![peer.clone()]),
-            cancel: CancelToken::new(),
-        })
-        .expect("the fetch driver starts"),
-    );
+    let cancel = CancelToken::new();
+    let (supply, driver) = PeerSupply::mount(SupplyContext {
+        fetcher: fetcher(&seeker),
+        transport: seeker.transport.clone(),
+        local: seeker.station.clone(),
+        authority: Box::new(MemberMayAcquire),
+        candidates: Arc::new(move || vec![peer.clone()]),
+        cancel: cancel.clone(),
+    });
+    // In production the Station owns this thread and joins it. Here the test
+    // does, so the driver does not outlive the read it exists for.
+    let fetching = std::thread::spawn({
+        let cancel = cancel.clone();
+        move || driver(cancel)
+    });
+    let supply = Arc::new(supply);
 
     let allow = |_: ContentAction<'_>| Ok(());
     let policy = seeker.policy(&space, &allow);
     let mut cursor =
-        ContentCursor::open(seeker.host.clone(), &policy, &content, supply).expect("open");
+        ContentCursor::open(seeker.host.clone(), &policy, &content, supply.clone()).expect("open");
 
     let mut out = Vec::new();
     let mut blocked = 0usize;
@@ -1804,4 +1809,8 @@ async fn a_cursor_reads_from_a_peer_without_the_test_fetching() {
         blocked > 0,
         "nothing was missing, so this proved nothing about fetching"
     );
+
+    drop(supply);
+    cancel.cancel();
+    fetching.join().expect("the fetch driver stops");
 }

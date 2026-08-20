@@ -167,20 +167,22 @@ pub struct SupplyContext {
 }
 
 impl PeerSupply {
-    /// Start the driver and return the supply a cursor is built with.
+    /// The supply, and the driver that has to be run for it to do anything.
     ///
-    /// The thread is the caller's to keep alive; dropping every `PeerSupply`
-    /// closes the channel and the driver returns. A supply whose driver has
-    /// gone answers [`Gap::Unasked`], which is true: there is nothing left that
-    /// could ask.
-    pub fn spawn(context: SupplyContext) -> std::io::Result<Self> {
+    /// Split rather than spawned here so the thread belongs to whoever owns the
+    /// Station: `spawn_tracked` is what makes `drain_tasks` join it, and a
+    /// thread this module started for itself would outlive the Station that
+    /// wanted it. One per Station, never joined, is a leak that only shows up
+    /// as a slow machine.
+    ///
+    /// A supply whose driver has stopped answers [`Gap::Unasked`], which is
+    /// true: there is nothing left that could ask.
+    pub fn mount(context: SupplyContext) -> (Self, impl FnOnce(CancelToken) + Send + 'static) {
         let (commands, inbox) = std::sync::mpsc::channel();
         let progress: Arc<Mutex<BTreeMap<Job, Progress>>> = Arc::default();
         let shared = progress.clone();
-        std::thread::Builder::new()
-            .name("lait-fetch".into())
-            .spawn(move || drive(context, inbox, shared))?;
-        Ok(Self { commands, progress })
+        let driver = move |cancel: CancelToken| drive(context, inbox, shared, cancel);
+        (Self { commands, progress }, driver)
     }
 
     fn note(&self, job: Job, progress: Progress) {
@@ -246,6 +248,7 @@ fn drive(
     context: SupplyContext,
     inbox: Receiver<Command>,
     progress: Arc<Mutex<BTreeMap<Job, Progress>>>,
+    cancel: CancelToken,
 ) {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -256,7 +259,20 @@ fn drive(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let mut abandoned: std::collections::BTreeSet<Job> = std::collections::BTreeSet::new();
-        while let Ok(command) = inbox.recv() {
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            // Timed rather than blocking: this thread is joined at shutdown, so
+            // it has to wake on its own to notice cancellation. A bare `recv`
+            // would sit here until somebody sent a command, and the join would
+            // wait for a fetch nobody is going to ask for.
+            let command = match inbox.recv_timeout(WAKE) {
+                Ok(command) => command,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                // Every supply has been dropped. Nothing can ask again.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            };
             match command {
                 Command::Abandon { job } => {
                     abandoned.insert(job);
@@ -276,12 +292,12 @@ fn drive(
                     }
                 }
             }
-            if context.cancel.is_cancelled() {
-                return;
-            }
         }
     });
 }
+
+/// How often an idle driver looks up to see whether it should stop.
+const WAKE: Duration = Duration::from_millis(200);
 
 /// Dial, fetch, and say which kind of nothing happened if nothing did.
 async fn serve(
