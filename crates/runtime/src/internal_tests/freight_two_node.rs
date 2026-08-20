@@ -1608,3 +1608,60 @@ async fn paging_holds_only_the_chunk_it_is_reading() {
         "a paged read left the whole content resident: {before} -> {after}"
     );
 }
+
+/// Throughput of a demand-paged read at media sizes, on a fixed small cache.
+///
+/// `#[ignore]` because it moves hundreds of megabytes: this is a measurement to
+/// run deliberately on a box that can hold it, not a gate on every push. Run it
+/// with `cargo nextest run -p runtime --lib paging_at_media_sizes --run-ignored
+/// all --no-capture`.
+///
+/// The transport is in-process, so what this measures is the content plane's
+/// own cost — chunking, sealing, hashing, proof verification, install, open —
+/// rather than a network. That is the number that decides whether 256 KiB is
+/// the right chunk, and whether a reader can keep ahead of a playhead.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "moves hundreds of megabytes; run deliberately"]
+async fn paging_at_media_sizes() {
+    // Reader cache stays small and fixed while the content grows, so the ratio
+    // being proved is content:cache and not content:memory.
+    const READER_CACHE: u64 = 8 * 1024 * 1024;
+
+    for (label, bytes) in [
+        ("16 MiB  (a trailer)", 16 * 1024 * 1024usize),
+        ("64 MiB  (a short)", 64 * 1024 * 1024),
+        ("256 MiB (a feature at 720p-ish)", 256 * 1024 * 1024),
+    ] {
+        let net = comms::mem::MemNet::new();
+        let holder = node(&net, "scale-holder", [31u8; 32], true);
+        let seeker = node_with_quota(&net, "scale-seeker", [32u8; 32], false, READER_CACHE);
+
+        let plaintext = filler(17, bytes);
+        let sealed = std::time::Instant::now();
+        let content = seed_content(&holder, 17, &plaintext);
+        let seal_secs = sealed.elapsed().as_secs_f64();
+        learn_descriptor(&seeker, &holder, &content);
+
+        let started = std::time::Instant::now();
+        let (read, windows) = page_through(&seeker, &holder, &content, 31, READER_CACHE).await;
+        let secs = started.elapsed().as_secs_f64();
+
+        assert_eq!(read.len(), plaintext.len());
+        assert!(read == plaintext, "{label}: the bytes changed in flight");
+
+        let mib = bytes as f64 / (1024.0 * 1024.0);
+        let resident = seeker.host.cache().resident_bytes();
+        eprintln!(
+            "{label}: ingest {:.1} MiB/s | paged {:.1} MiB/s over {windows} windows | \
+             resident ceiling {:.1} MiB against a {:.0} MiB cache",
+            mib / seal_secs,
+            mib / secs,
+            resident as f64 / (1024.0 * 1024.0),
+            READER_CACHE as f64 / (1024.0 * 1024.0),
+        );
+        assert!(
+            resident <= READER_CACHE,
+            "{label}: the reader ended holding {resident} against a {READER_CACHE} cache"
+        );
+    }
+}
