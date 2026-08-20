@@ -140,9 +140,17 @@ struct WebPresentedItem {
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum WebPresentedScene {
-    Frame { uri: String, width: u32, height: u32 },
-    Blank { reason: String },
-    Unsupported { output: String },
+    Frame {
+        uri: String,
+        width: u32,
+        height: u32,
+    },
+    Blank {
+        reason: String,
+    },
+    Unsupported {
+        output: String,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -423,9 +431,40 @@ struct WebDisplayPairing {
 
 impl From<ClientView> for WebClientView {
     fn from(view: ClientView) -> Self {
+        // Destructured whole, and deliberately without `..`.
+        //
+        // This is the seam where a field added to `api::ClientView` has to be
+        // carried to the browser, and it is the only place that could say so.
+        // Reading `field` — or destructuring with `..` — compiles exactly
+        // as well when a field is missed, and the browser then draws a view
+        // that quietly lacks it. That is the shape the api module's own doc
+        // calls out: safe by construction rather than by care.
+        //
+        // So adding to the boundary fails *here*, until somebody decides what
+        // this client does with it. Which is the decision, not the compile
+        // error, and it should be made on purpose.
+        let ClientView {
+            loading,
+            stale,
+            library,
+            host,
+            display,
+            presentation,
+            heads,
+            devices,
+            storage,
+            orbits,
+            space,
+            book,
+            correspondence,
+            notices,
+            failures,
+            in_flight,
+            mcp,
+        } = view;
         Self {
-            loading: view.loading,
-            stale: view.stale.map(|stale| match stale {
+            loading: loading,
+            stale: stale.map(|stale| match stale {
                 Staleness::NeverLoaded => WebStaleness {
                     kind: "neverLoaded",
                     reason: None,
@@ -435,7 +474,7 @@ impl From<ClientView> for WebClientView {
                     reason: Some(reason),
                 },
             }),
-            library: view.library.map(|rows| {
+            library: library.map(|rows| {
                 rows.into_iter()
                     .map(|row| WebLibraryWorld {
                         key: row.key,
@@ -470,13 +509,13 @@ impl From<ClientView> for WebClientView {
                     })
                     .collect()
             }),
-            host: view.host.map(|host| WebHostFacts {
+            host: host.map(|host| WebHostFacts {
                 version: host.version,
                 identity_home: host.identity_home,
                 spaces_root: host.spaces_root,
                 orbit_count: host.orbit_count,
             }),
-            display: view.display.map(|display| WebDisplayFacts {
+            display: display.map(|display| WebDisplayFacts {
                 instance: display.instance,
                 label: display.label,
                 origin: display.origin,
@@ -552,8 +591,7 @@ impl From<ClientView> for WebClientView {
                     })
                     .collect(),
             }),
-            heads: view
-                .heads
+            heads: heads
                 .into_iter()
                 .map(|head| WebHead {
                     id: head.id,
@@ -563,8 +601,7 @@ impl From<ClientView> for WebClientView {
                     orbit: head.orbit,
                 })
                 .collect(),
-            devices: view
-                .devices
+            devices: devices
                 .into_iter()
                 .map(|device| WebDevice {
                     id: device.id,
@@ -578,8 +615,7 @@ impl From<ClientView> for WebClientView {
                     last_error: device.last_error,
                 })
                 .collect(),
-            storage: view
-                .storage
+            storage: storage
                 .into_iter()
                 .map(|storage| WebStorage {
                     orbit: storage.orbit,
@@ -590,8 +626,7 @@ impl From<ClientView> for WebClientView {
                     missing: storage.missing.map(missing_name),
                 })
                 .collect(),
-            orbits: view
-                .orbits
+            orbits: orbits
                 .into_iter()
                 .map(|orbit| WebOrbit {
                     space: orbit.space,
@@ -600,7 +635,7 @@ impl From<ClientView> for WebClientView {
                     last_opened: orbit.last_opened,
                 })
                 .collect(),
-            space: view.space.map(|space| WebSpace {
+            space: space.map(|space| WebSpace {
                 space: space.space,
                 whoami: space.whoami,
                 admin: space.admin,
@@ -630,7 +665,7 @@ impl From<ClientView> for WebClientView {
                     summary: diagnosis.summary,
                 }),
             }),
-            book: view.book.map(|book| WebBook {
+            book: book.map(|book| WebBook {
                 cards: book
                     .cards
                     .into_iter()
@@ -662,7 +697,7 @@ impl From<ClientView> for WebClientView {
                     })
                     .collect(),
             }),
-            correspondence: view.correspondence.map(|corr| WebCorrespondenceFacts {
+            correspondence: correspondence.map(|corr| WebCorrespondenceFacts {
                 my_reach: corr.my_reach.clone(),
                 me: corr.me.clone(),
                 my_device: corr.my_device,
@@ -705,7 +740,7 @@ impl From<ClientView> for WebClientView {
                 open_tabs: corr.open_tabs,
                 active_tab: corr.active_tab,
             }),
-            presentation: view.presentation.map(|presentation| WebPresentationFacts {
+            presentation: presentation.map(|presentation| WebPresentationFacts {
                 chosen: presentation.chosen.map(|chosen| WebPresentationChoice {
                     orbit: chosen.orbit,
                     world: chosen.world,
@@ -751,7 +786,7 @@ impl From<ClientView> for WebClientView {
                 }),
                 failure: presentation.failure,
             }),
-            mcp: view.mcp.map(|mcp| WebMcpBinding {
+            mcp: mcp.map(|mcp| WebMcpBinding {
                 path: mcp.path,
                 detail: mcp.detail,
                 note: mcp.note,
@@ -760,16 +795,14 @@ impl From<ClientView> for WebClientView {
                 written: mcp.written,
                 world: mcp.world,
             }),
-            notices: view
-                .notices
+            notices: notices
                 .into_iter()
                 .map(|notice| WebNotice {
                     said: notice.said,
                     launched: notice.launched,
                 })
                 .collect(),
-            failures: view
-                .failures
+            failures: failures
                 .into_iter()
                 .map(|failure| WebFailure {
                     what: failure.what,
@@ -777,7 +810,7 @@ impl From<ClientView> for WebClientView {
                     retryable: failure.retryable,
                 })
                 .collect(),
-            in_flight: view.in_flight,
+            in_flight: in_flight,
         }
     }
 }
@@ -826,29 +859,80 @@ fn display_sync_mode_name(mode: api::DisplaySyncMode) -> &'static str {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum WebAction {
     Refresh,
-    Open { world: String, entry_path: String },
-    UpdateWorld { world: String },
-    StartDevice { id: String },
-    StopDevice { id: String },
-    RestartDevice { id: String },
-    ForceStopDevice { id: String },
+    Open {
+        world: String,
+        entry_path: String,
+    },
+    UpdateWorld {
+        world: String,
+    },
+    StartDevice {
+        id: String,
+    },
+    StopDevice {
+        id: String,
+    },
+    RestartDevice {
+        id: String,
+    },
+    ForceStopDevice {
+        id: String,
+    },
     StopAllOwned,
-    RemoveDevice { id: String, delete_data: bool },
-    ReadSpace { orbit: String },
+    RemoveDevice {
+        id: String,
+        delete_data: bool,
+    },
+    ReadSpace {
+        orbit: String,
+    },
     StartHead,
-    StopHead { id: String },
-    ForgetOrbit { space: String },
-    BookPut { card: Option<String>, name: String, note: Option<String> },
-    BookDelete { card: String },
-    BookSetPicture { card: String, path: Option<String> },
-    BookMerge { from: String, into: String },
-    BookClaimSelf { card: String },
-    BookLink { card: String, handle: String },
-    BookUnlink { card: String, handle: String },
-    BookExport { path: String, cards: Option<Vec<String>> },
-    BookImport { path: String },
-    BookAccept { suggestion: String },
-    BookDismiss { suggestion: String },
+    StopHead {
+        id: String,
+    },
+    ForgetOrbit {
+        space: String,
+    },
+    BookPut {
+        card: Option<String>,
+        name: String,
+        note: Option<String>,
+    },
+    BookDelete {
+        card: String,
+    },
+    BookSetPicture {
+        card: String,
+        path: Option<String>,
+    },
+    BookMerge {
+        from: String,
+        into: String,
+    },
+    BookClaimSelf {
+        card: String,
+    },
+    BookLink {
+        card: String,
+        handle: String,
+    },
+    BookUnlink {
+        card: String,
+        handle: String,
+    },
+    BookExport {
+        path: String,
+        cards: Option<Vec<String>>,
+    },
+    BookImport {
+        path: String,
+    },
+    BookAccept {
+        suggestion: String,
+    },
+    BookDismiss {
+        suggestion: String,
+    },
     InstallMcp {
         client: String,
         scope: Option<String>,
@@ -859,8 +943,13 @@ enum WebAction {
         world: Option<String>,
         preview: bool,
     },
-    DisplayPairingApprove { pairing: String, label: String },
-    DisplayPairingReject { pairing: String },
+    DisplayPairingApprove {
+        pairing: String,
+        label: String,
+    },
+    DisplayPairingReject {
+        pairing: String,
+    },
     DisplayAssignmentPut {
         device: String,
         orbit: String,
@@ -875,29 +964,53 @@ enum WebAction {
         static_delay_ms: i32,
         expires_at_unix_ms: Option<u64>,
     },
-    DisplayAssignmentRevoke { assignment: String },
-    DisplayDeviceRevoke { device: String },
-    SendMessage { to: String, body: String },
+    DisplayAssignmentRevoke {
+        assignment: String,
+    },
+    DisplayDeviceRevoke {
+        device: String,
+    },
+    SendMessage {
+        to: String,
+        body: String,
+    },
     CollectMail,
-    BlockSender { person: String },
-    AcceptContact { person: String },
+    BlockSender {
+        person: String,
+    },
+    AcceptContact {
+        person: String,
+    },
     /// Publish this identity's reach so it can be handed to somebody. Acts on
     /// nobody — showing a friend code is not befriending anyone.
     ShareReach,
     /// Take a correspondent in, by the announcement they handed over. The one
     /// of the pair that creates a relationship, which is why it is named for
     /// the person rather than for the artifact.
-    AddCorrespondent { announcement: String },
+    AddCorrespondent {
+        announcement: String,
+    },
     /// Enter the Space an arriving invitation names. `message` is its deposit
     /// id; the coordinates verify against their own Space, so accepting is the
     /// same act as following an invite link — delivery was never admission.
-    OpenInvitation { message: String },
+    OpenInvitation {
+        message: String,
+    },
     /// Carry an invitation this identity already holds to a correspondent.
     /// Minting one is the Space's authority and stays there.
-    SendInvitation { to: String, link: String },
-    OpenConversation { person: String },
-    FocusConversation { person: String },
-    CloseConversation { person: String },
+    SendInvitation {
+        to: String,
+        link: String,
+    },
+    OpenConversation {
+        person: String,
+    },
+    FocusConversation {
+        person: String,
+    },
+    CloseConversation {
+        person: String,
+    },
     EnterPresentation,
     PresentHere {
         orbit: String,
@@ -997,10 +1110,28 @@ impl From<WebAction> for ActionRequest {
             WebAction::BookImport { path } => Self::BookImport { path },
             WebAction::BookAccept { suggestion } => Self::BookAccept { suggestion },
             WebAction::BookDismiss { suggestion } => Self::BookDismiss { suggestion },
-            WebAction::InstallMcp { client, scope, name, agent, no_agent, project, world, preview } => {
-                Self::InstallMcp { client, scope, name, agent, no_agent, project, world, preview }
+            WebAction::InstallMcp {
+                client,
+                scope,
+                name,
+                agent,
+                no_agent,
+                project,
+                world,
+                preview,
+            } => Self::InstallMcp {
+                client,
+                scope,
+                name,
+                agent,
+                no_agent,
+                project,
+                world,
+                preview,
+            },
+            WebAction::DisplayPairingApprove { pairing, label } => {
+                Self::DisplayPairingApprove { pairing, label }
             }
-            WebAction::DisplayPairingApprove { pairing, label } => Self::DisplayPairingApprove { pairing, label },
             WebAction::DisplayPairingReject { pairing } => Self::DisplayPairingReject { pairing },
             WebAction::DisplayAssignmentPut {
                 device,
@@ -1028,7 +1159,9 @@ impl From<WebAction> for ActionRequest {
                 },
                 stale_after_ms,
                 on_stale: match on_stale {
-                    WebDisplayStaleAction::KeepWithNativeBanner => api::DisplayStaleAction::KeepWithNativeBanner,
+                    WebDisplayStaleAction::KeepWithNativeBanner => {
+                        api::DisplayStaleAction::KeepWithNativeBanner
+                    }
                     WebDisplayStaleAction::Blank => api::DisplayStaleAction::Blank,
                 },
                 sync_group,
@@ -1039,25 +1172,35 @@ impl From<WebAction> for ActionRequest {
                 static_delay_ms,
                 expires_at_unix_ms,
             },
-            WebAction::DisplayAssignmentRevoke { assignment } => Self::DisplayAssignmentRevoke { assignment },
+            WebAction::DisplayAssignmentRevoke { assignment } => {
+                Self::DisplayAssignmentRevoke { assignment }
+            }
             WebAction::DisplayDeviceRevoke { device } => Self::DisplayDeviceRevoke { device },
             WebAction::SendMessage { to, body } => Self::SendMessage { to, body },
             WebAction::CollectMail => Self::CollectMail,
             WebAction::BlockSender { person } => Self::BlockSender { person },
             WebAction::AcceptContact { person } => Self::AcceptContact { person },
             WebAction::ShareReach => Self::ShareReach,
-            WebAction::AddCorrespondent { announcement } => {
-                Self::AddCorrespondent { announcement }
-            }
+            WebAction::AddCorrespondent { announcement } => Self::AddCorrespondent { announcement },
             WebAction::OpenInvitation { message } => Self::OpenInvitation { message },
             WebAction::SendInvitation { to, link } => Self::SendInvitation { to, link },
             WebAction::OpenConversation { person } => Self::OpenConversation { person },
             WebAction::FocusConversation { person } => Self::FocusConversation { person },
             WebAction::CloseConversation { person } => Self::CloseConversation { person },
             WebAction::EnterPresentation => Self::EnterPresentation,
-            WebAction::PresentHere { orbit, world, surface, input, title } => {
-                Self::PresentHere { orbit, world, surface, input, title }
-            }
+            WebAction::PresentHere {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            } => Self::PresentHere {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            },
             WebAction::PresentRefresh => Self::PresentRefresh,
             WebAction::LeavePresentation => Self::LeavePresentation,
         }
@@ -1340,9 +1483,15 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         "refresh" | "theme" => {
             let _ = app.emit(MENU_EVENT, event.id.as_ref().to_string());
         }
-        "displays" => { let _ = summon_surface(app, OwnedWindowSurface::Displays); }
-        "book" => { let _ = summon_surface(app, OwnedWindowSurface::Book); }
-        "chat" => { let _ = summon_surface(app, OwnedWindowSurface::Chat); }
+        "displays" => {
+            let _ = summon_surface(app, OwnedWindowSurface::Displays);
+        }
+        "book" => {
+            let _ = summon_surface(app, OwnedWindowSurface::Book);
+        }
+        "chat" => {
+            let _ = summon_surface(app, OwnedWindowSurface::Chat);
+        }
         _ => {}
     });
     Ok(())
