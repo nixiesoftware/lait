@@ -2,6 +2,7 @@
   "name": "@nixie/astrolabe-receivers",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Production Astrolabe Display receiver adapters and conformance checks",
   "scripts": {
     "test": "node --test test/web-protocol.test.mjs"

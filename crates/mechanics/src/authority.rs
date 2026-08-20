@@ -236,8 +236,26 @@ impl GeneralAccessConfig {
 pub struct Principal(String);
 
 impl Principal {
+    /// Canonicalized when the argument is a device key, left alone otherwise.
+    ///
+    /// [`DeviceId`] compares spelling-blind, but a `Principal` is a bare `String`
+    /// with derived `Eq`/`Ord`/`Hash` — so without this, two spellings of one
+    /// device key are two principals. That matters here more than it looks:
+    /// principals are leaves of a *threshold* access structure, and a k-of-n rule
+    /// counts distinct leaves. Two names for one key inflate `n` and can satisfy a
+    /// quorum with fewer keys than the policy says.
+    ///
+    /// The fallback is not laziness. A principal is not always a device — the type
+    /// exists precisely so one can expand into a policy branch, a federated
+    /// founder — and case-folding an arbitrary principal name would merge two
+    /// genuinely distinct ones. So only a value that parses as a device key is
+    /// normalized, which is the only case where lower-case hex is the canonical
+    /// form.
     pub fn of_device(device: &DeviceId) -> Self {
-        Principal(device.as_str().to_string())
+        match DeviceId::parse(device.as_str()) {
+            Some(canonical) => Principal(canonical.as_str().to_string()),
+            None => Principal(device.as_str().to_string()),
+        }
     }
     /// The device this principal is, when it is a direct device principal.
     pub fn as_device(&self) -> Option<DeviceId> {
@@ -318,6 +336,33 @@ pub enum AuthorityTransition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One device key is one principal, so a threshold cannot be padded with
+    /// re-spellings of a key the holder already has.
+    #[test]
+    fn a_device_principal_cannot_be_spelled_two_ways() {
+        let device = crate::crypto::device_from_seed(&[9u8; 32]);
+        let shouted = DeviceId::from_key_string(device.as_str().to_ascii_uppercase());
+        assert_ne!(device.as_str(), shouted.as_str(), "one key, two spellings");
+
+        assert_eq!(
+            Principal::of_device(&device),
+            Principal::of_device(&shouted),
+            "a k-of-n rule counts distinct leaves; two names for one key inflate n"
+        );
+
+        let mut leaves = std::collections::BTreeSet::new();
+        leaves.insert(Principal::of_device(&device));
+        leaves.insert(Principal::of_device(&shouted));
+        assert_eq!(leaves.len(), 1, "and a set of leaves must agree");
+
+        // A principal that is not a device key is left exactly as written: the
+        // type exists so one can expand into a policy branch, and folding an
+        // arbitrary name would merge two distinct principals.
+        let named = Principal(String::from("Founders-EU"));
+        assert_eq!(named.as_str(), "Founders-EU");
+        assert_ne!(named, Principal(String::from("founders-eu")));
+    }
 
     fn principals(seeds: &[u8]) -> Vec<Principal> {
         let mut v: Vec<Principal> = seeds

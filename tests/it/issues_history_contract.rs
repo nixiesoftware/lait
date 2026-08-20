@@ -49,6 +49,27 @@ impl runtime::world::AuthorityView for WriterAuthority {
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
         })
     }
+
+    /// The reviewed identity rather than the trait's all-zero fixture default.
+    /// Anything that records the publication it was authored at — a Spec
+    /// revision, a geometry artifact — refuses one whose implementation digest
+    /// is zero, so the authority and the registration must name the same
+    /// implementation.
+    fn active_implementation(
+        &self,
+        _world: &replica::body::WorldId,
+        _authority_frontier: &AuthorityFrontier,
+    ) -> Result<Option<[u8; 32]>, String> {
+        Ok(Some(reviewed_implementation()))
+    }
+}
+
+/// The canonical Issues implementation id, as registered and as the authority
+/// reports it active.
+fn reviewed_implementation() -> [u8; 32] {
+    lait::world::IssuesWorld::implementation_descriptor()
+        .id()
+        .expect("the Issues descriptor is canonical")
 }
 
 fn actor() -> ActorId {
@@ -63,7 +84,7 @@ fn device() -> String {
 
 fn station() -> (Runtime, Station) {
     let registry = Builder::new()
-        .register(Arc::new(IssuesWorld::new()))
+        .register_reviewed(Arc::new(IssuesWorld::new()), reviewed_implementation())
         .build()
         .unwrap();
     let rt = Runtime::open(
@@ -76,6 +97,19 @@ fn station() -> (Runtime, Station) {
     );
     let station = rt.create().unwrap().open(Activation::offline()).unwrap();
     (rt, station)
+}
+
+/// The product result inside the durable acknowledgement.
+///
+/// Writes answer with the operation envelope now: the receipt that makes the
+/// operation durable, paired with the result it produced. These tests are
+/// about what the write produced — a handle, a link — rather than about the
+/// receipt, so they unwrap it here and keep asserting on the result.
+fn effect(response: Response) -> Response {
+    match response {
+        Response::Operation { response, .. } => *response,
+        other => other,
+    }
 }
 
 fn facts() -> RouterFacts {
@@ -125,8 +159,8 @@ fn history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on()
         },
         &facts(),
     );
-    let Response::Ref { reff } = created else {
-        panic!("expected the new issue's handle, got {created:?}");
+    let Response::Ref { reff } = effect(created) else {
+        panic!("expected the new issue's handle");
     };
     router.route(
         Request::Comment {
@@ -137,10 +171,16 @@ fn history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on()
         &facts(),
     );
 
-    let (activity, _) = router.route(Request::Activity { since: None }, &facts());
-    let Response::Activity { events: rows, .. } = activity else {
+    let (activity, _) = router.route(
+        Request::Activity {
+            page: issues::contract::PageRequest::default(),
+        },
+        &facts(),
+    );
+    let Response::Activity { page } = activity else {
         panic!("expected activity, got {activity:?}");
     };
+    let rows = page.items;
     assert!(!rows.is_empty(), "creating and commenting is history");
 
     for row in &rows {
@@ -203,6 +243,25 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         },
         &facts(),
     );
+    let project_id = match router
+        .route(
+            Request::ProjectList {
+                page: issues::contract::PageRequest::default(),
+            },
+            &facts(),
+        )
+        .0
+    {
+        Response::Projects { page } => page
+            .items
+            .into_iter()
+            .find(|project| project.key == "CLIENT")
+            .expect("client project")
+            .id
+            .as_str()
+            .to_owned(),
+        response => panic!("expected project list, got {response:?}"),
+    };
     let create = |title: &str| {
         let (reply, _) = router.route(
             Request::IssueNew {
@@ -218,16 +277,32 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
             },
             &facts(),
         );
-        let Response::Ref { reff } = reply else {
-            panic!("expected issue reference, got {reply:?}");
+        let Response::Ref { reff } = effect(reply) else {
+            panic!("expected issue reference");
         };
         reff
     };
     let foundation = create("Connect to a served World");
     let workspace = create("Operate the local workspace");
-    let before_link = session
-        .snapshot_id()
-        .expect("generation before topology edit");
+    let before_link: issues::contract::Page<issues::dto::ProjectDto> = serde_json::from_slice(
+        &session
+            .query(runtime::world::Query {
+                schema: issues::contract::issue_schema(),
+                schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+                payload: issues::contract::IssueQuery::Projects {
+                    page: issues::contract::PageRequest {
+                        limit: 1,
+                        cursor: None,
+                    },
+                }
+                .to_json(),
+                publication: None,
+            })
+            .expect("publication before topology edit")
+            .bytes,
+    )
+    .expect("project page before topology edit");
+    let before_link = before_link.publication;
 
     let (linked, _) = router.route(
         Request::IssueLink {
@@ -238,39 +313,78 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         &facts(),
     );
     assert!(
-        matches!(linked, Response::Ref { .. }),
-        "link reply: {linked:?}"
+        matches!(effect(linked), Response::Ref { .. }),
+        "link reply did not answer with the issue handle"
     );
 
-    let (current, _) = router.route(
-        Request::Geometry {
-            project: "CLIENT".into(),
+    let geometry_query = |publication| runtime::world::Query {
+        schema: issues::contract::issue_schema(),
+        schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+        payload: issues::contract::IssueQuery::Geometry {
+            project: project_id.clone(),
             roots: vec![],
-            generation: None,
-        },
-        &facts(),
-    );
-    let Response::Geometry(current) = current else {
-        panic!("expected current geometry, got {current:?}");
+            page: Some(issues::geometry::GeometryPageRequest::first(
+                issues::geometry::GeometrySection::Edges,
+                16,
+            )),
+        }
+        .to_json(),
+        publication,
     };
-    assert_eq!(current.nodes.len(), 2);
-    assert_eq!(current.components.len(), 1);
-    assert_eq!(current.edges.len(), 1);
-    assert_eq!(current.edges[0].relation, "blocks");
+    // Resolve the human project key once through the router's product
+    // snapshot, then use the canonical id selected by deterministic fixtures.
+    // Geometry itself is now a bounded artifact response: summary and one
+    // explicit page, never a whole graph serialized by accident.
+    // Geometry is built off the request now, so the first ask can legitimately
+    // answer `Pending` with neither summary nor page. Waiting for the artifact
+    // is the caller's job — the projection says which state it is in.
+    let ready_geometry = |query: runtime::world::Query| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let projection: issues::contract::GeometryProjection =
+                serde_json::from_slice(&session.query(query.clone()).expect("geometry").bytes)
+                    .expect("geometry response");
+            match projection.readiness {
+                issues::geometry::GeometryReadiness::Ready => break projection,
+                issues::geometry::GeometryReadiness::Pending
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => panic!("geometry never became ready: {other:?}"),
+            }
+        }
+    };
+    let current = ready_geometry(geometry_query(None));
+    let current_summary = current.summary.as_ref().expect("ready summary");
+    assert_eq!(current_summary.nodes, 2);
+    assert_eq!(current_summary.components, 1);
+    assert_eq!(current_summary.edges, 1);
+    let Some(issues::geometry::GeometryPage {
+        rows: issues::geometry::GeometryRows::Edges(edges),
+        ..
+    }) = current.page.as_ref()
+    else {
+        panic!("expected current edge page, got {:?}", current.page);
+    };
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].relation, issues::geometry::RelationKind::Blocks);
 
-    let (historical, _) = router.route(
-        Request::Geometry {
-            project: "CLIENT".into(),
-            roots: vec![],
-            generation: Some(before_link.to_hex()),
-        },
-        &facts(),
-    );
-    let Response::Geometry(historical) = historical else {
-        panic!("expected historical geometry, got {historical:?}");
+    let historical = ready_geometry(geometry_query(Some(before_link.publication.clone())));
+    let historical_summary = historical.summary.as_ref().expect("ready summary");
+    assert_eq!(historical_summary.nodes, 2);
+    assert_eq!(historical_summary.components, 2);
+    assert_eq!(historical_summary.edges, 0);
+    let Some(issues::geometry::GeometryPage {
+        rows: issues::geometry::GeometryRows::Edges(edges),
+        ..
+    }) = historical.page.as_ref()
+    else {
+        panic!("expected historical edge page, got {:?}", historical.page);
     };
-    assert_eq!(historical.nodes.len(), 2);
-    assert_eq!(historical.components.len(), 2);
-    assert!(historical.edges.is_empty());
-    assert_eq!(historical.generation, before_link.to_hex());
+    assert!(edges.is_empty());
+    assert_eq!(
+        data_encoding::HEXLOWER.encode(&historical.source.publication.manifest_root),
+        data_encoding::HEXLOWER.encode(&before_link.publication.manifest_root)
+    );
 }

@@ -9,6 +9,12 @@ mod compiler;
 mod coordinator;
 mod hls;
 mod http;
+
+pub use http::serve_display_on;
+/// The two the daemon needs to tell "the port is taken" from "our service
+/// broke". Re-exported rather than opening the module: everything else in there
+/// is the HTTPS surface itself, which has one caller.
+pub(crate) use http::{bind_display, is_port_taken};
 mod live;
 mod pairing;
 mod runtime;
@@ -20,7 +26,7 @@ pub use cmaf::{
     CmafTrackPackager, Failure as CmafFailure,
 };
 pub use compiler::{CompiledProgram, PlaybackAlignment, ProgramCompiler};
-pub use coordinator::DisplayCoordinator;
+pub use coordinator::{DisplayCoordinator, SurfaceRender};
 pub use hls::{Failure as HlsFailure, HlsCatalogPackager, HlsRenditionDescription, HlsSegment};
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
 pub use live::{LiveMediaHub, LiveMediaPacket, LiveMediaSnapshot, LiveMediaTrack, LiveTransport};
@@ -29,6 +35,7 @@ pub use pairing::{
 };
 pub use runtime::DisplayRuntime;
 pub use store::{
-    AssignmentRecord, AssignmentSync, CoordinatorState, CoordinatorStore, DeviceRecord, SourceGrant,
+    AssignmentRecord, AssignmentSync, CoordinatorPolicy, CoordinatorSecrets, CoordinatorStore,
+    Custodian, DeviceRecord, IdentifierCustody, IdentifierCustodyStatus, SourceGrant,
 };
 pub use tls::{DisplayTlsIdentity, DEFAULT_DISPLAY_PORT};

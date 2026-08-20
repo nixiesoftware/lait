@@ -363,6 +363,7 @@ dependencies = [
  "addressbook",
  "anyhow",
  "blake3",
+ "correspondence",
  "data-encoding",
  "flate2",
  "flutter_rust_bridge",
@@ -1166,6 +1167,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "correspondence"
+version = "0.7.8"
+dependencies = [
+ "addressbook",
+ "axum",
+ "blake3",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "lait-post",
+ "mechanics",
+ "postcard",
+ "runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1481,7 +1502,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1947,7 +1968,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2521,9 +2542,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.14"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "171fefbc92fe4a4de27e0698d6a5b392d6a0e333506bc49133760b3bcf948733"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3960,6 +3981,8 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -3968,6 +3991,8 @@ version = "0.7.8"
 dependencies = [
  "anyhow",
  "data-encoding",
+ "font8x8",
+ "image",
  "lait-issues",
  "mechanics",
  "postcard",
@@ -3976,6 +4001,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "typst",
  "typst-html",
  "world-interface",
@@ -4048,6 +4074,7 @@ dependencies = [
  "blake3",
  "fs2",
  "lait",
+ "libc",
  "mechanics",
  "schemars",
  "serde",
@@ -5912,6 +5939,7 @@ dependencies = [
  "serde",
  "serde-byte-array",
  "serde_json",
+ "smallvec",
  "tracing",
 ]
 
@@ -6036,6 +6064,7 @@ dependencies = [
  "fabric",
  "fs2",
  "getrandom 0.3.4",
+ "imbl",
  "journal",
  "mechanics",
  "postcard",
@@ -6101,7 +6130,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6193,7 +6222,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6378,7 +6407,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7044,7 +7073,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8149,6 +8178,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
@@ -8630,7 +8661,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "LAIT orbital lifecycle: Runtime, Orbit, Station, World hosting, Dock/Session, Contact policy, and Observation publication. Exposes no CRDT, iroh, stream, file, key, ciphertext, mutex, or product request types."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 # Not published. These are lait's internal boundaries, not a library surface —
 # the descriptions above say so ("the ONLY crate that names loro", "the ONLY
 # crate that names iroh"), and those are architecture invariants rather than a
@@ -24,6 +24,9 @@ fabric = { path = "../fabric" }
 # the transport seam; `iroh` is absent from this manifest by construction.
 comms = { path = "../comms" }
 journal = { path = "../journal" }
+# Publication-local indexes use Arc-backed persistent vectors, HAMTs, and
+# B+trees so one generation copies only changed rows/posting paths.
+imbl = "7.0.1"
 
 serde = { version = "1", features = ["derive"] }
 # `[u8; 64]` signature fields: serde only derives arrays up to length 32.
@@ -63,6 +66,7 @@ tracing = "0.1"
 workspace = true
 
 [dev-dependencies]
+replica = { path = "../replica", features = ["scale-fixtures"] }
 regex = "1.13.1"
 # The Contact wire decoders run BEFORE a signature is checked — they have to,
 # because the signature is inside the thing being decoded — so the parser is

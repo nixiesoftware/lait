@@ -93,6 +93,90 @@ pub struct BootstrapContext<'a> {
     pub initial_scope: Option<&'a InitialScope>,
 }
 
+/// One exact reviewed World implementation named by a lifecycle transition.
+///
+/// The pair is deliberately carried together: an implementation digest without
+/// its monotonic declaration cannot be ordered, while a version without the
+/// digest is not an authority coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewedImplementation {
+    pub id: [u8; 32],
+    pub version: u32,
+}
+
+/// A product's pure assessment of the active implementation.
+///
+/// Only `Direct` permits the host's ordinary newer-version reconciliation.
+/// Every migration state is inert until the launcher has durably recorded user
+/// consent; opening a Space is never consent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldUpgradeAssessment {
+    Current,
+    Direct,
+    ConsentRequired { migrator: ReviewedImplementation },
+    InProgress { migrator: ReviewedImplementation },
+    Unsupported { reason: String },
+}
+
+/// The generic resources supplied to one bounded lifecycle migration step.
+///
+/// `record` is product-authored opaque state but host-owned storage. The host
+/// bounds and atomically persists the replacement returned by
+/// [`WorldUpgradeProgress`] before it schedules another step or activates the
+/// preferred implementation.
+pub struct WorldUpgradeContext<'a> {
+    pub space: &'a SpaceId,
+    pub session: &'a Session,
+    pub identity: &'a LocalIdentity,
+    pub device: &'a str,
+    pub active: ReviewedImplementation,
+    pub migrator: ReviewedImplementation,
+    pub preferred: ReviewedImplementation,
+    /// Exact frozen source admitted by Runtime for this deterministic plan.
+    /// The host persists its portable publication and frontier; the local
+    /// materialization is reacquired on each activation.
+    pub source: &'a runtime::world::LifecycleSourceCoordinate,
+    pub record: Option<&'a [u8]>,
+}
+
+/// Result of one bounded, idempotent lifecycle step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldUpgradeProgress {
+    Pending {
+        completed: u64,
+        remaining: Option<u64>,
+        record: Vec<u8>,
+    },
+    Verified {
+        record: Vec<u8>,
+    },
+}
+
+/// Host-visible result of one composition-owned lifecycle turn.
+///
+/// Product record bytes never cross this boundary: the Station host persists
+/// them before returning one of these bounded progress facts to its daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldUpgradeStep {
+    Current,
+    /// This Space never activated the World. An update of another Space must
+    /// not turn that absence into a new binding.
+    Unbound,
+    Pending {
+        completed: u64,
+        remaining: Option<u64>,
+    },
+    /// Exact source reconstruction has been admitted and is progressing off
+    /// the daemon reactor and Station locks.
+    Building,
+    /// Runtime's conscious read envelope refused this source reconstruction.
+    Capacity,
+    Verified,
+    Unsupported {
+        reason: String,
+    },
+}
+
 /// Product-owned policy invoked by the generic Space lifecycle.
 ///
 /// Implementations are bound in the application composition root. The host
@@ -103,6 +187,42 @@ pub trait WorldLifecycle: Send + Sync {
     fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>>;
     fn initial_scope(&self, display_name: &str) -> Option<InitialScope>;
     fn bootstrap(&self, context: BootstrapContext<'_>) -> anyhow::Result<()>;
+
+    /// Decide whether moving `active` to this package's preferred
+    /// implementation is a direct activation or requires explicit lifecycle
+    /// consent. The default preserves the pre-migration behavior for Worlds
+    /// whose package has no data upgrade.
+    fn assess_upgrade(
+        &self,
+        active: Option<ReviewedImplementation>,
+        preferred: ReviewedImplementation,
+    ) -> anyhow::Result<WorldUpgradeAssessment> {
+        Ok(if active.is_some_and(|active| active.id == preferred.id) {
+            WorldUpgradeAssessment::Current
+        } else {
+            WorldUpgradeAssessment::Direct
+        })
+    }
+
+    /// Optional exact migrator used to re-verify a World that is already on
+    /// preferred after a later explicit consent operation. This is what lets a
+    /// causally valid legacy Contact delivered after activation remain durable
+    /// and be migrated by the next user-requested update without granting an
+    /// ambient auto-migration authority.
+    fn verification_migrator(
+        &self,
+        _preferred: ReviewedImplementation,
+    ) -> Option<ReviewedImplementation> {
+        None
+    }
+
+    /// Advance one bounded lifecycle step after durable user consent.
+    fn upgrade_step(
+        &self,
+        _context: WorldUpgradeContext<'_>,
+    ) -> anyhow::Result<WorldUpgradeProgress> {
+        anyhow::bail!("this World package has no lifecycle upgrade step")
+    }
 }
 
 /// One product package available to the application build.
@@ -115,6 +235,10 @@ pub struct WorldPackage {
     exec: runtime::exec::Package,
     projector: Option<Arc<dyn ObservationProjector>>,
     lifecycle: Option<Arc<dyn WorldLifecycle>>,
+    /// The package an unformed Space activates by default. Historical exact
+    /// packages remain installed for retained publication reads and existing
+    /// Spaces whose authority still selects them.
+    preferred: bool,
 }
 
 impl std::fmt::Debug for WorldPackage {
@@ -142,6 +266,7 @@ impl WorldPackage {
             exec: runtime::exec::Package::new(),
             projector: None,
             lifecycle: None,
+            preferred: true,
         }
     }
 
@@ -173,6 +298,13 @@ impl WorldPackage {
 
     pub fn with_lifecycle(mut self, lifecycle: Arc<dyn WorldLifecycle>) -> Self {
         self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Install this exact implementation for historical/authority-selected
+    /// use without making it the formation default for its World.
+    pub fn historical(mut self) -> Self {
+        self.preferred = false;
         self
     }
 
@@ -217,7 +349,10 @@ impl WorldPackages {
     }
 
     pub fn world_ids(&self) -> impl Iterator<Item = &WorldId> {
-        self.packages.iter().map(WorldPackage::world_id)
+        self.packages
+            .iter()
+            .filter(|package| package.preferred)
+            .map(WorldPackage::world_id)
     }
 
     pub fn contains(&self, world: &WorldId) -> bool {
@@ -229,7 +364,7 @@ impl WorldPackages {
     pub fn reviewed_implementation(&self, world: &WorldId) -> Option<[u8; 32]> {
         self.packages
             .iter()
-            .find(|package| package.world_id() == world)
+            .find(|package| package.world_id() == world && package.preferred)
             .map(|package| package.reviewed_implementation)
     }
 
@@ -238,7 +373,7 @@ impl WorldPackages {
     pub fn reviewed_state(&self, world: &WorldId) -> Option<([u8; 32], u32)> {
         self.packages
             .iter()
-            .find(|package| package.world_id() == world)
+            .find(|package| package.world_id() == world && package.preferred)
             .map(|package| (package.reviewed_implementation, package.reviewed_version()))
     }
 
@@ -247,6 +382,7 @@ impl WorldPackages {
     ) -> anyhow::Result<Vec<(WorldId, [u8; 32], u32, Vec<FounderGrant>)>> {
         self.packages
             .iter()
+            .filter(|package| package.preferred)
             .filter_map(|package| {
                 package.lifecycle.as_deref().map(|lifecycle| {
                     lifecycle.founder_grants().map(|grants| {
@@ -265,6 +401,7 @@ impl WorldPackages {
     pub fn initial_scopes(&self, display_name: &str) -> Vec<(WorldId, InitialScope)> {
         self.packages
             .iter()
+            .filter(|package| package.preferred)
             .filter_map(|package| {
                 package.lifecycle.as_deref().and_then(|lifecycle| {
                     lifecycle
@@ -278,7 +415,7 @@ impl WorldPackages {
     pub fn lifecycle_world_ids(&self) -> impl Iterator<Item = &WorldId> {
         self.packages
             .iter()
-            .filter(|package| package.lifecycle.is_some())
+            .filter(|package| package.preferred && package.lifecycle.is_some())
             .map(WorldPackage::world_id)
     }
 
@@ -286,7 +423,7 @@ impl WorldPackages {
         let package = self
             .packages
             .iter()
-            .find(|package| package.world_id() == world)
+            .find(|package| package.world_id() == world && package.preferred)
             .ok_or_else(|| anyhow::anyhow!("World '{world}' is not bundled"))?;
         let lifecycle = package
             .lifecycle
@@ -303,7 +440,7 @@ impl WorldPackages {
         let control = self
             .packages
             .iter()
-            .find(|package| package.world_id() == call.world())
+            .find(|package| package.world_id() == call.world() && package.preferred)
             .and_then(|package| package.control.as_deref())
             .ok_or_else(|| {
                 Failure::new(
@@ -319,6 +456,7 @@ impl WorldPackages {
     pub fn build(&self) -> Result<(Catalog, WorldRouter), RegistrationRefusal> {
         let mut runtime = Builder::new();
         let mut hosts = Vec::with_capacity(self.packages.len());
+        let mut preferred = BTreeMap::new();
         for package in &self.packages {
             let descriptor = package.implementation.descriptor();
             package
@@ -339,8 +477,31 @@ impl WorldPackages {
                 package.control.clone(),
                 package.exec.clone(),
                 package.projector.clone(),
+                package.lifecycle.clone(),
             ));
-            runtime = runtime.register(package.implementation.clone());
+            if package.preferred
+                && preferred
+                    .insert(package.world.clone(), package.reviewed_implementation)
+                    .is_some()
+            {
+                return Err(RegistrationRefusal::AmbiguousWorldDefault(
+                    package.world.clone(),
+                ));
+            }
+            runtime = runtime.register_reviewed(
+                package.implementation.clone(),
+                package.reviewed_implementation,
+            );
+        }
+        for world in self
+            .packages
+            .iter()
+            .map(WorldPackage::world_id)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if !preferred.contains_key(world) {
+                return Err(RegistrationRefusal::AmbiguousWorldDefault(world.clone()));
+            }
         }
         let registry = runtime.build()?;
         Ok((
@@ -348,13 +509,18 @@ impl WorldPackages {
             WorldRouter::new(
                 hosts
                     .into_iter()
-                    .map(|(world, reviewed, version, control, exec, projector)| {
-                        (
-                            world.clone(),
-                            WorldHost::new(world, reviewed, version, control, exec, projector),
-                        )
-                    })
+                    .map(
+                        |(world, reviewed, version, control, exec, projector, lifecycle)| {
+                            (
+                                (world.clone(), reviewed),
+                                WorldHost::new(
+                                    world, reviewed, version, control, exec, projector, lifecycle,
+                                ),
+                            )
+                        },
+                    )
                     .collect(),
+                preferred,
             ),
         ))
     }
@@ -374,6 +540,7 @@ pub struct WorldHost {
     control: Option<Arc<dyn Handler>>,
     exec: runtime::exec::Package,
     projector: Option<Arc<dyn ObservationProjector>>,
+    lifecycle: Option<Arc<dyn WorldLifecycle>>,
     primary_session: Mutex<Option<Session>>,
     agent_sessions: Mutex<HashMap<DeviceId, Session>>,
 }
@@ -394,6 +561,7 @@ impl WorldHost {
         control: Option<Arc<dyn Handler>>,
         exec: runtime::exec::Package,
         projector: Option<Arc<dyn ObservationProjector>>,
+        lifecycle: Option<Arc<dyn WorldLifecycle>>,
     ) -> Self {
         Self {
             world,
@@ -402,6 +570,7 @@ impl WorldHost {
             control,
             exec,
             projector,
+            lifecycle,
             primary_session: Mutex::new(None),
             agent_sessions: Mutex::new(HashMap::new()),
         }
@@ -418,6 +587,27 @@ impl WorldHost {
     /// The version this build declares for the World it hosts.
     pub fn reviewed_version(&self) -> u32 {
         self.reviewed_version
+    }
+
+    pub fn reviewed_state(&self) -> ReviewedImplementation {
+        ReviewedImplementation {
+            id: self.reviewed_implementation,
+            version: self.reviewed_version,
+        }
+    }
+
+    pub fn lifecycle(&self) -> Option<&dyn WorldLifecycle> {
+        self.lifecycle.as_deref()
+    }
+
+    fn clear_sessions(&self) {
+        // Move guards out before dropping Sessions: deregistration may touch
+        // Runtime state and must not happen while either host-local mutex is
+        // held.
+        let primary = self.primary_session.lock_recovering().take();
+        let agents = std::mem::take(&mut *self.agent_sessions.lock_recovering());
+        drop(primary);
+        drop(agents);
     }
 
     pub fn control(&self) -> Option<&dyn Handler> {
@@ -470,49 +660,116 @@ impl WorldHost {
 
 /// The World hosts enabled inside one active StationHost.
 pub struct WorldRouter {
-    hosts: BTreeMap<WorldId, WorldHost>,
+    hosts: BTreeMap<(WorldId, [u8; 32]), WorldHost>,
+    preferred: BTreeMap<WorldId, [u8; 32]>,
+    /// The sole ordinary-routing selector. Docking a replacement happens
+    /// before this short swap; prior Sessions are retired after it, so readers
+    /// see either exact old or exact new and never BTreeMap order.
+    active: Mutex<BTreeMap<WorldId, [u8; 32]>>,
 }
 
 impl std::fmt::Debug for WorldRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorldRouter")
-            .field("worlds", &self.hosts.keys().collect::<Vec<_>>())
+            .field("worlds", &self.preferred.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
 
 impl WorldRouter {
-    fn new(hosts: BTreeMap<WorldId, WorldHost>) -> Self {
-        Self { hosts }
+    fn new(
+        hosts: BTreeMap<(WorldId, [u8; 32]), WorldHost>,
+        preferred: BTreeMap<WorldId, [u8; 32]>,
+    ) -> Self {
+        Self {
+            hosts,
+            preferred,
+            active: Mutex::new(BTreeMap::new()),
+        }
     }
 
     pub fn world_ids(&self) -> impl Iterator<Item = &WorldId> {
-        self.hosts.keys()
+        self.preferred.keys()
     }
 
     pub fn contains(&self, world: &WorldId) -> bool {
-        self.hosts.contains_key(world)
+        self.preferred.contains_key(world)
     }
 
     pub fn host(&self, world: &WorldId) -> Option<&WorldHost> {
-        self.hosts.get(world)
+        let active = self.active.lock_recovering().get(world).copied();
+        active
+            .and_then(|implementation| self.host_for(world, implementation))
+            .or_else(|| self.preferred_host(world))
+    }
+
+    pub fn host_for(&self, world: &WorldId, implementation: [u8; 32]) -> Option<&WorldHost> {
+        self.hosts.get(&(world.clone(), implementation))
+    }
+
+    pub fn preferred_host(&self, world: &WorldId) -> Option<&WorldHost> {
+        self.host_for(world, *self.preferred.get(world)?)
     }
 
     pub fn reviewed_implementations(&self) -> impl Iterator<Item = (&WorldId, &[u8; 32])> {
-        self.hosts
+        self.preferred
             .iter()
-            .map(|(world, host)| (world, host.reviewed_implementation()))
+            .map(|(world, implementation)| (world, implementation))
     }
 
     /// Every hosted World's reviewed id with the version beside it.
     pub fn reviewed_states(&self) -> impl Iterator<Item = (&WorldId, [u8; 32], u32)> {
-        self.hosts.iter().map(|(world, host)| {
-            (
+        self.preferred.iter().filter_map(|(world, implementation)| {
+            let host = self.host_for(world, *implementation)?;
+            Some((
                 world,
                 *host.reviewed_implementation(),
                 host.reviewed_version(),
-            )
+            ))
         })
+    }
+
+    pub fn upgrade_assessment(
+        &self,
+        world: &WorldId,
+        active: Option<ReviewedImplementation>,
+    ) -> anyhow::Result<WorldUpgradeAssessment> {
+        let preferred = self
+            .preferred_host(world)
+            .ok_or_else(|| anyhow::anyhow!("World '{world}' has no preferred package"))?;
+        let preferred_state = preferred.reviewed_state();
+        match preferred.lifecycle() {
+            Some(lifecycle) => lifecycle.assess_upgrade(active, preferred_state),
+            None if active.is_some_and(|active| active.id == preferred_state.id) => {
+                Ok(WorldUpgradeAssessment::Current)
+            }
+            None => Ok(WorldUpgradeAssessment::Direct),
+        }
+    }
+
+    pub fn verification_migrator(&self, world: &WorldId) -> Option<ReviewedImplementation> {
+        let preferred = self.preferred_host(world)?;
+        preferred
+            .lifecycle()?
+            .verification_migrator(preferred.reviewed_state())
+    }
+
+    pub fn has_reviewed_implementation(
+        &self,
+        world: &WorldId,
+        implementation: ReviewedImplementation,
+    ) -> bool {
+        self.host_for(world, implementation.id)
+            .is_some_and(|host| host.reviewed_version() == implementation.version)
+    }
+
+    pub fn with_primary_for<R>(
+        &self,
+        world: &WorldId,
+        implementation: [u8; 32],
+        f: impl FnOnce(&Session) -> R,
+    ) -> Option<R> {
+        self.host_for(world, implementation)?.with_primary(f)
     }
 
     pub fn ensure_primary(
@@ -521,9 +778,23 @@ impl WorldRouter {
         world: &WorldId,
         identity: &LocalIdentity,
     ) -> Result<(), RuntimeFailure> {
-        self.host(world)
-            .ok_or_else(|| RuntimeFailure::UnknownWorld(world.clone()))?
-            .ensure_primary(station, identity)
+        let implementation = station.active_implementation(world, identity)?;
+        let target = self
+            .host_for(world, implementation)
+            .ok_or_else(|| RuntimeFailure::UnknownWorld(world.clone()))?;
+        target.ensure_primary(station, identity)?;
+        self.active
+            .lock_recovering()
+            .insert(world.clone(), implementation);
+        // Activation is a single exact implementation coordinate. Once the
+        // new Session is ready, retire every prior package Session for this
+        // World so BTreeMap order can never route ordinary work to a migrator.
+        for ((candidate, reviewed), host) in &self.hosts {
+            if candidate == world && *reviewed != implementation {
+                host.clear_sessions();
+            }
+        }
+        Ok(())
     }
 
     pub fn with_primary<R>(&self, world: &WorldId, f: impl FnOnce(&Session) -> R) -> Option<R> {
@@ -535,7 +806,11 @@ impl WorldRouter {
     /// Station observations and authority doorbells are shared across Worlds,
     /// so Space-level adapters need exactly one Session to publish that plane.
     pub fn with_any_primary<R>(&self, f: impl FnOnce(&Session) -> R) -> Option<R> {
-        for host in self.hosts.values() {
+        let active = self.active.lock_recovering().clone();
+        for (world, implementation) in active {
+            let Some(host) = self.host_for(&world, implementation) else {
+                continue;
+            };
             let session = host.primary_session.lock_recovering();
             if let Some(session) = session.as_ref() {
                 return Some(f(session));
@@ -545,7 +820,11 @@ impl WorldRouter {
     }
 
     pub fn start_projectors(&self, space: &mechanics::ids::SpaceId) {
-        for host in self.hosts.values() {
+        let active = self.active.lock_recovering().clone();
+        for (world, implementation) in active {
+            let Some(host) = self.host_for(&world, implementation) else {
+                continue;
+            };
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
@@ -558,7 +837,11 @@ impl WorldRouter {
 
     pub fn status(&self) -> Option<StatusProjection> {
         let mut combined: Option<StatusProjection> = None;
-        for host in self.hosts.values() {
+        let active = self.active.lock_recovering().clone();
+        for (world, implementation) in active {
+            let Some(host) = self.host_for(&world, implementation) else {
+                continue;
+            };
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
@@ -601,7 +884,11 @@ impl WorldRouter {
         observation: &runtime::world::Observation,
     ) -> Vec<RoutedInvalidation> {
         let mut projected = Vec::new();
-        for host in self.hosts.values() {
+        let active = self.active.lock_recovering().clone();
+        for (world, implementation) in active {
+            let Some(host) = self.host_for(&world, implementation) else {
+                continue;
+            };
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
@@ -628,7 +915,8 @@ impl WorldRouter {
         identity: &LocalIdentity,
         f: impl FnOnce(&Session) -> R,
     ) -> Result<R, RuntimeFailure> {
-        self.host(world)
+        let implementation = station.active_implementation(world, identity)?;
+        self.host_for(world, implementation)
             .ok_or_else(|| RuntimeFailure::UnknownWorld(world.clone()))?
             .with_agent(station, identity, f)
     }
@@ -878,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_worlds_still_fail_through_the_runtime_registry_contract() {
+    fn multiple_current_defaults_for_one_world_are_rejected() {
         let a = package("com.example.files", 1);
         let b = package("com.example.files", 2);
         let err = WorldPackages::new()
@@ -888,10 +1176,34 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            RegistrationRefusal::DuplicateWorld(
+            RegistrationRefusal::AmbiguousWorldDefault(
                 WorldId::parse("com.example.files").expect("test World id")
             )
         );
+    }
+
+    #[test]
+    fn historical_and_preferred_packages_are_exact_and_default_is_explicit() {
+        let old = package("com.example.files", 1);
+        let current = package("com.example.files", 2);
+        let (registry, hosts) = WorldPackages::new()
+            .with_package(WorldPackage::new(old.0, old.1).historical())
+            .with_package(WorldPackage::new(current.0, current.1))
+            .build()
+            .unwrap();
+        let world = WorldId::parse("com.example.files").unwrap();
+
+        assert!(registry.world_for(&world, [1; 32]).is_some());
+        assert!(registry.world_for(&world, [2; 32]).is_some());
+        assert_eq!(
+            hosts
+                .preferred_host(&world)
+                .unwrap()
+                .reviewed_implementation(),
+            &[2; 32]
+        );
+        assert!(hosts.host_for(&world, [1; 32]).is_some());
+        assert!(hosts.host_for(&world, [2; 32]).is_some());
     }
 
     #[test]

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
 description = "Deterministic timezone-aware recurrence windows for lait Worlds"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [dependencies]

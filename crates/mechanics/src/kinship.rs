@@ -53,7 +53,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::actor::{sign_detached, verify_detached};
-use crate::ids::{encode_ulid, ActorId, DeviceId, SpaceId};
+use crate::ids::{ActorId, DeviceId, SpaceId};
 
 /// Signing domain for a mutual device link.
 pub const LINK_DOMAIN: &[u8] = b"lait/kinship/1/link";
@@ -117,20 +117,6 @@ impl ProfileId {
         let mut head = [0u8; 16];
         head.copy_from_slice(&digest[..16]);
         Self::from_digest(head)
-    }
-
-    fn from_digest(digest: [u8; 16]) -> Self {
-        // Same shape as `SpaceId::from_digest`: a self-certifying id wearing the
-        // ULID grammar so every id in the tree reads and truncates alike.
-        // Constructed directly rather than through `parse`, so there is no
-        // fallible step to unwrap — a crockford128 encoding is a valid body by
-        // construction, and asserting that with an `expect` would be claiming a
-        // panic site that cannot happen.
-        Self(format!(
-            "{}{}",
-            Self::PREFIX,
-            encode_ulid(u128::from_be_bytes(digest))
-        ))
     }
 }
 

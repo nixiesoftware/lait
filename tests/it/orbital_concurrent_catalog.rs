@@ -60,26 +60,28 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(async {
-        let space = lait::orbital::discover_space(home)
-            .single()
-            .expect("test Space");
-        let call = issues_app::encode_call(&request)?;
-        let reply = lait::control::call_world(
-            home,
-            ControlRoute::World {
-                address: OrbitAddress::for_store(home, space),
-                world: call.world().as_str().to_string(),
-            },
-            call.clone(),
-            None,
-        )
-        .await?;
-        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
-            &call, reply,
-        )?)?)
-    })
-    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(async {
+            let space = lait::orbital::discover_space(home)
+                .single()
+                .expect("test Space");
+            let call = issues_app::encode_call(&request)?;
+            let reply = lait::control::call_world(
+                home,
+                ControlRoute::World {
+                    address: OrbitAddress::for_store(home, space),
+                    world: call.world().as_str().to_string(),
+                },
+                call.clone(),
+                None,
+            )
+            .await?;
+            Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+                &call, reply,
+            )?)?)
+        })
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -123,9 +125,10 @@ fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
                 all: true,
                 ..Default::default()
             },
+            page: issues::contract::PageRequest::default(),
         },
     ) {
-        IssueResponse::List { rows } => rows.iter().map(|r| r.title.clone()).collect(),
+        IssueResponse::List { page } => page.items.iter().map(|r| r.title.clone()).collect(),
         _ => vec![],
     }
 }

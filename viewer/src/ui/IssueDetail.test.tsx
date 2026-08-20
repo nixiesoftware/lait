@@ -2,7 +2,7 @@ import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { IssueView, LiveEntry, MemberDto, ProjectDto, WorkflowState } from "../types";
+import type { IssueDetailProjection, IssueView, LiveEntry, MemberDto, ProjectDto, WorkflowState } from "../types";
 import { WorldViewStoreProvider } from "../core/worldViewReact";
 import { liveKey, type LiveState } from "../live";
 import { projectKeys, ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
@@ -54,14 +54,14 @@ describe("IssueDetail loading", () => {
 
   it("renders the issue document without waiting for history or relations", async () => {
     const never = new Promise<never>(() => undefined);
-    let resolveView!: (value: IssueView & { kind: "issue" }) => void;
-    const view = new Promise<IssueView & { kind: "issue" }>((resolve) => {
+    let resolveView!: (value: IssueDetailProjection & { kind: "issue_detail" }) => void;
+    const view = new Promise<IssueDetailProjection & { kind: "issue_detail" }>((resolve) => {
       resolveView = resolve;
     });
     rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
-      if (request.cmd === "issue_view") return view;
+      if (request.cmd === "issue_detail") return view;
       if (request.cmd === "milestone_list") {
-        return Promise.resolve({ kind: "milestones", milestones: [] });
+        return Promise.resolve({ kind: "milestones", page: detailPage([]) });
       }
       if (request.cmd === "packet") {
         return Promise.resolve({
@@ -69,7 +69,7 @@ describe("IssueDetail loading", () => {
           proof: [], record: [], conflicts: [],
         });
       }
-      if (request.cmd === "history" || request.cmd === "issue_graph") return never;
+      if (request.cmd === "history") return never;
       throw new Error(`Unexpected request: ${request.cmd}`);
     });
 
@@ -110,7 +110,7 @@ describe("IssueDetail loading", () => {
             onOpenField={() => undefined}
             onError={vi.fn()}
             onDelete={() => undefined}
-            onPredict={async () => true}
+            onWork={async () => true}
             onNavigate={() => undefined}
             onClose={() => undefined}
                 />
@@ -131,9 +131,9 @@ describe("IssueDetail loading", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(rpcMock.mock.calls.filter(([, request]) => request.cmd === "issue_view")).toHaveLength(1);
+    expect(rpcMock.mock.calls.filter(([, request]) => request.cmd === "issue_detail")).toHaveLength(1);
     await act(async () => {
-      resolveView({ kind: "issue", ...issue });
+      resolveView(detailResponse(issue));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
@@ -159,7 +159,7 @@ describe("IssueDetail live rail", () => {
     // assertions, outside `act`.
     const never = new Promise<never>(() => undefined);
     rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
-      const known = ["issue_view", "milestone_list", "history", "issue_graph", "packet"];
+      const known = ["issue_detail", "milestone_list", "history", "packet"];
       if (known.includes(request.cmd)) return never;
       throw new Error(`Unexpected request: ${request.cmd}`);
     });
@@ -217,7 +217,7 @@ describe("IssueDetail live rail", () => {
                   onOpenField={() => undefined}
                   onError={vi.fn()}
                   onDelete={() => undefined}
-                  onPredict={async () => true}
+                  onWork={async () => true}
                   onNavigate={() => undefined}
                   onClose={() => undefined}
                 />
@@ -299,6 +299,33 @@ describe("IssueDetail live rail", () => {
     expect(mounted.textContent).not.toContain("Ann");
   });
 });
+
+const detailPublication = {
+  publication: {
+    manifest_root: Array(32).fill(1),
+    implementation_digest: Array(32).fill(2),
+    extractor_schema_digest: Array(32).fill(3),
+  },
+  materialization: 1,
+};
+
+function detailPage<T>(items: T[]) {
+  return { publication: detailPublication, items };
+}
+
+function detailResponse(view: IssueView): IssueDetailProjection & { kind: "issue_detail" } {
+  return {
+    kind: "issue_detail",
+    publication: detailPublication,
+    issue: view,
+    comments: detailPage(view.comments),
+    reactions: detailPage([]),
+    attachments: detailPage(view.attachments ?? []),
+    checks: detailPage(view.checks ?? []),
+    outgoing_relations: detailPage([]),
+    incoming_relations: detailPage([]),
+  };
+}
 
 function table(entries: LiveEntry[]): LiveState {
   return { generation: 4, partial: false, entries, unavailable: false };

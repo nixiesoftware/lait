@@ -106,6 +106,7 @@ import {
   useSpaceBoards,
   useProjectRegistry,
   useProjectViewerStore,
+  useLatestOperation,
   useSpec,
   useTeams,
 } from "./projectStore";
@@ -316,10 +317,15 @@ export function App() {
   /** Doc-ids the daemon says qualify. `null` = the daemon wasn't asked, which is
    *  not the same as "nothing qualifies" — see core/filter.ts. */
   const [allowed, setAllowed] = useState<ReadonlySet<string> | null>(null);
+  const [allowedCursor, setAllowedCursor] = useState<string | null>(null);
+  const [allowedLoading, setAllowedLoading] = useState(false);
   /** Tombstoned rows, fetched only while the display option shows them.
    *  Deleting an issue REMOVES it from `boards[P]` (the board genuinely does
    *  not know it), so the trash comes from `list all:true`, not the board. */
   const [deletedRows, setDeletedRows] = useState<Row[]>([]);
+  const [deletedCursor, setDeletedCursor] = useState<string | null>(null);
+  const [deletedLoading, setDeletedLoading] = useState(false);
+  const [boardLoadingMore, setBoardLoadingMore] = useState(false);
   const [mutationNotice, setMutationNotice] = useState("");
   /** Last doorbell epoch seen per space — the daemon-boot nonce (UI.md §5). */
   const epochs = useRef(new Map<string, number>());
@@ -349,11 +355,16 @@ export function App() {
     if (isIssueMode(view)) setIssueLayout(view);
   }, [view]);
   const projectStore = useProjectViewerStore();
+  const latestOperation = useLatestOperation(current).data ?? null;
   // Not while a team is in scope: `project` is null there, and a null project
   // is the request the daemon answers with a teaching error on any space with
   // more than one project. The team's rows come from the fan-out below.
   const boardSpace = isProjectView(view) && !team ? current : null;
-  const { board: projectBoard } = useProjectBoard(
+  const {
+    board: projectBoard,
+    nextCursor: projectBoardCursor,
+    loadMore: loadMoreProjectBoard,
+  } = useProjectBoard(
     boardSpace,
     isProjectView(view) && !team ? project : null,
   );
@@ -444,6 +455,18 @@ export function App() {
   }, [activeTeam, teamBoards, teamProjects]);
   /** One name for "the rows on screen", whichever scope produced them. */
   const board = activeTeam ? teamBoard : projectBoard;
+  const boardCursor = activeTeam ? null : projectBoardCursor;
+  const loadMoreBoard = useCallback(async () => {
+    if (!boardCursor || activeTeam) return;
+    setBoardLoadingMore(true);
+    try {
+      await loadMoreProjectBoard();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBoardLoadingMore(false);
+    }
+  }, [activeTeam, boardCursor, loadMoreProjectBoard]);
   /**
    * The project a new issue files into.
    *
@@ -801,50 +824,89 @@ export function App() {
     setProject((projects.find((candidate) => !candidate.archived) ?? projects[0])!.key);
   }, [projects, project, team, view]);
 
+  const loadDeleted = useCallback(async (cursor: string | null, append: boolean) => {
+    if (!current) return;
+    setDeletedLoading(true);
+    try {
+      const result = await rpc(current, {
+        cmd: "list",
+        // The *project's* key, never the stand-in a team board reports —
+        // `list` resolves a project reference, and a team key is not one.
+        project: team ? null : (board?.project.key ?? null),
+        filter: { all: true },
+        page: { limit: 100, cursor },
+      });
+      if (result.kind !== "list") return;
+      const incoming = result.page.items.filter((row) => row.tombstone);
+      setDeletedRows((rows) => {
+        if (!append) return incoming;
+        const byDoc = new Map(rows.map((row) => [row.doc_id, row]));
+        for (const row of incoming) byDoc.set(row.doc_id, row);
+        return [...byDoc.values()];
+      });
+      // The cursor is an exact-publication continuation. We keep it visible to
+      // the user instead of pretending the first hundred rows are the trash.
+      setDeletedCursor(result.page.next_cursor ?? null);
+    } catch {
+      if (!append) {
+        setDeletedRows([]);
+        setDeletedCursor(null);
+      }
+    } finally {
+      setDeletedLoading(false);
+    }
+  }, [board?.project.key, current, team]);
+
   // The trash. Scoped to the board's project so the group matches the view,
   // re-read on every doorbell (a remote delete is exactly the news it carries).
   useEffect(() => {
-    if (!current || !display.deleted) return setDeletedRows([]);
-    let alive = true;
-    void (async () => {
-      try {
-        const r = await rpc(current, {
-          cmd: "list",
-          // The *project's* key, never the stand-in a team board reports —
-          // `list` resolves a project reference, and a team key is not one.
-          project: team ? null : (board?.project.key ?? null),
-          filter: { all: true },
-        });
-        if (alive && r.kind === "list") setDeletedRows(r.rows.filter((x) => x.tombstone));
-      } catch {
-        if (alive) setDeletedRows([]);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [current, display.deleted, board?.project.key, team, revision]);
+    if (!current || !display.deleted) {
+      setDeletedRows([]);
+      setDeletedCursor(null);
+      return;
+    }
+    void loadDeleted(null, false);
+  }, [current, display.deleted, loadDeleted, revision]);
 
-  // `mine`/`label` are server truth: ask `list`, keep the doc-ids, intersect.
-  useEffect(() => {
-    if (!current || !needsServer(filter)) return setAllowed(null);
-    let alive = true;
-    void (async () => {
-      try {
-        const r = await rpc(current, {
-          cmd: "list",
-          project: null,
-          filter: { mine: filter.mine, label: filter.label, all: true },
-        });
-        if (alive && r.kind === "list") setAllowed(new Set(r.rows.map((x) => x.doc_id)));
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
+  const loadAllowed = useCallback(async (cursor: string | null, append: boolean) => {
+    if (!current) return;
+    setAllowedLoading(true);
+    try {
+      const result = await rpc(current, {
+        cmd: "list",
+        project: team ? null : (board?.project.key ?? null),
+        filter: { mine: filter.mine, label: filter.label, all: true },
+        page: { limit: 100, cursor },
+      });
+      if (result.kind !== "list") return;
+      setAllowed((currentIds) => {
+        const next = append && currentIds !== null ? new Set(currentIds) : new Set<string>();
+        for (const row of result.page.items) next.add(row.doc_id);
+        return next;
+      });
+      setAllowedCursor(result.page.next_cursor ?? null);
+    } catch (error) {
+      if (!append) {
+        setAllowed(null);
+        setAllowedCursor(null);
       }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [current, filter, revision]);
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAllowedLoading(false);
+    }
+  }, [board?.project.key, current, filter.label, filter.mine, team]);
+
+  // `mine`/`label` are server truth. The set is explicitly the exact-publication
+  // pages loaded so far; its continuation stays visible instead of making page
+  // one look like the complete selector universe.
+  useEffect(() => {
+    if (!current || !needsServer(filter)) {
+      setAllowed(null);
+      setAllowedCursor(null);
+      return;
+    }
+    void loadAllowed(null, false);
+  }, [current, filter, loadAllowed, revision]);
 
   // A selection that no longer exists (deleted, filtered away) must not linger.
   useEffect(() => {
@@ -949,10 +1011,10 @@ export function App() {
    * never come, because a refusal *is* the news.
    */
   const predict = useCallback(
-    async (doc: string, field: Field, value: string, send: () => Promise<unknown>) => {
+    async (doc: string, field: Field, value: string) => {
       setMutationNotice(`Saving ${field} on this device…`);
       try {
-        await projectStore.predictValue(currentRef.current ?? "", doc, field, value, send);
+        await projectStore.predictValue(currentRef.current ?? "", doc, field, value);
         setMutationNotice(`${field} saved on this device`);
         return true;
       } catch (e) {
@@ -1291,7 +1353,7 @@ export function App() {
         }
         setSelection(reff);
       },
-      predict: (doc, field, value, send) => predict(doc, field, value, send),
+      predict: (doc, field, value) => predict(doc, field, value),
       pickSpace: (id) => {
         const picked = spacesRef.current.find((space) => space.id === id);
         if (!picked) return;
@@ -1325,17 +1387,16 @@ export function App() {
       work: (action) => {
         const row = selectedRow();
         if (!row || !current) return;
-        const cmd = `issue_${action}` as const;
         const target = workTarget(statesRef.current, action);
         if (!target) {
           // No state in that category — the daemon refuses with a better sentence
           // than we could write. Send it and show its words.
-          void guard(() => rpc(current, { cmd, reff: row.reff }));
+          void commitField("work", () =>
+            projectStore.workIssue(current, row.doc_id, action, null));
           return;
         }
-        void predict(row.doc_id, "status", target.id, () =>
-          rpc(current, { cmd, reff: row.reff }),
-        );
+        void commitField("work", () =>
+          projectStore.workIssue(current, row.doc_id, action, target.id));
       },
 
       /** `H`/`L` — the neighbouring workflow column. Clamps at both ends. */
@@ -1344,9 +1405,7 @@ export function App() {
         if (!row || !current) return;
         const next = neighbourState(statesRef.current, row.status, delta);
         if (!next) return;
-        void predict(row.doc_id, "status", next.id, () =>
-          rpc(current, { cmd: "issue_edit", reff: row.reff, status: next.id }),
-        );
+        void predict(row.doc_id, "status", next.id);
       },
 
       /**
@@ -1375,12 +1434,15 @@ export function App() {
         const target = visible[i + delta];
         if (i < 0 || !target) return;
 
-        void guard(() =>
-          rpc(current, {
-            cmd: "issue_move",
-            reff: row.reff,
-            pos: delta < 0 ? { at: "before", reff: target.reff } : { at: "after", reff: target.reff },
-          }),
+        projectStore.beginBoardChange(
+          current,
+          shownBoard.project.key,
+          row.doc_id,
+          row.reff,
+          null,
+          delta < 0
+            ? { at: "before", reff: target.reff }
+            : { at: "after", reff: target.reff },
         );
       },
 
@@ -1407,20 +1469,13 @@ export function App() {
       deleteIssue: (reff) =>
         void guard(async () => {
           if (!current) return;
-          try {
-            await rpc(current, { cmd: "issue_delete", reff });
-          } catch (e) {
-            // The engine hands back the CLI's own question rather than us
-            // inventing one, so modal and terminal cannot disagree on the stakes.
-            if (e instanceof ConfirmRequired) {
-              // The engine's own words, in our dialog.
-              if (await ask.confirm({ title: e.question, confirmText: "Delete", danger: true })) {
-                await rpc(current, { cmd: "issue_delete", reff }, { confirm: true });
-              }
-              return;
-            }
-            throw e;
-          }
+          const confirmed = await ask.confirm({
+            title: `Delete ${reff}?`,
+            body: "Deletion tombstones — it can be restored later.",
+            confirmText: "Delete",
+            danger: true,
+          });
+          if (confirmed) await projectStore.tombstoneIssue(current, reff, true);
         }),
 
       restoreIssue: (reff) => {
@@ -1429,7 +1484,7 @@ export function App() {
         // refusing here keeps the history honest rather than politely noisy.
         const row = rowsRef.current.find((r) => r.reff === reff);
         if (row && !row.tombstone) return setToast("Not deleted");
-        void guard(() => rpc(current, { cmd: "issue_restore", reff }));
+        void guard(() => projectStore.tombstoneIssue(current, reff, false));
       },
 
       /** Toggle, not set: `i` on an issue you hold puts it down (Linear's `I`
@@ -1439,7 +1494,8 @@ export function App() {
         const me = membersRef.current.find((m) => m.me);
         if (!row || !current || !me) return;
         const add = !row.assignees.includes(me.key);
-        void guard(() => rpc(current, { cmd: "assign", reff: row.reff, who: [me.key], add }));
+        void commitField("assignee", () =>
+          projectStore.toggleAssignee(current, row.reff, me.key, add));
       },
 
       /** Column top/bottom. Same done-column refusal as `reorder`, same reason. */
@@ -1449,7 +1505,14 @@ export function App() {
         if (!row || !current || !shownBoard) return;
         const col = shownBoard.columns.find((c) => c.state.id === row.status);
         if (!col || col.state.category === "done") return;
-        void guard(() => rpc(current, { cmd: "issue_move", reff: row.reff, pos: { at: pos } }));
+        projectStore.beginBoardChange(
+          current,
+          shownBoard.project.key,
+          row.doc_id,
+          row.reff,
+          null,
+          { at: pos },
+        );
       },
 
       toggleCheck: () => {
@@ -1535,29 +1598,9 @@ export function App() {
     [view, current, readOnly, selection, checked, modal, field, api],
   );
 
-  /**
-   * A card was dropped: set its status, then place it.
-   *
-   * **Two requests, and there is no way to make it one.** `issue_edit` carries
-   * `status` but no position; `issue_move` carries `project` and `pos` but no
-   * status. So a cross-column drag is two commits and two activity rows — the same
-   * wrinkle the composer already documents for "file into a non-default column".
-   * That is an honest record of what happened (moved, then placed) rather than a
-   * fiction, and the alternative is a `Request` variant that does not exist.
-   *
-   * The **order is load-bearing**. Status first, position second:
-   *
-   * - Moving *into* a done status removes the doc from `boards[P]`; moving *out of*
-   *   one re-inserts it at the top (`replica.rs:858-869`). Doing the placement first
-   *   would have that re-insert stomp the position we just asked for.
-   * - Dropping into a done column sends **no** `issue_move` at all (`pos` is null):
-   *   done columns are rendered by the append rule and ignore the movable list, so
-   *   the write would be invisible at best and a lie about ordering at worst.
-   *
-   * Only status is predicted — `applyOverlay` re-buckets the row into the new
-   * column immediately, which is the part that has to feel instant. Position is not
-   * a field `Row` carries, so it settles on the doorbell a few milliseconds later.
-   */
+  /** A card drop enters the same bounded ChangeSet used by agent calls. The
+   * state and rank change are one predecessor-bound transition and one signed
+   * operation id; the optimistic re-bucket is visible before the network turn. */
   const dropCard = useCallback(
     (reff: string, status: string, pos: BoardPos | null) => {
       const id = currentRef.current;
@@ -1568,19 +1611,29 @@ export function App() {
       const changingStatus = row.status !== status;
       if (!changingStatus && !pos) return; // dropped where it already was
 
-      const send = async () => {
-        if (changingStatus) await rpc(id, { cmd: "issue_edit", reff, status });
-        if (pos) await rpc(id, { cmd: "issue_move", reff, pos });
-      };
-
-      if (changingStatus) {
-        void predict(row.doc_id, "status", status, send);
-      } else {
-        void guard(send);
-      }
+      projectStore.beginBoardChange(
+        id,
+        project,
+        row.doc_id,
+        reff,
+        changingStatus ? status : null,
+        pos,
+      );
     },
-    [guard, predict],
+    [project, projectStore],
   );
+
+  const operationNotice = latestOperation
+    ? latestOperation.phase === "sending"
+      ? `Sending board change… · ${latestOperation.operation.slice(0, 8)}`
+      : latestOperation.phase === "accepted"
+        ? `Accepted · refreshing exact publication… · ${latestOperation.operation.slice(0, 8)}`
+        : latestOperation.phase === "committed"
+          ? `Committed · ${latestOperation.operation.slice(0, 8)}`
+          : latestOperation.phase === "indeterminate"
+            ? `Outcome indeterminate; your pending view is preserved · ${latestOperation.error?.message ?? latestOperation.operation.slice(0, 8)}`
+            : `Rolled back (${latestOperation.error?.kind ?? "error"}) · ${latestOperation.error?.message ?? "the change was refused"}`
+    : "";
 
   const pending = useKeys(ctx);
   const detailVisible = Boolean(
@@ -2038,7 +2091,8 @@ export function App() {
           onOpenField={setField}
           onError={setError}
           onDelete={api.deleteIssue}
-          onPredict={api.predict}
+          onWork={(doc, action, predictedStatus) =>
+            projectStore.workIssue(current, doc, action, predictedStatus)}
           onNavigate={api.select}
           // A brief names the documents it is derived from, and following one
           // is a hop to a different surface — so it goes through `goto` rather
@@ -2578,6 +2632,15 @@ export function App() {
               onDrop={dropCard}
               filtered={isActive(filter)}
               onClearFilter={() => api.clearFilter()}
+              hasMore={needsServer(filter) ? allowedCursor !== null : boardCursor !== null}
+              loadingMore={needsServer(filter) ? allowedLoading : boardLoadingMore}
+              onLoadMore={() => {
+                if (needsServer(filter) && allowedCursor) {
+                  void loadAllowed(allowedCursor, true);
+                } else if (!needsServer(filter) && boardCursor) {
+                  void loadMoreBoard();
+                }
+              }}
               onReassign={(row, groupKey) => {
                 const id = currentRef.current;
                 if (!id) return;
@@ -2639,6 +2702,25 @@ export function App() {
               mutators={issueMutators}
               readOnly={readOnly}
               filtered={isActive(filter)}
+              hasMore={display.deleted
+                ? deletedCursor !== null
+                : needsServer(filter)
+                  ? allowedCursor !== null
+                  : boardCursor !== null}
+              loadingMore={display.deleted
+                ? deletedLoading
+                : needsServer(filter)
+                  ? allowedLoading
+                  : boardLoadingMore}
+              onLoadMore={() => {
+                if (display.deleted && deletedCursor) {
+                  void loadDeleted(deletedCursor, true);
+                } else if (!display.deleted && needsServer(filter) && allowedCursor) {
+                  void loadAllowed(allowedCursor, true);
+                } else if (!display.deleted && !needsServer(filter) && boardCursor) {
+                  void loadMoreBoard();
+                }
+              }}
             />
           ) : (
             <EmptyState
@@ -2850,16 +2932,17 @@ export function App() {
           labels={labels}
           members={members}
           onStatus={(id) =>
-            void bulk((reff) => rpc(current, { cmd: "issue_edit", reff, status: id }))
+            void bulk((reff) => projectStore.setStatus(current, reff, id))
           }
           onPriority={(id) =>
-            void bulk((reff) => rpc(current, { cmd: "issue_edit", reff, priority: id }))
+            void bulk((reff) => projectStore.setPriority(current, reff, id))
           }
-          onLabel={(name) => void bulk((reff) => rpc(current, { cmd: "label", reff, add: [name] }))}
+          onLabel={(name) =>
+            void bulk((reff) => projectStore.toggleLabel(current, reff, name, true))}
           onAssign={(key) =>
-            void bulk((reff) => rpc(current, { cmd: "assign", reff, who: [key], add: true }))
+            void bulk((reff) => projectStore.toggleAssignee(current, reff, key, true))
           }
-          onDue={(due) => void bulk((reff) => rpc(current, { cmd: "issue_edit", reff, due }))}
+          onDue={(due) => void bulk((reff) => projectStore.setDue(current, reff, due))}
           onDelete={() =>
             void (async () => {
               const n = checked.size;
@@ -2874,7 +2957,7 @@ export function App() {
               });
               if (!ok) return;
               const result = await bulk((reff) =>
-                rpc(current, { cmd: "issue_delete", reff }, { confirm: true }),
+                projectStore.tombstoneIssue(current, reff, true),
               );
               if (!result?.failures.length) setChecked(new Set());
             })()
@@ -2922,13 +3005,13 @@ export function App() {
           {pending.join(" ")} …
         </div>
       )}
-      {mutationNotice && (
+      {(operationNotice || mutationNotice) && (
         <div
           className="ui-surface border-line-strong bg-raised text-dim shadow-overlay fixed right-4 bottom-4 z-40 rounded-surface border px-3 py-1.5 text-sm"
           role="status"
           aria-live="polite"
         >
-          {mutationNotice}
+          {operationNotice || mutationNotice}
         </div>
       )}
       {toast && (

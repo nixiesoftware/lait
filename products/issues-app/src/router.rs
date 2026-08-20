@@ -9,14 +9,16 @@
 //!
 //! `IssueRouter` maps the product's [`IssuesRequest`] onto the semantic
 //! [`issues::IssuesWorld`] through a docked [`runtime::Session`]: it resolves
-//! refs/projects/labels and chooses the project from the World's `Snapshot`
-//! query, mints ids and stamps timestamps (the World is pure), submits the
+//! refs/projects/labels through exact product-owned Corpus selectors, mints ids
+//! and stamps timestamps (the World is pure), submits the
 //! mapped intent, and returns the product-owned [`IssuesResponse`] projection.
 //! The host supplies only the docked Session and principal facts.
 
-use issues::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
-use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
-use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
+use issues::contract::{
+    self, IssueIntent, IssueQuery, NewLabel, Pos, ResolveEntity, ResolvedEntity, WorkAction,
+};
+use issues::dto::{IssueView, LabelDto, ProjectDto, Row};
+use issues::ids::{DocId, LabelId, SystemUlidSource, UlidSource};
 use runtime::world::call::{Access, Call, Code, Context, Failure, Handler, Nudge, Reply};
 use runtime::world::{Conflict as SessionConflict, Failure as SessionFailure};
 use runtime::{
@@ -28,6 +30,21 @@ use crate::{
     decode_call, encode_reply, BoardPos, IssuesRequest as Request, IssuesResponse as Response,
     OPERATION, VERSION,
 };
+
+/// How far the sole-live-project fallback will look before it gives up.
+///
+/// Only the *shape* of the answer matters — one live project or not one — so
+/// this needs to be large enough that a real Space answers within a single
+/// page, not large enough to enumerate everything. A Space that exceeds it
+/// refuses and asks for `-p`, which is the same answer it would give for any
+/// other ambiguity.
+///
+/// It may not simply be raised: `find_kind_page` derives the query bound from
+/// this limit as `limit * 64 KiB` of `projected_bytes`, and the Station policy
+/// ceiling is 8 MiB (`runtime::find::Policy::default`). Anything above 128 is
+/// refused whole as `InvalidRequest` rather than truncated, so this rides the
+/// product-wide page size and stays well inside that ceiling.
+const SOLE_PROJECT_SCAN: u32 = issues::contract::DEFAULT_PAGE_SIZE;
 
 /// The daemon facts the router needs per request: who is acting and the
 /// project-choice inputs. (Membership/standing itself is enforced by the
@@ -80,21 +97,65 @@ impl IssuesCallHandler {
             default_project: None,
             now: mechanics::wallclock::now_secs(),
         };
-        for _ in 0..=3 {
-            let response = router.route(request.clone(), &facts).0;
-            if !matches!(
-                &response,
-                Response::Error {
-                    error_kind: crate::IssuesErrorKind::Retry,
-                    ..
-                }
-            ) {
-                return response;
+        // Retryable refusals are transient by definition -- the mutation lane
+        // is taken, the read capacity is momentarily full, the authority moved
+        // under the signature. Retrying them INSTANTLY asks the same question
+        // inside the same microsecond and gets the same answer, so what looked
+        // like four attempts was one attempt made four times. Wait a little
+        // between them, growing, so the condition has a chance to clear.
+        let deadline = std::time::Instant::now() + RETRY_DEADLINE;
+        let mut waited = RETRY_BACKOFF;
+        let mut response = router.route(request.clone(), &facts).0;
+        while matches!(
+            &response,
+            Response::Error {
+                error_kind: crate::IssuesErrorKind::Retry,
+                ..
             }
+        ) {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep(waited.min(deadline - now));
+            waited = waited.saturating_mul(2).min(RETRY_BACKOFF_CAP);
+            response = router.route(request.clone(), &facts).0;
         }
-        Response::retry("membership changed repeatedly — retry the request")
+        // Hand back the refusal that actually happened. This used to answer
+        // "membership changed repeatedly" for every exhausted retry, which
+        // named one cause out of several and was usually the wrong one: a
+        // busy node reported a governance change nobody had made.
+        response
     }
 }
+
+/// Reactions asked for beside one page of comments.
+///
+/// Four per comment across a default page. That covers an ordinary thread
+/// outright, and anything past it is reported by `reactions_complete`
+/// rather than drawn as absence -- which is what makes a figure here a
+/// tuning choice rather than a correctness one.
+///
+/// It is not the maximum page. A page declares a projection budget that
+/// grows with its limit, and asking for the maximum exceeded the grant and
+/// refused the whole view -- so the number that was meant to make reactions
+/// complete instead made the Issue unreadable.
+const REACTIONS_PER_VIEW: u32 = 4 * issues::contract::DEFAULT_PAGE_SIZE;
+
+/// How long a retryable refusal is waited out, and how the waiting grows.
+///
+/// The thing usually holding the mutation lane is convergence incorporating a
+/// peer's work, and on a loaded machine that can hold it for far longer than
+/// a handful of milliseconds. A budget counted in ATTEMPTS gets shorter
+/// exactly when the machine is slower, which is backwards; this is counted in
+/// time, so a busy node is waited out rather than reported as a failure the
+/// caller has to understand.
+///
+/// Bounded, because a request that cannot be admitted should eventually say
+/// so rather than hang.
+const RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(4);
+const RETRY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Handler for IssuesCallHandler {
     fn access(&self, call: &Call) -> Result<Access, Failure> {
@@ -166,152 +227,71 @@ impl Handler for IssuesCallHandler {
     }
 }
 
-/// The decoded catalog snapshot the router resolves against.
-struct Snapshot {
-    value: serde_json::Value,
+/// Cheap selector adapter over the same publication-pinned Corpus used by
+/// Find, Geometry, live invalidation, and agent search. It owns no aggregate
+/// product state and cannot become a second tracker selectors.
+struct Selectors<'a> {
+    session: &'a Session,
 }
 
-impl Snapshot {
-    fn projects(&self) -> &serde_json::Map<String, serde_json::Value> {
-        self.value["catalog"]["projects"]
-            .as_object()
-            .expect("projects object")
-    }
-    fn labels(&self) -> &serde_json::Map<String, serde_json::Value> {
-        self.value["catalog"]["labels"]
-            .as_object()
-            .expect("labels object")
+impl Selectors<'_> {
+    fn one(
+        &self,
+        entity: ResolveEntity,
+        selector: &str,
+        project: Option<&str>,
+    ) -> Option<ResolvedEntity> {
+        let bytes = self
+            .session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: IssueQuery::Resolve {
+                    entity,
+                    selector: selector.into(),
+                    project: project.map(str::to_owned),
+                }
+                .to_json(),
+                publication: None,
+            })
+            .ok()?
+            .bytes;
+        serde_json::from_slice(&bytes).ok()
     }
 
-    /// Resolve a ref (`KEY-n` alias, `iss_` id/prefix) to a DocId string.
     fn resolve_issue(&self, reff: &str) -> RefOutcome {
-        let reff = reff.trim();
-        if reff.is_empty() {
-            return RefOutcome::None;
-        }
-        let lower = reff.to_ascii_lowercase();
-        if let Some(doc) = self.value["aliases"]["by_alias"][&lower].as_str() {
-            return RefOutcome::One(doc.to_string());
-        }
-        // canonical / doc-id prefix
-        if lower.starts_with(DocId::PREFIX) {
-            let seqs = self.value["catalog"]["seqs"]
-                .as_object()
-                .expect("seqs object");
-            let mut hits: Vec<String> = seqs
-                .keys()
-                .filter(|d| d.to_ascii_lowercase().starts_with(&lower))
-                .cloned()
-                .collect();
-            hits.sort();
-            hits.dedup();
-            return match hits.len() {
-                0 => RefOutcome::None,
-                1 => RefOutcome::One(hits.remove(0)),
-                _ => RefOutcome::Many,
-            };
-        }
-        RefOutcome::None
+        self.one(ResolveEntity::Issue, reff, None)
+            .map_or(RefOutcome::None, |resolved| RefOutcome::One(resolved.id))
     }
 
-    /// Resolve a project ref (`prj_` id or case-insensitive KEY).
     fn resolve_project(&self, reff: &str) -> Option<String> {
-        let reff = reff.trim();
-        if reff.starts_with(ProjectId::PREFIX) && self.projects().contains_key(reff) {
-            return Some(reff.to_string());
-        }
-        let upper = reff.to_ascii_uppercase();
-        self.projects()
-            .iter()
-            .find(|(_, meta)| meta["key"].as_str() == Some(upper.as_str()))
-            .map(|(id, _)| id.clone())
+        self.one(ResolveEntity::Project, reff, None)
+            .map(|resolved| resolved.id)
     }
 
-    /// Resolve a milestone within a project (`mls_` id or case-insensitive name).
     fn resolve_milestone(&self, project: &str, reff: &str) -> Option<String> {
-        let reff = reff.trim();
-        let map = self.value["catalog"]["milestones"][project].as_object()?;
-        if map.contains_key(reff) {
-            return Some(reff.to_string());
-        }
-        map.iter()
-            .find(|(_, m)| {
-                m["name"]
-                    .as_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(reff))
-                    && m["tombstone"].as_bool() != Some(true)
-            })
-            .map(|(id, _)| id.clone())
+        self.one(ResolveEntity::Milestone, reff, Some(project))
+            .map(|resolved| resolved.id)
     }
 
-    /// Resolve a cycle within a project (`cyc_` id or case-insensitive name).
     fn resolve_cycle(&self, project: &str, reff: &str) -> Option<String> {
-        let reff = reff.trim();
-        let map = self.value["catalog"]["cycles"][project].as_object()?;
-        if map.contains_key(reff) {
-            return Some(reff.to_string());
-        }
-        map.iter()
-            .find(|(_, c)| {
-                c["name"]
-                    .as_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(reff))
-                    && c["tombstone"].as_bool() != Some(true)
-            })
-            .map(|(id, _)| id.clone())
+        self.one(ResolveEntity::Cycle, reff, Some(project))
+            .map(|resolved| resolved.id)
     }
 
-    /// Resolve an initiative (`ini_` id or case-insensitive name).
     fn resolve_initiative(&self, reff: &str) -> Option<(String, serde_json::Value)> {
-        let reff = reff.trim();
-        let map = self.value["catalog"]["initiatives"].as_object()?;
-        if let Some(v) = map.get(reff) {
-            return Some((reff.to_string(), v.clone()));
-        }
-        map.iter()
-            .find(|(_, i)| {
-                i["name"]
-                    .as_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(reff))
-                    && i["tombstone"].as_bool() != Some(true)
-            })
-            .map(|(id, v)| (id.clone(), v.clone()))
+        self.one(ResolveEntity::Initiative, reff, None)
+            .map(|resolved| (resolved.id, resolved.record))
     }
 
-    /// Resolve a team (`tm_` id, KEY, or case-insensitive name).
     fn resolve_team(&self, reff: &str) -> Option<(String, serde_json::Value)> {
-        let reff = reff.trim();
-        let map = self.value["catalog"]["teams"].as_object()?;
-        if let Some(v) = map.get(reff) {
-            return Some((reff.to_string(), v.clone()));
-        }
-        let upper = reff.to_ascii_uppercase();
-        map.iter()
-            .find(|(_, t)| {
-                t["tombstone"].as_bool() != Some(true)
-                    && (t["key"].as_str() == Some(upper.as_str())
-                        || t["name"]
-                            .as_str()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(reff)))
-            })
-            .map(|(id, v)| (id.clone(), v.clone()))
+        self.one(ResolveEntity::Team, reff, None)
+            .map(|resolved| (resolved.id, resolved.record))
     }
 
-    /// Resolve a label ref (`lbl_` id or case-insensitive name).
     fn resolve_label(&self, reff: &str) -> Option<String> {
-        let reff = reff.trim();
-        if reff.starts_with(LabelId::PREFIX) && self.labels().contains_key(reff) {
-            return Some(reff.to_string());
-        }
-        let lower = reff.to_ascii_lowercase();
-        self.labels()
-            .iter()
-            .find(|(_, meta)| {
-                meta["name"]
-                    .as_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(&lower))
-            })
-            .map(|(id, _)| id.clone())
+        self.one(ResolveEntity::Label, reff, None)
+            .map(|resolved| resolved.id)
     }
 }
 
@@ -323,10 +303,58 @@ enum RefOutcome {
 }
 
 /// The router.
+/// One assembled Issue from a Detail projection's first pages.
+///
+/// Reactions are paged beside the comments rather than inside them, so they
+/// are put back on the comment they mark. A reaction naming a comment this
+/// page does not carry is dropped rather than invented -- the comment page is
+/// the bound, and a reaction with nothing to attach to is not a fact about
+/// this answer.
+fn assemble(detail: issues::contract::IssueDetailProjection) -> IssueView {
+    let mut view = detail.issue;
+    let mut comments = detail.comments.items;
+    for comment in &mut comments {
+        comment.reactions.clear();
+        let Some(id) = comment.id.clone() else {
+            continue;
+        };
+        for record in detail
+            .reactions
+            .items
+            .iter()
+            .filter(|record| record.comment == id && record.on)
+        {
+            let Some(actor) = issues::ids::ActorId::parse(&record.actor) else {
+                continue;
+            };
+            match comment
+                .reactions
+                .iter_mut()
+                .find(|existing| existing.emoji == record.emoji)
+            {
+                Some(existing) => existing.actors.push(actor),
+                None => comment.reactions.push(issues::dto::ReactionDto {
+                    emoji: record.emoji.clone(),
+                    actors: vec![actor],
+                }),
+            }
+        }
+    }
+    view.comments = comments;
+    view.attachments = detail.attachments.items;
+    view.checks = detail.checks.items;
+    // Say where this answer stops. A first page that cannot be told apart
+    // from a whole discussion is the wrong answer, not a smaller one.
+    view.more_comments = detail.comments.next_cursor;
+    view.reactions_complete = detail.reactions.next_cursor.is_none();
+    view
+}
+
 pub struct IssueRouter<'a> {
     session: &'a Session,
     identity: &'a runtime::world::LocalIdentity,
     clock: &'a dyn UlidSource,
+    accepted: std::cell::RefCell<Option<crate::OperationReceipt>>,
 }
 
 impl<'a> IssueRouter<'a> {
@@ -339,24 +367,13 @@ impl<'a> IssueRouter<'a> {
             session,
             identity,
             clock,
+            accepted: std::cell::RefCell::new(None),
         }
     }
 
-    fn snapshot(&self) -> Snapshot {
-        let bytes = self
-            .session
-            .query(Query {
-                schema: contract::issue_schema(),
-                schema_version: contract::ISSUE_SCHEMA_VERSION,
-                payload: IssueQuery::Snapshot.to_json(),
-            })
-            .map(|p| p.bytes)
-            .unwrap_or_default();
-        Snapshot {
-            value: serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({
-                "catalog": {"projects":{},"labels":{},"seqs":{}},
-                "aliases": {"by_alias":{}},
-            })),
+    fn selectors(&self) -> Selectors<'_> {
+        Selectors {
+            session: self.session,
         }
     }
 
@@ -379,13 +396,33 @@ impl<'a> IssueRouter<'a> {
             },
         )?;
         let committed = self.session.submit(action)?;
+        self.accepted.replace(Some(crate::OperationReceipt {
+            operation: data_encoding::HEXLOWER.encode(&committed.operation),
+            phase: crate::OperationPhase::Accepted,
+            publication: committed.publication,
+        }));
         Ok(
             contract::IssueEffect::from_json(&committed.effect).unwrap_or(contract::IssueEffect {
                 doc: None,
                 run: None,
                 unchanged: false,
+                results: Vec::new(),
             }),
         )
+    }
+
+    /// Lower one convenience command through the same product ChangeSet
+    /// planner used by browser batches and agents. Product references remain
+    /// unresolved until the World evaluates the action's pinned publication.
+    fn submit_change(
+        &self,
+        operation: contract::ChangeOperation,
+        ts: u64,
+    ) -> Result<contract::IssueEffect, SessionFailure> {
+        self.submit(&IssueIntent::ChangeSet {
+            operations: vec![operation],
+            ts,
+        })
     }
 
     /// Who is on this issue, and what it is called.
@@ -399,8 +436,13 @@ impl<'a> IssueRouter<'a> {
     /// person who asked to follow an issue heard less about it than one who was
     /// put on it and left.
     pub fn interested(&self, reff: &str) -> Option<(String, Vec<String>)> {
-        let snapshot = self.snapshot();
-        let doc = self.resolve(&snapshot, reff).ok()?;
+        // Most requests already carry canonical product coordinates or lower
+        // directly into the shared ChangeSet/Find paths. Legacy selector
+        // adapters hydrate their selectors only when an arm actually derefs it;
+        // a canonical action must never pay a whole-tracker read before the
+        // request is even classified.
+        let selectors = self.selectors();
+        let doc = self.resolve(&selectors, reff).ok()?;
         let view: IssueView = self
             .query(&IssueQuery::View {
                 doc: doc.clone(),
@@ -425,31 +467,48 @@ impl<'a> IssueRouter<'a> {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),
+                publication: None,
             })?
             .bytes;
         serde_json::from_slice(&bytes)
             .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
     }
 
-    fn query_at<T: DeserializeOwned>(
+    fn query_pinned<T: DeserializeOwned>(
         &self,
         query: &IssueQuery,
-        generation: &str,
+        publication: runtime::publication::PublicationId,
     ) -> Result<T, SessionFailure> {
-        let bytes = data_encoding::HEXLOWER
-            .decode(generation.as_bytes())
-            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))?;
-        let root = <[u8; 32]>::try_from(bytes.as_slice())
-            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))?;
-        let id = runtime::WorldSnapshotId::new(contract::world_id(), root);
+        let bytes = self
+            .session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: query.to_json(),
+                publication: Some(publication),
+            })?
+            .bytes;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
+    }
+
+    fn query_exact<T: DeserializeOwned>(
+        &self,
+        query: &IssueQuery,
+        publication: crate::protocol::WorldPublicationCoordinate,
+    ) -> Result<T, SessionFailure> {
+        let publication = publication
+            .parse()
+            .ok_or(SessionFailure::Rejected(Rejection::InvalidRequest))?;
         let bytes = self
             .session
             .query_at(
-                &id,
+                publication,
                 Query {
                     schema: contract::issue_schema(),
                     schema_version: contract::ISSUE_SCHEMA_VERSION,
                     payload: query.to_json(),
+                    publication: Some(publication.publication),
                 },
             )?
             .bytes;
@@ -457,20 +516,55 @@ impl<'a> IssueRouter<'a> {
             .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
     }
 
-    /// The canonical reff for a DocId (from the current snapshot).
-    fn reff_for(&self, snapshot: &Snapshot, doc: &str) -> String {
-        snapshot.value["aliases"]["by_alias"]
-            .as_object()
-            .and_then(|m| {
-                m.iter()
-                    .find(|(_, v)| v.as_str() == Some(doc))
-                    .map(|(k, _)| k.to_uppercase())
-            })
-            .or_else(|| {
-                snapshot.value["aliases"]["canonical"][doc]
-                    .as_str()
-                    .map(String::from)
-            })
+    fn query_coordinate<T: DeserializeOwned>(
+        &self,
+        query: &IssueQuery,
+        publication: Option<crate::protocol::PublicationCoordinate>,
+    ) -> Result<T, SessionFailure> {
+        match publication {
+            Some(publication) => self.query_pinned(
+                query,
+                publication
+                    .parse()
+                    .ok_or(SessionFailure::Rejected(Rejection::InvalidRequest))?,
+            ),
+            None => match query {
+                IssueQuery::History { page, .. }
+                | IssueQuery::Relations { page, .. }
+                | IssueQuery::Comments { page, .. }
+                | IssueQuery::Reactions { page, .. }
+                | IssueQuery::Attachments { page, .. }
+                | IssueQuery::Checks { page, .. }
+                | IssueQuery::Inbox { page, .. } => self.query_page(query, page),
+                _ => self.query(query),
+            },
+        }
+    }
+
+    /// Enter the exact World publication carried by an Issues continuation
+    /// before asking the World to evaluate its inner Runtime cursor. A first
+    /// page has no coordinate and intentionally reads the current publication;
+    /// every continuation is exact or rejected.
+    fn query_page<T: DeserializeOwned>(
+        &self,
+        query: &IssueQuery,
+        page: &issues::contract::PageRequest,
+    ) -> Result<T, SessionFailure> {
+        match page.cursor.as_deref() {
+            None => self.query(query),
+            Some(cursor) => {
+                let (publication, _) = issues::contract::decode_page_cursor(cursor)
+                    .ok_or(SessionFailure::Rejected(Rejection::InvalidRequest))?;
+                self.query_pinned(query, publication.publication)
+            }
+        }
+    }
+
+    /// The current full collision-safe human rendering for one Issue id.
+    fn reff_for(&self, selectors: &Selectors<'_>, doc: &str) -> String {
+        selectors
+            .one(ResolveEntity::Issue, doc, None)
+            .map(|resolved| resolved.display)
             .unwrap_or_else(|| doc.to_string())
     }
 
@@ -478,36 +572,48 @@ impl<'a> IssueRouter<'a> {
     /// default → sole → error.
     fn choose_project(
         &self,
-        snapshot: &Snapshot,
+        selectors: &Selectors<'_>,
         explicit: Option<&str>,
         facts: &RouterFacts,
     ) -> Result<String, Response> {
         if let Some(p) = explicit {
-            return snapshot
+            return selectors
                 .resolve_project(p)
                 .ok_or_else(|| Response::not_found(format!("no project matches {p:?}")));
         }
         if let Some(hint) = &facts.project_hint {
-            if let Some(id) = snapshot.resolve_project(hint) {
+            if let Some(id) = selectors.resolve_project(hint) {
                 return Ok(id);
             }
         }
         if let Some(default) = &facts.default_project {
-            if let Some(id) = snapshot.resolve_project(default) {
+            if let Some(id) = selectors.resolve_project(default) {
                 return Ok(id);
             }
         }
         // Auto-selection skips archived projects: a soft-hidden project must not
         // become the default board just because it is the only live-looking one
         // (CUSTOM-9). Explicit refs above still resolve it.
-        let projects = snapshot.projects();
-        let live: Vec<&String> = projects
-            .iter()
-            .filter(|(_, meta)| meta["archived"].as_bool() != Some(true))
-            .map(|(id, _)| id)
-            .collect();
-        if live.len() == 1 {
-            return Ok(live[0].clone());
+        //
+        // This is the last link of the documented chain and it is load-bearing:
+        // a freshly founded Space has exactly one project, so every first issue
+        // filed without `-p` arrives here. Reached only after the three cheaper
+        // links miss, so the enumeration is not on the common path.
+        let page = issues::contract::PageRequest {
+            limit: SOLE_PROJECT_SCAN,
+            cursor: None,
+        };
+        let projects: issues::contract::Page<ProjectDto> = self
+            .query_page(&IssueQuery::Projects { page: page.clone() }, &page)
+            .map_err(Self::effect_err)?;
+        let mut live = projects.items.iter().filter(|project| !project.archived);
+        if let Some(only) = live.next() {
+            // A second live project means the answer is genuinely ambiguous; a
+            // truncated scan means we cannot prove it is not, and refusing is
+            // the safe direction in both cases.
+            if live.next().is_none() && projects.next_cursor.is_none() {
+                return Ok(only.id.to_string());
+            }
         }
         Err(Response::err(
             "no project chosen and no single default — pass -p <project>",
@@ -515,23 +621,23 @@ impl<'a> IssueRouter<'a> {
     }
 
     /// Resolve a ref to a DocId or a mapped error response.
-    fn resolve(&self, snapshot: &Snapshot, reff: &str) -> Result<String, Response> {
-        match snapshot.resolve_issue(reff) {
+    fn resolve(&self, selectors: &Selectors<'_>, reff: &str) -> Result<String, Response> {
+        match selectors.resolve_issue(reff) {
             RefOutcome::One(doc) => Ok(doc),
             RefOutcome::Many => Err(Response::not_found(format!("{reff:?} is ambiguous"))),
             RefOutcome::None => Err(Response::not_found(format!("no issue matches {reff:?}"))),
         }
     }
 
-    fn map_pos(&self, snapshot: &Snapshot, pos: BoardPos) -> Result<Pos, Response> {
+    fn map_pos(&self, selectors: &Selectors<'_>, pos: BoardPos) -> Result<Pos, Response> {
         Ok(match pos {
             BoardPos::Top => Pos::Top,
             BoardPos::Bottom => Pos::Bottom,
             BoardPos::Before { reff } => Pos::Before {
-                doc: self.resolve(snapshot, &reff)?,
+                doc: self.resolve(selectors, &reff)?,
             },
             BoardPos::After { reff } => Pos::After {
-                doc: self.resolve(snapshot, &reff)?,
+                doc: self.resolve(selectors, &reff)?,
             },
         })
     }
@@ -640,8 +746,11 @@ impl<'a> IssueRouter<'a> {
             // grant was told they lacked write standing.
             SessionFailure::Rejected(Rejection::NoActiveImplementation) => Response::denied(
                 "no World implementation is active at this space's frontier, so no \
-                 write can be authorized for anyone — an admin runs `world_upgrade` \
-                 to activate this build's; nothing was changed",
+                 write can be authorized for anyone — reopen this Space and approve \
+                 the reviewed World update in the launcher; nothing was changed",
+            ),
+            SessionFailure::Rejected(Rejection::ImplementationUnavailable) => Response::err(
+                "the exact World implementation active for this space is not installed on this node",
             ),
             SessionFailure::Rejected(Rejection::Conflict)
             | SessionFailure::Conflict(SessionConflict::Body) => {
@@ -666,6 +775,18 @@ impl<'a> IssueRouter<'a> {
             SessionFailure::GenerationUnavailable => {
                 Response::not_found("that World generation is not available on this node")
             }
+            SessionFailure::PublicationExpired(_) => Response::err(
+                "that exact World publication is no longer retained — reopen the current view; the operation receipt was not rewritten",
+            ),
+            SessionFailure::ReadCapacity => Response::retry(
+                "this node's publication read capacity is currently full — retry shortly",
+            ),
+            SessionFailure::Busy => Response::retry(
+                "this node is busy before accepting the operation — retry shortly",
+            ),
+            SessionFailure::OutcomeUnknown => Response::indeterminate(
+                "the operation's durable outcome is indeterminate — keep the pending view and reconcile by operation id; do not blindly replay",
+            ),
             SessionFailure::PersistenceCause { operation, reason } => {
                 Response::err(format!("persistence failed while {operation}: {reason}"))
             }
@@ -673,6 +794,39 @@ impl<'a> IssueRouter<'a> {
                 Response::err("internal error")
             }
             SessionFailure::Reset => Response::err("state reset — re-query"),
+            SessionFailure::Rejected(Rejection::BodyRead(failure)) => match failure {
+                runtime::world::BodyReadFailure::CapabilityUnavailable => Response::err(
+                    "this World callback was installed without the Body-read capability this operation requires",
+                ),
+                runtime::world::BodyReadFailure::Opaque(_) => Response::err(
+                    "this exact publication contains an opaque Body that the active implementation cannot interpret",
+                ),
+                runtime::world::BodyReadFailure::NotCollaborative(_) => Response::err(
+                    "the active implementation requested a collaborative view of a non-collaborative Body — operator attention is required",
+                ),
+                runtime::world::BodyReadFailure::SchemaAhead(_) => Response::err(
+                    "this exact publication contains a newer Body schema than the active implementation can read",
+                ),
+                runtime::world::BodyReadFailure::KeyUnavailable(_) => Response::err(
+                    "the key for this exact publication is unavailable — sync authority material, then re-query the current publication",
+                ),
+                runtime::world::BodyReadFailure::Corrupt(_) => Response::err(
+                    "an authenticated Body in this exact publication is corrupt — operator attention is required",
+                ),
+                runtime::world::BodyReadFailure::Capacity(_) => Response::retry(
+                    "this node's Body-image read capacity is currently full — retry shortly",
+                ),
+                runtime::world::BodyReadFailure::MaterialUnavailable(_) => Response::err(
+                    "this exact publication's Body material is not available locally — sync, then re-query the current publication",
+                ),
+                runtime::world::BodyReadFailure::PublicationExpired(_) => Response::err(
+                    "that exact publication is no longer retained — re-query from the current publication",
+                ),
+                runtime::world::BodyReadFailure::Interrupted(_) => {
+                    Response::retry("the publication read was interrupted — retry")
+                }
+                _ => Response::err("the exact publication could not be read — re-query or contact an operator"),
+            },
             SessionFailure::Rejected(Rejection::StateCorrupt) => Response::err(
                 "the space's issue catalog is corrupt (missing, duplicated, or mis-bound) — \
                  this store needs operator attention; nothing was changed",
@@ -685,9 +839,7 @@ impl<'a> IssueRouter<'a> {
     pub fn handles(req: &Request) -> bool {
         matches!(
             req,
-            Request::StructureStatus
-                | Request::StructureMigrate
-                | Request::Inbox { .. }
+            Request::Inbox { .. }
                 | Request::AccessPlan { .. }
                 | Request::IssueNew { .. }
                 | Request::IssueEdit { .. }
@@ -710,15 +862,19 @@ impl<'a> IssueRouter<'a> {
                 | Request::IssueStop { .. }
                 | Request::Verify { .. }
                 | Request::AcceptCheck { .. }
-                | Request::IssueGraph { .. }
-                | Request::ProjectGraph { .. }
                 | Request::Geometry { .. }
                 | Request::IssueView { .. }
+                | Request::IssueDetail { .. }
                 | Request::List { .. }
                 | Request::Board { .. }
                 | Request::History { .. }
+                | Request::IssueRelations { .. }
+                | Request::IssueComments { .. }
+                | Request::IssueReactions { .. }
+                | Request::IssueAttachments { .. }
+                | Request::IssueChecks { .. }
                 | Request::ProjectNew { .. }
-                | Request::ProjectList
+                | Request::ProjectList { .. }
                 | Request::ProjectEdit { .. }
                 | Request::ProjectUpdates { .. }
                 | Request::ProjectUpdatePost { .. }
@@ -730,24 +886,25 @@ impl<'a> IssueRouter<'a> {
                 | Request::CycleList { .. }
                 | Request::CycleSet { .. }
                 | Request::IssueCycle { .. }
-                | Request::InitiativeList
+                | Request::InitiativeList { .. }
                 | Request::InitiativeSet { .. }
-                | Request::TeamList
+                | Request::TeamList { .. }
                 | Request::TeamSet { .. }
-                | Request::TriageList
+                | Request::TriageList { .. }
                 | Request::TriageSubmit { .. }
                 | Request::TriageDecide { .. }
                 | Request::Attach { .. }
                 | Request::Detach { .. }
                 | Request::AttachmentGet { .. }
                 | Request::LabelNew { .. }
-                | Request::LabelList
+                | Request::LabelList { .. }
+                | Request::LabelShow { .. }
                 | Request::LabelEdit { .. }
                 | Request::LabelDelete { .. }
                 | Request::SpaceRename { .. }
                 | Request::SpaceDescribe { .. }
                 | Request::Activity { .. }
-                | Request::RoleList
+                | Request::RoleList { .. }
                 | Request::RoleShow { .. }
                 | Request::RoleCreate { .. }
                 | Request::RoleEdit { .. }
@@ -783,41 +940,411 @@ impl<'a> IssueRouter<'a> {
     /// Route one issue-family request. Returns the mapped response and whether
     /// it committed a change (the daemon rings the doorbell / re-announces).
     pub fn route(&self, req: Request, facts: &RouterFacts) -> (Response, bool) {
+        self.accepted.replace(None);
         match self.route_inner(req, facts) {
-            Ok((resp, changed)) => (resp, changed),
+            Ok((resp, changed)) => match (self.accepted.take(), changed) {
+                (Some(receipt), _) => (
+                    Response::Operation {
+                        receipt,
+                        response: Box::new(resp),
+                    },
+                    changed,
+                ),
+                (None, true) => (
+                    Response::err(
+                        "the operation changed durable state without returning its receipt",
+                    ),
+                    false,
+                ),
+                (None, false) => (resp, false),
+            },
             Err(resp) => (resp, false),
         }
     }
 
     fn route_inner(&self, req: Request, facts: &RouterFacts) -> Result<(Response, bool), Response> {
-        let snapshot = self.snapshot();
+        let selectors = self.selectors();
         match req {
-            Request::StructureStatus => {
-                let report = self
-                    .query(&IssueQuery::StructureStatus)
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Structure(Box::new(report)), false))
-            }
-            Request::StructureMigrate => {
-                let effect = self
-                    .submit(&IssueIntent::StructureMigrate {
-                        actor: facts.actor.clone(),
-                        device: facts.device.clone(),
-                        ts: facts.now,
+            request @ (Request::ChangeSet { .. } | Request::OperationStatus { .. }) => {
+                let status_only = matches!(&request, Request::OperationStatus { .. });
+                let (operation, timestamp, operations) = match request {
+                    Request::ChangeSet {
+                        operation,
+                        timestamp,
+                        operations,
+                    } => (operation, timestamp, operations),
+                    Request::OperationStatus {
+                        operation,
+                        timestamp,
+                        operations,
+                    } => (Some(operation), Some(timestamp), operations),
+                    _ => return Err(Response::err("invalid operation request")),
+                };
+                let operations = operations
+                    .into_iter()
+                    .map(|operation| -> Result<contract::ChangeOperation, Response> {
+                        Ok(match operation {
+                            crate::ChangeOperation::ProjectCreate { name, key, color } => {
+                                contract::ChangeOperation::ProjectCreate { name, key, color }
+                            }
+                            crate::ChangeOperation::SpecCreate {
+                                project,
+                                kind,
+                                title,
+                                text,
+                                links,
+                            } => contract::ChangeOperation::SpecCreate {
+                                project: match project {
+                                    crate::ChangeProject::Existing { project } => {
+                                        contract::ChangeProject::Existing { project }
+                                    }
+                                    crate::ChangeProject::Created { operation } => {
+                                        contract::ChangeProject::Created { operation }
+                                    }
+                                },
+                                kind,
+                                title,
+                                text: if text.starts_with(contract::DOCUMENT_PREFIX) {
+                                    text
+                                } else {
+                                    crate::document::plain_document(&text)
+                                },
+                                links,
+                            },
+                            crate::ChangeOperation::IssueCreate {
+                                project,
+                                title,
+                                priority,
+                                status,
+                                parent,
+                                assignees,
+                                labels,
+                                body,
+                                due,
+                                estimate,
+                            } => contract::ChangeOperation::IssueCreate {
+                                project: match project {
+                                    crate::ChangeProject::Existing { project } => {
+                                        contract::ChangeProject::Existing { project }
+                                    }
+                                    crate::ChangeProject::Created { operation } => {
+                                        contract::ChangeProject::Created { operation }
+                                    }
+                                },
+                                title,
+                                priority: priority.unwrap_or_else(|| "none".into()),
+                                status,
+                                parent,
+                                assignees,
+                                labels: labels
+                                    .into_iter()
+                                    .map(|label| match label {
+                                        crate::ChangeLabel::Existing { label } => {
+                                            contract::ChangeLabel::Existing { label }
+                                        }
+                                        crate::ChangeLabel::Created { operation } => {
+                                            contract::ChangeLabel::Created { operation }
+                                        }
+                                    })
+                                    .collect(),
+                                body: body.map(|body| {
+                                    if body.starts_with(contract::DOCUMENT_PREFIX) {
+                                        body
+                                    } else {
+                                        crate::document::plain_document(&body)
+                                    }
+                                }),
+                                due,
+                                estimate,
+                            },
+                            crate::ChangeOperation::IssueBoard {
+                                issue,
+                                status,
+                                position,
+                            } => contract::ChangeOperation::IssueBoard {
+                                issue,
+                                status,
+                                position: position.map(|position| match position {
+                                    crate::ChangePosition::Top => contract::ChangePosition::Top,
+                                    crate::ChangePosition::Bottom => {
+                                        contract::ChangePosition::Bottom
+                                    }
+                                    crate::ChangePosition::Before { issue } => {
+                                        contract::ChangePosition::Before { issue }
+                                    }
+                                    crate::ChangePosition::After { issue } => {
+                                        contract::ChangePosition::After { issue }
+                                    }
+                                }),
+                            },
+                            crate::ChangeOperation::IssuePatch {
+                                issue,
+                                title,
+                                status,
+                                priority,
+                                due,
+                                clear_due,
+                                estimate,
+                                clear_estimate,
+                                assignees,
+                                labels,
+                            } => contract::ChangeOperation::IssuePatch {
+                                issue,
+                                title,
+                                status,
+                                priority,
+                                due,
+                                clear_due,
+                                estimate,
+                                clear_estimate,
+                                assignees,
+                                labels: labels.map(|labels| {
+                                    labels
+                                        .into_iter()
+                                        .map(|label| match label {
+                                            crate::ChangeLabel::Existing { label } => {
+                                                contract::ChangeLabel::Existing { label }
+                                            }
+                                            crate::ChangeLabel::Created { operation } => {
+                                                contract::ChangeLabel::Created { operation }
+                                            }
+                                        })
+                                        .collect()
+                                }),
+                            },
+                            crate::ChangeOperation::IssueWork { issue, action } => {
+                                contract::ChangeOperation::IssueWork {
+                                    issue,
+                                    action: match action {
+                                        crate::ChangeWorkAction::Start => WorkAction::Start,
+                                        crate::ChangeWorkAction::Done => WorkAction::Done,
+                                        crate::ChangeWorkAction::Stop => WorkAction::Stop,
+                                    },
+                                }
+                            }
+                            crate::ChangeOperation::IssueTombstone { issue, on } => {
+                                contract::ChangeOperation::IssueTombstone { issue, on }
+                            }
+                            crate::ChangeOperation::IssueComment {
+                                issue,
+                                body,
+                                parent,
+                            } => contract::ChangeOperation::IssueComment {
+                                issue,
+                                body,
+                                parent,
+                            },
+                            crate::ChangeOperation::IssueCommentAt {
+                                issue,
+                                body,
+                                field,
+                                start,
+                                end,
+                                parent,
+                                source,
+                            } => contract::ChangeOperation::IssueCommentAt {
+                                issue,
+                                body,
+                                field,
+                                start,
+                                end,
+                                parent,
+                                source: source.parse().ok_or_else(|| {
+                                    Response::invalid("source must be an exact world publication")
+                                })?,
+                            },
+                            crate::ChangeOperation::IssueReaction {
+                                issue,
+                                comment,
+                                emoji,
+                                on,
+                            } => contract::ChangeOperation::IssueReaction {
+                                issue,
+                                comment,
+                                emoji,
+                                on,
+                            },
+                            crate::ChangeOperation::IssueLink {
+                                issue,
+                                kind,
+                                target,
+                                on,
+                            } => contract::ChangeOperation::IssueLink {
+                                issue,
+                                kind,
+                                target,
+                                on,
+                            },
+                            crate::ChangeOperation::IssueParent { issue, parent } => {
+                                contract::ChangeOperation::IssueParent { issue, parent }
+                            }
+                            crate::ChangeOperation::IssueMove {
+                                issue,
+                                project,
+                                position,
+                            } => contract::ChangeOperation::IssueMove {
+                                issue,
+                                project: project.map(|project| match project {
+                                    crate::ChangeProject::Existing { project } => {
+                                        contract::ChangeProject::Existing { project }
+                                    }
+                                    crate::ChangeProject::Created { operation } => {
+                                        contract::ChangeProject::Created { operation }
+                                    }
+                                }),
+                                position: position.map(|position| match position {
+                                    crate::ChangePosition::Top => contract::ChangePosition::Top,
+                                    crate::ChangePosition::Bottom => {
+                                        contract::ChangePosition::Bottom
+                                    }
+                                    crate::ChangePosition::Before { issue } => {
+                                        contract::ChangePosition::Before { issue }
+                                    }
+                                    crate::ChangePosition::After { issue } => {
+                                        contract::ChangePosition::After { issue }
+                                    }
+                                }),
+                            },
+                            crate::ChangeOperation::IssueMilestone { issue, milestone } => {
+                                contract::ChangeOperation::IssueMilestone { issue, milestone }
+                            }
+                            crate::ChangeOperation::LabelCreate { name, color } => {
+                                contract::ChangeOperation::LabelCreate { name, color }
+                            }
+                            crate::ChangeOperation::LabelEdit { label, name, color } => {
+                                contract::ChangeOperation::LabelEdit { label, name, color }
+                            }
+                            crate::ChangeOperation::LabelDelete { label } => {
+                                contract::ChangeOperation::LabelDelete { label }
+                            }
+                        })
                     })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let request = match operation {
+                    Some(operation) => {
+                        let bytes = data_encoding::HEXLOWER
+                            .decode(operation.as_bytes())
+                            .map_err(|_| {
+                                Response::invalid("operation must be 32 lowercase hex digits")
+                            })?;
+                        let raw: [u8; 16] = bytes.try_into().map_err(|_| {
+                            Response::invalid("operation must be 32 lowercase hex digits")
+                        })?;
+                        RequestId::from_bytes(raw)
+                    }
+                    None => RequestId::mint(),
+                };
+                let semantic = IssueIntent::ChangeSet {
+                    operations,
+                    ts: timestamp.unwrap_or(facts.now),
+                };
+                if status_only {
+                    let intent = Intent {
+                        schema: contract::issue_schema(),
+                        schema_version: contract::ISSUE_SCHEMA_VERSION,
+                        payload: semantic.to_json(),
+                    };
+                    let status = self
+                        .session
+                        .operation_status_for(request, &intent)
+                        .map_err(Self::effect_err)?;
+                    let operation = data_encoding::HEXLOWER.encode(&request.as_bytes());
+                    return Ok((
+                        match status {
+                            runtime::OperationStatus::Absent => Response::OperationStatus {
+                                operation,
+                                readiness: crate::OperationReadiness::Absent,
+                                publication: None,
+                                results: Vec::new(),
+                            },
+                            runtime::OperationStatus::Found {
+                                receipt,
+                                publication,
+                            } => {
+                                let effect = contract::IssueEffect::from_json(&receipt.effect)
+                                    .ok_or_else(|| {
+                                        Response::err("the durable operation receipt is corrupt")
+                                    })?;
+                                let (readiness, publication) = match publication {
+                                    runtime::OperationPublication::Ready(publication) => {
+                                        (crate::OperationReadiness::Ready, Some(publication))
+                                    }
+                                    runtime::OperationPublication::Building => {
+                                        (crate::OperationReadiness::Building, None)
+                                    }
+                                    runtime::OperationPublication::Capacity => {
+                                        (crate::OperationReadiness::Capacity, None)
+                                    }
+                                    runtime::OperationPublication::ImplementationUnavailable => {
+                                        (crate::OperationReadiness::ImplementationUnavailable, None)
+                                    }
+                                    runtime::OperationPublication::GenerationUnavailable => {
+                                        (crate::OperationReadiness::GenerationUnavailable, None)
+                                    }
+                                    runtime::OperationPublication::Unavailable => {
+                                        (crate::OperationReadiness::Unavailable, None)
+                                    }
+                                };
+                                Response::OperationStatus {
+                                    operation,
+                                    readiness,
+                                    publication,
+                                    results: effect
+                                        .results
+                                        .into_iter()
+                                        .map(|result| crate::ChangeEffect {
+                                            operation: result.operation,
+                                            kind: result.kind,
+                                            id: result.id,
+                                        })
+                                        .collect(),
+                                }
+                            }
+                        },
+                        false,
+                    ));
+                }
+                let effect = self
+                    .submit_with_request(&semantic, request)
                     .map_err(Self::effect_err)?;
-                let report = self
-                    .query(&IssueQuery::StructureStatus)
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Structure(Box::new(report)), !effect.unchanged))
+                Ok((
+                    Response::ChangeSet {
+                        results: effect
+                            .results
+                            .into_iter()
+                            .map(|result| crate::ChangeEffect {
+                                operation: result.operation,
+                                kind: result.kind,
+                                id: result.id,
+                            })
+                            .collect(),
+                    },
+                    !effect.unchanged,
+                ))
             }
-            Request::Inbox { watermark } => {
-                let projection =
-                    crate::projections::inbox(self.session, &facts.actor, &facts.device, watermark);
+            Request::Inbox {
+                watermark,
+                page,
+                publication,
+            } => {
+                let page: issues::contract::Page<issues::dto::InboxEntry> = self
+                    .query_coordinate(
+                        &IssueQuery::Inbox {
+                            exclude_device: Some(facts.device.clone()),
+                            page,
+                        },
+                        publication,
+                    )
+                    .map_err(Self::effect_err)?;
+                let unread_on_page = page
+                    .items
+                    .iter()
+                    .filter(|entry| entry.ts > watermark)
+                    .count() as u64;
                 Ok((
                     Response::Inbox {
-                        entries: projection.entries,
-                        unread: projection.unread,
+                        page,
+                        unread_on_page,
                     },
                     false,
                 ))
@@ -848,22 +1375,28 @@ impl<'a> IssueRouter<'a> {
                 due,
                 estimate,
             } => {
-                let project = self.choose_project(&snapshot, project.as_deref(), facts)?;
+                let project = self.choose_project(&selectors, project.as_deref(), facts)?;
                 let duedate = match due.as_deref() {
                     None | Some("none") => None,
                     Some(text) => Some(parse_due(text).ok_or_else(bad_due)?),
                 };
                 let resolved_assignees: Vec<String> = assignees.to_vec();
-                let mut label_ids = Vec::new();
-                let mut new_labels = Vec::new();
+                let mut operations = Vec::new();
+                let mut change_labels = Vec::new();
                 for label in &labels {
-                    match snapshot.resolve_label(label) {
-                        Some(id) => label_ids.push(id),
-                        None => new_labels.push(NewLabel {
-                            id: LabelId::mint(self.clock).as_str().to_string(),
-                            name: label.clone(),
-                            color: "gray".into(),
-                        }),
+                    match selectors.resolve_label(label) {
+                        Some(id) => {
+                            change_labels.push(contract::ChangeLabel::Existing { label: id })
+                        }
+                        None => {
+                            let operation = u16::try_from(operations.len())
+                                .map_err(|_| Response::err("too many labels for one issue"))?;
+                            operations.push(contract::ChangeOperation::LabelCreate {
+                                name: label.clone(),
+                                color: "gray".into(),
+                            });
+                            change_labels.push(contract::ChangeLabel::Created { operation });
+                        }
                     }
                 }
                 // A body that already declares itself a document is passed
@@ -891,28 +1424,31 @@ impl<'a> IssueRouter<'a> {
                     Some(body) => Some(crate::document::plain_document(&body)),
                     None => None,
                 };
-                let doc = DocId::mint(self.clock).as_str().to_string();
+                operations.push(contract::ChangeOperation::IssueCreate {
+                    project: contract::ChangeProject::Existing { project },
+                    title,
+                    priority: priority.unwrap_or_else(|| "none".into()),
+                    status: None,
+                    parent: None,
+                    assignees: resolved_assignees,
+                    labels: change_labels,
+                    body,
+                    due: duedate,
+                    estimate,
+                });
                 let effect = self
-                    .submit(&IssueIntent::IssueNew {
-                        doc: doc.clone(),
-                        project,
-                        title,
-                        priority: priority.unwrap_or_else(|| "none".into()),
-                        assignees: resolved_assignees,
-                        labels: label_ids,
-                        new_labels,
-                        body,
-                        duedate,
-                        estimate,
-                        actor: facts.actor.clone(),
-                        device: facts.device.clone(),
+                    .submit(&IssueIntent::ChangeSet {
+                        operations,
                         ts: facts.now,
                     })
                     .map_err(Self::effect_err)?;
-                let reff = effect
-                    .doc
-                    .map(|d| self.reff_for(&self.snapshot(), &d))
-                    .unwrap_or(doc);
+                let doc = effect
+                    .results
+                    .iter()
+                    .find(|result| result.kind == "issue")
+                    .map(|result| result.id.clone())
+                    .ok_or_else(|| Response::err("issue create returned no issue result"))?;
+                let reff = self.reff_for(&self.selectors(), &doc);
                 Ok((Response::Ref { reff }, true))
             }
             Request::IssueEdit {
@@ -924,7 +1460,7 @@ impl<'a> IssueRouter<'a> {
                 due,
                 estimate,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let description = if let Some(description) = description {
                     let issue: IssueView = self
                         .query(&IssueQuery::View {
@@ -985,7 +1521,7 @@ impl<'a> IssueRouter<'a> {
                 insert,
                 base_len,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::IssueTextSplice {
                     doc: doc.clone(),
                     index,
@@ -1001,7 +1537,7 @@ impl<'a> IssueRouter<'a> {
                 expected,
                 splices,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let upgraded = apply_document_splices(&expected, &splices)
                     .ok_or_else(|| Response::err("document upgrade could not be completed"))?;
                 if !crate::document::compile_document(&upgraded).valid {
@@ -1025,7 +1561,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((self.ref_response(&doc), true))
             }
             Request::IssueTextCheckpoint { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::IssueTextCheckpoint {
                     doc: doc.clone(),
                     device: facts.device.clone(),
@@ -1035,31 +1571,28 @@ impl<'a> IssueRouter<'a> {
                 Ok((self.ref_response(&doc), true))
             }
             Request::IssueMove { reff, project, pos } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                let project = match project {
-                    Some(p) => Some(
-                        snapshot
-                            .resolve_project(&p)
-                            .ok_or_else(|| Response::not_found(format!("no project {p:?}")))?,
-                    ),
-                    None => None,
-                };
-                let pos = match pos {
-                    Some(p) => Some(self.map_pos(&snapshot, p)?),
-                    None => None,
-                };
-                self.submit(&IssueIntent::IssueMove {
-                    doc: doc.clone(),
-                    project,
-                    pos,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
-                .map_err(Self::effect_err)?;
+                let position = pos.map(|position| match position {
+                    BoardPos::Top => contract::ChangePosition::Top,
+                    BoardPos::Bottom => contract::ChangePosition::Bottom,
+                    BoardPos::Before { reff } => contract::ChangePosition::Before { issue: reff },
+                    BoardPos::After { reff } => contract::ChangePosition::After { issue: reff },
+                });
+                let effect = self
+                    .submit_change(
+                        contract::ChangeOperation::IssueMove {
+                            issue: reff.clone(),
+                            project: project
+                                .map(|project| contract::ChangeProject::Existing { project }),
+                            position,
+                        },
+                        facts.now,
+                    )
+                    .map_err(Self::effect_err)?;
+                let doc = effect.doc.unwrap_or(reff);
                 Ok((self.ref_response(&doc), true))
             }
             Request::Assign { reff, who, add } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::Assign {
                     doc: doc.clone(),
                     who,
@@ -1071,11 +1604,11 @@ impl<'a> IssueRouter<'a> {
                 Ok((self.ref_response(&doc), true))
             }
             Request::Label { reff, add, remove } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let mut add_ids = Vec::new();
                 let mut new_labels = Vec::new();
                 for label in &add {
-                    match snapshot.resolve_label(label) {
+                    match selectors.resolve_label(label) {
                         Some(id) => add_ids.push(id),
                         None => new_labels.push(NewLabel {
                             id: LabelId::mint(self.clock).as_str().to_string(),
@@ -1086,7 +1619,7 @@ impl<'a> IssueRouter<'a> {
                 }
                 let remove_ids: Vec<String> = remove
                     .iter()
-                    .filter_map(|l| snapshot.resolve_label(l))
+                    .filter_map(|l| selectors.resolve_label(l))
                     .collect();
                 self.submit(&IssueIntent::Label {
                     doc: doc.clone(),
@@ -1104,20 +1637,16 @@ impl<'a> IssueRouter<'a> {
                 body,
                 reply_to,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                self.submit(&IssueIntent::Comment {
-                    doc: doc.clone(),
-                    body,
-                    // The adapter mints the id (lowercase — it doubles as a
-                    // Body path segment); the World re-validates it.
-                    id: Some(issues::ids::mint_comment_id(self.clock)),
-                    parent: reply_to,
-                    actor: facts.actor.clone(),
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueComment {
+                        issue: reff.clone(),
+                        body,
+                        parent: reply_to,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
-                Ok((self.ref_response(&doc), true))
+                Ok((Response::Ref { reff }, true))
             }
             Request::CommentAt {
                 reff,
@@ -1126,26 +1655,24 @@ impl<'a> IssueRouter<'a> {
                 start,
                 end,
                 reply_to,
+                source,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                self.submit(&IssueIntent::CommentAt {
-                    doc: doc.clone(),
-                    body,
-                    field,
-                    start,
-                    end,
-                    // The adapter mints the id (lowercase — it doubles as a
-                    // Body path segment); the World re-validates it. Required
-                    // rather than optional here: a span with no comment id
-                    // behind it is a span no reader can name.
-                    id: issues::ids::mint_comment_id(self.clock),
-                    parent: reply_to,
-                    actor: facts.actor.clone(),
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueCommentAt {
+                        issue: reff.clone(),
+                        body,
+                        field,
+                        start,
+                        end,
+                        parent: reply_to,
+                        source: source.parse().ok_or_else(|| {
+                            Response::invalid("source must be an exact world publication")
+                        })?,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
-                Ok((self.ref_response(&doc), true))
+                Ok((Response::Ref { reff }, true))
             }
             Request::React {
                 reff,
@@ -1153,81 +1680,74 @@ impl<'a> IssueRouter<'a> {
                 emoji,
                 on,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                self.submit(&IssueIntent::React {
-                    doc: doc.clone(),
-                    comment,
-                    emoji,
-                    actor: facts.actor.clone(),
-                    on,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueReaction {
+                        issue: reff.clone(),
+                        comment,
+                        emoji,
+                        on,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
-                Ok((self.ref_response(&doc), true))
+                Ok((Response::Ref { reff }, true))
             }
             Request::IssueDelete { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                self.submit(&IssueIntent::SetTombstone {
-                    doc: doc.clone(),
-                    on: true,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueTombstone {
+                        issue: reff.clone(),
+                        on: true,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
                 Ok((
                     Response::Ok {
-                        message: Some(format!("deleted {}", self.reff_for(&snapshot, &doc))),
+                        message: Some(format!("deleted {reff}")),
                     },
                     true,
                 ))
             }
             Request::IssueRestore { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                self.submit(&IssueIntent::SetTombstone {
-                    doc: doc.clone(),
-                    on: false,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueTombstone {
+                        issue: reff.clone(),
+                        on: false,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
                 Ok((
                     Response::Ok {
-                        message: Some(format!("restored {}", self.reff_for(&snapshot, &doc))),
+                        message: Some(format!("restored {reff}")),
                     },
                     true,
                 ))
             }
-            Request::IssueLink { reff, kind, target } => {
-                self.link(&snapshot, reff, kind, target, true, facts)
-            }
+            Request::IssueLink { reff, kind, target } => self.link(reff, kind, target, true, facts),
             Request::IssueUnlink { reff, kind, target } => {
-                self.link(&snapshot, reff, kind, target, false, facts)
+                self.link(reff, kind, target, false, facts)
             }
             Request::IssueParent { reff, parent } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                let parent = match parent {
-                    Some(p) => Some(self.resolve(&snapshot, &p)?),
-                    None => None,
-                };
-                self.submit(&IssueIntent::Parent {
-                    doc: doc.clone(),
-                    parent,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueParent {
+                        issue: reff.clone(),
+                        parent,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
-                Ok((self.ref_response(&doc), true))
+                Ok((Response::Ref { reff }, true))
             }
-            Request::IssueStart { reff } => self.work(&snapshot, reff, WorkAction::Start, facts),
-            Request::IssueDone { reff } => self.work(&snapshot, reff, WorkAction::Done, facts),
-            Request::IssueStop { reff } => self.work(&snapshot, reff, WorkAction::Stop, facts),
+            Request::IssueStart { reff } => self.work(&selectors, reff, WorkAction::Start, facts),
+            Request::IssueDone { reff } => self.work(&selectors, reff, WorkAction::Done, facts),
+            Request::IssueStop { reff } => self.work(&selectors, reff, WorkAction::Stop, facts),
             Request::Verify {
                 reff,
                 source,
                 build,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let request = RequestId::mint();
                 let run = runtime::exec::derive_run_id(
                     self.session.space_id(),
@@ -1258,7 +1778,7 @@ impl<'a> IssueRouter<'a> {
                 }
                 Ok((
                     Response::Check {
-                        reff: self.reff_for(&snapshot, &doc),
+                        reff: self.reff_for(&selectors, &doc),
                         run,
                     },
                     true,
@@ -1272,7 +1792,7 @@ impl<'a> IssueRouter<'a> {
                 verdict,
                 move_to_done,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let effect = self
                     .submit(&IssueIntent::AcceptCheck {
                         doc: doc.clone(),
@@ -1294,26 +1814,61 @@ impl<'a> IssueRouter<'a> {
                 }
                 Ok((
                     Response::Check {
-                        reff: self.reff_for(&snapshot, &doc),
+                        reff: self.reff_for(&selectors, &doc),
                         run,
                     },
                     true,
                 ))
             }
             Request::IssueView { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                let view: IssueView = self
-                    .query(&IssueQuery::View {
+                let doc = self.resolve(&selectors, &reff)?;
+                // "Show me this Issue" means the Issue, not a summary of it
+                // with its discussion and attachments left blank. The World
+                // keeps those bounded by serving them as separate pages --
+                // `IssueQuery::View` is that bounded core and says so -- and
+                // assembling the first page of each into one answer is this
+                // layer's job. `IssueDetail` remains the way to page further
+                // into any one of them.
+                // Reactions are paged independently of the comments they
+                // mark, so the default page would leave a busy thread's later
+                // reactions unread and those comments would draw as though
+                // nobody had reacted. Ask for as many as this Issue is
+                // allowed to have across the comment page it accompanies;
+                // what is still missing after that is reported rather than
+                // rendered as absence.
+                let mut pages = issues::contract::IssueDetailPages::default();
+                pages.reactions.limit = REACTIONS_PER_VIEW;
+                let detail: issues::contract::IssueDetailProjection = self
+                    .query(&IssueQuery::Detail {
                         doc,
                         me: Some(facts.actor.clone()),
+                        pages,
                     })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Issue(Box::new(view)), false))
+                Ok((Response::Issue(Box::new(assemble(detail))), false))
             }
-            Request::List { project, filter } => {
+            Request::IssueDetail { reff, publication } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let query = IssueQuery::Detail {
+                    doc,
+                    me: Some(facts.actor.clone()),
+                    pages: issues::contract::IssueDetailPages::default(),
+                };
+                let view: issues::contract::IssueDetailProjection = match publication {
+                    Some(publication) => self.query_exact(&query, publication),
+                    None => self.query(&query),
+                }
+                .map_err(Self::effect_err)?;
+                Ok((Response::IssueDetail(Box::new(view)), false))
+            }
+            Request::List {
+                project,
+                filter,
+                page,
+            } => {
                 let project = match project {
                     Some(p) => Some(
-                        snapshot
+                        selectors
                             .resolve_project(&p)
                             .ok_or_else(|| Response::not_found(format!("no project {p:?}")))?,
                     ),
@@ -1331,120 +1886,157 @@ impl<'a> IssueRouter<'a> {
                             )
                         })?;
                         Some(
-                            snapshot.resolve_milestone(project, m).ok_or_else(|| {
+                            selectors.resolve_milestone(project, m).ok_or_else(|| {
                                 Response::not_found(format!("no milestone {m:?}"))
                             })?,
                         )
                     }
                     None => None,
                 };
-                let rows: Vec<Row> = self
-                    .query(&IssueQuery::List {
-                        project,
-                        label: filter.label.and_then(|l| snapshot.resolve_label(&l)),
-                        status: filter.status,
-                        milestone,
-                        mine: filter.mine.then(|| facts.actor.clone()),
-                        all: filter.all,
-                        me: Some(facts.actor.clone()),
-                    })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::List { rows }, false))
+                let query = IssueQuery::List {
+                    project,
+                    label: filter.label.and_then(|l| selectors.resolve_label(&l)),
+                    status: filter.status,
+                    milestone,
+                    mine: filter.mine.then(|| facts.actor.clone()),
+                    all: filter.all,
+                    me: Some(facts.actor.clone()),
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<Row> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::List { page }, false))
             }
             Request::Board {
                 project,
                 project_hint: _,
+                page,
             } => {
-                let project = self.choose_project(&snapshot, project.as_deref(), facts)?;
-                let view: BoardView = self
-                    .query(&IssueQuery::Board {
-                        project,
-                        me: Some(facts.actor.clone()),
-                    })
-                    .map_err(Self::effect_err)?;
+                let project = self.choose_project(&selectors, project.as_deref(), facts)?;
+                let query = IssueQuery::Board {
+                    project,
+                    me: Some(facts.actor.clone()),
+                    page: page.clone(),
+                };
+                let view: issues::dto::BoardPage =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
                 Ok((Response::Board(Box::new(view)), false))
-            }
-            Request::IssueGraph { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                let view: GraphView = self
-                    .query(&IssueQuery::Graph {
-                        doc,
-                        me: Some(facts.actor.clone()),
-                    })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Graph(Box::new(view)), false))
-            }
-            Request::ProjectGraph { project } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
-                    Response::not_found(format!("no project matches {project:?}"))
-                })?;
-                let view: issues::dto::ProjectGraphView = self
-                    .query(&IssueQuery::ProjectGraph { project: id })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::ProjectGraph(Box::new(view)), false))
             }
             Request::Geometry {
                 project,
                 roots,
-                generation,
+                publication,
+                page,
             } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let query = IssueQuery::Geometry { project: id, roots };
-                let view: issues::geometry::GeometryView = match generation {
-                    Some(generation) => self.query_at(&query, &generation),
+                let query = IssueQuery::Geometry {
+                    project: id,
+                    roots,
+                    page,
+                };
+                let view: issues::contract::GeometryProjection = match publication {
+                    Some(publication) => self.query_pinned(
+                        &query,
+                        publication.parse().ok_or_else(|| {
+                            Response::invalid("publication digests must be 64 lowercase hex bytes")
+                        })?,
+                    ),
                     None => self.query(&query),
                 }
                 .map_err(Self::effect_err)?;
                 Ok((Response::Geometry(Box::new(view)), false))
             }
-            Request::History { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                #[derive(serde::Deserialize)]
-                struct Hist {
-                    events: Vec<issues::dto::ActivityEvent>,
-                    last: String,
-                }
-                let hist: Hist = self
-                    .query(&IssueQuery::History { doc })
+            Request::History {
+                reff,
+                publication,
+                page,
+            } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let page: issues::contract::Page<issues::dto::ActivityEvent> = self
+                    .query_coordinate(&IssueQuery::History { doc, page }, publication)
                     .map_err(Self::effect_err)?;
-                Ok((
-                    Response::Activity {
-                        events: hist.events,
-                        last: hist.last,
-                    },
-                    false,
-                ))
+                Ok((Response::Activity { page }, false))
             }
-            Request::Activity { since } => {
-                #[derive(serde::Deserialize)]
-                struct Feed {
-                    events: Vec<issues::dto::ActivityEvent>,
-                    last: String,
-                }
-                let feed: Feed = self
-                    .query(&IssueQuery::Activity { since })
+            Request::IssueRelations {
+                reff,
+                direction,
+                publication,
+                page,
+            } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let query = IssueQuery::Relations {
+                    doc,
+                    direction,
+                    page,
+                };
+                let page: issues::contract::Page<issues::dto::IssueRelationDto> = self
+                    .query_coordinate(&query, publication)
                     .map_err(Self::effect_err)?;
-                Ok((
-                    Response::Activity {
-                        events: feed.events,
-                        last: feed.last,
-                    },
-                    false,
-                ))
+                Ok((Response::Relations { page }, false))
+            }
+            Request::IssueComments {
+                reff,
+                publication,
+                page,
+            } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let query = IssueQuery::Comments { doc, page };
+                let page: issues::contract::Page<issues::dto::CommentDto> = self
+                    .query_coordinate(&query, publication)
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Comments { page }, false))
+            }
+            Request::IssueReactions {
+                reff,
+                publication,
+                page,
+            } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let query = IssueQuery::Reactions { doc, page };
+                let page: issues::contract::Page<issues::records::ReactionRecord> = self
+                    .query_coordinate(&query, publication)
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Reactions { page }, false))
+            }
+            Request::IssueAttachments {
+                reff,
+                publication,
+                page,
+            } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let query = IssueQuery::Attachments { doc, page };
+                let page: issues::contract::Page<issues::dto::AttachmentMetaDto> = self
+                    .query_coordinate(&query, publication)
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Attachments { page }, false))
+            }
+            Request::IssueChecks {
+                reff,
+                publication,
+                page,
+            } => {
+                let doc = self.resolve(&selectors, &reff)?;
+                let query = IssueQuery::Checks { doc, page };
+                let page: issues::contract::Page<issues::dto::CheckDto> = self
+                    .query_coordinate(&query, publication)
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Checks { page }, false))
+            }
+            Request::Activity { page } => {
+                let query = IssueQuery::Activity { page: page.clone() };
+                let page: issues::contract::Page<issues::dto::ActivityEvent> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Activity { page }, false))
             }
             Request::ProjectNew { name, key, color } => {
-                let id = ProjectId::mint(self.clock).as_str().to_string();
-                self.submit(&IssueIntent::ProjectNew {
-                    id,
-                    name,
-                    key: key.clone(),
-                    // Optional on the wire, resolved to the birth default here — the
-                    // same shape `LabelNew` uses, so an omitted colour still lands a
-                    // sensible one rather than an empty string.
-                    color: color.unwrap_or_else(|| "blue".into()),
-                    device: facts.device.clone(),
+                self.submit(&IssueIntent::ChangeSet {
+                    operations: vec![contract::ChangeOperation::ProjectCreate {
+                        name,
+                        key: key.clone(),
+                        color: color.unwrap_or_else(|| "blue".into()),
+                    }],
                     ts: facts.now,
                 })
                 .map_err(Self::effect_err)?;
@@ -1455,11 +2047,11 @@ impl<'a> IssueRouter<'a> {
                     true,
                 ))
             }
-            Request::ProjectList => {
-                let projects: Vec<ProjectDto> = self
-                    .query(&IssueQuery::Projects)
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Projects { projects }, false))
+            Request::ProjectList { page } => {
+                let query = IssueQuery::Projects { page: page.clone() };
+                let page: issues::contract::Page<ProjectDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Projects { page }, false))
             }
             Request::ProjectEdit {
                 project,
@@ -1472,11 +2064,9 @@ impl<'a> IssueRouter<'a> {
                 archived,
                 team,
             } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                // `none`/`""` clears; absent leaves it untouched — the same
-                // double-option the issue due-date carries.
                 let parse_date = |v: Option<String>| -> Result<Option<Option<u64>>, Response> {
                     match v.as_deref() {
                         None => Ok(None),
@@ -1496,7 +2086,7 @@ impl<'a> IssueRouter<'a> {
                     None => None,
                     Some("") | Some("none") => Some(String::new()),
                     Some(sel) => Some(
-                        snapshot
+                        selectors
                             .resolve_team(sel)
                             .ok_or_else(|| Response::not_found(format!("no team matches {sel:?}")))?
                             .0,
@@ -1519,7 +2109,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Ref { reff: project }, true))
             }
             Request::ProjectDelete { project } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
                 self.submit(&IssueIntent::ProjectDelete {
@@ -1544,7 +2134,7 @@ impl<'a> IssueRouter<'a> {
                 ))
             }
             Request::Follow { reff, on } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::Follow {
                     doc: doc.clone(),
                     actor: facts.actor.clone(),
@@ -1555,14 +2145,17 @@ impl<'a> IssueRouter<'a> {
                 .map_err(Self::effect_err)?;
                 Ok((self.ref_response(&doc), true))
             }
-            Request::MilestoneList { project } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+            Request::MilestoneList { project, page } => {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let milestones: Vec<issues::dto::MilestoneDto> = self
-                    .query(&IssueQuery::Milestones { project: id })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Milestones { milestones }, false))
+                let query = IssueQuery::Milestones {
+                    project: id,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::dto::MilestoneDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Milestones { page }, false))
             }
             Request::MilestoneSet {
                 project,
@@ -1573,15 +2166,17 @@ impl<'a> IssueRouter<'a> {
                 pos,
                 remove,
             } => {
-                let project_id = snapshot.resolve_project(&project).ok_or_else(|| {
+                let project_id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
                 let id = match &milestone {
-                    Some(sel) => snapshot
-                        .resolve_milestone(&project_id, sel)
-                        .ok_or_else(|| {
-                            Response::not_found(format!("no milestone matches {sel:?}"))
-                        })?,
+                    Some(sel) => {
+                        selectors
+                            .resolve_milestone(&project_id, sel)
+                            .ok_or_else(|| {
+                                Response::not_found(format!("no milestone matches {sel:?}"))
+                            })?
+                    }
                     None => issues::ids::mint_milestone_id(self.clock),
                 };
                 let target_date = match target.as_deref() {
@@ -1592,7 +2187,7 @@ impl<'a> IssueRouter<'a> {
                 // `Before`/`After` name a sibling milestone, resolved in the same
                 // project — the World takes ids, and a name is this layer's job.
                 let resolve_sibling = |reff: &str| {
-                    snapshot
+                    selectors
                         .resolve_milestone(&project_id, reff)
                         .ok_or_else(|| {
                             Response::not_found(format!("no milestone matches {reff:?}"))
@@ -1624,43 +2219,31 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Ref { reff: id }, true))
             }
             Request::IssueMilestone { reff, milestone } => {
-                let doc = self.resolve(&snapshot, &reff)?;
-                let milestone = match milestone.as_deref().map(str::trim) {
-                    None | Some("") | Some("none") => None,
-                    Some(sel) => {
-                        // Milestones are project-scoped: resolve within the
-                        // issue's own project.
-                        let view: IssueView = self
-                            .query(&IssueQuery::View {
-                                doc: doc.clone(),
-                                me: None,
-                            })
-                            .map_err(Self::effect_err)?;
-                        let project = view.project_id.as_str().to_string();
-                        Some(snapshot.resolve_milestone(&project, sel).ok_or_else(|| {
-                            Response::not_found(format!(
-                                "no milestone matches {sel:?} in this issue's project"
-                            ))
-                        })?)
-                    }
-                };
-                self.submit(&IssueIntent::IssueMilestone {
-                    doc: doc.clone(),
-                    milestone,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::IssueMilestone {
+                        issue: reff.clone(),
+                        milestone: milestone.and_then(|milestone| {
+                            let milestone = milestone.trim();
+                            (!milestone.is_empty() && milestone != "none")
+                                .then(|| milestone.to_string())
+                        }),
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
-                Ok((self.ref_response(&doc), true))
+                Ok((self.ref_response(&reff), true))
             }
-            Request::CycleList { project } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+            Request::CycleList { project, page } => {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let cycles: Vec<issues::dto::CycleDto> = self
-                    .query(&IssueQuery::Cycles { project: id })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Cycles { cycles }, false))
+                let query = IssueQuery::Cycles {
+                    project: id,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::dto::CycleDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Cycles { page }, false))
             }
             Request::CycleSet {
                 project,
@@ -1670,11 +2253,11 @@ impl<'a> IssueRouter<'a> {
                 end,
                 remove,
             } => {
-                let project_id = snapshot.resolve_project(&project).ok_or_else(|| {
+                let project_id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
                 let id = match &cycle {
-                    Some(sel) => snapshot
+                    Some(sel) => selectors
                         .resolve_cycle(&project_id, sel)
                         .ok_or_else(|| Response::not_found(format!("no cycle matches {sel:?}")))?,
                     None => issues::ids::mint_cycle_id(self.clock),
@@ -1700,7 +2283,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Ref { reff: id }, true))
             }
             Request::IssueCycle { reff, cycle } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let cycle = match cycle.as_deref().map(str::trim) {
                     None | Some("") | Some("none") => None,
                     Some(sel) => {
@@ -1711,7 +2294,7 @@ impl<'a> IssueRouter<'a> {
                             })
                             .map_err(Self::effect_err)?;
                         let project = view.project_id.as_str().to_string();
-                        Some(snapshot.resolve_cycle(&project, sel).ok_or_else(|| {
+                        Some(selectors.resolve_cycle(&project, sel).ok_or_else(|| {
                             Response::not_found(format!(
                                 "no cycle matches {sel:?} in this issue's project"
                             ))
@@ -1727,11 +2310,11 @@ impl<'a> IssueRouter<'a> {
                 .map_err(Self::effect_err)?;
                 Ok((self.ref_response(&doc), true))
             }
-            Request::InitiativeList => {
-                let initiatives: Vec<issues::dto::InitiativeDto> = self
-                    .query(&IssueQuery::Initiatives)
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Initiatives { initiatives }, false))
+            Request::InitiativeList { page } => {
+                let query = IssueQuery::Initiatives { page: page.clone() };
+                let page: issues::contract::Page<issues::dto::InitiativeDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Initiatives { page }, false))
             }
             Request::InitiativeSet {
                 initiative,
@@ -1745,7 +2328,7 @@ impl<'a> IssueRouter<'a> {
                 remove,
             } => {
                 let current = match &initiative {
-                    Some(sel) => Some(snapshot.resolve_initiative(sel).ok_or_else(|| {
+                    Some(sel) => Some(selectors.resolve_initiative(sel).ok_or_else(|| {
                         Response::not_found(format!("no initiative matches {sel:?}"))
                     })?),
                     None => None,
@@ -1754,33 +2337,22 @@ impl<'a> IssueRouter<'a> {
                     .as_ref()
                     .map(|(id, _)| id.clone())
                     .unwrap_or_else(|| issues::ids::mint_initiative_id(self.clock));
-                // Merge membership against the current record; the intent
-                // carries the complete replacement list.
-                let projects = if add_projects.is_empty() && remove_projects.is_empty() {
-                    None
-                } else {
-                    let mut members: Vec<String> = current
-                        .as_ref()
-                        .and_then(|(_, v)| v["projects"].as_array().cloned())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|p| p.as_str().map(String::from))
-                        .collect();
-                    for sel in &add_projects {
-                        let id = snapshot.resolve_project(sel).ok_or_else(|| {
-                            Response::not_found(format!("no project matches {sel:?}"))
-                        })?;
-                        if !members.contains(&id) {
-                            members.push(id);
-                        }
-                    }
-                    for sel in &remove_projects {
-                        if let Some(id) = snapshot.resolve_project(sel) {
-                            members.retain(|m| m != &id);
-                        }
-                    }
-                    Some(members)
-                };
+                let add_projects = add_projects
+                    .iter()
+                    .map(|selector| {
+                        selectors.resolve_project(selector).ok_or_else(|| {
+                            Response::not_found(format!("no project matches {selector:?}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let remove_projects = remove_projects
+                    .iter()
+                    .map(|selector| {
+                        selectors.resolve_project(selector).ok_or_else(|| {
+                            Response::not_found(format!("no project matches {selector:?}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let owner = owner.map(|o| {
                     let o = o.trim();
                     if o.eq_ignore_ascii_case("none") {
@@ -1801,7 +2373,8 @@ impl<'a> IssueRouter<'a> {
                     owner,
                     health,
                     target_date,
-                    projects,
+                    add_projects,
+                    remove_projects,
                     tombstone: remove.then_some(true),
                     device: facts.device.clone(),
                     ts: facts.now,
@@ -1809,10 +2382,11 @@ impl<'a> IssueRouter<'a> {
                 .map_err(Self::effect_err)?;
                 Ok((Response::Ref { reff: id }, true))
             }
-            Request::TeamList => {
-                let teams: Vec<issues::dto::TeamDto> =
-                    self.query(&IssueQuery::Teams).map_err(Self::effect_err)?;
-                Ok((Response::Teams { teams }, false))
+            Request::TeamList { page } => {
+                let query = IssueQuery::Teams { page: page.clone() };
+                let page: issues::contract::Page<issues::dto::TeamDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Teams { page }, false))
             }
             Request::TeamSet {
                 team,
@@ -1826,7 +2400,7 @@ impl<'a> IssueRouter<'a> {
             } => {
                 let current =
                     match &team {
-                        Some(sel) => Some(snapshot.resolve_team(sel).ok_or_else(|| {
+                        Some(sel) => Some(selectors.resolve_team(sel).ok_or_else(|| {
                             Response::not_found(format!("no team matches {sel:?}"))
                         })?),
                         None => None,
@@ -1835,28 +2409,14 @@ impl<'a> IssueRouter<'a> {
                     .as_ref()
                     .map(|(id, _)| id.clone())
                     .unwrap_or_else(|| issues::ids::mint_team_id(self.clock));
-                let members = if add_members.is_empty() && remove_members.is_empty() {
-                    None
-                } else {
-                    let mut members: Vec<String> = current
-                        .as_ref()
-                        .and_then(|(_, v)| v["members"].as_array().cloned())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|m| m.as_str().map(String::from))
-                        .collect();
-                    for actor in &add_members {
-                        let actor = actor.trim().to_string();
-                        if !members.contains(&actor) {
-                            members.push(actor);
-                        }
-                    }
-                    for actor in &remove_members {
-                        let actor = actor.trim();
-                        members.retain(|m| m != actor);
-                    }
-                    Some(members)
-                };
+                let add_members = add_members
+                    .into_iter()
+                    .map(|actor| actor.trim().to_string())
+                    .collect();
+                let remove_members = remove_members
+                    .into_iter()
+                    .map(|actor| actor.trim().to_string())
+                    .collect();
                 let lead = lead.map(|l| {
                     let l = l.trim();
                     if l.eq_ignore_ascii_case("none") {
@@ -1871,7 +2431,8 @@ impl<'a> IssueRouter<'a> {
                     key,
                     icon,
                     lead,
-                    members,
+                    add_members,
+                    remove_members,
                     tombstone: remove.then_some(true),
                     device: facts.device.clone(),
                     ts: facts.now,
@@ -1879,10 +2440,11 @@ impl<'a> IssueRouter<'a> {
                 .map_err(Self::effect_err)?;
                 Ok((Response::Ref { reff: id }, true))
             }
-            Request::TriageList => {
-                let items: Vec<issues::dto::TriageDto> =
-                    self.query(&IssueQuery::Triage).map_err(Self::effect_err)?;
-                Ok((Response::TriageItems { items }, false))
+            Request::TriageList { page } => {
+                let query = IssueQuery::Triage { page: page.clone() };
+                let page: issues::contract::Page<issues::records::TriageRecord> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::TriageItems { page }, false))
             }
             Request::TriageSubmit {
                 title,
@@ -1915,7 +2477,7 @@ impl<'a> IssueRouter<'a> {
                         let sel = project.as_deref().ok_or_else(|| {
                             Response::err("accepting needs a project: pass -p <project>")
                         })?;
-                        let project_id = snapshot.resolve_project(sel).ok_or_else(|| {
+                        let project_id = selectors.resolve_project(sel).ok_or_else(|| {
                             Response::not_found(format!("no project matches {sel:?}"))
                         })?;
                         let doc = DocId::mint(self.clock).as_str().to_string();
@@ -1925,7 +2487,7 @@ impl<'a> IssueRouter<'a> {
                         let sel = target.as_deref().ok_or_else(|| {
                             Response::err("duplicate needs the existing issue: pass its ref")
                         })?;
-                        (None, Some(self.resolve(&snapshot, sel)?))
+                        (None, Some(self.resolve(&selectors, sel)?))
                     }
                     _ => (None, None),
                 };
@@ -1949,7 +2511,7 @@ impl<'a> IssueRouter<'a> {
                     })?;
                 let message = match (outcome.as_str(), &effect.doc) {
                     ("accepted", Some(doc)) => {
-                        format!("accepted into {}", self.reff_for(&self.snapshot(), doc))
+                        format!("accepted into {}", self.reff_for(&self.selectors(), doc))
                     }
                     ("duplicate", _) => "marked duplicate".into(),
                     _ => "declined".into(),
@@ -1969,7 +2531,7 @@ impl<'a> IssueRouter<'a> {
                 size,
                 comment,
             } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::Attach {
                     doc: doc.clone(),
                     id: issues::ids::mint_attachment_id(self.clock),
@@ -1996,7 +2558,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((self.ref_response(&doc), true))
             }
             Request::Detach { reff, id } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::Detach {
                     doc: doc.clone(),
                     id,
@@ -2007,7 +2569,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((self.ref_response(&doc), true))
             }
             Request::AttachmentGet { reff, id } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let record: serde_json::Value = self
                     .query(&IssueQuery::Attachment { doc, id })
                     .map_err(Self::effect_err)?;
@@ -2035,21 +2597,24 @@ impl<'a> IssueRouter<'a> {
                     false,
                 ))
             }
-            Request::ProjectUpdates { project } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+            Request::ProjectUpdates { project, page } => {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let updates: Vec<issues::dto::ProjectUpdateDto> = self
-                    .query(&IssueQuery::ProjectUpdates { project: id })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Updates { updates }, false))
+                let query = IssueQuery::ProjectUpdates {
+                    project: id,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::dto::ProjectUpdateDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Updates { page }, false))
             }
             Request::ProjectUpdatePost {
                 project,
                 body,
                 health,
             } => {
-                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+                let id = selectors.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
                 self.submit(&IssueIntent::ProjectUpdatePost {
@@ -2065,45 +2630,53 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Ref { reff: project }, true))
             }
             Request::LabelNew { name, color } => {
-                let id = LabelId::mint(self.clock).as_str().to_string();
-                self.submit(&IssueIntent::LabelNew {
-                    id,
-                    name: name.clone(),
-                    color: color.unwrap_or_else(|| "gray".into()),
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::LabelCreate {
+                        name: name.clone(),
+                        color: color.unwrap_or_else(|| "gray".into()),
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
                 Ok((Response::Ref { reff: name }, true))
             }
-            Request::LabelList => {
-                let labels: Vec<LabelDto> =
-                    self.query(&IssueQuery::Labels).map_err(Self::effect_err)?;
-                Ok((Response::Labels { labels }, false))
+            Request::LabelList { page } => {
+                let query = IssueQuery::Labels { page: page.clone() };
+                let page: issues::contract::Page<LabelDto> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Labels { page }, false))
+            }
+            Request::LabelShow { label, publication } => {
+                let result: contract::LabelProjection = self
+                    .query_exact(&IssueQuery::Label { label }, publication)
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Label {
+                        publication: result.publication,
+                        label: result.label,
+                    },
+                    false,
+                ))
             }
             Request::LabelEdit { label, name, color } => {
-                let id = snapshot
-                    .resolve_label(&label)
-                    .ok_or_else(|| Response::not_found(format!("no label matches {label:?}")))?;
-                self.submit(&IssueIntent::LabelEdit {
-                    id,
-                    name,
-                    color,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::LabelEdit {
+                        label: label.clone(),
+                        name,
+                        color,
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
                 Ok((Response::Ref { reff: label }, true))
             }
             Request::LabelDelete { label } => {
-                let id = snapshot
-                    .resolve_label(&label)
-                    .ok_or_else(|| Response::not_found(format!("no label matches {label:?}")))?;
-                self.submit(&IssueIntent::LabelDelete {
-                    id,
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
+                self.submit_change(
+                    contract::ChangeOperation::LabelDelete {
+                        label: label.clone(),
+                    },
+                    facts.now,
+                )
                 .map_err(Self::effect_err)?;
                 Ok((Response::Ref { reff: label }, true))
             }
@@ -2125,18 +2698,14 @@ impl<'a> IssueRouter<'a> {
                 .map_err(Self::effect_err)?;
                 Ok((Response::Ok { message: None }, true))
             }
-            Request::RoleList => {
-                let roles: serde_json::Value =
-                    self.query(&IssueQuery::Roles).map_err(Self::effect_err)?;
-                Ok((
-                    Response::Text {
-                        text: serde_json::to_string_pretty(&roles).unwrap_or_default(),
-                    },
-                    false,
-                ))
+            Request::RoleList { page } => {
+                let query = IssueQuery::Roles { page: page.clone() };
+                let roles: issues::contract::Page<issues::contract::RoleProjection> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Roles { page: roles }, false))
             }
             Request::RoleShow { role } => {
-                let view: serde_json::Value = self
+                let view: issues::contract::RoleProjection = self
                     .query(&IssueQuery::RoleShow { role })
                     .map_err(Self::effect_err)?;
                 Ok((
@@ -2157,7 +2726,7 @@ impl<'a> IssueRouter<'a> {
                 let scope_project = match project {
                     None => None,
                     Some(sel) => Some(
-                        snapshot
+                        selectors
                             .resolve_project(&sel)
                             .ok_or_else(|| Response::not_found("no such project"))?,
                     ),
@@ -2251,10 +2820,10 @@ impl<'a> IssueRouter<'a> {
                 ))
             }
             Request::WorkflowShow { project } => {
-                let project = snapshot
+                let project = selectors
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
-                let view: serde_json::Value = self
+                let view: issues::contract::WorkflowProjection = self
                     .query(&IssueQuery::Workflow { project })
                     .map_err(Self::effect_err)?;
                 Ok((
@@ -2284,7 +2853,7 @@ impl<'a> IssueRouter<'a> {
                 expect_heads,
                 body_json,
             } => {
-                let project = snapshot
+                let project = selectors
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
                 self.submit(&IssueIntent::WorkflowReplace {
@@ -2302,18 +2871,21 @@ impl<'a> IssueRouter<'a> {
                     true,
                 ))
             }
-            Request::SpecList { project } => {
+            Request::SpecList { project, page } => {
                 let project = project
                     .map(|project| {
-                        snapshot
+                        selectors
                             .resolve_project(&project)
                             .ok_or_else(|| Response::not_found("no such project"))
                     })
                     .transpose()?;
-                let specs = self
-                    .query(&IssueQuery::Specs { project })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Specs { specs }, false))
+                let query = IssueQuery::Specs {
+                    project,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::spec::SpecSummary> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Specs { page }, false))
             }
             Request::SpecShow { spec } => {
                 let spec = self
@@ -2326,43 +2898,55 @@ impl<'a> IssueRouter<'a> {
                     false,
                 ))
             }
-            Request::SpecHistory { spec } => {
-                let revisions = self
-                    .query(&IssueQuery::SpecHistory { spec })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::SpecRevisions { revisions }, false))
+            Request::SpecHistory { spec, page } => {
+                let query = IssueQuery::SpecHistory {
+                    spec,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::spec::Revision> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::SpecRevisions { page }, false))
             }
-            Request::SpecReferences { project } => {
+            Request::SpecReferences { project, page } => {
                 let project = project
                     .map(|project| {
-                        snapshot
+                        selectors
                             .resolve_project(&project)
                             .ok_or_else(|| Response::not_found("no such project"))
                     })
                     .transpose()?;
-                let references = self
-                    .query(&IssueQuery::SpecReferences { project })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::SpecReferences { references }, false))
+                let query = IssueQuery::SpecReferences {
+                    project,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::spec::SpecReferenceFact> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::SpecReferences { page }, false))
             }
-            Request::SpecObservations { project } => {
+            Request::SpecObservations { project, page } => {
                 let project = project
                     .map(|project| {
-                        snapshot
+                        selectors
                             .resolve_project(&project)
                             .ok_or_else(|| Response::not_found("no such project"))
                     })
                     .transpose()?;
-                let observations = self
-                    .query(&IssueQuery::SpecObservations { project })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::SpecObservations { observations }, false))
+                let query = IssueQuery::SpecObservations {
+                    project,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::records::SpecObservationRecord> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::SpecObservations { page }, false))
             }
-            Request::BaselineHistory { baseline } => {
-                let revisions = self
-                    .query(&IssueQuery::BaselineHistory { baseline })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::BaselineRevisions { revisions }, false))
+            Request::BaselineHistory { baseline, page } => {
+                let query = IssueQuery::BaselineHistory {
+                    baseline,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::spec::BaselineRevision> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::BaselineRevisions { page }, false))
             }
             Request::SpecNew {
                 project,
@@ -2379,22 +2963,27 @@ impl<'a> IssueRouter<'a> {
                 if !crate::document::compile_document(&text).valid {
                     return Err(Response::err("document could not be saved"));
                 }
-                let project = snapshot
+                let project = selectors
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
-                let spec = issues::ids::mint_spec_id(self.clock);
-                self.submit(&IssueIntent::SpecCreate {
-                    spec: spec.clone(),
-                    project,
-                    kind,
-                    title,
-                    text,
-                    links,
-                    actor: facts.actor.clone(),
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
-                .map_err(Self::effect_err)?;
+                let effect = self
+                    .submit(&IssueIntent::ChangeSet {
+                        operations: vec![contract::ChangeOperation::SpecCreate {
+                            project: contract::ChangeProject::Existing { project },
+                            kind,
+                            title,
+                            text,
+                            links,
+                        }],
+                        ts: facts.now,
+                    })
+                    .map_err(Self::effect_err)?;
+                let spec = effect
+                    .results
+                    .first()
+                    .filter(|result| result.kind == "spec")
+                    .map(|result| result.id.clone())
+                    .ok_or_else(|| Response::err("change set omitted the created Spec"))?;
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
@@ -2561,10 +3150,15 @@ impl<'a> IssueRouter<'a> {
                     ts: facts.now,
                 })
                 .map_err(Self::effect_err)?;
-                let observations = self
-                    .query(&IssueQuery::SpecObservations { project: None })
+                let request = issues::contract::PageRequest::default();
+                let query = IssueQuery::SpecObservations {
+                    project: None,
+                    page: request.clone(),
+                };
+                let page: issues::contract::Page<issues::records::SpecObservationRecord> = self
+                    .query_page(&query, &request)
                     .map_err(Self::effect_err)?;
-                Ok((Response::SpecObservations { observations }, true))
+                Ok((Response::SpecObservations { page }, true))
             }
             Request::SpecRetract { spec, observation } => {
                 self.submit(&IssueIntent::SpecRetract {
@@ -2575,23 +3169,31 @@ impl<'a> IssueRouter<'a> {
                     ts: facts.now,
                 })
                 .map_err(Self::effect_err)?;
-                let observations = self
-                    .query(&IssueQuery::SpecObservations { project: None })
+                let request = issues::contract::PageRequest::default();
+                let query = IssueQuery::SpecObservations {
+                    project: None,
+                    page: request.clone(),
+                };
+                let page: issues::contract::Page<issues::records::SpecObservationRecord> = self
+                    .query_page(&query, &request)
                     .map_err(Self::effect_err)?;
-                Ok((Response::SpecObservations { observations }, true))
+                Ok((Response::SpecObservations { page }, true))
             }
-            Request::BaselineList { project } => {
+            Request::BaselineList { project, page } => {
                 let project = project
                     .map(|project| {
-                        snapshot
+                        selectors
                             .resolve_project(&project)
                             .ok_or_else(|| Response::not_found("no such project"))
                     })
                     .transpose()?;
-                let baselines = self
-                    .query(&IssueQuery::Baselines { project })
-                    .map_err(Self::effect_err)?;
-                Ok((Response::Baselines { baselines }, false))
+                let query = IssueQuery::Baselines {
+                    project,
+                    page: page.clone(),
+                };
+                let page: issues::contract::Page<issues::spec::BaselineSummary> =
+                    self.query_page(&query, &page).map_err(Self::effect_err)?;
+                Ok((Response::Baselines { page }, false))
             }
             Request::BaselineShow { baseline } => {
                 let baseline = self
@@ -2604,7 +3206,7 @@ impl<'a> IssueRouter<'a> {
                 name,
                 members,
             } => {
-                let project = snapshot
+                let project = selectors
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
                 self.require_issued_members(&members)?;
@@ -2696,7 +3298,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Baseline(Box::new(view)), true))
             }
             Request::IssueBaseline { reff, baseline } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 self.submit(&IssueIntent::IssueBaseline {
                     doc,
                     baseline,
@@ -2712,7 +3314,7 @@ impl<'a> IssueRouter<'a> {
                 ))
             }
             Request::Packet { reff } => {
-                let doc = self.resolve(&snapshot, &reff)?;
+                let doc = self.resolve(&selectors, &reff)?;
                 let packet = self
                     .query(&IssueQuery::Packet { doc })
                     .map_err(Self::effect_err)?;
@@ -2726,18 +3328,18 @@ impl<'a> IssueRouter<'a> {
 
     fn ref_response(&self, doc: &str) -> Response {
         Response::Ref {
-            reff: self.reff_for(&self.snapshot(), doc),
+            reff: self.reff_for(&self.selectors(), doc),
         }
     }
 
     fn work(
         &self,
-        snapshot: &Snapshot,
+        selectors: &Selectors,
         reff: String,
         action: WorkAction,
         facts: &RouterFacts,
     ) -> Result<(Response, bool), Response> {
-        let doc = self.resolve(snapshot, &reff)?;
+        let doc = self.resolve(selectors, &reff)?;
         let effect = self
             .submit(&IssueIntent::WorkState {
                 doc: doc.clone(),
@@ -2758,25 +3360,23 @@ impl<'a> IssueRouter<'a> {
 
     fn link(
         &self,
-        snapshot: &Snapshot,
         reff: String,
         kind: String,
         target: String,
         add: bool,
         facts: &RouterFacts,
     ) -> Result<(Response, bool), Response> {
-        let doc = self.resolve(snapshot, &reff)?;
-        let target = self.resolve(snapshot, &target)?;
-        self.submit(&IssueIntent::Link {
-            doc: doc.clone(),
-            kind,
-            target,
-            add,
-            device: facts.device.clone(),
-            ts: facts.now,
-        })
+        self.submit_change(
+            contract::ChangeOperation::IssueLink {
+                issue: reff.clone(),
+                kind,
+                target,
+                on: add,
+            },
+            facts.now,
+        )
         .map_err(Self::effect_err)?;
-        Ok((self.ref_response(&doc), true))
+        Ok((Response::Ref { reff }, true))
     }
 }
 
@@ -2809,7 +3409,7 @@ fn bad_due() -> Response {
 /// midnight. Timezone policy is deliberately the simplest honest one — a due
 /// *date* names a day, and UTC midnight is the one reading every replica
 /// derives identically; clients localize for display.
-fn parse_due(text: &str) -> Option<u64> {
+pub(crate) fn parse_due(text: &str) -> Option<u64> {
     let text = text.trim();
     if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
         return text.parse().ok();

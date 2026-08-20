@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
 description = "Executable reference receiver for Astrolabe Display"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [dependencies]

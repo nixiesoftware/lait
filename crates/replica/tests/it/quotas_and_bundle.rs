@@ -134,7 +134,7 @@ fn commit_blob(
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -218,7 +218,7 @@ fn commit_note(
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -563,6 +563,22 @@ fn operator_configuration_lowers_but_never_raises_protocol_maxima() {
     }
     .clamped();
     assert_eq!(lowered.max_space_bodies, 5, "lowering is allowed");
+}
+
+#[test]
+fn million_body_protocol_envelope_is_lazy_not_preallocated() {
+    let replica = Replica::loro();
+    assert_eq!(replica.quota().max_space_bodies, 10_000_000);
+    assert_eq!(
+        replica.quota().max_space_bytes,
+        16 * 1024 * 1024 * 1024 * 1024
+    );
+    assert_eq!(replica.usage(), (0, 0));
+    assert!(replica.body_keys().is_empty());
+    assert!(
+        std::mem::size_of_val(&replica) < 4096,
+        "the quota is an arithmetic ceiling, not reserved Body storage"
+    );
 }
 
 #[test]

@@ -21,6 +21,17 @@ pub const MAX_PREDECESSORS: usize = 8;
 const SPEC_REVISION_CONTEXT: &str = "lait.issues.spec-revision.v1";
 const BASELINE_REVISION_CONTEXT: &str = "lait.issues.baseline-revision.v1";
 
+// `runtime::publication::PublicationId` deliberately has no dependency on
+// schemars. This private mirror describes its serde shape for the product
+// contract without creating a second durable coordinate type.
+#[derive(JsonSchema)]
+#[allow(dead_code, reason = "schema-only mirror for PublicationId")]
+struct PublicationSchema {
+    manifest_root: [u8; 32],
+    implementation_digest: [u8; 32],
+    extractor_schema_digest: [u8; 32],
+}
+
 /// What one Spec contributes to the lifecycle.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
@@ -293,11 +304,11 @@ pub struct Body {
     pub spec: String,
     pub project: String,
     pub kind: Kind,
-    /// World generation against which this revision was composed. This is the
-    /// coordinate for every Issue-derived projection of the revision; it is
-    /// deliberately part of the immutable revision identity.
-    #[serde(default)]
-    pub generation: String,
+    /// Full portable World publication against which this revision was
+    /// composed. A Manifest root alone cannot name the implementation or
+    /// extractor semantics that gave the Plan its meaning.
+    #[schemars(with = "PublicationSchema")]
+    pub publication: runtime::publication::PublicationId,
     pub title: String,
     #[serde(default)]
     pub text: String,
@@ -324,13 +335,10 @@ impl Body {
         if crate::ids::ProjectId::parse(&self.project).is_none() {
             return Err("invalid Project id".into());
         }
-        if !self.generation.is_empty()
-            && (self.generation.len() != 64
-                || data_encoding::HEXLOWER
-                    .decode(self.generation.as_bytes())
-                    .is_err())
+        if self.publication.implementation_digest == [0; 32]
+            || self.publication.extractor_schema_digest.digest() == [0; 32]
         {
-            return Err("invalid World generation".into());
+            return Err("invalid World publication".into());
         }
         let title = self.title.trim();
         if title.is_empty() || self.title.len() > MAX_TITLE_BYTES {
@@ -357,6 +365,9 @@ impl Body {
         if self.plan.is_some() && self.kind != Kind::Plan {
             return Err("structured Plan data belongs only on a Plan Spec".into());
         }
+        if self.kind == Kind::Plan && self.plan.is_none() {
+            return Err("Plan revision is missing its bounded root selection".into());
+        }
         if let Some(plan) = &self.plan {
             plan.validate()?;
         }
@@ -381,6 +392,13 @@ pub struct Spec {
     /// Notes filed against this document, in a set beside the revision map
     /// rather than inside any revision. See `Observation`.
     pub observations: Vec<Observation>,
+    /// V4 head coordinates live in a small add-wins head Body. When present,
+    /// they are authoritative and let a write hydrate only current heads rather
+    /// than anti-join the complete revision history.
+    pub explicit_heads: Vec<String>,
+    /// Effective issued coordinates maintained beside heads. Draft successors
+    /// do not force an ancestry scan merely to discover the governing revision.
+    pub explicit_issued: Vec<String>,
 }
 
 impl Spec {
@@ -407,6 +425,8 @@ impl Spec {
         Self {
             revisions,
             observations,
+            explicit_heads: Vec::new(),
+            explicit_issued: Vec::new(),
         }
     }
 
@@ -417,6 +437,13 @@ impl Spec {
     }
 
     pub fn heads(&self) -> Vec<&Revision> {
+        if !self.explicit_heads.is_empty() {
+            return self
+                .explicit_heads
+                .iter()
+                .filter_map(|id| self.revision(id))
+                .collect();
+        }
         heads(&self.revisions, |revision| {
             (&revision.revision, &revision.predecessors)
         })
@@ -435,6 +462,22 @@ impl Spec {
     /// not invalidate it. A later issued revision supersedes it; a later
     /// withdrawal ends it. Concurrent controlling revisions are a conflict.
     pub fn issued(&self) -> Issued<'_> {
+        // A physical v4 heads Body makes even an empty issued set
+        // authoritative.  Falling back to DAG ancestry here would resurrect a
+        // withdrawn issuance simply because the set is empty.
+        if !self.explicit_heads.is_empty() {
+            let controls = self
+                .explicit_issued
+                .iter()
+                .filter_map(|id| self.revision(id))
+                .collect::<Vec<_>>();
+            return match controls.as_slice() {
+                [] => Issued::None,
+                [one] if one.body.state == State::Issued => Issued::One(one),
+                [one] if one.body.state == State::Withdrawn => Issued::None,
+                _ => Issued::Conflict(controls),
+            };
+        }
         let controls: Vec<&Revision> = self
             .revisions
             .iter()
@@ -541,6 +584,8 @@ pub struct BaselineRevision {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Baseline {
     pub revisions: Vec<BaselineRevision>,
+    pub explicit_heads: Vec<String>,
+    pub explicit_issued: Vec<String>,
 }
 
 impl Baseline {
@@ -553,10 +598,21 @@ impl Baseline {
             .filter_map(|raw| serde_json::from_slice(raw).ok())
             .collect();
         revisions.sort_by(|a, b| a.revision.cmp(&b.revision));
-        Self { revisions }
+        Self {
+            revisions,
+            explicit_heads: Vec::new(),
+            explicit_issued: Vec::new(),
+        }
     }
 
     pub fn heads(&self) -> Vec<&BaselineRevision> {
+        if !self.explicit_heads.is_empty() {
+            return self
+                .explicit_heads
+                .iter()
+                .filter_map(|id| self.revision(id))
+                .collect();
+        }
         heads(&self.revisions, |revision| {
             (&revision.revision, &revision.predecessors)
         })
@@ -572,6 +628,21 @@ impl Baseline {
     }
 
     pub fn issued(&self) -> BaselineIssued<'_> {
+        // As for Specs, presence of physical heads means an empty issued set
+        // is a real state (withdrawn), not a request for legacy DAG inference.
+        if !self.explicit_heads.is_empty() {
+            let controls = self
+                .explicit_issued
+                .iter()
+                .filter_map(|id| self.revision(id))
+                .collect::<Vec<_>>();
+            return match controls.as_slice() {
+                [] => BaselineIssued::None,
+                [one] if one.body.state == State::Issued => BaselineIssued::One(one),
+                [one] if one.body.state == State::Withdrawn => BaselineIssued::None,
+                _ => BaselineIssued::Conflict(controls),
+            };
+        }
         let controls: Vec<&BaselineRevision> = self
             .revisions
             .iter()
@@ -629,6 +700,26 @@ pub struct SpecView {
     pub body: Body,
 }
 
+/// Bounded collection row for one Spec/Plan. Revision text and topology are
+/// deliberately absent: callers page those immutable records through
+/// `SpecHistory`. Concurrent heads remain explicit rather than being flattened
+/// into an invented current title or state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecSummary {
+    pub spec: String,
+    pub project: String,
+    pub kind: Kind,
+    pub heads: Vec<String>,
+    pub issued: Vec<String>,
+    pub conflicted: bool,
+    /// Present only when one exact head can be rendered without choosing among
+    /// concurrent intent. The bounded register page may hydrate this one
+    /// revision; conflicts remain summaries until the caller pages the heads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<Box<SpecView>>,
+}
+
 /// Stable external view of one Baseline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -642,6 +733,21 @@ pub struct BaselineView {
     #[serde(default)]
     pub issued: Vec<String>,
     pub body: BaselineBody,
+}
+
+/// Bounded collection row for one Baseline. The immutable revision records are
+/// a separate cursor page, preserving conflicts without revisiting the whole
+/// document DAG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineSummary {
+    pub baseline: String,
+    pub project: String,
+    pub heads: Vec<String>,
+    pub issued: Vec<String>,
+    pub conflicted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<Box<BaselineView>>,
 }
 
 /// How an exact revision reached a Packet.
@@ -726,6 +832,19 @@ pub struct SpecReference {
     pub head: bool,
     /// The asserting revision is the effective issued one.
     pub issued: bool,
+}
+
+/// One independently pageable link assertion. Head/issued standing is not
+/// copied onto every edge; callers compare `revision` against the bounded head
+/// coordinates in [`SpecSummary`], avoiding a second mutable truth per link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecReferenceFact {
+    pub spec: String,
+    pub revision: String,
+    pub kind: Kind,
+    pub title: String,
+    pub link: Link,
 }
 
 /// One retractable note about the graph, bound to nobody's document.
@@ -1041,7 +1160,7 @@ mod tests {
             spec: spec.into(),
             project: "prj_01k1k8q6c6t0g0000000000000".into(),
             kind: Kind::Requirement,
-            generation: String::new(),
+            publication: publication(),
             title: "A requirement".into(),
             text: "The system shall be deterministic.".into(),
             state,
@@ -1070,6 +1189,14 @@ mod tests {
         }
     }
 
+    fn publication() -> runtime::publication::PublicationId {
+        runtime::publication::PublicationId::new(
+            [1; 32],
+            [2; 32],
+            runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
+        )
+    }
+
     #[test]
     fn structured_plan_data_belongs_only_to_plan_specs() {
         let mut revision = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
@@ -1080,6 +1207,7 @@ mod tests {
             Err("structured Plan data belongs only on a Plan Spec".into())
         );
         revision.kind = Kind::Plan;
+        revision.publication = publication();
         assert_eq!(revision.validate(), Ok(()));
     }
 
@@ -1131,6 +1259,7 @@ mod tests {
     fn structured_plan_changes_are_part_of_revision_identity() {
         let mut left = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
         left.kind = Kind::Plan;
+        left.publication = publication();
         left.plan = Some(plan());
         let mut right = left.clone();
         right.plan.as_mut().expect("Plan data").roots[0] = "iss_01k1k8q6c6t0g0000000000001".into();
@@ -1235,6 +1364,7 @@ mod tests {
             .expect("draft Baseline");
         let current = Baseline {
             revisions: vec![issued.clone(), draft.clone()],
+            ..Baseline::default()
         };
         assert!(
             matches!(current.issued(), BaselineIssued::One(revision) if revision.revision == issued.revision)
@@ -1247,6 +1377,7 @@ mod tests {
         .expect("withdrawn Baseline");
         let current = Baseline {
             revisions: vec![issued, draft, withdrawn],
+            ..Baseline::default()
         };
         assert!(matches!(current.issued(), BaselineIssued::None));
     }

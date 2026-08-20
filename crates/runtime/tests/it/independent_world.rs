@@ -166,8 +166,7 @@ impl World for MultiWorld {
                 let key = self.pad_key();
                 let text = v["text"].as_str().unwrap_or_default();
                 let at = ctx
-                    .read_collaborative(&key)
-                    .ok()
+                    .read_collaborative(&key)?
                     .and_then(|p| p.texts.get("body").map(|t| t.chars().count() as u64))
                     .unwrap_or(0);
                 declare(
@@ -245,11 +244,11 @@ impl World for MultiWorld {
             serde_json::from_slice(&query.payload).map_err(|_| Rejection::InvalidRequest)?;
         let bytes = match v["q"].as_str() {
             Some("entry") => ctx
-                .read_body(&self.entry_key(v["k"].as_str().unwrap_or_default()))
+                .read_body(&self.entry_key(v["k"].as_str().unwrap_or_default()))?
+                .map(|bytes| bytes.as_ref().to_vec())
                 .unwrap_or_default(),
             Some("pad") => ctx
-                .read_collaborative(&self.pad_key())
-                .ok()
+                .read_collaborative(&self.pad_key())?
                 .and_then(|p| p.texts.get("body").cloned())
                 .unwrap_or_default()
                 .into_bytes(),
@@ -261,6 +260,7 @@ impl World for MultiWorld {
             schema_version: 1,
             bytes,
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -424,6 +424,7 @@ fn query_json(session: &Session, value: serde_json::Value) -> Vec<u8> {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: serde_json::to_vec(&value).unwrap(),
+            publication: None,
         })
         .unwrap()
         .bytes

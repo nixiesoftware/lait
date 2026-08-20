@@ -64,6 +64,53 @@ impl Drop for OwnedReceiver {
     }
 }
 
+/// Stops the identity daemon however the test ends, panic included.
+///
+/// `stop_daemon` at the foot of the body only runs when the body reaches it,
+/// and a panic is how this test reports every failure. The daemon it started
+/// then outlived it still holding the display coordinator's fixed port, so
+/// nextest's retry hit the port guard 23ms in and reported "something else on
+/// this machine holds it" — which was the previous attempt of this same test,
+/// and read as a dirty machine. The retry could not have passed, and the
+/// failure the log ended on was never the one worth reading.
+///
+/// Its own thread and its own runtime: a `Drop` running during an unwind cannot
+/// await, and must not panic — a panic here would abort the process and take
+/// the real failure with it.
+struct DaemonStopped(PathBuf);
+
+impl Drop for DaemonStopped {
+    fn drop(&mut self) {
+        let home = self.0.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                stop_daemon(&home).await;
+                for _ in 0..100 {
+                    let selection = lait::config::Selection::for_identity(&home);
+                    let gone = match lait::daemon::Client::for_selection(&selection) {
+                        Ok(daemon) => {
+                            matches!(daemon.probe().await, lait::control::Probe::Absent)
+                                && lait::config::acquire_daemon_lock(daemon.home()).is_ok()
+                        }
+                        Err(_) => true,
+                    };
+                    if gone {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        })
+        .join();
+    }
+}
+
 async fn wait_for_daemon_stop(home: &Path) {
     for _ in 0..100 {
         let selection = lait::config::Selection::for_identity(home);
@@ -202,6 +249,7 @@ async fn wait_for_revision_change(
 }
 
 async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &str) {
+    let mut last = String::from("the coordinator was never reached");
     for _ in 0..200 {
         let display = client.display_status().await.expect("read receiver health");
         if let Some(health) = display
@@ -222,9 +270,41 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
             assert!(health.pipeline_unobservable);
             return;
         }
+        last = match display.devices.iter().find(|row| row.device == device) {
+            None => format!(
+                "the coordinator lists no device {device} at all (it knows: [{known}])",
+                known = display
+                    .devices
+                    .iter()
+                    .map(|row| row.device.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(row) => match row.health.as_ref() {
+                None => format!("device {device} is paired but has reported no health yet"),
+                Some(health) => format!(
+                    "device {device} last reported revision {seen_revision}/item {seen_item} \
+                     (connection {connection}, playback {playback}, last_error {error}) \
+                     while this waited for {revision}/{item}",
+                    seen_revision = health.revision,
+                    seen_item = health.current_item,
+                    connection = health.connection,
+                    playback = health.playback,
+                    error = health.last_error,
+                ),
+            },
+        };
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("coordinator never observed health for the presented Signage revision");
+    // Three different bugs used to arrive as this one sentence: a receiver that
+    // never paired, one that paired and went silent, and one stuck presenting an
+    // older revision. Only the third is a Signage bug, and the message could not
+    // tell them apart — so a nightly failure on a platform nobody has in front of
+    // them named nothing and cost a bisect.
+    panic!(
+        "coordinator never observed health for the presented Signage revision \
+         after 20s. Last observation: {last}"
+    );
 }
 
 async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
@@ -537,8 +617,35 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         );
     };
 
+    // This test drives a real receiver through pairing, so it needs the display
+    // coordinator — and the coordinator binds a fixed `0.0.0.0:7443`, which makes
+    // it a machine-wide singleton. A daemon that loses that race now degrades to
+    // serving without display coordination rather than refusing to start, which
+    // is right for the product and leaves this test with nothing to pair against.
+    //
+    // Said here, before ten seconds of polling. Without it the failure is
+    // "reference receiver did not open a pairing within ten seconds" — a symptom
+    // that names neither the port nor the process holding it, which is the class
+    // of message this suite exists to stop shipping.
+    if let Err(error) = std::net::TcpListener::bind((
+        std::net::Ipv4Addr::UNSPECIFIED,
+        lait::display::DEFAULT_DISPLAY_PORT,
+    )) {
+        panic!(
+            "this test needs the display coordinator, which binds 0.0.0.0:{port}, and \
+             something else on this machine holds it ({error}). A running `lait` daemon is \
+             the usual holder — stop it, or run this test where none is running. Setting \
+             LAIT_DISPLAY=off does not help: it removes the coordinator this test drives.",
+            port = lait::display::DEFAULT_DISPLAY_PORT,
+        );
+    }
+
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
+    // Declared before the client, so it drops after it: the daemon is asked to
+    // stop once nothing is still speaking to it, and before the temporary homes
+    // it is holding open are removed.
+    let _daemon_stopped = DaemonStopped(identity.path().to_path_buf());
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
@@ -923,7 +1030,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         (client, signals)
     };
 
-    let head = client.head().await.expect("a head for this identity");
+    let head = client
+        .head("issues")
+        .await
+        .expect("a head for this identity");
     assert!(
         head.base.starts_with("http://127.0.0.1:"),
         "a head came up somewhere other than loopback: {}",
@@ -956,13 +1066,59 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     // Asking twice finds the head that is already up. The alternative is a port
     // and a run credential per click.
-    let again = client.head().await.expect("the same head");
+    let again = client.head("issues").await.expect("the same head");
     assert_eq!(again, head, "a second Open started a second head");
-    assert_eq!(
-        client.heads().len(),
-        1,
-        "one identity acquired more than one head"
+
+    // A different World is a different head, which is the whole point: one
+    // process per World is what makes stopping one a statement about that
+    // World rather than about whatever else shared it.
+    let signage = client
+        .head("signage")
+        .await
+        .expect("a head for the other World");
+    assert_ne!(
+        signage.base, head.base,
+        "two Worlds were served by one head"
     );
+
+    // Two Worlds, two heads — and *exactly* two. The assertion this replaces
+    // said `len() == 1`, "one identity acquired more than one head", written when
+    // one head served everything. It was left standing directly under the block
+    // above that starts a second head, so it could not pass; the display-pairing
+    // wait earlier in this test failed first and hid it. Per-World heads reached
+    // CI unproven against a real binary because of it.
+    //
+    // The count is what matters, not just that the bases differ: the defect this
+    // is guarding is a *third* head, which is what `Option<&str>` produced when
+    // one caller named a World and another did not.
+    let heads = client.heads();
+    assert_eq!(
+        heads.len(),
+        2,
+        "two Worlds is two heads, and no more: {:?}",
+        heads.iter().map(|h| (&h.world, &h.url)).collect::<Vec<_>>()
+    );
+    let mut served: Vec<Option<String>> = heads.iter().map(|h| h.world.clone()).collect();
+    served.sort();
+    assert_eq!(
+        served,
+        vec![Some("issues".to_owned()), Some("signage".to_owned())],
+        "each head names the World it actually announced"
+    );
+
+    // Asking again for either World finds the head that is already up, rather
+    // than spending a third port. This is the property the key exists for, and
+    // it is checked *after* both are running because that is when a key
+    // collision would show.
+    assert_eq!(
+        client.head("issues").await.expect("the issues head").base,
+        head.base
+    );
+    assert_eq!(
+        client.head("signage").await.expect("the signage head").base,
+        signage.base
+    );
+    assert_eq!(client.heads().len(), 2, "asking again started nothing new");
 
     let minted = client.mint(&head).await.expect("a launch credential");
     assert!(!minted.secret.is_empty());

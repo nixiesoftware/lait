@@ -11,7 +11,7 @@
 //! into ordinal pages and signed the ordered page hashes. Editing an existing
 //! Body was cheap — its entry stayed in its page — but *adding* one was not:
 //! a new entry in an early page pushes the last entry into the next page, and
-//! every page after it changes. At the 100,000-Body ceiling that is a complete
+//! every page after it changes. At the 10,000,000-Body ceiling that is a complete
 //! rewrite of the catalog to add one issue. An index has no ordinals, so an
 //! insertion rewrites one leaf and its ancestors and nothing else.
 //!

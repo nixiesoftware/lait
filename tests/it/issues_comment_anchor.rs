@@ -177,21 +177,34 @@ impl Driver {
         Ok(contract::IssueEffect::from_json(&committed.effect).unwrap())
     }
 
+    /// The issue as this suite reads it: the summary with its discussion
+    /// folded back in.
+    ///
+    /// `View` is deliberately the bounded summary and leaves discussion,
+    /// relations, attachments and checks empty — they are independent pages
+    /// now. Anchors live on comments, so this suite has to ask for the page
+    /// as well, and it rejoins the two so every assertion below can keep
+    /// reading one issue.
     fn view(&self, doc: &str) -> IssueView {
         let bytes = self
             .session
             .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
-                payload: IssueQuery::View {
+                payload: IssueQuery::Detail {
                     doc: doc.to_string(),
                     me: None,
+                    pages: contract::IssueDetailPages::default(),
                 }
                 .to_json(),
+                publication: None,
             })
             .unwrap()
             .bytes;
-        serde_json::from_slice(&bytes).unwrap()
+        let detail: contract::IssueDetailProjection = serde_json::from_slice(&bytes).unwrap();
+        let mut view = detail.issue;
+        view.comments = detail.comments.items;
+        view
     }
 
     fn seed(&mut self) -> String {
@@ -238,6 +251,21 @@ impl Driver {
     ) -> Result<String, runtime::world::Failure> {
         let id = issues::ids::mint_comment_id(&SystemUlidSource);
         let ts = self.ts();
+        let source = self
+            .session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: IssueQuery::View {
+                    doc: doc.to_string(),
+                    me: None,
+                }
+                .to_json(),
+                publication: None,
+            })
+            .expect("source publication")
+            .publication
+            .expect("stamped source publication");
         self.submit(&IssueIntent::CommentAt {
             doc: doc.to_string(),
             body: body.into(),
@@ -246,6 +274,7 @@ impl Driver {
             end,
             id: id.clone(),
             parent: None,
+            source,
             actor: my_actor().as_str().to_string(),
             device: my_device().as_str().to_string(),
             ts,

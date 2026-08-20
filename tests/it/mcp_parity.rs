@@ -7,8 +7,7 @@
 //! tool, or if a `Response` DTO stops round-tripping (a silent contract break).
 
 use issues::dto::{
-    ActivityEvent, BoardColumn, BoardView, IssueView, Priority, ProjectDto, Row, WorkflowState,
-    SCHEMA_VERSION,
+    ActivityEvent, BoardPage, IssueView, Priority, ProjectDto, Row, WorkflowState, SCHEMA_VERSION,
 };
 use issues::ids::{DocId, ProjectId, SpaceId, SystemUlidSource};
 use issues_app::IssuesResponse as Response;
@@ -25,6 +24,31 @@ fn tool_error_text(reply: &serde_json::Value) -> String {
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The product result inside a durable operation envelope.
+///
+/// Every write answers as `{"kind":"operation","receipt":{..},"response":{..}}`
+/// -- the same envelope the viewer and the host plane get, because an agent is
+/// not owed a weaker acknowledgement than a browser. Reads are unwrapped
+/// already and pass through.
+fn accepted(reply: serde_json::Value) -> serde_json::Value {
+    if reply["kind"] != "operation" {
+        return reply;
+    }
+    assert_eq!(reply["receipt"]["phase"], "accepted", "{reply}");
+    reply["response"].clone()
+}
+
+fn publication() -> runtime::publication::WorldPublicationId {
+    runtime::publication::WorldPublicationId::new(
+        runtime::publication::PublicationId::new(
+            [1; 32],
+            [2; 32],
+            runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
+        ),
+        runtime::publication::MaterializationId::INITIAL,
+    )
 }
 
 /// Every shell command an agent must drive is on the shell router. World
@@ -138,6 +162,7 @@ fn response_dtos_round_trip() {
         target_date: None,
         archived: false,
         team: String::new(),
+        enrichment_complete: true,
     };
     let row = Row {
         due_date: None,
@@ -160,6 +185,7 @@ fn response_dtos_round_trip() {
         ],
         tombstone: false,
         provisional: false,
+        enrichment_complete: true,
     };
 
     let samples = vec![
@@ -174,20 +200,28 @@ fn response_dtos_round_trip() {
             run: "71".repeat(16),
         },
         Response::List {
-            rows: vec![row.clone()],
+            page: issues::contract::Page {
+                publication: publication(),
+                items: vec![row.clone()],
+                next_cursor: None,
+                exact_total: Some(1),
+            },
         },
-        Response::Board(Box::new(BoardView {
+        Response::Board(Box::new(BoardPage {
             schema_version: SCHEMA_VERSION,
             project: project.clone(),
-            columns: vec![BoardColumn {
-                state: WorkflowState {
-                    id: "backlog".into(),
-                    name: "Backlog".into(),
-                    category: issues::dto::StatusCategory::Backlog,
-                    color: "gray".into(),
-                },
-                rows: vec![row.clone()],
+            workflow: vec![WorkflowState {
+                id: "backlog".into(),
+                name: "Backlog".into(),
+                category: issues::dto::StatusCategory::Backlog,
+                color: "gray".into(),
             }],
+            rows: issues::contract::Page {
+                publication: publication(),
+                items: vec![row.clone()],
+                next_cursor: None,
+                exact_total: Some(1),
+            },
         })),
         Response::Issue(Box::new(IssueView {
             due_date: None,
@@ -218,22 +252,28 @@ fn response_dtos_round_trip() {
             checks: vec![],
             provisional: false,
             corrupt_records: vec![],
+            more_comments: None,
+            reactions_complete: true,
         })),
         Response::Activity {
-            events: vec![ActivityEvent {
-                seq: 1,
-                cursor: String::new(),
-                doc_id: Some(doc_id.clone()),
-                reff: "iss_3f9ab2c".into(),
-                kind: "edited".into(),
-                changes: vec![],
-                actor: None,
-                actor_nick: "you".into(),
-                text: String::new(),
-                ts: 1000,
-                collision: false,
-            }],
-            last: String::new(),
+            page: issues::contract::Page {
+                publication: publication(),
+                items: vec![ActivityEvent {
+                    seq: 1,
+                    cursor: String::new(),
+                    doc_id: Some(doc_id.clone()),
+                    reff: "iss_3f9ab2c".into(),
+                    kind: "edited".into(),
+                    changes: vec![],
+                    actor: None,
+                    actor_nick: "you".into(),
+                    text: String::new(),
+                    ts: 1000,
+                    collision: false,
+                }],
+                next_cursor: None,
+                exact_total: Some(1),
+            },
         },
         Response::not_found("no issue matches 'ENG-9x'"),
     ];
@@ -434,14 +474,14 @@ fn a_baseline_of_an_unissued_spec_names_the_lifecycle() {
         serde_json::json!({ "name": "Engineering", "key": "ENG" }),
     );
     assert!(project.get("error").is_none(), "{project}");
-    let spec = mcp.call(
+    let spec = accepted(mcp.call(
         "issues_spec_new",
         serde_json::json!({
             "project": "ENG",
             "kind": "plan",
             "title": "The tree as it stands",
         }),
-    );
+    ));
     let spec_id = spec["spec"]["spec"]
         .as_str()
         .or_else(|| spec["spec"].as_str())
@@ -511,6 +551,8 @@ fn issue_response_status_field_survives_the_kind_tag() {
         checks: vec![],
         provisional: false,
         corrupt_records: vec![],
+        more_comments: None,
+        reactions_complete: true,
     }));
     let json = serde_json::to_string(&resp).unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();

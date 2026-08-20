@@ -5,7 +5,9 @@ major 1. It uses `SecRandomCopyBytes`, CryptoKit SHA-256/HMAC, a
 ThisDeviceOnly Keychain item, an ephemeral no-cookie/no-cache URLSession that
 refuses redirects and enforces response bounds while streaming, strict JSON
 field validation, verified asset decode dimensions, monotonic playback, and
-native pairing/unassigned/offline/stale/revoked/refusal UI.
+native pairing/unassigned/offline/stale/revoked/refusal UI. Eligible live
+assignments use the coordinator's authenticated HLS-v3 MPEG-TS edge through
+AVPlayer; the receiver never accepts a caller-supplied media URL.
 
 It does not load a web view, remote code, arbitrary URL, catalog, World route,
 or demo program. Its coordinator origin is fixed to the origin named in

@@ -322,3 +322,27 @@ LAIT_HOME=/tmp/bob   lait --port 7718 --json &
 
 Each head serves its own identity's spaces, with its own per-run token. Found in
 alice's tab, mint an invite there, paste it into bob's Welcome.
+
+## Licence
+
+lait is **source-available, not open source**. Every first-party package in this
+repository — the engine, the products, the client, the receivers, the viewer and
+the tooling — is offered under the [PolyForm Noncommercial License
+1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0), reproduced in
+[`LICENSE`](LICENSE).
+
+You may read, run, modify and redistribute it for any **noncommercial** purpose.
+PolyForm names those purposes explicitly: personal study, research, experiment,
+hobby and amateur projects, and use by charitable, educational, public-research,
+public-safety, environmental and government organisations — regardless of how
+that organisation is funded.
+
+**Any commercial use requires a separate licence.** Ask: <omar@onnixi.com>.
+
+Releases up to and including v0.9.0 were published under `MIT OR Apache-2.0`.
+That grant is irrevocable for those versions and is not withdrawn here; this
+licence governs subsequent versions.
+
+The third-party dependency closure stays permissive and is unaffected — see
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and the allowlist in
+[`deny.toml`](deny.toml).

@@ -30,6 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /src/target/release/lait /usr/local/bin/lait
 
+# The same obligation every other channel carries: whoever receives a copy gets
+# the terms it is offered under and the account of what it is built from. An
+# image is a distribution like any other, and this one shipped neither.
+COPY LICENSE /usr/share/doc/lait/LICENSE
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/lait/THIRD-PARTY-NOTICES.md
+
 # A self-contained node home (identity + content-addressed store) lives here; mount a
 # volume so the seed keeps its identity and adopted space across restarts.
 ENV LAIT_HOME=/data

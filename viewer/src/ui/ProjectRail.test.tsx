@@ -16,6 +16,15 @@ vi.mock("../api", () => ({ rpc: rpcMock, spaceRpc: spaceRpcMock }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
 
+const publication = {
+  publication: {
+    manifest_root: Array(32).fill(1),
+    implementation_digest: Array(32).fill(2),
+    extractor_schema_digest: Array(32).fill(3),
+  },
+  materialization: 1,
+};
+
 const project: ProjectDto = {
   id: "prj_test",
   name: "Platform",
@@ -48,7 +57,10 @@ describe("ProjectRail", () => {
   ) {
     rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
       if (request.cmd === "milestone_list") {
-        return Promise.resolve({ kind: "milestones", milestones: MILESTONES });
+        return Promise.resolve({
+          kind: "milestones",
+          page: { publication, items: MILESTONES },
+        });
       }
       throw new Error(`Unexpected request: ${request.cmd}`);
     });

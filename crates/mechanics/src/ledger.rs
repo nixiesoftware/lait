@@ -913,6 +913,15 @@ impl Authority {
         self
     }
 
+    /// Test seam for the detached Journal maintenance boundary. Production
+    /// open deliberately performs no payload-directory sweep; corruption
+    /// tests invoke the same collector explicitly before claiming that every
+    /// remaining object is reachable authoritative state.
+    #[cfg(test)]
+    pub(crate) fn collect_unreachable_for_test(&self) -> Result<(), Failure> {
+        self.store.collect_unreachable().map_err(Failure::from)
+    }
+
     /// The Space this ledger serves.
     pub fn space(&self) -> &SpaceId {
         &self.genesis.space_id

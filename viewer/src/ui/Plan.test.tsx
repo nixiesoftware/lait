@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GeometryView, PlanData, Row } from "../types";
+import type { GeometrySummary, GeometryView, PlanData, Row } from "../types";
 import { PlanSeedEditor, PlanSurface, planCounts } from "./Plan";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -24,7 +24,7 @@ function row(reff: string): Row {
   };
 }
 
-const CLOSURE: GeometryView["closure"] = {
+const CLOSURE: GeometrySummary["closure"] = {
   total: 3,
   closed: 1,
   ready: 2,
@@ -49,7 +49,7 @@ describe("Plan surface", () => {
   });
 
   it("reads closure from the compiled geometry and zero from nothing", () => {
-    expect(planCounts({ closure: CLOSURE } as GeometryView)).toEqual(CLOSURE);
+    expect(planCounts({ summary: { closure: CLOSURE } } as GeometryView)).toEqual(CLOSURE);
     expect(planCounts(null).total).toBe(0);
   });
 

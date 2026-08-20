@@ -568,6 +568,42 @@ impl world_interface::ClientHost for PackageClientHost {
         })
     }
 
+    fn call_find<'a>(
+        &'a self,
+        world: replica::body::WorldId,
+        query: runtime::find::Query,
+    ) -> world_interface::ClientFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let response = client_as_scoped(
+                &self.home,
+                Request::Find {
+                    world: world.as_str().to_owned(),
+                    query,
+                },
+                &self.scope,
+                self.act_as.as_deref(),
+                &self.selection,
+            )
+            .await
+            .map_err(|error| world_interface::Failure::new(format!("{error:#}")))?;
+            match response {
+                Response::Find { answer } => serde_json::to_value(answer).map_err(|error| {
+                    world_interface::Failure::new(format!("encode Runtime Find answer: {error}"))
+                }),
+                response @ Response::Error { .. } => {
+                    serde_json::to_value(response).map_err(|error| {
+                        world_interface::Failure::new(format!(
+                            "encode Runtime Find refusal: {error}"
+                        ))
+                    })
+                }
+                other => Err(world_interface::Failure::new(format!(
+                    "Runtime Find request returned an unexpected response: {other:?}"
+                ))),
+            }
+        })
+    }
+
     fn call_work<'a>(
         &'a self,
         request: runtime::exec::WorkRequest,

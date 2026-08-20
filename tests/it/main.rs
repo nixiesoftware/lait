@@ -31,7 +31,6 @@ mod issues_comment_anchor;
 mod issues_history_contract;
 mod issues_policy_designer;
 mod issues_reference_perf;
-mod issues_world_cache;
 mod lait_daemon;
 mod launcher_safety;
 mod live_control;
@@ -58,3 +57,29 @@ mod semantic_type_names;
 mod signal_is_not_durable;
 mod station_lifecycle;
 mod viewer_parity;
+
+/// Integration fixtures generally care about the product payload while the
+/// operation protocol itself has dedicated parity/continuity coverage. Keep
+/// those fixtures honest about the durable acknowledgement before exposing
+/// the inner response they historically asserted.
+fn accepted_issue_response(response: issues_app::IssuesResponse) -> issues_app::IssuesResponse {
+    match response {
+        issues_app::IssuesResponse::Operation { receipt, response } => {
+            assert_eq!(receipt.phase, issues_app::OperationPhase::Accepted);
+            assert_eq!(
+                receipt.operation.len(),
+                32,
+                "Runtime RequestId must remain a 128-bit lowercase hex operation id"
+            );
+            assert!(
+                receipt
+                    .operation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                "operation id must be canonical lowercase hex"
+            );
+            *response
+        }
+        response => response,
+    }
+}

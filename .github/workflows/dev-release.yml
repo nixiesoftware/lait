@@ -72,7 +72,7 @@ jobs:
           stage="lait-dev-$target"
           mkdir -p "$stage"
           cp "target/$target/release/$bin" "$stage/"
-          cp README.md LICENSE-APACHE LICENSE-MIT "$stage/" 2>/dev/null || true
+          cp README.md LICENSE "$stage/"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$stage.zip" "$stage" >/dev/null
             asset="$stage.zip"

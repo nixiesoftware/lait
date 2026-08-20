@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_DISPLAY } from "../core/display";
-import type { BoardView } from "../types";
+import type { BoardView, Row } from "../types";
 import { Board } from "./Board";
 import type { IssueMutators } from "./fields";
 
@@ -88,5 +88,61 @@ describe("Board filtered-empty state", () => {
     mount({ filtered: false });
     expect(host!.querySelector('[data-application-state="filtered-empty"]')).toBeNull();
     expect(host!.querySelector('[aria-label="Issue board"]')).toBeTruthy();
+  });
+
+  it("keeps selection and horizontal position while pending rows refresh", () => {
+    const row: Row = {
+      reff: "ONE-1",
+      doc_id: "iss_1",
+      project_id: "prj_x",
+      key_alias: "ONE-1",
+      title: "Keep me selected",
+      status: "backlog",
+      priority: "none",
+      assignee_summary: "",
+      assignees: [],
+      tombstone: false,
+      provisional: false,
+    };
+    const loaded: BoardView = {
+      ...board,
+      columns: [{ ...board.columns[0]!, rows: [row] }, board.columns[1]!],
+    };
+    mount({ board: loaded, selection: row.reff, optimistic: new Set([row.doc_id]) });
+    const canvas = host!.querySelector<HTMLElement>('[aria-label="Issue board"]')!;
+    act(() => {
+      canvas.scrollLeft = 347;
+      canvas.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    const refreshed: BoardView = {
+      ...loaded,
+      columns: [
+        { ...loaded.columns[0]!, rows: [] },
+        { ...loaded.columns[1]!, rows: [{ ...row, status: "done" }] },
+      ],
+    };
+    act(() => {
+      root?.render(
+        <Board
+          board={refreshed}
+          display={DEFAULT_DISPLAY}
+          members={[]}
+          labels={[]}
+          selection={row.reff}
+          optimistic={new Set([row.doc_id])}
+          onSelect={() => undefined}
+          onCreate={() => undefined}
+          onDrop={() => undefined}
+          onReassign={() => undefined}
+          mutators={noopMutators}
+          onLoadChildren={() => Promise.resolve([])}
+          readOnly={false}
+          filtered={false}
+          onClearFilter={() => undefined}
+        />,
+      );
+    });
+    expect(canvas.scrollLeft).toBe(347);
+    expect(host!.querySelector('[aria-current="true"]')?.textContent).toContain("Keep me selected");
   });
 });

@@ -75,9 +75,34 @@ pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
 /// Internal discriminator on canonical issue source. Client renderers collapse
 /// it; semantic APIs never ask callers to supply it.
 pub const DOCUMENT_PREFIX: &str = "// lait-document:1\n";
+/// Maximum UTF-8 bytes for a human-facing issue or triage title.
+pub const MAX_TITLE_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes for a human-facing entity name.
+pub const MAX_NAME_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes for one prose field extracted into the shared corpus.
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+/// Outer Intent/Query envelope: one maximal text value plus bounded JSON,
+/// links, identities and command metadata. Runtime also enforces its 2 MiB
+/// substrate ceiling before World decode.
+pub const MAX_PAYLOAD_BYTES: u32 = 1_572_864;
+/// Project and initiative summaries share a Body with hot scalar metadata.
+/// Their deliberately small ceiling keeps a scalar edit's whole-Body copy
+/// bounded; long-form planning prose belongs in a Spec/Plan revision Body.
+pub const MAX_METADATA_DESCRIPTION_BYTES: usize = 16 * 1024;
+/// Maximum UTF-8 bytes for compact color/icon-like presentation tokens.
+pub const MAX_PRESENTATION_TOKEN_BYTES: usize = 256;
 /// The longest reaction emoji accepted, in UTF-8 bytes (a ZWJ family sequence
 /// fits; a paragraph does not).
 pub const MAX_REACTION_EMOJI_BYTES: usize = 32;
+/// Hard cardinality ceilings for an issue's notification audience. They make
+/// activity fan-out a bounded publication cost and prevent one pathological
+/// issue from turning a comment or status transition into a tracker-wide
+/// write. Assignee/follower truth remains in independently addressed relation
+/// Bodies; these bounds are validated before those records are staged.
+pub const MAX_ISSUE_ASSIGNEES: usize = 128;
+pub const MAX_ISSUE_LABELS: usize = 128;
+pub const MAX_ISSUE_FOLLOWERS: usize = 128;
+pub const MAX_ISSUE_AUDIENCE: usize = MAX_ISSUE_ASSIGNEES + MAX_ISSUE_FOLLOWERS;
 /// The largest accepted estimate. Every scale humans use tops out far below
 /// this; the cap exists so a typo cannot become a permanent register.
 pub const MAX_ESTIMATE: u32 = 1000;
@@ -122,6 +147,18 @@ pub const MAX_ATTACHMENT_NAME_BYTES: usize = 180;
 pub const TRIAGE_OUTCOMES: [&str; 3] = ["accepted", "declined", "duplicate"];
 /// The self-reported health labels (project updates, initiatives).
 pub const HEALTH_LABELS: [&str; 3] = ["on_track", "at_risk", "off_track"];
+
+pub fn valid_title(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= MAX_TITLE_BYTES
+}
+
+pub fn valid_name(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= MAX_NAME_BYTES
+}
+
+pub const fn valid_text(value: &str) -> bool {
+    value.len() <= MAX_TEXT_BYTES
+}
 
 pub fn world_id() -> WorldId {
     WorldId::parse(PRODUCT_WORLD).expect("product world id")
@@ -745,6 +782,207 @@ pub enum Pos {
     After { doc: String },
 }
 
+pub const CHANGE_SET_MAX_OPERATIONS: usize = 64;
+pub const CHANGE_SET_MAX_BYTES: usize = 512 * 1_024;
+
+/// A project coordinate inside one atomic Issues change set. Later operations
+/// may address a project created by an earlier ordinal without a client-side
+/// create/read/create loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ChangeProject {
+    Existing { project: String },
+    Created { operation: u16 },
+}
+
+/// A label coordinate inside one atomic Issues change set. A newly-created
+/// label may be attached to a later Issue without an adapter create/read loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ChangeLabel {
+    Existing { label: String },
+    Created { operation: u16 },
+}
+
+fn default_priority() -> String {
+    "none".into()
+}
+
+/// A Board target resolved inside the pinned World action. Keeping product
+/// references here (rather than pre-querying in an adapter) lets a human drag
+/// and an agent ChangeSet obey the same exact-publication rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "at", rename_all = "snake_case")]
+pub enum ChangePosition {
+    Top,
+    Bottom,
+    Before { issue: String },
+    After { issue: String },
+}
+
+/// The first canonical bounded batch vocabulary. New operation kinds extend
+/// this product-owned planner; they never expose Runtime Body operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ChangeOperation {
+    ProjectCreate {
+        name: String,
+        key: String,
+        color: String,
+    },
+    SpecCreate {
+        project: ChangeProject,
+        kind: crate::spec::Kind,
+        title: String,
+        text: String,
+        #[serde(default)]
+        links: Vec<crate::spec::Link>,
+    },
+    IssueCreate {
+        project: ChangeProject,
+        title: String,
+        #[serde(default = "default_priority")]
+        priority: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        assignees: Vec<String>,
+        #[serde(default)]
+        labels: Vec<ChangeLabel>,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        due: Option<u64>,
+        #[serde(default)]
+        estimate: Option<u32>,
+    },
+    /// Atomically change workflow state and/or Board position. A cross-column
+    /// drag is one predecessor-bound transition and one durable operation, not
+    /// an adapter loop of status then move.
+    IssueBoard {
+        issue: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        position: Option<ChangePosition>,
+    },
+    /// Replace any subset of the row-sized Issue facts. Set-valued fields are
+    /// exact replacements so a multi-assignee/label edit remains one bounded
+    /// durable operation rather than an adapter loop.
+    IssuePatch {
+        issue: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        priority: Option<String>,
+        #[serde(default)]
+        due: Option<u64>,
+        #[serde(default)]
+        clear_due: bool,
+        #[serde(default)]
+        estimate: Option<u32>,
+        #[serde(default)]
+        clear_estimate: bool,
+        #[serde(default)]
+        assignees: Option<Vec<String>>,
+        #[serde(default)]
+        labels: Option<Vec<ChangeLabel>>,
+    },
+    /// Apply one work-state verb, including its authenticated self-assignment
+    /// semantics, through the same planner used by human and agent batches.
+    IssueWork {
+        issue: String,
+        action: WorkAction,
+    },
+    /// Tombstone or restore one Issue. The Boolean is explicit so retries and
+    /// bulk plans remain byte-identical instead of inferring a toggle.
+    IssueTombstone {
+        issue: String,
+        on: bool,
+    },
+    /// Add one immutable comment record. Its stable id is derived from the
+    /// ChangeSet request id and this operation's ordinal.
+    IssueComment {
+        issue: String,
+        body: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+    /// Add an immutable comment anchored against one exact rendered source.
+    /// The full station-local coordinate prevents a stale scalar offset from
+    /// being reinterpreted against a rematerialized or newer Issue body.
+    IssueCommentAt {
+        issue: String,
+        body: String,
+        field: String,
+        start: u64,
+        #[serde(default)]
+        end: Option<u64>,
+        #[serde(default)]
+        parent: Option<String>,
+        source: runtime::publication::WorldPublicationId,
+    },
+    /// Replace one actor-owned reaction tuple with its explicit presence.
+    IssueReaction {
+        issue: String,
+        comment: String,
+        emoji: String,
+        on: bool,
+    },
+    /// Replace one directed/symmetric Issue relation tuple.
+    IssueLink {
+        issue: String,
+        kind: String,
+        target: String,
+        on: bool,
+    },
+    /// Replace the Issue's parent relation. `None` unparents.
+    IssueParent {
+        issue: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+    /// Move an Issue between projects and/or to a bounded Board position.
+    IssueMove {
+        issue: String,
+        #[serde(default)]
+        project: Option<ChangeProject>,
+        #[serde(default)]
+        position: Option<ChangePosition>,
+    },
+    /// Replace the Issue's milestone membership within its current project.
+    IssueMilestone {
+        issue: String,
+        #[serde(default)]
+        milestone: Option<String>,
+    },
+    LabelCreate {
+        name: String,
+        color: String,
+    },
+    LabelEdit {
+        label: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+    },
+    LabelDelete {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeResult {
+    pub operation: u16,
+    pub kind: String,
+    pub id: String,
+}
+
 /// A label minted by this transaction (create-on-first-use).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewLabel {
@@ -785,11 +1023,147 @@ pub struct DocumentSplice {
     pub insert: String,
 }
 
+/// One exact, content-bound source window selected outside mutation admission.
+/// The cursor is a compact product coordinate; source content never enters the
+/// signed command or the host's opaque lifecycle record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V4MigrationWindow {
+    /// Stable phase vocabulary. The planner uses `catalog`, `issue`, the
+    /// Catalog-backed `coordinates` join, `spec`, `baseline`, then the
+    /// body-less `terminal` sentinel.
+    pub phase: String,
+    /// Exact frozen Body opened by the commit callback. Absent only for the
+    /// terminal sentinel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyKey>,
+    /// Phase-local continuation within that Body. It is an ordinal or a
+    /// canonical map/set key, never source payload.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subitem: String,
+    /// Domain-separated digest of the selected Body/window coordinate and its
+    /// frozen source bytes. Commit recomputes it before staging any effect.
+    pub digest: [u8; 32],
+    /// Canonical durable cursor written with the migrated output.
+    pub cursor: String,
+}
+
+impl V4MigrationWindow {
+    pub const CURSOR_PREFIX: &str = "m1";
+    pub const TERMINAL_PHASE: &str = "terminal";
+
+    pub fn render_cursor(phase: &str, body: Option<&BodyKey>, subitem: &str) -> Option<String> {
+        if !matches!(
+            phase,
+            "catalog" | "issue" | "coordinates" | "spec" | "baseline" | Self::TERMINAL_PHASE
+        ) || subitem.len() > 256
+            || (phase == Self::TERMINAL_PHASE) != body.is_none()
+            || (phase == Self::TERMINAL_PHASE && !subitem.is_empty())
+        {
+            return None;
+        }
+        let body = body.map_or_else(|| "-".to_string(), |key| key.body.render());
+        let subitem = data_encoding::BASE64URL_NOPAD.encode(subitem.as_bytes());
+        Some(format!("{}:{phase}:{body}:{subitem}", Self::CURSOR_PREFIX))
+    }
+
+    pub fn valid(&self) -> bool {
+        self.digest != [0; 32]
+            && self
+                .body
+                .as_ref()
+                .is_none_or(|body| body.world == world_id())
+            && Self::render_cursor(&self.phase, self.body.as_ref(), &self.subitem)
+                .is_some_and(|cursor| cursor == self.cursor)
+            && self.cursor.len() <= 512
+    }
+
+    pub fn parse_cursor(cursor: &str) -> Option<(String, Option<BodyId>, String)> {
+        let mut parts = cursor.splitn(4, ':');
+        if parts.next()? != Self::CURSOR_PREFIX {
+            return None;
+        }
+        let phase = parts.next()?.to_string();
+        let body = match parts.next()? {
+            "-" => None,
+            rendered => Some(BodyId::parse(rendered)?),
+        };
+        let subitem = String::from_utf8(
+            data_encoding::BASE64URL_NOPAD
+                .decode(parts.next()?.as_bytes())
+                .ok()?,
+        )
+        .ok()?;
+        Self::render_cursor(
+            &phase,
+            body.as_ref()
+                .map(|body| BodyKey::new(world_id(), body.clone()))
+                .as_ref(),
+            &subitem,
+        )
+        .filter(|canonical| canonical == cursor)?;
+        Some((phase, body, subitem))
+    }
+
+    pub fn terminal(&self) -> bool {
+        self.phase == Self::TERMINAL_PHASE
+    }
+}
+
+/// Crash-stable coordinate for one bounded v3 -> v4 lifecycle batch.
+///
+/// The launcher persists the signed intent containing this value before it
+/// submits. A large legacy description therefore remains in its frozen Body;
+/// neither the opaque lifecycle record nor the signed command becomes a
+/// tracker-sized data transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V4MigrationPlan {
+    pub version: u16,
+    pub source: runtime::publication::PublicationId,
+    pub source_frontier: replica::frontier::ReplicaFrontier,
+    /// Last durably committed batch/cursor at preparation time. Zero plus an
+    /// empty cursor names the first batch.
+    pub previous_batch: u64,
+    #[serde(default)]
+    pub previous_cursor: String,
+    /// Exact next frozen source window, prepared read-only before the action is
+    /// admitted to the single mutation lane.
+    pub window: V4MigrationWindow,
+    /// Product fact timestamp chosen once when this plan is signed. Durable
+    /// attribution still comes exclusively from authenticated Context.
+    pub timestamp: u64,
+}
+
+impl V4MigrationPlan {
+    pub const VERSION: u16 = 2;
+
+    pub fn valid(&self) -> bool {
+        self.version == Self::VERSION
+            && self.source.implementation_digest != [0; 32]
+            && self.source.extractor_schema_digest.digest() != [0; 32]
+            && self.source_frontier != replica::frontier::ReplicaFrontier::EMPTY
+            && self.previous_cursor.len() <= 512
+            && (self.previous_batch > 0 || self.previous_cursor.is_empty())
+            && self.window.valid()
+            && self.window.cursor != self.previous_cursor
+            && self.timestamp > 0
+    }
+}
+
 /// The product intents (schema `issue` v1). Every id/timestamp is supplied by
 /// the daemon; the World validates and stages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum IssueIntent {
+    /// Preflight and lower a bounded, ordered product mutation as one Runtime
+    /// action. Entity identities derive from this action's RequestId plus the
+    /// operation ordinal, so retries are byte- and identity-idempotent.
+    ChangeSet {
+        operations: Vec<ChangeOperation>,
+        /// Signed client fact used for authored revision ordering.
+        ts: u64,
+    },
     /// The ONE founder-only, crash-resumable formation intent: it atomically
     /// creates the deterministic Catalog with the captured display name,
     /// initialization timestamp, initial project, the built-in role
@@ -814,20 +1188,17 @@ pub enum IssueIntent {
         /// Hex of the initial project's default workflow revision id.
         default_workflow_commitment: String,
     },
-    /// Materialize every currently visible Issue relation and current Spec head
-    /// into the structures this implementation writes natively.
-    ///
-    /// Compatibility readers make a pre-cutover Space usable before this runs,
-    /// but they do not move truth: links and parentage can still live only in
-    /// the Catalog, and a current Spec head can still lack a generation
-    /// coordinate. This one administrative intent creates equivalent relation
-    /// Bodies and immutable Spec successors without emitting user activity or
-    /// changing lifecycle state. It is idempotent; once the visible state is
-    /// fully materialized it stages no operations.
-    StructureMigrate {
-        actor: String,
-        device: String,
-        ts: u64,
+    /// Advance the decisive v3 -> v4 physical migration by one bounded atomic
+    /// batch. A durable cursor and immutable audit entry ride the same
+    /// transaction as the copied facts; callers repeat until the effect is an
+    /// idempotent no-op. Batching is required by the substrate's 4,096-op /
+    /// 1-MiB transaction ceiling and is not exposed as product truth.
+    V4Migrate {
+        /// Compact deterministic coordinate prepared against one exact frozen
+        /// source publication by the composition-owned lifecycle. Migrated
+        /// Bodies and text remain in the frozen source rather than inflating
+        /// the host's opaque lifecycle record.
+        plan: V4MigrationPlan,
     },
     IssueNew {
         doc: String,
@@ -984,6 +1355,8 @@ pub enum IssueIntent {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
+        /// Exact rendered publication whose scalar offsets are named.
+        source: runtime::publication::WorldPublicationId,
         actor: String,
         device: String,
         ts: u64,
@@ -1163,9 +1536,9 @@ pub enum IssueIntent {
         device: String,
         ts: u64,
     },
-    /// Create or edit an initiative (SCOPE-8). Membership arrives as the
-    /// complete replacement list (the router merges add/remove against the
-    /// snapshot), so the record write is LWW-whole like `projects`.
+    /// Create or edit an initiative (SCOPE-8). Membership changes are tuple
+    /// deltas so one project edit never enumerates or rewrites the initiative's
+    /// other memberships.
     InitiativeSet {
         id: String,
         name: Option<String>,
@@ -1178,21 +1551,23 @@ pub enum IssueIntent {
             skip_serializing_if = "Option::is_none"
         )]
         target_date: Option<Option<u64>>,
-        projects: Option<Vec<String>>,
+        add_projects: Vec<String>,
+        remove_projects: Vec<String>,
         tombstone: Option<bool>,
         device: String,
         ts: u64,
     },
     /// Create or edit a team (GOV-7). `key` binds at creation and is
     /// immutable after (it seeds nothing yet, but the project-key rule is the
-    /// convention). Members arrive as the complete replacement list.
+    /// convention). Membership changes are independently addressed deltas.
     TeamSet {
         id: String,
         name: Option<String>,
         key: Option<String>,
         icon: Option<String>,
         lead: Option<String>,
-        members: Option<Vec<String>>,
+        add_members: Vec<String>,
+        remove_members: Vec<String>,
         tombstone: Option<bool>,
         device: String,
         ts: u64,
@@ -1524,20 +1899,239 @@ impl IssueIntent {
     }
 }
 
+pub const DEFAULT_PAGE_SIZE: u32 = 100;
+pub const MAX_PAGE_SIZE: u32 = 1_000;
+
+/// One bounded continuation request. The cursor is an opaque Issues envelope
+/// around Runtime's cursor and the full WorldPublicationId. The application
+/// router uses that coordinate to enter the exact historical World before the
+/// inner cursor is evaluated, so a continuation can never silently run under
+/// a newer implementation or extractor declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PageRequest {
+    #[serde(default = "default_page_size")]
+    pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self {
+            limit: DEFAULT_PAGE_SIZE,
+            cursor: None,
+        }
+    }
+}
+
+const fn default_page_size() -> u32 {
+    DEFAULT_PAGE_SIZE
+}
+
+impl PageRequest {
+    pub fn validate(&self) -> bool {
+        (1..=MAX_PAGE_SIZE).contains(&self.limit)
+            && self
+                .cursor
+                .as_ref()
+                .is_none_or(|cursor| !cursor.is_empty() && cursor.len() <= 16 * 1_024)
+    }
+}
+
+const PAGE_CURSOR_VERSION: u8 = 2;
+const PAGE_CURSOR_BINDING_CONTEXT: &str = "lait.issues.page-continuation.v2";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageContinuation {
+    version: u8,
+    publication: runtime::publication::WorldPublicationId,
+    cursor: String,
+    binding: [u8; 32],
+}
+
+fn page_cursor_binding(
+    publication: runtime::publication::WorldPublicationId,
+    cursor: &str,
+) -> Option<[u8; 32]> {
+    let material = postcard::to_stdvec(&(PAGE_CURSOR_VERSION, publication, cursor)).ok()?;
+    Some(blake3::derive_key(PAGE_CURSOR_BINDING_CONTEXT, &material))
+}
+
+/// Wrap one Runtime continuation in the exact portable publication that
+/// produced it. The representation remains deliberately opaque to clients.
+pub fn encode_page_cursor(
+    publication: runtime::publication::WorldPublicationId,
+    cursor: String,
+) -> Option<String> {
+    if cursor.is_empty() {
+        return None;
+    }
+    let continuation = PageContinuation {
+        version: PAGE_CURSOR_VERSION,
+        publication,
+        binding: page_cursor_binding(publication, &cursor)?,
+        cursor,
+    };
+    let bytes = postcard::to_stdvec(&continuation).ok()?;
+    (bytes.len() <= 12 * 1_024).then(|| data_encoding::BASE64URL_NOPAD.encode(&bytes))
+}
+
+/// Decode an Issues continuation and reject alternate encodings. The inner
+/// Runtime cursor is returned only to product code; clients never learn its
+/// transport representation.
+pub fn decode_page_cursor(
+    encoded: &str,
+) -> Option<(runtime::publication::WorldPublicationId, String)> {
+    let bytes = data_encoding::BASE64URL_NOPAD
+        .decode(encoded.as_bytes())
+        .ok()?;
+    if data_encoding::BASE64URL_NOPAD.encode(&bytes) != encoded {
+        return None;
+    }
+    let continuation: PageContinuation = postcard::from_bytes(&bytes).ok()?;
+    if continuation.version != PAGE_CURSOR_VERSION
+        || continuation.cursor.is_empty()
+        || continuation.binding
+            != page_cursor_binding(continuation.publication, &continuation.cursor)?
+        || postcard::to_stdvec(&continuation).ok()? != bytes
+    {
+        return None;
+    }
+    Some((continuation.publication, continuation.cursor))
+}
+
+/// Exact coordinate selected by a continuation, for the application router.
+pub fn page_publication(request: &PageRequest) -> Option<runtime::publication::WorldPublicationId> {
+    request
+        .cursor
+        .as_deref()
+        .and_then(decode_page_cursor)
+        .map(|(publication, _)| publication)
+}
+
+/// Uniform response envelope for every collection whose cardinality is not
+/// proven by a product singleton bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Page<T> {
+    pub publication: runtime::publication::WorldPublicationId,
+    pub items: Vec<T>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_total: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssueDetailPages {
+    pub comments: PageRequest,
+    pub reactions: PageRequest,
+    pub attachments: PageRequest,
+    pub checks: PageRequest,
+    pub outgoing_relations: PageRequest,
+    pub incoming_relations: PageRequest,
+}
+
+impl Default for IssueDetailPages {
+    fn default() -> Self {
+        Self {
+            comments: PageRequest::default(),
+            reactions: PageRequest::default(),
+            attachments: PageRequest::default(),
+            checks: PageRequest::default(),
+            outgoing_relations: PageRequest::default(),
+            incoming_relations: PageRequest::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueDetailProjection {
+    pub publication: runtime::publication::WorldPublicationId,
+    pub issue: crate::dto::IssueView,
+    pub comments: Page<crate::dto::CommentDto>,
+    pub reactions: Page<crate::records::ReactionRecord>,
+    pub attachments: Page<crate::dto::AttachmentMetaDto>,
+    pub checks: Page<crate::dto::CheckDto>,
+    pub outgoing_relations: Page<crate::dto::IssueRelationDto>,
+    pub incoming_relations: Page<crate::dto::IssueRelationDto>,
+}
+
+/// One exact label record at the query publication. A tombstoned label is
+/// represented by `None` so consumers can remove it without treating an
+/// arbitrary first registry page as the complete label universe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelProjection {
+    pub publication: runtime::publication::WorldPublicationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<crate::dto::LabelDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleSummary {
+    pub role_id: String,
+    pub built_in: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflict_heads: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleProjection {
+    pub summary: RoleSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<crate::views::StoredRoleRevision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowProjection {
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<crate::workflow::WorkflowRevision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflict_heads: Vec<String>,
+}
+
 /// The product queries (read the committed snapshot; derive projections).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum IssueQuery {
-    /// The full catalog snapshot the daemon derives refs/aliases and
-    /// choose-project from.
-    Snapshot,
+    /// Migrator-package-only, constant-footprint lifecycle proof. This reads
+    /// only the v4 migration marker and its retained audit tail; it never
+    /// projects Catalog, Issues, Specs, or Baselines.
+    V4MigrationStatus,
     /// Report which current Blueprint records still depend on compatibility
     /// readers instead of the structures this implementation writes natively.
     StructureStatus,
+    /// Resolve one human selector through exact, publication-pinned Corpus
+    /// facts. This is the shared selector primitive used by human adapters and
+    /// agent ChangeSets; it never hydrates a tracker-wide catalog.
+    Resolve {
+        entity: ResolveEntity,
+        selector: String,
+        #[serde(default)]
+        project: Option<String>,
+    },
     View {
         doc: String,
         /// The viewer's actor (for `assignee_summary`), if known.
         me: Option<String>,
+    },
+    /// One bounded issue summary plus independently continued enrichment
+    /// sections, all evaluated against this query's one exact publication.
+    Detail {
+        doc: String,
+        me: Option<String>,
+        pages: IssueDetailPages,
     },
     List {
         project: Option<String>,
@@ -1549,22 +2143,12 @@ pub enum IssueQuery {
         mine: Option<String>,
         all: bool,
         me: Option<String>,
+        page: PageRequest,
     },
     Board {
         project: String,
         me: Option<String>,
-    },
-    Graph {
-        doc: String,
-        me: Option<String>,
-    },
-    /// A whole project's structure at once — every direct edge and parent link
-    /// between its live issues. `Graph` answers this one issue at a time, which
-    /// a detail rail wants and a chart cannot use: laying a project out by
-    /// dependency depth needs the edges together, and per-issue is N round
-    /// trips for a graph the catalog holds whole.
-    ProjectGraph {
-        project: String,
+        page: PageRequest,
     },
     /// Compile Plan morphology from canonical Issue facts at this query's one
     /// pinned World generation. `roots` are canonical `iss_` document ids; an
@@ -1573,19 +2157,60 @@ pub enum IssueQuery {
         project: String,
         #[serde(default)]
         roots: Vec<String>,
+        /// Optional bounded artifact page. Absence returns only readiness and
+        /// summary; no query can accidentally serialize the full graph.
+        #[serde(default)]
+        page: Option<crate::geometry::GeometryPageRequest>,
     },
     History {
         doc: String,
+        page: PageRequest,
     },
-    Projects,
+    /// One direction of the issue's durable relation/containment neighborhood.
+    /// Directions page independently so a high-degree node remains bounded.
+    Relations {
+        doc: String,
+        direction: crate::dto::RelationDirection,
+        page: PageRequest,
+    },
+    /// Immutable comments, oldest first. Reactions are a separate tuple page.
+    Comments {
+        doc: String,
+        page: PageRequest,
+    },
+    Reactions {
+        doc: String,
+        page: PageRequest,
+    },
+    Attachments {
+        doc: String,
+        page: PageRequest,
+    },
+    Checks {
+        doc: String,
+        page: PageRequest,
+    },
+    Projects {
+        page: PageRequest,
+    },
     /// A project's status-update feed, newest first (SCOPE-1).
     ProjectUpdates {
         project: String,
+        page: PageRequest,
     },
-    Labels,
+    Labels {
+        page: PageRequest,
+    },
+    /// Hydrate one label by stable id for operation-correlated terminal
+    /// reconciliation. This is a unique indexed seek, never a registry scan.
+    Label {
+        label: String,
+    },
     /// Every role definition: built-ins plus custom heads (with conflict
     /// head lists).
-    Roles,
+    Roles {
+        page: PageRequest,
+    },
     RoleShow {
         role: String,
     },
@@ -1603,15 +2228,14 @@ pub enum IssueQuery {
     /// A token built from `(ts, doc, entry id)` names the row itself, and an
     /// entry id survives trimming because it never described a position.
     Activity {
-        since: Option<String>,
+        page: PageRequest,
     },
-    /// The addressed-to-you inbox, derived in ONE pass over the committed
-    /// snapshot: recent events on issues assigned to `actor`, excluding
-    /// events authored by `exclude_device` (a device's own edits are not its
-    /// inbox), newest first, bounded.
+    /// The authenticated principal's addressed-to-you inbox. Identity is
+    /// derived from the outer Runtime action; clients cannot select another
+    /// actor under the ordinary read demand.
     Inbox {
-        actor: String,
         exclude_device: Option<String>,
+        page: PageRequest,
     },
     /// A project's workflow revision head(s).
     Workflow {
@@ -1620,51 +2244,40 @@ pub enum IssueQuery {
     /// Every Spec, optionally restricted to one project.
     Specs {
         project: Option<String>,
+        page: PageRequest,
     },
     /// One Spec including its current heads and issued coordinate.
     Spec {
         spec: String,
     },
-    /// Every revision of one Spec, with its predecessors and its body.
-    ///
-    /// The whole DAG, not a page of it: a client cannot show which revision
-    /// governs, compare two heads, or find their common ancestor from a view
-    /// that only ever carries the newest body — and a Spec's history is bounded
-    /// by how often people revise a document, not by machine traffic.
+    /// One bounded immutable-revision page of a Spec/Plan DAG.
     SpecHistory {
         spec: String,
+        page: PageRequest,
     },
     /// Every Baseline, optionally restricted to one project.
     Baselines {
         project: Option<String>,
+        page: PageRequest,
     },
     /// One Baseline including its current heads.
     Baseline {
         baseline: String,
     },
-    /// Every revision of one Baseline — the same argument as [`Self::SpecHistory`],
-    /// and additionally what a pre-issue compare of member sets reads.
+    /// One bounded immutable-revision page of a Baseline DAG.
     BaselineHistory {
         baseline: String,
+        page: PageRequest,
     },
-    /// Every typed Link asserted anywhere in scope, with the standing of the
-    /// revision asserting it.
-    ///
-    /// The whole edge set rather than one document's neighbourhood: incoming
-    /// edges cannot be derived from the target, coverage is a question about all
-    /// of them at once, and answering either one document at a time is a query
-    /// per row. Bounded by revisions × links, which is the same order the Packet
-    /// derivation already walks.
+    /// One bounded page of typed Links asserted in scope.
     SpecReferences {
         project: Option<String>,
+        page: PageRequest,
     },
-    /// Every Observation filed in a project, in both directions at once.
-    ///
-    /// Project-wide for the same reason the references are: a note names a
-    /// subject and a target, so "what has anyone noticed about this document"
-    /// is only answerable by reading the sets of documents other than it.
+    /// One bounded page of Observation assertions/retractions in scope.
     SpecObservations {
         project: Option<String>,
+        page: PageRequest,
     },
     /// The deterministic effective brief for one Issue.
     Packet {
@@ -1673,31 +2286,53 @@ pub enum IssueQuery {
     /// A project's milestones with derived progress (SCOPE-1).
     Milestones {
         project: String,
+        page: PageRequest,
     },
     /// A project's cycles with derived counts (BOARD-11).
     Cycles {
         project: String,
+        page: PageRequest,
     },
     /// Every live initiative with its derived roll-up (SCOPE-8).
-    Initiatives,
+    Initiatives {
+        page: PageRequest,
+    },
     /// Every live team with its owned projects (GOV-7).
-    Teams,
+    Teams {
+        page: PageRequest,
+    },
     /// The triage intake queue, pending first (SCOPE-7).
-    Triage,
+    Triage {
+        page: PageRequest,
+    },
     /// One attachment's full record including the payload (CREATE-5).
     Attachment {
         doc: String,
         id: String,
     },
-    /// Everything the doorbell needs to describe one ring, read at ONE pinned
-    /// snapshot: a digest per catalog plane, and the doc→project index.
-    ///
-    /// The World answers this because the World owns the catalog's schema — it
-    /// is the only thing that knows a "milestone" is a plane and which project
-    /// it belongs to. The daemon compares digests between rings and never learns
-    /// what any of them mean. Both halves come from one query so they cannot
-    /// describe two different roots.
-    RingDigest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveEntity {
+    Issue,
+    Project,
+    Label,
+    Milestone,
+    Cycle,
+    Initiative,
+    Team,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedEntity {
+    pub id: String,
+    /// Stable human rendering. For Issues this is the full collision-safe
+    /// alias; for other entities it is their canonical id or key.
+    pub display: String,
+    #[serde(default)]
+    pub record: serde_json::Value,
 }
 
 /// A bounded audit of Blueprint's current structural representation.
@@ -1724,44 +2359,65 @@ pub struct StructureReport {
     pub plans_without_roots: u64,
     pub issue_documents_pending: u64,
     pub baselines: u64,
+    /// Durable v3 -> v4 cursor and audit-tail verification. Present only in
+    /// the separately installed migrator implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationVerification>,
     pub complete: bool,
 }
 
-/// One catalog plane and the digest of its committed contents.
+/// Bounded proof that the migrator's mutable cursor and immutable audit tail
+/// describe the same completed batch. The lifecycle host requires this proof
+/// before it may activate the preferred v4 implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PlaneDigest {
-    /// Nested rather than flattened: `flatten` does not compose with
-    /// `deny_unknown_fields`, and silently produces a decoder that rejects
-    /// perfectly good input — which is how a "fail visibly" contract turns into
-    /// a doorbell that reports nothing at all.
-    pub plane: crate::dto::CatalogScope,
-    pub digest: String,
+pub struct MigrationVerification {
+    pub batch: u64,
+    pub cursor: String,
+    pub marker_complete: bool,
+    pub audit_records: u64,
+    pub audit_tail_complete: bool,
+    pub audit_tail_matches: bool,
+    /// Every source admitted by the preferred extractor has a deterministic
+    /// migrator phase. End-of-enumerator alone is never completion.
+    pub source_coverage_complete: bool,
+    /// The cursor enumerated one immutable source publication rather than the
+    /// changing migration head. Until Runtime supplies that exact-source
+    /// lifecycle capability, completion must remain pending.
+    pub source_snapshot_pinned: bool,
+    /// Portable semantic publication and causal frontier retained by the
+    /// generic lifecycle host. A later Contact extension is compared against
+    /// this cut and re-enters the consented migrator instead of becoming
+    /// silently invisible under preferred v4.
+    pub source_publication: runtime::publication::PublicationId,
+    pub source_frontier: replica::frontier::ReplicaFrontier,
 }
 
-/// One doc and the project it belongs to, as the ring index names it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RingDoc {
-    pub doc: String,
-    pub project_id: String,
-    pub project_key: String,
+impl MigrationVerification {
+    pub fn verified(&self) -> bool {
+        self.marker_complete
+            && self.audit_records > 0
+            && self.audit_tail_complete
+            && self.audit_tail_matches
+            && self.source_coverage_complete
+            && self.source_snapshot_pinned
+    }
 }
 
-/// The reply to [`IssueQuery::RingDigest`] — everything the doorbell needs to
-/// describe one ring, read at ONE pinned snapshot.
-///
-/// A typed contract on purpose. This used to be hand-built `serde_json::Value`
-/// parsed permissively on the other side, which meant a plane the daemon could
-/// not understand was silently skipped — and a plane that never fires is exactly
-/// the failure this whole dirty-set exists to prevent. Now a malformed or
-/// unrecognised plane fails the decode, and the daemon rings coarsely and
-/// visibly rather than quietly dropping it.
+/// Publication-pinned, bounded geometry response. The compact artifact never
+/// crosses the World boundary wholesale; callers receive its readiness,
+/// constant-size summary, and at most one explicitly requested page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RingDigestView {
-    pub planes: Vec<PlaneDigest>,
-    pub docs: Vec<RingDoc>,
+pub struct GeometryProjection {
+    pub key: crate::geometry::GeometryArtifactKey,
+    pub source: runtime::publication::WorldPublicationId,
+    pub estimate: crate::geometry::GeometryEstimate,
+    pub readiness: crate::geometry::GeometryReadiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<crate::geometry::GeometrySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<crate::geometry::GeometryPage>,
 }
 
 impl IssueQuery {
@@ -1821,6 +2477,9 @@ pub struct IssueEffect {
     /// Whether the intent was an idempotent no-op (nothing staged).
     #[serde(default)]
     pub unchanged: bool,
+    /// Ordered per-operation effects for [`IssueIntent::ChangeSet`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<ChangeResult>,
 }
 
 impl IssueEffect {
@@ -1870,6 +2529,22 @@ pub struct IssueEvent {
     /// cannot be, because trimming the log renumbers every event behind it.
     #[serde(skip)]
     pub entry: String,
+}
+
+impl IssueEvent {
+    /// Product notification class for events that enter an addressed inbox.
+    /// Keeping this normalization beside the durable event prevents the
+    /// writer and extractor from disagreeing about which events need bounded
+    /// recipient facts.
+    pub fn inbox_kind(&self) -> Option<&'static str> {
+        match self.k.as_str() {
+            "assigned" => Some("assigned"),
+            "commented" => Some("comment"),
+            "started" | "finished" | "stopped" => Some("status"),
+            "edited" if self.c.iter().any(|change| change.f == "status") => Some("status"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1958,55 +2633,6 @@ pub fn default_workflow() -> Vec<serde_json::Value> {
 }
 
 #[cfg(test)]
-mod ring_digest_tests {
-    use super::*;
-    use crate::dto::CatalogScope;
-
-    /// The contract must survive its own serializer.
-    ///
-    /// This exists because it did not. An earlier shape used `#[serde(flatten)]`
-    /// to merge the project into a scope and `deny_unknown_fields` to make an
-    /// unknown plane loud — a combination serde does not support, which produced
-    /// a decoder that rejected the encoder's own output. Every doorbell went out
-    /// empty and every test that asserted a dirty-set failed at once. A
-    /// "fail visibly" contract is only worth having if valid input survives it.
-    #[test]
-    fn a_ring_digest_survives_its_own_round_trip() {
-        let view = RingDigestView {
-            planes: vec![
-                PlaneDigest {
-                    plane: CatalogScope::Labels,
-                    digest: "abc".into(),
-                },
-                PlaneDigest {
-                    plane: CatalogScope::Boards {
-                        project_id: "prj_1".into(),
-                        project_key: "ENG".into(),
-                    },
-                    digest: "def".into(),
-                },
-            ],
-            docs: vec![RingDoc {
-                doc: "iss_1".into(),
-                project_id: "prj_1".into(),
-                project_key: "ENG".into(),
-            }],
-        };
-        let bytes = serde_json::to_vec(&view).expect("encode");
-        let back: RingDigestView = serde_json::from_slice(&bytes).expect("decode its own output");
-        assert_eq!(view, back);
-    }
-
-    /// And a plane this build does not know must fail LOUDLY rather than be
-    /// skipped — a silently dropped plane is a resource that never refreshes.
-    #[test]
-    fn an_unknown_plane_fails_the_decode() {
-        let json = br#"{"planes":[{"plane":{"scope":"from_the_future"},"digest":"x"}],"docs":[]}"#;
-        assert!(serde_json::from_slice::<RingDigestView>(json).is_err());
-    }
-}
-
-#[cfg(test)]
 mod verify_contract_tests {
     use super::*;
 
@@ -2029,6 +2655,84 @@ mod verify_contract_tests {
         assert_ne!(pass.digest().unwrap(), other_report.digest().unwrap());
         assert_ne!(pass.digest().unwrap(), other_size.digest().unwrap());
         assert!(verify_candidate("unknown", report(1), 100).is_none());
+    }
+}
+
+#[cfg(test)]
+mod product_bound_tests {
+    use super::*;
+
+    #[test]
+    fn issue_and_entity_text_bounds_are_utf8_byte_bounds() {
+        assert!(valid_title("a"));
+        assert!(!valid_title("   "));
+        assert!(valid_title(&"x".repeat(MAX_TITLE_BYTES)));
+        assert!(!valid_title(&"é".repeat(MAX_TITLE_BYTES)));
+        assert!(valid_name(&"n".repeat(MAX_NAME_BYTES)));
+        assert!(!valid_name(&"n".repeat(MAX_NAME_BYTES + 1)));
+        assert!(valid_text(&"x".repeat(MAX_TEXT_BYTES)));
+        assert!(!valid_text(&"x".repeat(MAX_TEXT_BYTES + 1)));
+    }
+
+    #[test]
+    fn page_continuation_pins_the_complete_world_publication() {
+        let publication = runtime::publication::WorldPublicationId::new(
+            runtime::publication::PublicationId::new(
+                [1; 32],
+                [2; 32],
+                runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
+            ),
+            runtime::publication::MaterializationId::from_u64(7).unwrap(),
+        );
+        let encoded = encode_page_cursor(publication, "runtime-cursor".into()).unwrap();
+        assert_eq!(
+            decode_page_cursor(&encoded),
+            Some((publication, "runtime-cursor".into()))
+        );
+        assert_eq!(
+            page_publication(&PageRequest {
+                limit: 10,
+                cursor: Some(encoded.clone()),
+            }),
+            Some(publication)
+        );
+
+        let mut tampered = encoded.into_bytes();
+        let last = tampered.last_mut().unwrap();
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        assert!(decode_page_cursor(std::str::from_utf8(&tampered).unwrap()).is_none());
+    }
+
+    #[test]
+    fn migration_window_cursor_rejects_body_and_subitem_tampering() {
+        let body = BodyKey::new(world_id(), BodyId::from_bytes([0x41; 16]));
+        let cursor = V4MigrationWindow::render_cursor("issue", Some(&body), "21:comment:list:0")
+            .expect("canonical migration cursor");
+        let window = V4MigrationWindow {
+            phase: "issue".into(),
+            body: Some(body.clone()),
+            subitem: "21:comment:list:0".into(),
+            digest: [0x42; 32],
+            cursor: cursor.clone(),
+        };
+        assert!(window.valid());
+
+        let mut wrong_body = window.clone();
+        wrong_body.body = Some(BodyKey::new(world_id(), BodyId::from_bytes([0x43; 16])));
+        assert!(!wrong_body.valid());
+
+        let mut wrong_subitem = window.clone();
+        wrong_subitem.subitem = "21:comment:list:1".into();
+        assert!(!wrong_subitem.valid());
+
+        let mut wrong_digest = window;
+        wrong_digest.digest = [0; 32];
+        assert!(!wrong_digest.valid());
+
+        let parsed = V4MigrationWindow::parse_cursor(&cursor).expect("round trip cursor");
+        assert_eq!(parsed.0, "issue");
+        assert_eq!(parsed.1, Some(body.body));
+        assert_eq!(parsed.2, "21:comment:list:0");
     }
 }
 

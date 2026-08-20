@@ -138,6 +138,15 @@ class AstrolabeMenuBar extends StatelessWidget {
                   ),
                   onSelected: summonBook,
                 ),
+                PlatformMenuItem(
+                  label: 'Chat',
+                  shortcut: const SingleActivator(
+                    LogicalKeyboardKey.keyM,
+                    meta: true,
+                    shift: true,
+                  ),
+                  onSelected: summonCorrespondence,
+                ),
               ],
             ),
             PlatformMenuItemGroup(

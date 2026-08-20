@@ -767,6 +767,7 @@ mod end_to_end {
             projects: Vec::new(),
         };
         let app = Arc::new(App {
+            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
             head: crate::serve::head::Source::embedded(),
             selection: crate::config::Selection::default(),
             guard: Guard::new(TOKEN.into(), 7717),

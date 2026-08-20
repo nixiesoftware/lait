@@ -107,20 +107,37 @@ impl World for SignageWorld {
         let query: SignageQuery =
             serde_json::from_slice(&query.payload).map_err(|_| Rejection::InvalidRequest)?;
         let projection = match query {
-            SignageQuery::Program { program } => SignageProjection::Program {
-                program: contract::body_key(&program)
-                    .and_then(|key| ctx.read_body(&key))
-                    .and_then(|bytes| serde_json::from_slice::<SignageProgram>(&bytes).ok())
-                    .filter(SignageProgram::validate),
-            },
+            SignageQuery::Program { program } => {
+                let program = match contract::body_key(&program)
+                    .map(|key| ctx.read_body(&key))
+                    .transpose()?
+                    .flatten()
+                {
+                    None => None,
+                    Some(bytes) => {
+                        let program = serde_json::from_slice::<SignageProgram>(&bytes)
+                            .map_err(|_| Rejection::StateCorrupt)?;
+                        if !program.validate() {
+                            return Err(Rejection::StateCorrupt);
+                        }
+                        Some(program)
+                    }
+                };
+                SignageProjection::Program { program }
+            }
             SignageQuery::Programs => {
-                let mut programs = ctx
-                    .bodies_with_schema(&self.id, &contract::program_schema())
-                    .into_iter()
-                    .filter_map(|key| ctx.read_body(&key))
-                    .filter_map(|bytes| serde_json::from_slice::<SignageProgram>(&bytes).ok())
-                    .filter(SignageProgram::validate)
-                    .collect::<Vec<_>>();
+                let mut programs = Vec::new();
+                for key in ctx.bodies_with_schema(&self.id, &contract::program_schema()) {
+                    let Some(bytes) = ctx.read_body(&key)? else {
+                        continue;
+                    };
+                    let program = serde_json::from_slice::<SignageProgram>(&bytes)
+                        .map_err(|_| Rejection::StateCorrupt)?;
+                    if !program.validate() {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    programs.push(program);
+                }
                 programs
                     .sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
                 SignageProjection::Programs { programs }
@@ -131,6 +148,7 @@ impl World for SignageWorld {
             schema_version: contract::PROGRAM_SCHEMA_VERSION,
             bytes: serde_json::to_vec(&projection).map_err(|_| Rejection::ContractViolation)?,
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
             demand: contract::demand_read(),
         })
     }

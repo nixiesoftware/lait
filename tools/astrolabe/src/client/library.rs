@@ -42,6 +42,11 @@ pub struct WorldStanding {
     /// A newer bundle exists that this build cannot run, each unmet
     /// requirement named. Not actionable, and deliberately not `behind`.
     pub unmet: Option<Vec<String>>,
+    /// The durable native update operation, when consent has been recorded.
+    pub operation: Option<String>,
+    pub phase: Option<String>,
+    pub progress: Option<String>,
+    pub message: Option<String>,
 }
 
 /// What the daemon has learned about each World this build ships.
@@ -64,6 +69,20 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
         .filter_map(|package| {
             let world = package.world().as_str().to_string();
             let standing = lait::update::world::standing(&worlds, &world)?;
+            let upgrade = lait::update::consent::load(&worlds, &world).ok().flatten();
+            let progress = upgrade.as_ref().map(|job| {
+                if let Some(remaining) = job.remaining_records {
+                    format!(
+                        "{} records completed, {remaining} remaining",
+                        job.completed_records
+                    )
+                } else {
+                    format!(
+                        "{} of {} Spaces completed",
+                        job.completed_spaces, job.total_spaces
+                    )
+                }
+            });
             Some((
                 world,
                 WorldStanding {
@@ -71,6 +90,10 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
                     serving: standing.serving,
                     available: standing.channel,
                     unmet: standing.unmet,
+                    operation: upgrade.as_ref().map(|job| job.operation_hex()),
+                    phase: upgrade.as_ref().map(|job| job.phase.as_str().to_owned()),
+                    progress,
+                    message: upgrade.and_then(|job| job.message),
                 },
             ))
         })

@@ -65,26 +65,28 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(async {
-        let space = lait::orbital::discover_space(home)
-            .single()
-            .expect("test Space");
-        let call = issues_app::encode_call(&request)?;
-        let reply = lait::control::call_world(
-            home,
-            ControlRoute::World {
-                address: OrbitAddress::for_store(home, space),
-                world: call.world().as_str().to_string(),
-            },
-            call.clone(),
-            None,
-        )
-        .await?;
-        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
-            &call, reply,
-        )?)?)
-    })
-    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(async {
+            let space = lait::orbital::discover_space(home)
+                .single()
+                .expect("test Space");
+            let call = issues_app::encode_call(&request)?;
+            let reply = lait::control::call_world(
+                home,
+                ControlRoute::World {
+                    address: OrbitAddress::for_store(home, space),
+                    world: call.world().as_str().to_string(),
+                },
+                call.clone(),
+                None,
+            )
+            .await?;
+            Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+                &call, reply,
+            )?)?)
+        })
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -168,10 +170,22 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
             body: Some("the sealed body".into()),
         },
     );
-    assert!(
-        matches!(&resp, IssueResponse::Ref { reff } if reff == "CORE-1"),
-        "{resp:?}"
+    let IssueResponse::Ref { reff: issue_ref } = resp else {
+        panic!("issue creation did not return its stable reference: {resp:?}");
+    };
+    assert!(issue_ref.starts_with("CORE-"), "{issue_ref}");
+
+    // Inbox recipients are immutable causal event facts. Establish the
+    // founder's assignment before the joiner authors its later comment; a
+    // subsequent assignment must not retroactively rewrite that event.
+    let resp = issue_req(
+        &client,
+        &founder_home,
+        issues_app::IssuesRequest::IssueStart {
+            reff: issue_ref.clone(),
+        },
     );
+    assert!(!matches!(resp, IssueResponse::Error { .. }), "{resp:?}");
 
     // The founder mints an auto-approving invite link (Coordinates v1).
     let resp = req(
@@ -253,7 +267,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         &client,
         &joiner_home,
         issues_app::IssuesRequest::IssueView {
-            reff: "CORE-1".into(),
+            reff: issue_ref.clone(),
         },
     );
     let IssueResponse::Issue(view) = resp else {
@@ -272,7 +286,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         &joiner_home,
         issues_app::IssuesRequest::Comment {
             reply_to: None,
-            reff: "CORE-1".into(),
+            reff: issue_ref.clone(),
             body: "joined over the socket".into(),
         },
     );
@@ -287,12 +301,15 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         match issue_req(
             &client,
             &founder_home,
-            issues_app::IssuesRequest::IssueView {
-                reff: "CORE-1".into(),
+            issues_app::IssuesRequest::IssueComments {
+                reff: issue_ref.clone(),
+                publication: None,
+                page: issues::contract::PageRequest::default(),
             },
         ) {
-            IssueResponse::Issue(v)
-                if v.comments
+            IssueResponse::Comments { page }
+                if page
+                    .items
                     .iter()
                     .any(|c| c.body == "joined over the socket") =>
             {
@@ -306,25 +323,22 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         "the joiner's comment never converged back to the founder"
     );
 
-    // Inbox reconstruction (plan 04): the founder assigns itself by starting
-    // the issue, so the JOINER's converged comment is addressed to it — the
-    // inbox is a pure projection over the synced state, rebuilt from query.
-    let resp = issue_req(
-        &client,
-        &founder_home,
-        issues_app::IssuesRequest::IssueStart {
-            reff: "CORE-1".into(),
-        },
-    );
-    assert!(!matches!(resp, IssueResponse::Error { .. }), "{resp:?}");
+    // Inbox reconstruction (plan 04): the joiner's comment was authored after
+    // the founder's assignment above, so its immutable recipient set includes
+    // the founder and the inbox remains a pure query projection.
     let inboxed = poll_until(Duration::from_secs(10), || {
         match issue_req(
             &client,
             &founder_home,
-            issues_app::IssuesRequest::Inbox { watermark: 0 },
+            issues_app::IssuesRequest::Inbox {
+                watermark: 0,
+                page: issues::contract::PageRequest::default(),
+                publication: None,
+            },
         ) {
-            IssueResponse::Inbox { entries, .. }
-                if entries
+            IssueResponse::Inbox { page, .. }
+                if page
+                    .items
                     .iter()
                     .any(|e| e.kind == "comment" && e.detail == "joined over the socket") =>
             {

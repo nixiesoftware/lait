@@ -1,6 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
+import { LaitError } from "./api";
+import { loadBoardScroll, saveBoardScroll } from "./core/boardState";
 import { projectKeys, ProjectViewerStore } from "./projectStore";
-import type { BoardView, Response, Row, SpaceDoorbell, SpecLink } from "./types";
+import type {
+  BoardView,
+  Page,
+  Response,
+  Row,
+  SpaceDoorbell,
+  SpecLink,
+  WorkflowState,
+  WorldRequest,
+} from "./types";
+
+const publication = {
+  publication: {
+    manifest_root: Array(32).fill(1),
+    implementation_digest: Array(32).fill(2),
+    extractor_schema_digest: Array(32).fill(3),
+  },
+  materialization: 1,
+};
+const acceptedPublication = {
+  publication: {
+    manifest_root: Array(32).fill(9),
+    implementation_digest: Array(32).fill(2),
+    extractor_schema_digest: Array(32).fill(3),
+  },
+  materialization: 2,
+};
+const page = <T,>(items: T[]): Page<T> => ({ publication, items });
 
 const row: Row = {
   reff: "iss_1",
@@ -26,9 +55,210 @@ const board: BoardView & { kind: "board" } = {
   }],
 };
 
+const boardResponse = (view: BoardView): Response => ({
+  kind: "board",
+  schema_version: view.schema_version,
+  project: view.project,
+  workflow: view.columns.map((column) => column.state),
+  rows: page(view.columns.flatMap((column) => column.rows)),
+});
+
+const changeSetResponse = (request: { cmd: string }): Response => ({
+  kind: "change_set",
+  results: [],
+  receipt: {
+    operation: (request as { operation?: string }).operation ?? "00".repeat(16),
+    phase: "accepted",
+    publication: acceptedPublication,
+  },
+});
+
 describe("ProjectViewerStore", () => {
+  it("keeps one operation continuous through arbitrary Board latency and typed rollback", async () => {
+    const operation = "11".repeat(16);
+    const secondOperation = "22".repeat(16);
+    const thirdOperation = "33".repeat(16);
+    const committedPublication = {
+      publication: {
+        manifest_root: Array(32).fill(4),
+        implementation_digest: Array(32).fill(2),
+        extractor_schema_digest: Array(32).fill(3),
+      },
+      materialization: 2,
+    };
+    const done: WorkflowState = {
+      id: "done",
+      name: "Done",
+      category: "done",
+      color: "green",
+    };
+    const other: Row = { ...row, reff: "iss_2", doc_id: "doc_2", key_alias: "ONE-2", title: "Second" };
+    let authoritative = false;
+    let refreshFirst!: (response: Response) => void;
+    let finishMutation!: (response: Response) => void;
+    let failMutation!: (error: unknown) => void;
+    let mutation = new Promise<Response>((resolve, reject) => {
+      finishMutation = resolve;
+      failMutation = reject;
+    });
+    const firstBoardPage = (nextPublication = publication): Response => ({
+      kind: "board",
+      schema_version: 3,
+      project: board.project,
+      workflow: [board.columns[0]!.state, done],
+      rows: { publication: nextPublication, items: [authoritative ? other : row], next_cursor: "next" },
+    });
+    const secondBoardPage = (nextPublication = publication): Response => ({
+      kind: "board",
+      schema_version: 3,
+      project: board.project,
+      workflow: [board.columns[0]!.state, done],
+      rows: {
+        publication: nextPublication,
+        items: [authoritative ? { ...row, status: "done" } : other],
+      },
+    });
+    const rpc = vi.fn(async (_space: string, request: WorldRequest) => {
+      if (request.cmd === "change_set") return mutation;
+      if (request.cmd !== "board") throw new Error("unexpected request");
+      if (request.page?.cursor) {
+        return secondBoardPage(authoritative ? committedPublication : publication);
+      }
+      if (!authoritative) return firstBoardPage();
+      return new Promise<Response>((resolve) => { refreshFirst = resolve; });
+    });
+    const ids = [operation, operation, secondOperation, thirdOperation];
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => ids.shift()!);
+    await store.ensureBoard("local", "ONE");
+    await store.loadMoreBoard("local", "ONE");
+    const boardKey = projectKeys.board("local", "ONE");
+    const rawBefore = store.resources.read<BoardView>(boardKey).data;
+    const selected = other.reff;
+    saveBoardScroll("prj_1", 347);
+    const unsubscribe = store.resources.subscribe(boardKey, () => undefined);
+
+    const pending = store.beginBoardChange("local", "ONE", row.doc_id, row.reff, "done", null);
+    expect(pending.operation).toBe(operation);
+    expect(store.operation("local", operation)?.phase).toBe("sending");
+    expect(store.selectBoard("local", "ONE")?.columns[1]?.rows[0]?.doc_id).toBe(row.doc_id);
+    expect(store.resources.read<BoardView>(boardKey).data).toBe(rawBefore);
+    await Promise.resolve();
+    expect(store.operation("local", operation)?.phase).toBe("sending");
+    expect(selected).toBe(other.reff);
+    expect(loadBoardScroll("prj_1")).toBe(347);
+
+    finishMutation({
+      kind: "change_set",
+      results: [{ operation: 0, kind: "issue", id: row.doc_id }],
+      receipt: { operation, phase: "accepted", publication: committedPublication },
+    });
+    await pending.completion;
+    expect(store.operation("local", operation)?.phase).toBe("accepted");
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+
+    authoritative = true;
+    const ringing = store.handleDoorbell({
+      space: "local",
+      epoch: 1,
+      seq: 1,
+      reset: false,
+      invalidations: [{
+        world: "com.lait.issues",
+        dirty: [{ kind: "project", id: "prj_1", label: "ONE", docs: [row.doc_id] }],
+        planes: [],
+      }],
+      publications: [{ world: "com.lait.issues", publication: committedPublication }],
+      change: {
+        attribution: { operation: Array(16).fill(0x11), actor: "actor", device: "device" },
+        bodies: [],
+      },
+      authority_advanced: false,
+      activity_advanced: false,
+      presence_advanced: false,
+    });
+    await Promise.resolve();
+    expect(store.resources.read<BoardView>(boardKey)).toMatchObject({
+      state: "refreshing",
+      data: rawBefore,
+    });
+    expect(store.operation("local", operation)?.phase).toBe("accepted");
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+    expect(selected).toBe(other.reff);
+    expect(loadBoardScroll("prj_1")).toBe(347);
+    refreshFirst(firstBoardPage(committedPublication));
+    await ringing;
+    expect(store.operation("local", operation)).toMatchObject({
+      phase: "committed",
+      publication: committedPublication,
+    });
+    expect(store.overlay.has(row.doc_id)).toBe(false);
+    expect(store.resources.read<BoardView>(boardKey).data?.columns.flatMap((column) => column.rows))
+      .toEqual([other, { ...row, status: "done" }]);
+    expect(selected).toBe(other.reff);
+    expect(loadBoardScroll("prj_1")).toBe(347);
+
+    mutation = Promise.resolve({
+      kind: "change_set",
+      results: [{ operation: 0, kind: "issue", id: row.doc_id }],
+      receipt: { operation, phase: "accepted", publication: committedPublication },
+    });
+    const replay = store.beginBoardChange("local", "ONE", row.doc_id, row.reff, "done", null);
+    expect(replay.operation).toBe(operation);
+    expect(store.operation("local", operation)?.phase).toBe("sending");
+    await replay.completion;
+    expect(store.operation("local", operation)?.phase).toBe("committed");
+
+    mutation = new Promise<Response>((resolve, reject) => {
+      finishMutation = resolve;
+      failMutation = reject;
+    });
+    const refused = store.beginBoardChange("local", "ONE", row.doc_id, row.reff, "todo", null);
+    expect(store.operation("local", secondOperation)?.phase).toBe("sending");
+    failMutation(new LaitError("workflow transition denied", 403, "denied"));
+    const rollback = await refused.completion;
+    expect(rollback).toMatchObject({
+      operation: secondOperation,
+      phase: "rolled_back",
+      error: { kind: "denied", message: "workflow transition denied" },
+    });
+    expect(store.overlay.has(row.doc_id)).toBe(false);
+    expect(store.resources.read<BoardView>(boardKey).data?.columns.flatMap((column) => column.rows))
+      .toEqual([other, { ...row, status: "done" }]);
+    expect(selected).toBe(other.reff);
+    expect(loadBoardScroll("prj_1")).toBe(347);
+
+    mutation = new Promise<Response>((resolve, reject) => {
+      finishMutation = resolve;
+      failMutation = reject;
+    });
+    const changeSetCallsBefore = rpc.mock.calls.filter(([, request]) => request.cmd === "change_set").length;
+    const uncertain = store.beginBoardChange("local", "ONE", row.doc_id, row.reff, "todo", null);
+    expect(uncertain.operation).toBe(thirdOperation);
+    expect(store.operation("local", thirdOperation)?.phase).toBe("sending");
+    expect(store.selectBoard("local", "ONE")?.columns[0]?.rows.some((item) =>
+      item.doc_id === row.doc_id)).toBe(true);
+    failMutation(new LaitError("durable outcome unknown", 500, "indeterminate"));
+    const indeterminate = await uncertain.completion;
+    expect(indeterminate).toMatchObject({
+      operation: thirdOperation,
+      phase: "indeterminate",
+      error: { kind: "indeterminate", message: "durable outcome unknown" },
+    });
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+    expect(store.selectBoard("local", "ONE")?.columns[0]?.rows.some((item) =>
+      item.doc_id === row.doc_id)).toBe(true);
+    expect(store.resources.read<BoardView>(boardKey).data?.columns.flatMap((column) => column.rows))
+      .toEqual([other, { ...row, status: "done" }]);
+    expect(selected).toBe(other.reff);
+    expect(loadBoardScroll("prj_1")).toBe(347);
+    expect(rpc.mock.calls.filter(([, request]) => request.cmd === "change_set")).toHaveLength(
+      changeSetCallsBefore + 1,
+    );
+    unsubscribe();
+  });
+
   it("normalizes board rows and composes partial detail immediately", async () => {
-    const rpc = vi.fn(async () => board as Response);
+    const rpc = vi.fn(async () => boardResponse(board));
     const store = new ProjectViewerStore(rpc);
     await store.ensureBoard("local", "ONE");
     expect(store.selectRow("local", row.reff)).toEqual(row);
@@ -42,13 +272,266 @@ describe("ProjectViewerStore", () => {
     });
   });
 
+  it("commits a scalar operation only after its own target renders at the exact WPI", async () => {
+    const operation = "55".repeat(16);
+    const issue = {
+      schema_version: 3,
+      reff: row.reff,
+      doc_id: row.doc_id,
+      space_id: "local",
+      project_id: row.project_id,
+      project_key: "ONE",
+      key_alias: row.key_alias,
+      title: "Instant",
+      description: "",
+      status: row.status,
+      priority: row.priority,
+      assignees: [],
+      labels: [],
+      label_names: [],
+      comments: [],
+      created_by: "actor",
+      created_at: 1,
+      provisional: false,
+    };
+    const exactPage = <T,>(items: T[]): Page<T> => ({
+      publication: acceptedPublication,
+      items,
+    });
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd === "board") return boardResponse(board);
+      if (request.cmd === "change_set") return changeSetResponse(request);
+      if (request.cmd !== "issue_detail") throw new Error("unexpected request");
+      expect(request.publication).toEqual(acceptedPublication);
+      return {
+        kind: "issue_detail",
+        publication: acceptedPublication,
+        issue,
+        comments: exactPage([]),
+        reactions: exactPage([]),
+        attachments: exactPage([]),
+        checks: exactPage([]),
+        outgoing_relations: exactPage([]),
+        incoming_relations: exactPage([]),
+      };
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    // Normalize the row without subscribing to the Board resource. Terminal
+    // reconciliation must therefore render this target, not rely on a Board.
+    await store.ensureBoard("local", "ONE");
+    await store.editTitle("local", row.reff, "Instant");
+    expect(store.operation("local", operation)?.phase).toBe("accepted");
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+
+    await store.handleDoorbell({
+      space: "local",
+      epoch: 1,
+      seq: 1,
+      reset: false,
+      invalidations: [{
+        world: "com.lait.issues",
+        dirty: [{ kind: "project", id: row.project_id, label: "ONE", docs: [row.doc_id] }],
+        planes: [],
+      }],
+      publications: [{ world: "com.lait.issues", publication: acceptedPublication }],
+      change: {
+        attribution: { operation: Array(16).fill(0x55), actor: "actor", device: "device" },
+        bodies: [],
+      },
+      authority_advanced: false,
+      activity_advanced: false,
+      presence_advanced: false,
+    });
+    expect(store.operation("local", operation)).toMatchObject({
+      phase: "committed",
+      publication: acceptedPublication,
+    });
+    expect(store.overlay.has(row.doc_id)).toBe(false);
+    expect(store.selectIssueDetail("local", row.reff).issue?.title).toBe("Instant");
+  });
+
+  it("reconciles an indeterminate operation read-only without blind resubmission", async () => {
+    const operation = "66".repeat(16);
+    let readiness: "absent" | "building" | "ready" = "building";
+    const issue = {
+      schema_version: 3,
+      reff: row.reff,
+      doc_id: row.doc_id,
+      space_id: "local",
+      project_id: row.project_id,
+      project_key: "ONE",
+      key_alias: row.key_alias,
+      title: "Recovered",
+      description: "",
+      status: row.status,
+      priority: row.priority,
+      assignees: [],
+      labels: [],
+      label_names: [],
+      comments: [],
+      created_by: "actor",
+      created_at: 1,
+      provisional: false,
+    };
+    const exactPage = <T,>(items: T[]): Page<T> => ({ publication: acceptedPublication, items });
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd === "board") return boardResponse(board);
+      if (request.cmd === "change_set") {
+        throw new LaitError("durable outcome unknown", 500, "indeterminate");
+      }
+      if (request.cmd === "operation_status") {
+        return {
+          kind: "operation_status",
+          operation,
+          readiness,
+          ...(readiness === "ready" ? { publication: acceptedPublication } : {}),
+          results: [{ operation: 0, kind: "issue", id: row.doc_id }],
+        };
+      }
+      if (request.cmd === "issue_detail") {
+        expect(request.publication).toEqual(acceptedPublication);
+        return {
+          kind: "issue_detail",
+          publication: acceptedPublication,
+          issue,
+          comments: exactPage([]),
+          reactions: exactPage([]),
+          attachments: exactPage([]),
+          checks: exactPage([]),
+          outgoing_relations: exactPage([]),
+          incoming_relations: exactPage([]),
+        };
+      }
+      throw new Error("unexpected request");
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    await store.ensureBoard("local", "ONE");
+    await store.editTitle("local", row.reff, "Recovered");
+    expect(store.operation("local", operation)?.phase).toBe("indeterminate");
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+
+    const building = await store.refreshOperationStatus("local", operation);
+    expect(building).toMatchObject({ phase: "indeterminate", error: { kind: "building" } });
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+    expect(rpc.mock.calls.filter(([, request]) => request.cmd === "change_set")).toHaveLength(1);
+
+    readiness = "ready";
+    const committed = await store.refreshOperationStatus("local", operation);
+    expect(committed).toMatchObject({ phase: "committed", publication: acceptedPublication });
+    expect(store.overlay.has(row.doc_id)).toBe(false);
+    expect(store.selectIssueDetail("local", row.reff).issue?.title).toBe("Recovered");
+    expect(rpc.mock.calls.filter(([, request]) => request.cmd === "change_set")).toHaveLength(1);
+  });
+
+  it("rolls optimism back only after status proves the operation absent", async () => {
+    const operation = "77".repeat(16);
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd === "board") return boardResponse(board);
+      if (request.cmd === "change_set") {
+        throw new LaitError("durable outcome unknown", 500, "indeterminate");
+      }
+      if (request.cmd === "operation_status") {
+        return { kind: "operation_status", operation, readiness: "absent", results: [] };
+      }
+      throw new Error("unexpected request");
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    await store.ensureBoard("local", "ONE");
+    await store.editTitle("local", row.reff, "Maybe");
+    expect(store.overlay.has(row.doc_id)).toBe(true);
+    const absent = await store.refreshOperationStatus("local", operation);
+    expect(absent).toMatchObject({ phase: "rolled_back", error: { kind: "operation_absent" } });
+    expect(store.overlay.has(row.doc_id)).toBe(false);
+    expect(store.selectRow("local", row.reff)?.title).toBe(row.title);
+    expect(rpc.mock.calls.filter(([, request]) => request.cmd === "change_set")).toHaveLength(1);
+  });
+
+  it("returns the created issue id from the same accepted ChangeSet", async () => {
+    const operation = "88".repeat(16);
+    const created = "iss_created";
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd !== "change_set") throw new Error("unexpected request");
+      return {
+        kind: "change_set",
+        results: [{ operation: 0, kind: "issue", id: created }],
+        receipt: { operation, phase: "accepted", publication: acceptedPublication },
+      };
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    await expect(store.createIssue("local", {
+      project: "prj_1",
+      title: "One durable create",
+      status: "todo",
+    })).resolves.toBe(created);
+    const requests = rpc.mock.calls.map(([, request]) => request);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      cmd: "change_set",
+      operation,
+      operations: [{ op: "issue_create", title: "One durable create", status: "todo" }],
+    });
+    expect(store.operation("local", operation)).toMatchObject({
+      phase: "accepted",
+      doc: created,
+      results: [{ kind: "issue", id: created }],
+    });
+  });
+
+  it("renders an exact label target before retiring label optimism", async () => {
+    const operation = "99".repeat(16);
+    const label = { id: "lbl_exact", name: "Exact", color: "violet" };
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd === "label_list") {
+        return { kind: "labels", page: { publication: acceptedPublication, items: [] } };
+      }
+      if (request.cmd === "change_set") {
+        return {
+          kind: "change_set",
+          results: [{ operation: 0, kind: "label", id: label.id }],
+          receipt: { operation, phase: "accepted", publication: acceptedPublication },
+        };
+      }
+      if (request.cmd === "label_show") {
+        expect(request).toMatchObject({ label: label.id, publication: acceptedPublication });
+        return { kind: "label", publication: acceptedPublication, label };
+      }
+      throw new Error("unexpected request");
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    await store.ensureLabels("local");
+    await store.createLabel("local", label.name, label.color);
+    expect(store.operation("local", operation)?.phase).toBe("accepted");
+    expect(await store.ensureLabels("local")).toEqual([
+      { id: `local:${operation}`, name: label.name, color: label.color },
+    ]);
+
+    await store.handleDoorbell({
+      space: "local",
+      epoch: 1,
+      seq: 1,
+      reset: false,
+      invalidations: [],
+      publications: [{ world: "com.lait.issues", publication: acceptedPublication }],
+      change: {
+        attribution: { operation: Array(16).fill(0x99), actor: "actor", device: "device" },
+        bodies: [],
+      },
+      authority_advanced: false,
+      activity_advanced: false,
+      presence_advanced: false,
+    });
+    expect(store.operation("local", operation)?.phase).toBe("committed");
+    expect(await store.ensureLabels("local")).toEqual([label]);
+    expect(rpc.mock.calls.filter(([, request]) => request.cmd === "label_show")).toHaveLength(1);
+  });
+
   it("shares optimistic values across board and issue detail", async () => {
     let finish!: () => void;
     const write = new Promise<void>((resolve) => { finish = resolve; });
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
+      if (request.cmd === "board") return boardResponse(board);
       await write;
-      return { kind: "ok", message: null } as Response;
+      return changeSetResponse(request);
     });
     const store = new ProjectViewerStore(rpc);
     await store.ensureBoard("local", "ONE");
@@ -60,12 +543,18 @@ describe("ProjectViewerStore", () => {
   });
 
   it("refreshes an affected board before retiring its prediction", async () => {
+    const operation = "44".repeat(16);
     let authoritative = board;
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return authoritative as Response;
-      return { kind: "ok", message: null } as Response;
+      if (request.cmd === "board") {
+        const response = boardResponse(authoritative) as Extract<Response, { kind: "board" }>;
+        return authoritative === board
+          ? response
+          : { ...response, rows: { ...response.rows, publication: acceptedPublication } };
+      }
+      return changeSetResponse(request);
     });
-    const store = new ProjectViewerStore(rpc);
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
     await store.ensureBoard("local", "ONE");
     const unsubscribe = store.resources.subscribe(projectKeys.board("local", "ONE"), () => undefined);
     await store.editTitle("local", row.reff, "Instant");
@@ -79,6 +568,11 @@ describe("ProjectViewerStore", () => {
       seq: 1,
       reset: false,
       invalidations: [{ world: "com.lait.issues", dirty: [{ kind: "project", id: "prj_1", label: "ONE", docs: [row.doc_id] }], planes: [] }],
+      publications: [{ world: "com.lait.issues", publication: acceptedPublication }],
+      change: {
+        attribution: { operation: Array(16).fill(0x44), actor: "actor", device: "device" },
+        bodies: [],
+      },
       authority_advanced: false,
       activity_advanced: false,
       presence_advanced: false,
@@ -95,9 +589,9 @@ describe("ProjectViewerStore", () => {
     // `dirty` — and milestones used to be invalidated only when some
     // issue doc was dirty, so the list it belongs to never refreshed.
     let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 0, done: 0 }];
-    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
-      if (request.cmd === "milestone_list") return { kind: "milestones", milestones } as Response;
+    const rpc = vi.fn(async (_space: string, request: WorldRequest) => {
+      if (request.cmd === "board") return boardResponse(board);
+      if (request.cmd === "milestone_list") return { kind: "milestones", page: page(milestones) } as Response;
       return { kind: "ok", message: null } as Response;
     });
     const store = new ProjectViewerStore(rpc);
@@ -119,7 +613,7 @@ describe("ProjectViewerStore", () => {
 
   it("ignores an identical invalidation owned by another World", async () => {
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "milestone_list") return { kind: "milestones", milestones: [] } as Response;
+      if (request.cmd === "milestone_list") return { kind: "milestones", page: page([]) } as Response;
       return { kind: "ok", message: null } as Response;
     });
     const store = new ProjectViewerStore(rpc);
@@ -146,8 +640,8 @@ describe("ProjectViewerStore", () => {
     // private `useState` copy in the overview could never hear.
     let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 2, done: 0 }];
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
-      if (request.cmd === "milestone_list") return { kind: "milestones", milestones } as Response;
+      if (request.cmd === "board") return boardResponse(board);
+      if (request.cmd === "milestone_list") return { kind: "milestones", page: page(milestones) } as Response;
       return { kind: "ok", message: null } as Response;
     });
     const store = new ProjectViewerStore(rpc);
@@ -181,7 +675,7 @@ describe("ProjectViewerStore", () => {
     // past post said, and a milestone edit must not refetch it.
     let updates = [{ id: "upd_1", author: "act_1", ts: 1, body: "first" }];
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "project_updates") return { kind: "updates", updates } as Response;
+      if (request.cmd === "project_updates") return { kind: "updates", page: page(updates) } as Response;
       return { kind: "ok", message: null } as Response;
     });
     const store = new ProjectViewerStore(rpc);
@@ -212,9 +706,9 @@ describe("ProjectViewerStore", () => {
     // The other half of precision, and the half a coarse ring cannot give you:
     // a milestone edit must not drag the label registry along behind it.
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
-      if (request.cmd === "label_list") return { kind: "labels", labels: [] } as Response;
-      return { kind: "milestones", milestones: [] } as Response;
+      if (request.cmd === "board") return boardResponse(board);
+      if (request.cmd === "label_list") return { kind: "labels", page: page([]) } as Response;
+      return { kind: "milestones", page: page([]) } as Response;
     });
     const store = new ProjectViewerStore(rpc);
     await store.ensureBoard("local", "ONE");
@@ -241,8 +735,8 @@ describe("ProjectViewerStore", () => {
     // scoped to that project — a panel that stops refreshing and says nothing.
     let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 0, done: 0 }];
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
-      return { kind: "milestones", milestones } as Response;
+      if (request.cmd === "board") return boardResponse(board);
+      return { kind: "milestones", page: page(milestones) } as Response;
     });
     const store = new ProjectViewerStore(rpc);
     await store.ensureMilestones("local", "prj_1");
@@ -295,7 +789,7 @@ describe("ProjectViewerStore", () => {
   });
 
   it("does not invalidate an unrelated selected issue", async () => {
-    const rpc = vi.fn(async () => board as Response);
+    const rpc = vi.fn(async () => boardResponse(board));
     const store = new ProjectViewerStore(rpc);
     store.resources.set(projectKeys.issue("local", "iss_other"), {
       schema_version: 3, reff: "iss_other", doc_id: "doc_other", space_id: "local",
@@ -313,8 +807,8 @@ describe("ProjectViewerStore", () => {
 
   it("predicts an assignee toggle and stacks a second on the first", async () => {
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
-      return { kind: "ok", message: null } as Response;
+      if (request.cmd === "board") return boardResponse(board);
+      return changeSetResponse(request);
     });
     const store = new ProjectViewerStore(rpc);
     await store.ensureBoard("local", "ONE");
@@ -328,15 +822,24 @@ describe("ProjectViewerStore", () => {
     ]);
     expect(store.selectBoard("local", "ONE")?.columns[0]?.rows[0]?.assignees).toHaveLength(2);
     await Promise.all([first, second]);
-    expect(rpc).toHaveBeenCalledWith("local", {
-      cmd: "assign", reff: row.reff, who: ["a".repeat(64)], add: true,
-    });
+    const changes = rpc.mock.calls
+      .map(([, request]) => request as WorldRequest)
+      .filter((request): request is Extract<WorldRequest, { cmd: "change_set" }> =>
+        request.cmd === "change_set");
+    expect(changes.map((change) => change.operations)).toEqual([
+      [{ op: "issue_patch", issue: row.reff, assignees: ["a".repeat(64)] }],
+      [{
+        op: "issue_patch",
+        issue: row.reff,
+        assignees: ["a".repeat(64), "b".repeat(64)],
+      }],
+    ]);
   });
 
   it("predicts a due date, and its clearing, in the row's units", async () => {
-    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
-      return { kind: "ok", message: null } as Response;
+    const rpc = vi.fn(async (_space: string, request: WorldRequest) => {
+      if (request.cmd === "board") return boardResponse(board);
+      return changeSetResponse(request);
     });
     const store = new ProjectViewerStore(rpc);
     await store.ensureBoard("local", "ONE");
@@ -344,19 +847,27 @@ describe("ProjectViewerStore", () => {
     expect(store.selectRow("local", row.reff)?.due_date).toBe(
       Date.UTC(2026, 6, 30) / 1000,
     );
-    expect(rpc).toHaveBeenCalledWith("local", {
-      cmd: "issue_edit", reff: row.reff, due: "2026-07-30",
-    });
+    expect(rpc.mock.calls.some(([, request]) =>
+      request.cmd === "change_set"
+      && request.operations.some((operation) =>
+        operation.op === "issue_patch"
+        && operation.issue === row.reff
+        && operation.due === Date.UTC(2026, 6, 30) / 1000)))
+      .toBe(true);
     await store.setDue("local", row.reff, null);
     expect(store.selectRow("local", row.reff)?.due_date).toBeNull();
-    expect(rpc).toHaveBeenCalledWith("local", {
-      cmd: "issue_edit", reff: row.reff, due: "none",
-    });
+    expect(rpc.mock.calls.some(([, request]) =>
+      request.cmd === "change_set"
+      && request.operations.some((operation) =>
+        operation.op === "issue_patch"
+        && operation.issue === row.reff
+        && operation.clear_due === true)))
+      .toBe(true);
   });
 
   it("rolls a refused label toggle back immediately", async () => {
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
-      if (request.cmd === "board") return board as Response;
+      if (request.cmd === "board") return boardResponse(board);
       throw new Error("refused");
     });
     const store = new ProjectViewerStore(rpc);

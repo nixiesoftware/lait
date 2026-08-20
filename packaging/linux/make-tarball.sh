@@ -70,6 +70,13 @@ done
   echo "make-tarball: THIRD-PARTY-NOTICES.md is missing" >&2
   exit 1
 }
+# PolyForm's Notices section makes carrying the terms an obligation on whoever
+# distributes a copy, not a courtesy — so a missing LICENSE is a refusal, the
+# same as missing notices.
+[ -f "$REPO/LICENSE" ] || {
+  echo "make-tarball: LICENSE is missing" >&2
+  exit 1
+}
 
 reported="$("$BUNDLE/lait" --version)"
 if [ "$reported" != "lait $VERSION" ]; then
@@ -115,6 +122,7 @@ mkdir "$STAGED/current"
 # files would make tomorrow's newly required file the one an old script drops.
 cp -a "$BUNDLE/." "$STAGED/current/"
 cp "$REPO/THIRD-PARTY-NOTICES.md" "$STAGED/current/THIRD-PARTY-NOTICES.md"
+cp "$REPO/LICENSE" "$STAGED/current/LICENSE"
 cp "$STUB" "$STAGED/astrolabe"
 
 # DrvFS presents ordinary files as executable unless Windows metadata is

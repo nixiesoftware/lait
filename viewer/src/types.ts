@@ -163,6 +163,14 @@ export interface BoardView {
   columns: BoardColumn[];
 }
 
+/** One bounded board page; clients group rows through the pinned workflow. */
+export interface BoardPage {
+  schema_version: number;
+  project: ProjectDto;
+  workflow: WorkflowState[];
+  rows: Page<Row>;
+}
+
 export interface CommentDto {
   author: string;
   author_nick: string | null;
@@ -208,6 +216,28 @@ export interface ReactionDto {
   actors: string[];
 }
 
+export interface ReactionRecord {
+  issue: string;
+  comment: string;
+  emoji: string;
+  actor: string;
+  on: boolean;
+}
+
+export interface CheckDto {
+  run: string;
+  spec: string;
+  version: number;
+  build: string;
+  source: string;
+  state: string;
+  by: string;
+  ts: number;
+  attempt?: string | null;
+  report?: string | null;
+  verdict?: string | null;
+}
+
 export interface IssueView {
   schema_version: number;
   reff: string;
@@ -246,6 +276,21 @@ export interface IssueView {
   baseline?: BaselineRef | null;
   /** Attachment metadata (CREATE-5). */
   attachments?: AttachmentMetaDto[];
+  checks?: CheckDto[];
+  /** Exact coordinate and independent continuations for bounded enrichment. */
+  enrichment?: {
+    publication: WorldPublicationId;
+    /** Current record-addressed reaction facts already visited. Kept so a
+     * later comment page can be enriched without replaying an earlier reaction
+     * page or silently crossing publications. */
+    reaction_records?: ReactionRecord[];
+    comments?: string | null;
+    reactions?: string | null;
+    attachments?: string | null;
+    checks?: string | null;
+    outgoing_relations?: string | null;
+    incoming_relations?: string | null;
+  };
   provisional: boolean;
   /** Malformed stored records, kept beside the valid projection rather than
    * silently dropped or laundered into sentinel values. */
@@ -274,12 +319,21 @@ export interface PlanData {
 export interface SpecBody {
   spec: string; project: string; kind: SpecKind; title: string; text: string;
   state: SpecState; links: SpecLink[]; plan?: PlanData | null; author: string; ts: number;
-  /** World generation against which this immutable revision was composed. */
-  generation?: string;
+  /** Exact portable World publication against which this immutable revision was composed. */
+  publication: PublicationId;
 }
 export interface SpecView {
   spec: string; project: string; kind: SpecKind; title: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: SpecBody;
+}
+export interface SpecSummary {
+  spec: string;
+  project: string;
+  kind: SpecKind;
+  heads: string[];
+  issued: string[];
+  conflicted: boolean;
+  view?: SpecView | null;
 }
 export interface BaselineBody {
   baseline: string; project: string; name: string; state: SpecState;
@@ -288,6 +342,14 @@ export interface BaselineBody {
 export interface BaselineView {
   baseline: string; project: string; name: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: BaselineBody;
+}
+export interface BaselineSummary {
+  baseline: string;
+  project: string;
+  heads: string[];
+  issued: string[];
+  conflicted: boolean;
+  view?: BaselineView | null;
 }
 
 export type GeometryRole = "constraint" | "containment" | "equivalence" | "association";
@@ -360,19 +422,74 @@ export interface GeometryClosure {
   cyclic: number;
   stalled: number;
 }
-export interface GeometryView {
+export interface GeometryArtifactKey {
+  source: WorldPublicationId;
+  projection_schema: number[];
+  selection: number[];
+}
+export interface GeometryEstimate {
+  selected_nodes: number;
+  selected_edges: number;
+  reduction_candidates: number;
+  node_visits: number;
+  edge_visits: number;
+  reachability_visits: number;
+  working_bytes: number;
+}
+export type GeometryReadiness =
+  | { state: "pending" }
+  | { state: "ready" }
+  | { state: "unavailable"; reason: unknown };
+export interface GeometrySummary {
   schema_version: number;
-  generation: string;
   project: string;
-  roots: string[];
-  nodes: GeometryNode[];
-  edges: GeometryEdge[];
-  components: GeometryComponent[];
-  /** The containment partition, contracted and layered. Empty when nothing in
-   *  the selection is a sub-issue of anything else. */
-  regions?: GeometryRegion[];
-  residuals: GeometryResidual[];
+  roots: number;
+  nodes: number;
+  edges: number;
+  components: number;
+  regions: number;
+  residuals: number;
   closure: GeometryClosure;
+  retained_bytes: number;
+}
+export type GeometrySection =
+  | "Roots" | "Nodes" | "Edges" | "Components" | "Regions" | "Residuals"
+  | { ComponentMembers: number }
+  | { ComponentRoots: number }
+  | { ComponentTerminals: number }
+  | { RegionMembers: number }
+  | { ResidualAt: number }
+  | { ResidualRequires: number };
+export interface GeometryCursor {
+  artifact: GeometryArtifactKey;
+  section: GeometrySection;
+  offset: number;
+}
+export interface GeometryPageRequest {
+  section: GeometrySection;
+  limit: number;
+  cursor?: GeometryCursor | null;
+}
+export type GeometryRows =
+  | { Roots: unknown[] }
+  | { Nodes: unknown[] }
+  | { Edges: unknown[] }
+  | { Components: unknown[] }
+  | { Regions: unknown[] }
+  | { Residuals: unknown[] }
+  | { Members: unknown[] };
+export interface GeometryPage {
+  rows: GeometryRows;
+  next?: GeometryCursor | null;
+}
+/** Publication-pinned geometry readiness/summary plus at most one bounded page. */
+export interface GeometryView {
+  key: GeometryArtifactKey;
+  source: WorldPublicationId;
+  estimate: GeometryEstimate;
+  readiness: GeometryReadiness;
+  summary?: GeometrySummary | null;
+  page?: GeometryPage | null;
 }
 /**
  * One typed assertion seen from the far end — `spec.rs` `SpecReference`.
@@ -391,6 +508,7 @@ export interface SpecReference {
   head: boolean;
   issued: boolean;
 }
+export type SpecReferenceFact = Omit<SpecReference, "head" | "issued">;
 
 /**
  * One retractable note about the graph — `spec.rs` `Observation`.
@@ -412,6 +530,16 @@ export interface SpecObservation {
   target: SpecTarget;
   note: string;
 }
+export type SpecObservationRecord =
+  | { kind: "assert"; project: string; observation: SpecObservation }
+  | {
+      kind: "retract";
+      project: string;
+      observation: string;
+      spec: string;
+      actor: string;
+      timestamp: number;
+    };
 
 /** One immutable revision and the revisions it descends from. */
 export interface SpecRevision {
@@ -503,55 +631,28 @@ export interface LinkDto {
   direction: string;
   row: Row;
 }
-
-/**
- * An issue's graph neighborhood — `dto.rs` `GraphView`, reply to `IssueGraph`.
- *
- * Read from the catalog *structure* doc without opening any issue doc, so it is
- * cheap. `parent`/`children` are the sub-issue tree (a tree-move CRDT, so concurrent
- * reparents can't converge to a cycle); `blocked_by` is the transitive set of open
- * issues that block this one, computed by the daemon (not just direct `blocks` edges).
- */
-/** One structural edge between two issues — `dto.rs` `GraphEdgeDto`.
- *
- *  Doc ids, not refs: a ref is an alias and a rename moves it, while every
- *  `Row` already carries `doc_id` for exactly this join. */
-export interface GraphEdgeDto {
-  from: string;
-  /** `blocks` | `relates` | `duplicates`. */
+export type RelationDirection = "out" | "in";
+export interface IssueRelationDto {
   kind: string;
-  to: string;
+  direction: RelationDirection;
+  row: Row;
 }
 
-/**
- * A project's whole structure — `dto.rs` `ProjectGraphView`.
- *
- * `issue_graph` answers the same question one issue at a time, which is what a
- * detail rail wants and what a chart cannot use: laying a project out by
- * dependency depth needs every edge together, and per-issue is N round trips
- * for a graph the catalog holds whole.
- *
- * Direct edges only — no transitive closure, unlike `GraphView.blocked_by`.
- * Reachability is derivable from these, and a transitive set drawn as
- * connectors is unreadable: it draws the shortcut across a chain as though it
- * were a separate constraint.
- */
-export interface ProjectGraphView {
-  schema_version: number;
-  project: string;
-  edges: GraphEdgeDto[];
-  /** `[child, parent]` for the sub-issue tree. */
-  parents: [string, string][];
-}
-
+/** One bounded relation neighborhood at an exact World publication.
+ * Parent/children and direct links are hydrated from independently continued
+ * incoming/outgoing Corpus pages; the cursors make partialness explicit. */
 export interface GraphView {
   schema_version: number;
   reff: string;
   doc_id: string;
+  publication: WorldPublicationId;
   parent: Row | null;
+  parent_conflicted?: boolean;
   children: Row[];
   links: LinkDto[];
   blocked_by: Row[];
+  next_outgoing?: string | null;
+  next_incoming?: string | null;
 }
 
 export interface ActivityEvent {
@@ -952,6 +1053,153 @@ export interface RoutedInvalidation {
   planes: DirtyPlane[];
 }
 
+/** Authenticated authorship for one durable operation. */
+export interface DurableAttribution {
+  operation: number[];
+  actor: string;
+  device: string;
+}
+
+export type DurableMutation =
+  | "Atomic"
+  | "Register"
+  | "Map"
+  | "List"
+  | "Text"
+  | "Set"
+  | "Counter"
+  | "Lifecycle"
+  | "Tree"
+  | "Log";
+
+export interface DurableStableTextRange {
+  /**
+   * Exact scalar range in the Observation's committed publication. Apply it
+   * only when the current projection has the matching WorldPublicationId;
+   * otherwise re-query and use the anchors only through the server.
+   */
+  start: number;
+  end: number;
+  /** Canonical Fabric anchors for server-side re-resolution after later edits. */
+  start_anchor: number[];
+  end_anchor: number[];
+  deleted: number;
+  inserted: number;
+  inserted_bytes: number;
+}
+
+/** Value-free description of one operation in the committed Body batch. */
+export interface DurablePathChange {
+  mutation: DurableMutation;
+  path?: string | null;
+  locator?: string | null;
+  text?: DurableStableTextRange | null;
+}
+
+export type DurableDetail = { Exact: DurablePathChange[] } | "Dirty";
+
+export interface DurableBodyChange {
+  body: { world: string; body: number[] };
+  detail: DurableDetail;
+}
+
+/** Same durable feedback vocabulary for human, agent, CLI and API writes. */
+export interface DurableChange {
+  attribution?: DurableAttribution | null;
+  bodies: DurableBodyChange[];
+}
+
+/** Portable semantic identity of one immutable World read generation. */
+export interface PublicationId {
+  manifest_root: number[];
+  implementation_digest: number[];
+  extractor_schema_digest: number[];
+}
+
+/** Browser-safe form accepted by the Issues app protocol. */
+export interface PublicationCoordinate {
+  manifest_root: string;
+  implementation_digest: string;
+  extractor_schema_digest: string;
+}
+
+/** Complete Station-local coordinate of one immutable World read image. */
+export interface WorldPublicationId {
+  publication: PublicationId;
+  materialization: number;
+}
+
+/** Durable acknowledgement of the same signed Issues action observed later
+ * through `SpaceDoorbell.change.attribution.operation`. */
+export interface OperationReceipt {
+  operation: string;
+  phase: "accepted";
+  publication: WorldPublicationId;
+}
+
+/** Opaque, exact-publication continuation requested by every unbounded list. */
+export interface PageRequest {
+  limit: number;
+  cursor?: string | null;
+}
+
+/** Uniform bounded collection envelope from the Issues World. */
+export interface Page<T> {
+  publication: WorldPublicationId;
+  items: T[];
+  next_cursor?: string | null;
+  exact_total?: number | null;
+}
+
+export interface RoleRevision {
+  revision_id: string;
+  predecessor_ids?: string[];
+  body: {
+    role_id?: string;
+    name: string;
+    description: string;
+    scope_kind: string;
+    scope_project?: string | null;
+    capabilities: string[];
+  };
+}
+
+export interface RoleProjection {
+  summary: {
+    role_id: string;
+    built_in: boolean;
+    revision?: string | null;
+    conflict_heads: string[];
+  };
+  revision?: RoleRevision | null;
+}
+
+export interface IssueDetailPages {
+  comments: PageRequest;
+  reactions: PageRequest;
+  attachments: PageRequest;
+  checks: PageRequest;
+  outgoing_relations: PageRequest;
+  incoming_relations: PageRequest;
+}
+
+export interface IssueDetailProjection {
+  publication: WorldPublicationId;
+  issue: IssueView;
+  comments: Page<CommentDto>;
+  reactions: Page<ReactionRecord>;
+  attachments: Page<AttachmentMetaDto>;
+  checks: Page<CheckDto>;
+  outgoing_relations: Page<IssueRelationDto>;
+  incoming_relations: Page<IssueRelationDto>;
+}
+
+/** One World whose exact read publication changed in this doorbell. */
+export interface AffectedWorldPublication {
+  world: string;
+  publication: WorldPublicationId;
+}
+
 /**
  * A dirty-set frame, tagged with the space it rang for.
  *
@@ -970,6 +1218,18 @@ export interface SpaceDoorbell {
   reset: boolean;
   invalidations: RoutedInvalidation[];
   /**
+   * Sorted exact read coordinates for affected Worlds. Empty on reset and
+   * authority-only rings. A missing or mismatched coordinate forbids applying
+   * scalar offsets from `change`; re-query the authoritative projection.
+   */
+  publications?: AffectedWorldPublication[];
+  /**
+   * Exact paths/ranges when bounded, otherwise an explicit Body-dirty marker.
+   * No product values ride this stream; authoritative state is fetched after
+   * the publication notification.
+   */
+  change?: DurableChange;
+  /**
    * Membership, roles, devices or keys advanced. Its own flag, not a catalog
    * plane: authority is not in the catalog and can move with no Body touched.
    */
@@ -986,6 +1246,89 @@ export type BoardPos =
   | { at: "bottom" }
   | { at: "before"; reff: string }
   | { at: "after"; reff: string };
+
+export type ChangePosition =
+  | { at: "top" }
+  | { at: "bottom" }
+  | { at: "before"; issue: string }
+  | { at: "after"; issue: string };
+
+export type ChangeProject =
+  | { source: "existing"; project: string }
+  | { source: "created"; operation: number };
+
+export type ChangeLabel =
+  | { source: "existing"; label: string }
+  | { source: "created"; operation: number };
+
+export type IssuesChangeOperation =
+  | { op: "project_create"; name: string; key: string; color: string }
+  | {
+      op: "spec_create";
+      project: ChangeProject;
+      kind: SpecKind;
+      title: string;
+      text: string;
+      links?: SpecLink[];
+    }
+  | {
+      op: "issue_create";
+      project: ChangeProject;
+      title: string;
+      priority?: string | null;
+      status?: string | null;
+      parent?: string | null;
+      assignees?: string[];
+      labels?: ChangeLabel[];
+      body?: string | null;
+      due?: number | null;
+      estimate?: number | null;
+    }
+  | {
+      op: "issue_board";
+      issue: string;
+      status?: string | null;
+      position?: ChangePosition | null;
+    }
+  | {
+      op: "issue_patch";
+      issue: string;
+      title?: string | null;
+      status?: string | null;
+      priority?: string | null;
+      due?: number | null;
+      clear_due?: boolean;
+      estimate?: number | null;
+      clear_estimate?: boolean;
+      assignees?: string[] | null;
+      labels?: ChangeLabel[] | null;
+    }
+  | { op: "issue_work"; issue: string; action: "start" | "done" | "stop" }
+  | { op: "issue_tombstone"; issue: string; on: boolean }
+  | { op: "issue_comment"; issue: string; body: string; parent?: string | null }
+  | {
+      op: "issue_comment_at";
+      issue: string;
+      body: string;
+      field: string;
+      start: number;
+      end?: number | null;
+      parent?: string | null;
+      source: WorldPublicationId;
+    }
+  | { op: "issue_reaction"; issue: string; comment: string; emoji: string; on: boolean }
+  | { op: "issue_link"; issue: string; kind: string; target: string; on: boolean }
+  | { op: "issue_parent"; issue: string; parent?: string | null }
+  | {
+      op: "issue_move";
+      issue: string;
+      project?: ChangeProject | null;
+      position?: ChangePosition | null;
+    }
+  | { op: "issue_milestone"; issue: string; milestone?: string | null }
+  | { op: "label_create"; name: string; color: string }
+  | { op: "label_edit"; label: string; name?: string | null; color?: string | null }
+  | { op: "label_delete"; label: string };
 
 export interface DocumentSplice {
   index: number;
@@ -1012,25 +1355,6 @@ export interface Filter {
   all?: boolean;
 }
 
-export interface StructureReport {
-  generation: string;
-  projects: number;
-  issues: number;
-  visible_edges: number;
-  visible_parents: number;
-  relation_bodies: number;
-  relation_projects_pending: number;
-  relation_edges_pending: number;
-  relation_parents_pending: number;
-  specs: number;
-  spec_heads_pending: number;
-  spec_conflicts: number;
-  plans_without_roots: number;
-  issue_documents_pending: number;
-  baselines: number;
-  complete: boolean;
-}
-
 /**
  * The installed Issues application protocol plus the browser-safe root control
  * requests, internally tagged by `cmd`.
@@ -1048,8 +1372,8 @@ export interface StructureReport {
  * have no browser surface yet — add them here when they grow one.
  */
 export type Request =
-  | { cmd: "structure_status" }
-  | { cmd: "structure_migrate" }
+  | { cmd: "change_set"; operation?: string | null; timestamp?: number | null; operations: IssuesChangeOperation[] }
+  | { cmd: "operation_status"; operation: string; timestamp: number; operations: IssuesChangeOperation[] }
   | { cmd: "issue_new"; title: string; project?: string | null; project_hint?: string | null; assignees?: string[]; priority?: Priority | null; labels?: string[]; body?: string | null; due?: string | null; estimate?: number | null }
   /** `due`: `YYYY-MM-DD` (UTC), unix seconds, or `"none"` to clear; `estimate`:
    *  a number as a string, or `"none"` to clear. Absent = untouched. */
@@ -1072,6 +1396,7 @@ export type Request =
   | { cmd: "assign"; reff: string; who: string[]; add?: boolean }
   | { cmd: "label"; reff: string; add?: string[]; remove?: string[] }
   | { cmd: "comment"; reff: string; body: string; reply_to?: string | null }
+  | { cmd: "comment_at"; reff: string; body: string; field: string; start: number; end?: number | null; reply_to?: string | null; source: WorldPublicationId }
   /** Toggle an emoji reaction on a comment. Writes no history event. */
   | { cmd: "react"; reff: string; comment: string; emoji: string; on?: boolean }
   | { cmd: "issue_delete"; reff: string }
@@ -1088,15 +1413,18 @@ export type Request =
   | { cmd: "issue_done"; reff: string }
   | { cmd: "issue_stop"; reff: string }
   | { cmd: "issue_view"; reff: string }
-  | { cmd: "list"; project?: string | null; filter?: Filter }
-  | { cmd: "board"; project?: string | null; project_hint?: string | null }
-  | { cmd: "history"; reff: string }
-  | { cmd: "issue_graph"; reff: string }
-  /** A whole project's structure at once. Reply is `project_graph`. */
-  | { cmd: "project_graph"; project: string }
+  | { cmd: "issue_detail"; reff: string; publication?: WorldPublicationId | null }
+  | { cmd: "list"; project?: string | null; filter?: Filter; page: PageRequest }
+  | { cmd: "board"; project?: string | null; project_hint?: string | null; page: PageRequest }
+  | { cmd: "history"; reff: string; publication?: PublicationCoordinate | null; page: PageRequest }
+  | { cmd: "issue_relations"; reff: string; direction: RelationDirection; publication?: PublicationCoordinate | null; page: PageRequest }
+  | { cmd: "issue_comments"; reff: string; publication?: PublicationCoordinate | null; page: PageRequest }
+  | { cmd: "issue_reactions"; reff: string; publication?: PublicationCoordinate | null; page: PageRequest }
+  | { cmd: "issue_attachments"; reff: string; publication?: PublicationCoordinate | null; page: PageRequest }
+  | { cmd: "issue_checks"; reff: string; publication?: PublicationCoordinate | null; page: PageRequest }
   | { cmd: "project_new"; name: string; key: string; color?: string | null }
-  | { cmd: "project_list" }
-  | { cmd: "team_list" }
+  | { cmd: "project_list"; page: PageRequest }
+  | { cmd: "team_list"; page: PageRequest }
   /**
    * Create, edit or delete a team — one verb for all three.
    *
@@ -1130,12 +1458,12 @@ export type Request =
       team?: string | null;
     }
   /** Reply is `updates` — the project's status feed, newest first. */
-  | { cmd: "project_updates"; project: string }
+  | { cmd: "project_updates"; project: string; page: PageRequest }
   | { cmd: "project_update_post"; project: string; body: string; health?: string | null }
   /** Subscribe to an issue without being assigned (INBOX-9). */
   | { cmd: "follow"; reff: string; on?: boolean }
   /** Reply is `milestones` — the project's milestones with progress (SCOPE-1). */
-  | { cmd: "milestone_list"; project: string }
+  | { cmd: "milestone_list"; project: string; page: PageRequest }
   | { cmd: "milestone_set"; project: string; milestone?: string | null; name?: string | null; description?: string | null; target?: string | null; pos?: BoardPos | null; remove?: boolean }
   /** Point an issue at a milestone in its project (`null`/"none" clears). */
   | { cmd: "issue_milestone"; reff: string; milestone?: string | null }
@@ -1150,13 +1478,19 @@ export type Request =
    *  record written before the cutover, its inline payload. */
   | { cmd: "attachment_get"; reff: string; id: string }
   | { cmd: "label_new"; name: string; color?: string | null }
-  | { cmd: "label_list" }
+  | { cmd: "label_list"; page: PageRequest }
+  | { cmd: "label_show"; label: string; publication: WorldPublicationId }
   | { cmd: "label_edit"; label: string; name?: string | null; color?: string | null }
   | { cmd: "label_delete"; label: string }
   | { cmd: "space_rename"; name: string }
   | { cmd: "space_describe"; description: string }
-  | { cmd: "activity"; since?: string }
-  | { cmd: "inbox"; clear?: boolean }
+  | { cmd: "activity"; page: PageRequest }
+  | {
+      cmd: "inbox";
+      clear?: boolean;
+      page: PageRequest;
+      publication?: PublicationCoordinate | null;
+    }
   | { cmd: "member_add"; who: string; admin?: boolean; as_name?: string | null }
   | { cmd: "member_remove"; who: string }
   /** Mint (or reuse) a co-located agent's seed, self-incept it, and sponsor it
@@ -1192,24 +1526,22 @@ export type Request =
   /** Reply is `text` — the revision as pretty JSON (same shape the CLI prints). */
   | { cmd: "workflow_show"; project: string }
   | { cmd: "workflow_set"; project: string; expect_heads: string[]; body_json: string }
-  | { cmd: "spec_list"; project?: string | null }
-  | { cmd: "geometry"; project: string; roots?: string[]; generation?: string | null }
+  | { cmd: "spec_list"; project?: string | null; page: PageRequest }
+  | { cmd: "geometry"; project: string; roots?: string[]; publication?: PublicationCoordinate | null; page?: GeometryPageRequest | null }
   | { cmd: "spec_show"; spec: string }
-  /** Reply is `spec_revisions` — the whole DAG, oldest first. */
-  | { cmd: "spec_history"; spec: string }
-  /** Reply is spec_references — every typed link in scope, and who asserts it. */
-  | { cmd: "spec_references"; project?: string | null }
-  | { cmd: "baseline_history"; baseline: string }
+  /** Reply is one exact-publication revision page. */
+  | { cmd: "spec_history"; spec: string; page: PageRequest }
+  | { cmd: "spec_references"; project?: string | null; page: PageRequest }
+  | { cmd: "baseline_history"; baseline: string; page: PageRequest }
   | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
   | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null; plan?: PlanData | null }
   | { cmd: "spec_document_upgrade"; spec: string; expected: string; text: string }
   | { cmd: "spec_state"; spec: string; expected: string; state: SpecState }
   | { cmd: "spec_resolve"; spec: string; expected_heads: string[]; body_json: string }
-  /** Reply is `spec_observations` — every note filed in scope, both directions. */
-  | { cmd: "spec_observations"; project?: string | null }
+  | { cmd: "spec_observations"; project?: string | null; page: PageRequest }
   | { cmd: "spec_observe"; spec: string; rel: SpecRel; target: SpecTarget; note?: string }
   | { cmd: "spec_retract"; spec: string; observation: string }
-  | { cmd: "baseline_list"; project?: string | null }
+  | { cmd: "baseline_list"; project?: string | null; page: PageRequest }
   | { cmd: "baseline_show"; baseline: string }
   | { cmd: "baseline_new"; project: string; name: string; members: SpecRef[] }
   | { cmd: "baseline_revise"; baseline: string; expected: string; name?: string | null; members?: SpecRef[] | null }
@@ -1218,7 +1550,7 @@ export type Request =
   | { cmd: "issue_baseline"; reff: string; baseline?: BaselineRef | null }
   | { cmd: "packet"; reff: string }
   /** Reply is `text` — every role definition as pretty JSON. */
-  | { cmd: "role_list" }
+  | { cmd: "role_list"; page: PageRequest }
   /** Reply is `assignments` — effective scoped grants, optionally one actor. */
   | { cmd: "access_list"; actor?: string | null }
   /** Expand a role's pinned caps and install them for an actor (Space- or
@@ -1438,23 +1770,34 @@ export interface OrbitEntry {
  * `Status(Box<StatusInfo>)`, `Diagnosis(..)`) serialize **flattened** under an
  * internal tag — hence the intersections rather than a nested payload field.
  */
-export type Response =
+type ResponseBody =
   | { kind: "hello"; protocol_version: number }
   | { kind: "ok"; message: string | null }
-  | ({ kind: "structure" } & StructureReport)
+  | { kind: "change_set"; results: { operation: number; kind: string; id: string }[] }
+  | {
+      kind: "operation_status";
+      operation: string;
+      readiness: "absent" | "ready" | "building" | "capacity" | "implementation_unavailable" | "generation_unavailable" | "unavailable";
+      publication?: WorldPublicationId | null;
+      results: { operation: number; kind: string; id: string }[];
+    }
   | { kind: "ref"; reff: string }
   | ({ kind: "issue" } & IssueView)
-  | { kind: "list"; rows: Row[] }
-  | ({ kind: "board" } & BoardView)
-  | ({ kind: "graph" } & GraphView)
-  | ({ kind: "project_graph" } & ProjectGraphView)
+  | ({ kind: "issue_detail" } & IssueDetailProjection)
+  | { kind: "list"; page: Page<Row> }
+  | ({ kind: "board" } & BoardPage)
   | ({ kind: "geometry" } & GeometryView)
-  | { kind: "activity"; events: ActivityEvent[]; last: string }
-  | { kind: "inbox"; entries: InboxEntry[]; unread: number }
-  | { kind: "projects"; projects: ProjectDto[] }
-  | { kind: "teams"; teams: TeamDto[] }
-  | { kind: "updates"; updates: ProjectUpdateDto[] }
-  | { kind: "milestones"; milestones: MilestoneDto[] }
+  | { kind: "activity"; page: Page<ActivityEvent> }
+  | { kind: "relations"; page: Page<IssueRelationDto> }
+  | { kind: "comments"; page: Page<CommentDto> }
+  | { kind: "reactions"; page: Page<ReactionRecord> }
+  | { kind: "attachments"; page: Page<AttachmentMetaDto> }
+  | { kind: "checks"; page: Page<CheckDto> }
+  | { kind: "inbox"; page: Page<InboxEntry>; unread_on_page: number }
+  | { kind: "projects"; page: Page<ProjectDto> }
+  | { kind: "teams"; page: Page<TeamDto> }
+  | { kind: "updates"; page: Page<ProjectUpdateDto> }
+  | { kind: "milestones"; page: Page<MilestoneDto> }
   /** Exactly one of `content` and `data_b64` is present, and which one says
    *  which era the record is from. */
   | {
@@ -1465,7 +1808,9 @@ export type Response =
       data_b64?: string;
       size?: number;
     }
-  | { kind: "labels"; labels: LabelDto[] }
+  | { kind: "labels"; page: Page<LabelDto> }
+  | { kind: "label"; publication: WorldPublicationId; label?: LabelDto | null }
+  | { kind: "roles"; page: Page<RoleProjection> }
   /** `control.rs` `BookView`, trimmed to what the browser reads. */
   | { kind: "book"; cards: BookCardDto[] }
   /** `control.rs` `BookResolutionView` — authored hits for resolved handles. */
@@ -1484,13 +1829,13 @@ export type Response =
    *  would put it where the response tag lives — `JSON.parse` keeps the last
    *  duplicate, so the reply would arrive claiming to be a `requirement`. */
   | { kind: "spec"; spec: SpecView }
-  | { kind: "specs"; specs: SpecView[] }
-  | { kind: "spec_revisions"; revisions: SpecRevision[] }
-  | { kind: "spec_references"; references: SpecReference[] }
-  | { kind: "spec_observations"; observations: SpecObservation[] }
-  | { kind: "baseline_revisions"; revisions: BaselineRevisionDto[] }
+  | { kind: "specs"; page: Page<SpecSummary> }
+  | { kind: "spec_revisions"; page: Page<SpecRevision> }
+  | { kind: "spec_references"; page: Page<SpecReferenceFact> }
+  | { kind: "spec_observations"; page: Page<SpecObservationRecord> }
+  | { kind: "baseline_revisions"; page: Page<BaselineRevisionDto> }
   | ({ kind: "baseline" } & BaselineView)
-  | { kind: "baselines"; baselines: BaselineView[] }
+  | { kind: "baselines"; page: Page<BaselineSummary> }
   | ({ kind: "packet" } & Packet)
   | { kind: "events"; events: Event[]; last: number }
   | { kind: "who"; peers: PresenceEntry[] }
@@ -1507,4 +1852,20 @@ export type Response =
   | { kind: "signals"; signals: SignalEntry[]; dropped: number }
   /** Every host-plane answer, under one `kind` and its own `host` tag. */
   | ({ kind: "host" } & HostReply)
-  | { kind: "error"; message: string; error_kind: "error" | "not_found" };
+  | {
+      kind: "error";
+      message: string;
+      error_kind: "error" | "invalid" | "not_found" | "denied" | "retry" | "indeterminate";
+    };
+
+/** Application responses are unwrapped from the on-wire operation envelope,
+ * but retain its durable receipt for feedback/reconciliation. Generic Space
+ * responses simply omit it. */
+export type Response = ResponseBody & { receipt?: OperationReceipt };
+
+/** Exact product wire shape. Only Issues writes use the operation envelope. */
+export type IssuesWireResponse = Response | {
+  kind: "operation";
+  receipt: OperationReceipt;
+  response: Response;
+};

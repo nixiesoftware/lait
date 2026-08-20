@@ -66,26 +66,28 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(async {
-        let space = lait::orbital::discover_space(home)
-            .single()
-            .expect("test Space");
-        let call = issues_app::encode_call(&request)?;
-        let reply = lait::control::call_world(
-            home,
-            ControlRoute::World {
-                address: OrbitAddress::for_store(home, space),
-                world: call.world().as_str().to_string(),
-            },
-            call.clone(),
-            None,
-        )
-        .await?;
-        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
-            &call, reply,
-        )?)?)
-    })
-    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(async {
+            let space = lait::orbital::discover_space(home)
+                .single()
+                .expect("test Space");
+            let call = issues_app::encode_call(&request)?;
+            let reply = lait::control::call_world(
+                home,
+                ControlRoute::World {
+                    address: OrbitAddress::for_store(home, space),
+                    world: call.world().as_str().to_string(),
+                },
+                call.clone(),
+                None,
+            )
+            .await?;
+            Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+                &call, reply,
+            )?)?)
+        })
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -130,9 +132,10 @@ fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
         issues_app::IssuesRequest::List {
             project: None,
             filter: issues_app::protocol::Filter::default(),
+            page: issues::contract::PageRequest::default(),
         },
     ) {
-        IssueResponse::List { rows } => rows.into_iter().map(|r| r.title).collect(),
+        IssueResponse::List { page } => page.items.into_iter().map(|r| r.title).collect(),
         _ => Vec::new(),
     }
 }
@@ -262,12 +265,24 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
     let _ = joiner_handle.take().unwrap().join();
 
     // While the joiner is down, the founder files a new issue under the same key.
+    // The founder may still be installing the final Contact publication when
+    // the peer goes offline. That is live bounded contention, not shutdown:
+    // retry only the typed pre-admission answer and never replay an unknown
+    // durable outcome.
+    let post_restart = poll_until(Duration::from_secs(20), || {
+        match new_issue(&rt, &founder_home, "after restart") {
+            response @ IssueResponse::Ref { .. } => Some(response),
+            IssueResponse::Error {
+                error_kind: issues_app::IssuesErrorKind::Retry,
+                ..
+            } => None,
+            other => panic!("founder: post-restart issue failed terminally: {other:?}"),
+        }
+    })
+    .expect("founder publication did not become writable after Contact");
     assert!(
-        matches!(
-            new_issue(&rt, &founder_home, "after restart"),
-            IssueResponse::Ref { .. }
-        ),
-        "founder: post-restart issue"
+        matches!(post_restart, IssueResponse::Ref { .. }),
+        "founder: post-restart issue: {post_restart:?}"
     );
 
     // Restart the joiner on the SAME home. It re-docks from its persisted

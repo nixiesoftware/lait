@@ -28,7 +28,7 @@ use lait::install::{Client as AgentClient, Scope};
 
 use super::{Client, ClientError, ClientResult};
 
-pub use lait_workbench::{HeadFacts, HeadKind, Ownership};
+pub use lait_workbench::{HeadFacts, HeadKind, HeadState, Ownership, Stopped};
 
 /// What authoring an MCP binding asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +85,13 @@ impl Client {
         self.supervisor().list_heads()
     }
 
-    /// Stop a head this client started.
-    pub async fn stop_head(&self, id: &str) -> ClientResult<()> {
+    /// Stop a head this client started, and say what actually happened.
+    ///
+    /// Two successes, kept apart all the way to the caller: the head was running
+    /// and is not any more, or it had already exited. The second is the only way a
+    /// person learns their World fell over on its own, so collapsing it here would
+    /// throw away the fact and leave the surface reporting a button press.
+    pub async fn stop_head(&self, id: &str) -> ClientResult<Stopped> {
         self.supervisor().stop_head(id).await.map_err(Into::into)
     }
 

@@ -68,14 +68,35 @@ fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
     // shipped before sections existed.
     assert_eq!(descriptor.version(), 2);
     let id = descriptor.id().expect("canonical descriptor");
-    // Moved deliberately when durable Exec control landed: the package now
-    // declares `issues::contract::verify_spec()` in its Spec section, and
-    // COMPATIBILITY.md's rule is that changing declared Spec meaning changes
-    // the descriptor identity. Spaces on the previous implementation take the
-    // ordinary World-upgrade path.
+    // Moved deliberately a second time by the query and publication rebuild.
+    // The package's declared FIND surface is what changed: the schemas, the
+    // extractors and their bounds are all part of the descriptor, and
+    // COMPATIBILITY.md's rule is that changing declared meaning changes the
+    // descriptor identity. (The first move was durable Exec control adding
+    // `issues::contract::verify_spec()` to the Spec section.)
+    //
+    // That same rebuild then moved it once more, within this release, by
+    // declaring `relation_target_kind` — the reverse of the membership
+    // posting the rebuild had already introduced. One release, one move: the
+    // two changes ship together and no Space ever ran the intermediate
+    // surface.
+    //
+    // Then twice more, still inside this release. `alias_project_ordinal`,
+    // because a human reference is a project AND a number and the number is
+    // only unique within the project -- the ordinal alone answered with one
+    // row per project once ordinals became small enough for a person to
+    // read. And `kind_project_state_live`, which a roll-up counts directly:
+    // the coordinate beside it counts tombstoned rows too, so excluding them
+    // had meant resolving every member, which is what put a ceiling on
+    // collections that never needed one.
+    //
+    // Spaces on the previous implementation take the ordinary World-upgrade
+    // path, exactly as they did then. What must NOT happen is this constant
+    // being refreshed to whatever the build now prints: that turns the pin
+    // into a mirror and the gate stops meaning anything.
     assert_eq!(
         id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "e405d9b52ba7a3aca4a1db28f802c4566890338ea2412fa0a70e832e80d04b56",
+        "f342ffcb0cc4b1fe8cc272c1f8de1830b56b15395af96b6d819818026faa1199",
         "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
     );
 }

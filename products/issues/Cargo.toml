@@ -4,7 +4,9 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "LAIT's canonical IssuesWorld product: schemas, semantic model, DTOs, and product identifiers"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
+# See the root manifest: noncommercial terms and crates.io do not mix.
+publish = false
 
 [lints]
 workspace = true
@@ -21,3 +23,5 @@ schemars = "1"
 postcard = { version = "1", features = ["use-std"] }
 data-encoding = "2.6"
 blake3 = "1"
+unicode-normalization = "=0.1.25"
+unicode-segmentation = "=1.13.3"

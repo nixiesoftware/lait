@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
+// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `env_flag`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -68,7 +68,11 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.refresh() = ActionRequest_Refresh;
 
   /// Hand a World to the person's browser.
+  ///
+  /// Names the mount as well as the path: a head serves one World, so opening
+  /// says which rather than reaching for whichever head is up.
   const factory ActionRequest.open({
+    required String world,
     required String entryPath,
   }) = ActionRequest_Open;
 
@@ -115,6 +119,42 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.stopHead({
     required String id,
   }) = ActionRequest_StopHead;
+
+  /// Send a message to a person, over the configured carrier.
+  const factory ActionRequest.sendMessage({
+    required String to,
+    required String body,
+  }) = ActionRequest_SendMessage;
+
+  /// Ask the carrier for anything waiting, and file it into conversations.
+  const factory ActionRequest.collectMail() = ActionRequest_CollectMail;
+
+  /// Block a person at the carrier, so no device of theirs lands again. Also
+  /// how an incoming stranger is dismissed.
+  const factory ActionRequest.blockSender({
+    required String person,
+  }) = ActionRequest_BlockSender;
+
+  /// Accept an unknown correspondent into the address book.
+  const factory ActionRequest.acceptContact({
+    required String person,
+  }) = ActionRequest_AcceptContact;
+
+  /// Open a conversation as a tab, and focus it. What a click in the address
+  /// book asks for.
+  const factory ActionRequest.openConversation({
+    required String person,
+  }) = ActionRequest_OpenConversation;
+
+  /// Focus an already-open conversation tab.
+  const factory ActionRequest.focusConversation({
+    required String person,
+  }) = ActionRequest_FocusConversation;
+
+  /// Close a conversation tab.
+  const factory ActionRequest.closeConversation({
+    required String person,
+  }) = ActionRequest_CloseConversation;
 
   /// Forget an Orbit. The store is left alone; this is registry-only.
   const factory ActionRequest.forgetOrbit({
@@ -216,6 +256,45 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.displayDeviceRevoke({
     required String device,
   }) = ActionRequest_DisplayDeviceRevoke;
+
+  /// Add a passphrase as a second way into the coordinator's identifier key.
+  ///
+  /// The first slot is sealed to this daemon's device, which survives an
+  /// operating-system profile but not the loss of the identity. A passphrase
+  /// depends on neither, which is what makes it a second way in rather than a
+  /// second copy of the first.
+  const factory ActionRequest.displayIdentifierAdmitPassphrase({
+    required String passphrase,
+  }) = ActionRequest_DisplayIdentifierAdmitPassphrase;
+
+  /// Make this machine a screen.
+  ///
+  /// Pressing the control is the whole of the consent — there is no dialog
+  /// in front of it, because being asked *what to show* before you are a
+  /// screen is the wrong order. Nothing is enrolled and nothing is
+  /// committed: this client is already a member of the Space it will draw,
+  /// so there is no stranger to issue a credential to. Leaving is
+  /// [`ActionRequest::LeavePresentation`].
+  const factory ActionRequest.enterPresentation() =
+      ActionRequest_EnterPresentation;
+
+  /// Point this screen at one exact surface. Dispatched from inside the
+  /// mode, never as a precondition for entering it.
+  const factory ActionRequest.presentHere({
+    required String orbit,
+    required String world,
+    required String surface,
+    required String input,
+    required String title,
+  }) = ActionRequest_PresentHere;
+
+  /// Ask the current selection again. What a refresh boundary and a manual
+  /// nudge both do.
+  const factory ActionRequest.presentRefresh() = ActionRequest_PresentRefresh;
+
+  /// Stop being a screen.
+  const factory ActionRequest.leavePresentation() =
+      ActionRequest_LeavePresentation;
 }
 
 /// The identity's address book, as last read.
@@ -326,6 +405,59 @@ class CardRow {
           presence == other.presence;
 }
 
+/// One message in a conversation. The chat draws a custom component per `kind`.
+class ChatMessageRow {
+  /// True if this identity sent it — which side of the chat it is drawn on.
+  final bool mine;
+
+  /// `message` (text) or `invitation`. The chat draws each with its own
+  /// component: one is read, the other acted on.
+  final String kind;
+
+  /// The text, for a message. `None` for an invitation.
+  final String? body;
+
+  /// When it was written, unix seconds.
+  final BigInt sentAt;
+
+  /// The proven signer's device, for a received message.
+  final String fromDevice;
+
+  /// Whether the carrier's word matched the proof. `false` is not wrong but is
+  /// worth surfacing rather than hiding.
+  final bool provenanceAgrees;
+
+  const ChatMessageRow({
+    required this.mine,
+    required this.kind,
+    this.body,
+    required this.sentAt,
+    required this.fromDevice,
+    required this.provenanceAgrees,
+  });
+
+  @override
+  int get hashCode =>
+      mine.hashCode ^
+      kind.hashCode ^
+      body.hashCode ^
+      sentAt.hashCode ^
+      fromDevice.hashCode ^
+      provenanceAgrees.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ChatMessageRow &&
+          runtimeType == other.runtimeType &&
+          mine == other.mine &&
+          kind == other.kind &&
+          body == other.body &&
+          sentAt == other.sentAt &&
+          fromDevice == other.fromDevice &&
+          provenanceAgrees == other.provenanceAgrees;
+}
+
 /// Everything a surface can draw, as of one moment.
 ///
 /// Sent whole. There is no partial update and no patch protocol, because a
@@ -347,6 +479,11 @@ class ClientView {
   /// The daemon-owned, self-hosted display coordinator. `None` until its
   /// first authoritative read lands.
   final DisplayFacts? display;
+
+  /// This machine as a screen. `Some` *is* Big Picture — whether or not it
+  /// has drawn anything yet — so a surface reads presence here rather than
+  /// keeping a mode flag of its own that could disagree.
+  final PresentationFacts? presentation;
   final List<HeadRow> heads;
   final List<DeviceRow> devices;
   final List<StorageRow> storage;
@@ -361,6 +498,10 @@ class ClientView {
   /// `None` until the book has been read once. Empty cards is a book
   /// that answered and holds nothing, not an unread book.
   final BookFacts? book;
+
+  /// This identity's correspondence — the mailbox and the arrival standing.
+  /// `None` until read once, distinct from a mailbox that answered empty.
+  final CorrespondenceFacts? correspondence;
   final List<NoticeRow> notices;
   final List<FailureRow> failures;
 
@@ -378,12 +519,14 @@ class ClientView {
     this.library_,
     this.host,
     this.display,
+    this.presentation,
     required this.heads,
     required this.devices,
     required this.storage,
     required this.orbits,
     this.space,
     this.book,
+    this.correspondence,
     required this.notices,
     required this.failures,
     required this.inFlight,
@@ -397,12 +540,14 @@ class ClientView {
       library_.hashCode ^
       host.hashCode ^
       display.hashCode ^
+      presentation.hashCode ^
       heads.hashCode ^
       devices.hashCode ^
       storage.hashCode ^
       orbits.hashCode ^
       space.hashCode ^
       book.hashCode ^
+      correspondence.hashCode ^
       notices.hashCode ^
       failures.hashCode ^
       inFlight.hashCode ^
@@ -418,16 +563,151 @@ class ClientView {
           library_ == other.library_ &&
           host == other.host &&
           display == other.display &&
+          presentation == other.presentation &&
           heads == other.heads &&
           devices == other.devices &&
           storage == other.storage &&
           orbits == other.orbits &&
           space == other.space &&
           book == other.book &&
+          correspondence == other.correspondence &&
           notices == other.notices &&
           failures == other.failures &&
           inFlight == other.inFlight &&
           mcp == other.mcp;
+}
+
+/// One person one can message, with each device that is them.
+class ContactRow {
+  final String id;
+  final String name;
+  final List<String> devices;
+
+  /// In the book (a friend) vs an unadded stranger who wrote first. Parts the
+  /// normal contact list from the incoming section.
+  final bool added;
+
+  /// An agent rather than a person — wears the AI mark.
+  final bool isAgent;
+
+  /// If this is a contact's agent, whose, and their name for the label.
+  final String? parentId;
+  final String? parentName;
+
+  /// Unread received messages — the badge. Zero once opened.
+  final int unread;
+
+  const ContactRow({
+    required this.id,
+    required this.name,
+    required this.devices,
+    required this.added,
+    required this.isAgent,
+    this.parentId,
+    this.parentName,
+    required this.unread,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      devices.hashCode ^
+      added.hashCode ^
+      isAgent.hashCode ^
+      parentId.hashCode ^
+      parentName.hashCode ^
+      unread.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ContactRow &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          devices == other.devices &&
+          added == other.added &&
+          isAgent == other.isAgent &&
+          parentId == other.parentId &&
+          parentName == other.parentName &&
+          unread == other.unread;
+}
+
+/// One conversation: who it is with, and every message either way.
+class ConversationRow {
+  final String peerId;
+  final String peerName;
+  final List<ChatMessageRow> messages;
+
+  const ConversationRow({
+    required this.peerId,
+    required this.peerName,
+    required this.messages,
+  });
+
+  @override
+  int get hashCode => peerId.hashCode ^ peerName.hashCode ^ messages.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConversationRow &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          peerName == other.peerName &&
+          messages == other.messages;
+}
+
+/// A person's correspondence, drawn as conversations rather than an inbox.
+///
+/// `None` on `ClientView` until it has been read once — the same
+/// loading-versus-empty distinction the book keeps.
+class CorrespondenceFacts {
+  /// This identity's own device id on the plane — the address a correspondent
+  /// writes to. `None` until the plane is known.
+  final String? myDevice;
+
+  /// The people this identity can reach. A person folds all their devices into
+  /// one contact, and a click on one opens a chat.
+  final List<ContactRow> contacts;
+
+  /// One transcript per person, mixing sent and received.
+  final List<ConversationRow> conversations;
+
+  /// Which conversations are open as tabs, in tab order. Shared state, so a
+  /// click in the address book opens the tab the chat window draws.
+  final List<String> openTabs;
+
+  /// The focused tab, if any.
+  final String? activeTab;
+
+  const CorrespondenceFacts({
+    this.myDevice,
+    required this.contacts,
+    required this.conversations,
+    required this.openTabs,
+    this.activeTab,
+  });
+
+  @override
+  int get hashCode =>
+      myDevice.hashCode ^
+      contacts.hashCode ^
+      conversations.hashCode ^
+      openTabs.hashCode ^
+      activeTab.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CorrespondenceFacts &&
+          runtimeType == other.runtimeType &&
+          myDevice == other.myDevice &&
+          contacts == other.contacts &&
+          conversations == other.conversations &&
+          openTabs == other.openTabs &&
+          activeTab == other.activeTab;
 }
 
 class DeviceRow {
@@ -609,6 +889,10 @@ class DisplayFacts {
   final List<DisplayAssignmentRow> assignments;
   final List<DisplayPairingRow> pendingPairings;
 
+  /// `None` from a daemon that predates the custody split — not reported, as
+  /// distinct from reported-as-none.
+  final DisplayIdentifierCustodyRow? identifierCustody;
+
   const DisplayFacts({
     required this.instance,
     required this.label,
@@ -619,6 +903,7 @@ class DisplayFacts {
     required this.devices,
     required this.assignments,
     required this.pendingPairings,
+    this.identifierCustody,
   });
 
   @override
@@ -631,7 +916,8 @@ class DisplayFacts {
       surfaces.hashCode ^
       devices.hashCode ^
       assignments.hashCode ^
-      pendingPairings.hashCode;
+      pendingPairings.hashCode ^
+      identifierCustody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -646,7 +932,8 @@ class DisplayFacts {
           surfaces == other.surfaces &&
           devices == other.devices &&
           assignments == other.assignments &&
-          pendingPairings == other.pendingPairings;
+          pendingPairings == other.pendingPairings &&
+          identifierCustody == other.identifierCustody;
 }
 
 class DisplayHealthRow {
@@ -706,6 +993,34 @@ class DisplayHealthRow {
           driftResidualMs == other.driftResidualMs &&
           correctionEvents == other.correctionEvents &&
           pipelineUnobservable == other.pipelineUnobservable;
+}
+
+/// How many ways back into this coordinator's identifier key exist, and whether
+/// any survives the machine.
+///
+/// Carried on the ordinary status projection rather than a settings page: the
+/// moment an operator wants this is after the machine is gone, and a fact only
+/// reachable from the lost machine is not a fact they have.
+class DisplayIdentifierCustodyRow {
+  /// Kinds of unlock path, never material.
+  final List<String> slots;
+  final bool portable;
+
+  const DisplayIdentifierCustodyRow({
+    required this.slots,
+    required this.portable,
+  });
+
+  @override
+  int get hashCode => slots.hashCode ^ portable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayIdentifierCustodyRow &&
+          runtimeType == other.runtimeType &&
+          slots == other.slots &&
+          portable == other.portable;
 }
 
 class DisplayPairingRow {
@@ -928,18 +1243,49 @@ class HeadRow {
   /// its identity has.
   final String? orbit;
 
+  /// The one World this head serves.
+  ///
+  /// `None` is a head from before the pin, which answers for every mounted
+  /// World. It matches no row deliberately: a surface cannot say a definite
+  /// thing about it, and saying an indefinite thing is the defect this field
+  /// closes.
+  final String? world;
+
   /// The address, *without* the run credential its URL carries. A front page
   /// has no use for a credential — `Open` mints a single-use ticket of its
   /// own, which is what that ceremony is for.
   final String? origin;
   final bool owned;
 
+  /// What the supervisor can say about this head *now*.
+  ///
+  /// `running`, `exited` or `unknown`. Carried because without it a surface has
+  /// only row *presence* to go on, and presence is not liveness: exited heads stay
+  /// listed so a person can see the thing they opened died, so a surface counting
+  /// rows paints a crashed head as Running. `HeadState` was added underneath and
+  /// stopped here, one hop short of the only place the lie was visible.
+  ///
+  /// A string like `DeviceRow::state`, not the enum: this crosses a generated
+  /// bridge, and a new variant should widen a match on the far side rather than
+  /// break the binding.
+  final String state;
+
+  /// Why the state could not be established, when it could not.
+  ///
+  /// `Some` only for `unknown`, exactly as `DeviceRow::degraded` carries only a
+  /// real degradation. A surface that can say *why* it cannot tell is the whole
+  /// difference between a third state and a shrug.
+  final String? stateDetail;
+
   const HeadRow({
     required this.id,
     required this.kind,
     this.orbit,
+    this.world,
     this.origin,
     required this.owned,
+    required this.state,
+    this.stateDetail,
   });
 
   @override
@@ -947,8 +1293,11 @@ class HeadRow {
       id.hashCode ^
       kind.hashCode ^
       orbit.hashCode ^
+      world.hashCode ^
       origin.hashCode ^
-      owned.hashCode;
+      owned.hashCode ^
+      state.hashCode ^
+      stateDetail.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -958,8 +1307,11 @@ class HeadRow {
           id == other.id &&
           kind == other.kind &&
           orbit == other.orbit &&
+          world == other.world &&
           origin == other.origin &&
-          owned == other.owned;
+          owned == other.owned &&
+          state == other.state &&
+          stateDetail == other.stateDetail;
 }
 
 class HostFacts {
@@ -1228,6 +1580,166 @@ enum PresenceView {
   ;
 }
 
+/// What a screen was pointed at.
+class PresentationChoice {
+  final String orbit;
+  final String world;
+  final String surface;
+
+  /// What to call this on screen while it is loading or refusing.
+  final String title;
+
+  const PresentationChoice({
+    required this.orbit,
+    required this.world,
+    required this.surface,
+    required this.title,
+  });
+
+  @override
+  int get hashCode =>
+      orbit.hashCode ^ world.hashCode ^ surface.hashCode ^ title.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentationChoice &&
+          runtimeType == other.runtimeType &&
+          orbit == other.orbit &&
+          world == other.world &&
+          surface == other.surface &&
+          title == other.title;
+}
+
+/// This machine as a screen. Present exactly when Big Picture is on.
+///
+/// Being a screen and showing something are separate facts, so `chosen` is
+/// optional: a screen entered and not yet pointed at anything is a real state
+/// with its own surface, not a half-built one.
+class PresentationFacts {
+  final PresentationChoice? chosen;
+
+  /// The last verified render, kept across a failed re-ask so a screen goes
+  /// stale rather than dark.
+  final PresentedProgram? program;
+
+  /// Why the last attempt did not answer. Travels *beside* `program`, never
+  /// instead of it — "stale, and here is why" and "nothing to show" are
+  /// different things to tell somebody standing in front of a screen.
+  final String? failure;
+
+  const PresentationFacts({
+    this.chosen,
+    this.program,
+    this.failure,
+  });
+
+  @override
+  int get hashCode => chosen.hashCode ^ program.hashCode ^ failure.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentationFacts &&
+          runtimeType == other.runtimeType &&
+          chosen == other.chosen &&
+          program == other.program &&
+          failure == other.failure;
+}
+
+class PresentedItem {
+  final String id;
+  final int? durationMs;
+  final String assessment;
+  final String? spokenSummary;
+  final PresentedScene scene;
+
+  const PresentedItem({
+    required this.id,
+    this.durationMs,
+    required this.assessment,
+    this.spokenSummary,
+    required this.scene,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      durationMs.hashCode ^
+      assessment.hashCode ^
+      spokenSummary.hashCode ^
+      scene.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentedItem &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          durationMs == other.durationMs &&
+          assessment == other.assessment &&
+          spokenSummary == other.spokenSummary &&
+          scene == other.scene;
+}
+
+class PresentedProgram {
+  /// `current`, `partial`, or `unavailable`.
+  final String assessment;
+  final List<String> partialReasons;
+
+  /// `hold_last`, `loop`, `poll_at_end`, or `blank_at_end`.
+  final String cycle;
+  final int? refreshAfterMs;
+  final List<PresentedItem> items;
+
+  const PresentedProgram({
+    required this.assessment,
+    required this.partialReasons,
+    required this.cycle,
+    this.refreshAfterMs,
+    required this.items,
+  });
+
+  @override
+  int get hashCode =>
+      assessment.hashCode ^
+      partialReasons.hashCode ^
+      cycle.hashCode ^
+      refreshAfterMs.hashCode ^
+      items.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentedProgram &&
+          runtimeType == other.runtimeType &&
+          assessment == other.assessment &&
+          partialReasons == other.partialReasons &&
+          cycle == other.cycle &&
+          refreshAfterMs == other.refreshAfterMs &&
+          items == other.items;
+}
+
+@freezed
+sealed class PresentedScene with _$PresentedScene {
+  const PresentedScene._();
+
+  const factory PresentedScene.frame({
+    /// `png`, `jpeg`, or `webp`.
+    required String mediaType,
+    required int width,
+    required int height,
+    required Uint8List bytes,
+  }) = PresentedScene_Frame;
+  const factory PresentedScene.blank({
+    /// `source_unavailable`, `unsupported`, or `program_ended`.
+    required String reason,
+  }) = PresentedScene_Blank;
+  const factory PresentedScene.unsupported({
+    required String output,
+  }) = PresentedScene_Unsupported;
+}
+
 /// The Space somebody is administering, as it last answered.
 class SpaceRow {
   final String space;
@@ -1472,16 +1984,33 @@ class WorldUpdateRow {
   /// would be refused on arrival teaches a person to distrust the control.
   final List<String>? unmet;
 
+  /// Durable native consent/progress, independent of channel standing.
+  final String? operation;
+  final String? phase;
+  final String? progress;
+  final String? message;
+
   const WorldUpdateRow({
     this.serving,
     this.available,
     required this.behind,
     this.unmet,
+    this.operation,
+    this.phase,
+    this.progress,
+    this.message,
   });
 
   @override
   int get hashCode =>
-      serving.hashCode ^ available.hashCode ^ behind.hashCode ^ unmet.hashCode;
+      serving.hashCode ^
+      available.hashCode ^
+      behind.hashCode ^
+      unmet.hashCode ^
+      operation.hashCode ^
+      phase.hashCode ^
+      progress.hashCode ^
+      message.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1491,5 +2020,9 @@ class WorldUpdateRow {
           serving == other.serving &&
           available == other.available &&
           behind == other.behind &&
-          unmet == other.unmet;
+          unmet == other.unmet &&
+          operation == other.operation &&
+          phase == other.phase &&
+          progress == other.progress &&
+          message == other.message;
 }

@@ -59,26 +59,28 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(async {
-        let space = lait::orbital::discover_space(home)
-            .single()
-            .expect("test Space");
-        let call = issues_app::encode_call(&request)?;
-        let reply = lait::control::call_world(
-            home,
-            ControlRoute::World {
-                address: OrbitAddress::for_store(home, space),
-                world: call.world().as_str().to_string(),
-            },
-            call.clone(),
-            None,
-        )
-        .await?;
-        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
-            &call, reply,
-        )?)?)
-    })
-    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(async {
+            let space = lait::orbital::discover_space(home)
+                .single()
+                .expect("test Space");
+            let call = issues_app::encode_call(&request)?;
+            let reply = lait::control::call_world(
+                home,
+                ControlRoute::World {
+                    address: OrbitAddress::for_store(home, space),
+                    world: call.world().as_str().to_string(),
+                },
+                call.clone(),
+                None,
+            )
+            .await?;
+            Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+                &call, reply,
+            )?)?)
+        })
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn grant_role(
@@ -113,10 +115,17 @@ fn grant_role(
     }
 }
 
+/// The JSON body of a read, however the surface hands it back.
+///
+/// Listing roles answers with a typed `Roles { page }` now rather than JSON
+/// inside a `Text`; the page serializes to the same shape these assertions
+/// navigate, so the only thing that changed is where the value comes from.
+/// `RoleShow` and `WorkflowShow` still answer with `Text`.
 fn text_of(resp: IssueResponse) -> serde_json::Value {
     match resp {
         IssueResponse::Text { text } => serde_json::from_str(&text).expect("json text"),
-        other => panic!("expected Text, got {other:?}"),
+        IssueResponse::Roles { page } => serde_json::to_value(page).expect("roles page json"),
+        other => panic!("expected a read body, got {other:?}"),
     }
 }
 
@@ -181,12 +190,22 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert!(online, "daemon online");
 
     // ---- built-ins are listed, immutable, and shown with revisions --------
-    let roles = text_of(issue_req(&rt, &home, issues_app::IssuesRequest::RoleList));
+    let roles = text_of(issue_req(
+        &rt,
+        &home,
+        issues_app::IssuesRequest::RoleList {
+            page: issues::contract::PageRequest {
+                limit: 100,
+                cursor: None,
+            },
+        },
+    ));
     let ids: Vec<&str> = roles
-        .as_array()
+        .get("items")
+        .and_then(serde_json::Value::as_array)
         .unwrap()
         .iter()
-        .map(|r| r["role_id"].as_str().unwrap())
+        .map(|r| r["summary"]["role_id"].as_str().unwrap())
         .collect();
     for built_in in ["lait.administrator", "lait.contributor", "lait.viewer"] {
         assert!(ids.contains(&built_in), "{built_in} listed");
@@ -198,7 +217,7 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
             role: "lait.viewer".into(),
         },
     ));
-    assert_eq!(viewer["built_in"], true);
+    assert_eq!(viewer["summary"]["built_in"], true);
     let resp = issue_req(
         &rt,
         &home,
@@ -219,8 +238,14 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     );
 
     // ---- custom role lifecycle: create → edit (exact head) → assign -------
-    let project_key = match issue_req(&rt, &home, issues_app::IssuesRequest::ProjectList) {
-        IssueResponse::Projects { projects } => projects.first().unwrap().key.clone(),
+    let project_key = match issue_req(
+        &rt,
+        &home,
+        issues_app::IssuesRequest::ProjectList {
+            page: issues::contract::PageRequest::default(),
+        },
+    ) {
+        IssueResponse::Projects { page } => page.items.first().unwrap().key.clone(),
         other => panic!("{other:?}"),
     };
     let created = issue_req(

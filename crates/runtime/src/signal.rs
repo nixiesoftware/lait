@@ -12,17 +12,17 @@
 //! becomes activity.
 //!
 //! That negative is the whole contract, and it is easy to break by accident.
-//! One line — a `with_replica` here, a `publish` there — would journal nothing
-//! and still emit an Observation, and `StationHost::frame_for` turns any
+//! One line — a Replica mutation seam here, a `publish` there — would journal
+//! nothing and still emit an Observation, and `StationHost::frame_for` turns any
 //! Observation carrying scopes into `activity_advanced`. So the enforcement is
 //! structural: **this module may not name the Replica writer or the Observation
 //! ring**, and `tests/signal_is_not_durable.rs` parses this file and fails if it
 //! does.
 //!
 //! Privacy cannot do that job. `Broadcaster::publish` is `pub(crate)` and this
-//! module is inside that crate; `StationCore::with_replica` is outright `pub`.
-//! The gate is what makes the rule real, which is why it lands before the code
-//! it guards.
+//! module is inside that crate; StationCore's explicit metadata/control seams
+//! are public to the Runtime composition. The gate is what makes the rule real,
+//! which is why it lands before the code it guards.
 
 use replica::body::WorldId;
 

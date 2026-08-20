@@ -19,20 +19,46 @@ use runtime::world::call::{Call, Reply};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
-use world_interface::display::{DisplayRequest, REQUIRED_WORLD_ACCESS};
+use world_interface::display::{DisplayProjection, DisplayRequest, REQUIRED_WORLD_ACCESS};
 use world_interface::{
     ClientAccess, ClientFuture, ClientHost, ClientInvocationKind, Failure, HostContentRequest,
     HostControlRequest, PresentationHandle, PresentationResolution, WorldClientRegistry,
 };
 
-use crate::control::ControlRoute;
+use crate::control::{ControlRoute, Request};
 use crate::orbits::Router;
 
 use super::{
-    AssignmentRecord, CompiledProgram, CoordinatorState, CoordinatorStore, PlaybackAlignment,
+    AssignmentRecord, CompiledProgram, CoordinatorPolicy, CoordinatorStore, PlaybackAlignment,
     ProgramCompiler,
 };
 use super::{LiveMediaHub, LiveTransport};
+
+/// One exact surface to render, and the viewport to render it for.
+///
+/// This is the whole of what a render needs. An attached receiver's assignment
+/// is turned into one of these and pinned besides; a member screen builds one
+/// directly from a local choice. Keeping the two on one path is what makes the
+/// member profile a *reach and revocation* difference rather than a second
+/// rendering stack that could disagree with the first.
+#[derive(Debug, Clone)]
+pub struct SurfaceRender {
+    pub orbit: String,
+    /// The Space an assignment pins. `None` when nothing has committed to one
+    /// yet, in which case the resolved Orbit is taken as the answer rather than
+    /// checked against a second one.
+    pub space: Option<String>,
+    pub world: WorldId,
+    pub surface: world_interface::display::DisplaySurfaceId,
+    pub input: world_interface::display::CanonicalDisplayInput,
+    pub theme: world_interface::display::DisplayTheme,
+    pub width: u32,
+    pub height: u32,
+    pub scale_milli: u16,
+    pub locale: String,
+    pub horizon_ms: u32,
+    pub now_unix_ms: u64,
+}
 
 const MAX_LIVE_TICKETS: usize = 256;
 const MSE_TICKET_LIFETIME_MS: u64 = 86_400_000;
@@ -96,7 +122,7 @@ impl DisplayCoordinator {
         registry: WorldClientRegistry,
         local_root: PathBuf,
     ) -> Result<Self> {
-        let identifier_key = store.snapshot()?.identifier_key;
+        let identifier_key = store.identifier_key()?;
         let (assignment_changes, _) = broadcast::channel(64);
         Ok(Self {
             store,
@@ -109,6 +135,134 @@ impl DisplayCoordinator {
             live: LiveMediaHub::default(),
             live_tickets: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// What to render, independent of who is going to look at it.
+    ///
+    /// An assignment supplies this for an attached receiver; a member screen
+    /// supplies it directly. Everything downstream — the surface contract, the
+    /// required-Query classification, the disposable renderer and its bounds —
+    /// is identical, because none of it was ever about the receiver.
+    async fn render_surface(
+        &self,
+        want: &SurfaceRender,
+        pin: Option<&AssignmentRecord>,
+    ) -> Result<DisplayProjection> {
+        let package = self
+            .registry
+            .package_for_world(&want.world)
+            .ok_or_else(|| anyhow!("display World is not bundled by this build"))?;
+        let surface = package
+            .display_surface(&want.surface)
+            .ok_or_else(|| anyhow!("display surface is not bundled by this build"))?;
+        surface
+            .descriptor
+            .validate(&want.world)
+            .map_err(adapter_failure)
+            .context("validate display surface descriptor")?;
+        if let Some(assignment) = pin {
+            validate_source_pin(assignment, surface)?;
+        }
+
+        let reviewed = self
+            .router
+            .reviewed_world_implementation(&want.world)
+            .ok_or_else(|| anyhow!("display World has no host implementation"))?;
+        if let Some(assignment) = pin {
+            if reviewed != assignment.source.implementation {
+                return Err(anyhow!(
+                    "display assignment implementation does not match the daemon's reviewed implementation"
+                ));
+            }
+        }
+
+        let resolved = self
+            .router
+            .resolve(&want.orbit)
+            .context("resolve display Orbit")?;
+        if let Some(space) = want.space.as_deref() {
+            if resolved.address.space.as_str() != space {
+                return Err(anyhow!("display Space does not match its resolved Orbit"));
+            }
+        }
+
+        let request = DisplayRequest {
+            surface: want.surface.clone(),
+            width: want.width,
+            height: want.height,
+            scale_milli: want.scale_milli,
+            theme: want.theme,
+            locale: want.locale.clone(),
+            window_start_unix: want.now_unix_ms / 1_000,
+            window_horizon_ms: want.horizon_ms,
+            input: want.input.clone(),
+        };
+        request.validate().map_err(adapter_failure)?;
+        let invocation = (surface.prepare)(&request).map_err(adapter_failure)?;
+        package
+            .validate_invocation(&invocation)
+            .map_err(adapter_failure)?;
+        if invocation.access() != ClientAccess::Query
+            || !matches!(
+                invocation.kind(),
+                ClientInvocationKind::World(_) | ClientInvocationKind::Find { .. }
+            )
+        {
+            return Err(anyhow!(
+                "display surface did not prepare a read-only World or Find invocation"
+            ));
+        }
+
+        let route = ControlRoute::World {
+            address: resolved.address,
+            world: want.world.as_str().to_string(),
+        };
+        let host = QueryOnlyHost {
+            router: self.router.as_ref(),
+            route,
+            world: &want.world,
+            local_root: &self.local_root,
+        };
+        if package
+            .confirmation(&host, &invocation)
+            .await
+            .map_err(adapter_failure)?
+            .is_some()
+        {
+            return Err(anyhow!(
+                "display query unexpectedly requires interactive confirmation"
+            ));
+        }
+        let value = package
+            .execute(&host, invocation)
+            .await
+            .map_err(adapter_failure)?;
+        let projection = surface
+            .renderer
+            .project(value, &request)
+            .await
+            .map_err(adapter_failure)?;
+        projection
+            .validate_for(&surface.descriptor, &request)
+            .map_err(adapter_failure)?;
+        Ok(projection)
+    }
+
+    /// Render a surface for a screen that is a **member of the Space**, not an
+    /// attached receiver.
+    ///
+    /// Nothing between here and the World changes. What is absent is everything
+    /// that exists because a receiver is a stranger: no pairing, no proof key,
+    /// no assignment record, no opaque asset handle, and no
+    /// [`ProgramCompiler`] — a member already holds the Space these bytes came
+    /// from, so binding them to a credential it does not have would protect
+    /// nothing.
+    ///
+    /// Selection is therefore local and revocation is convergent: losing
+    /// standing stops the Query, with no policy to push and nothing to
+    /// clawback.
+    pub async fn render_for_member(&self, want: &SurfaceRender) -> Result<DisplayProjection> {
+        self.render_surface(want, None).await
     }
 
     /// Resolve, query, render, validate, and freeze the current assignment for
@@ -141,96 +295,21 @@ impl DisplayCoordinator {
 
         let world = WorldId::parse(&assignment.source.world)
             .ok_or_else(|| anyhow!("display assignment pins an invalid World"))?;
-        let package = self
-            .registry
-            .package_for_world(&world)
-            .ok_or_else(|| anyhow!("display assignment World is not bundled by this build"))?;
-        let surface = package
-            .display_surface(&assignment.source.surface)
-            .ok_or_else(|| anyhow!("display assignment surface is not bundled by this build"))?;
-        surface
-            .descriptor
-            .validate(&world)
-            .map_err(adapter_failure)
-            .context("validate display surface descriptor")?;
-        validate_source_pin(&assignment, surface)?;
-
-        let reviewed = self
-            .router
-            .reviewed_world_implementation(&world)
-            .ok_or_else(|| anyhow!("display assignment World has no host implementation"))?;
-        if reviewed != assignment.source.implementation {
-            return Err(anyhow!(
-                "display assignment implementation does not match the daemon's reviewed implementation"
-            ));
-        }
-
-        let resolved = self
-            .router
-            .resolve(&assignment.orbit)
-            .context("resolve display assignment Orbit")?;
-        if resolved.address.space.as_str() != assignment.space {
-            return Err(anyhow!(
-                "display assignment Space does not match its resolved Orbit"
-            ));
-        }
-
-        let request = DisplayRequest {
+        let want = SurfaceRender {
+            orbit: assignment.orbit.clone(),
+            space: Some(assignment.space.clone()),
+            world,
             surface: assignment.source.surface.clone(),
+            input: assignment.source.input.clone(),
+            theme: assignment.theme,
             width: capabilities.viewport.width,
             height: capabilities.viewport.height,
             scale_milli: capabilities.viewport.scale_milli,
-            theme: assignment.theme,
             locale: capabilities.locale.clone(),
-            window_start_unix: now_unix_ms / 1_000,
-            window_horizon_ms: capabilities.max_staging_horizon_ms,
-            input: assignment.source.input.clone(),
+            horizon_ms: capabilities.max_staging_horizon_ms,
+            now_unix_ms,
         };
-        request.validate().map_err(adapter_failure)?;
-        let invocation = (surface.prepare)(&request).map_err(adapter_failure)?;
-        package
-            .validate_invocation(&invocation)
-            .map_err(adapter_failure)?;
-        if invocation.access() != ClientAccess::Query
-            || !matches!(invocation.kind(), ClientInvocationKind::World(_))
-        {
-            return Err(anyhow!(
-                "display surface did not prepare a read-only World invocation"
-            ));
-        }
-
-        let route = ControlRoute::World {
-            address: resolved.address,
-            world: world.as_str().to_string(),
-        };
-        let host = QueryOnlyHost {
-            router: self.router.as_ref(),
-            route,
-            world: &world,
-            local_root: &self.local_root,
-        };
-        if package
-            .confirmation(&host, &invocation)
-            .await
-            .map_err(adapter_failure)?
-            .is_some()
-        {
-            return Err(anyhow!(
-                "display query unexpectedly requires interactive confirmation"
-            ));
-        }
-        let value = package
-            .execute(&host, invocation)
-            .await
-            .map_err(adapter_failure)?;
-        let projection = surface
-            .renderer
-            .project(value, &request)
-            .await
-            .map_err(adapter_failure)?;
-        projection
-            .validate_for(&surface.descriptor, &request)
-            .map_err(adapter_failure)?;
+        let projection = self.render_surface(&want, Some(&assignment)).await?;
         let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
         let compiled = Arc::new(self.compiler.compile(
             &assignment.id,
@@ -576,7 +655,7 @@ fn random_token() -> Result<String> {
 }
 
 fn playback_alignment(
-    state: &CoordinatorState,
+    state: &CoordinatorPolicy,
     assignment: &AssignmentRecord,
     sampled_at_unix_ms: u64,
 ) -> Result<Option<PlaybackAlignment>> {
@@ -713,6 +792,45 @@ impl ClientHost for QueryOnlyHost<'_> {
                 .call_world_requiring(self.route.clone(), &call, REQUIRED_WORLD_ACCESS)
                 .await
                 .map_err(|error| Failure::new(format!("{error:#}")))
+        })
+    }
+
+    fn call_find<'a>(
+        &'a self,
+        world: WorldId,
+        query: runtime::find::Query,
+    ) -> ClientFuture<'a, Value> {
+        Box::pin(async move {
+            if &world != self.world {
+                return Err(Failure::new(
+                    "display projection attempted to query another World",
+                ));
+            }
+            let ControlRoute::World { address, .. } = &self.route else {
+                return Err(Failure::new("display projection has no World route"));
+            };
+            let response = self
+                .router
+                .request_routed(
+                    ControlRoute::Orbit {
+                        address: address.clone(),
+                    },
+                    &Request::Find {
+                        world: world.as_str().to_owned(),
+                        query,
+                    },
+                    None,
+                )
+                .await
+                .map_err(|error| Failure::new(format!("{error:#}")))?;
+            match response {
+                crate::control::Response::Find { answer } => serde_json::to_value(answer)
+                    .map_err(|error| Failure::new(format!("encode Runtime Find answer: {error}"))),
+                crate::control::Response::Error { message, .. } => Err(Failure::new(message)),
+                other => Err(Failure::new(format!(
+                    "Runtime Find request returned an unexpected response: {other:?}"
+                ))),
+            }
         })
     }
 

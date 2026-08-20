@@ -54,7 +54,9 @@
 ;
 ; where STAGE is the release bundle —
 ;   apps\astrolabe\build\windows\x64\runner\Release
-; with THIRD-PARTY-NOTICES.md copied in beside it.
+; with THIRD-PARTY-NOTICES.md and LICENSE copied in beside it — both are
+; compiled in, and LICENSE is also read for the licence page, so a stage
+; missing either fails the makensis run rather than shipping without them.
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -101,9 +103,17 @@ VIAddVersionKey "ProductName" "Astrolabe"
 VIAddVersionKey "FileDescription" "The local client for served Worlds"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
-VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
+VIAddVersionKey "LegalCopyright" "Copyright 2026 Omar Younes - PolyForm Noncommercial 1.0.0"
 
 !define MUI_ABORTWARNING
+; The terms, shown before anything is installed. PolyForm obliges whoever
+; distributes a copy to ensure the recipient also gets them; a file dropped in
+; the install directory satisfies that only in the letter, and this product is
+; noncommercial-licensed, which is the kind of term a person installing it at
+; work needs to see rather than discover. Read from ${STAGE} for the same
+; reason the notices are: CI stages both beside the pair, so the installer and
+; the update tree carry the same file.
+!insertmacro MUI_PAGE_LICENSE "${STAGE}\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -139,6 +149,7 @@ Section "Astrolabe" SecMain
   ; by `ci/third-party-notices.sh` and held current by CI, so shipping it is a
   ; copy rather than something somebody has to remember to update.
   File "${STAGE}\THIRD-PARTY-NOTICES.md"
+  File "${STAGE}\LICENSE"
 
   ; --- What the interface is made of ----------------------------------------
   ;

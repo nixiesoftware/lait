@@ -6,7 +6,7 @@ import type { GeometryView, PlanData, Row, SpecState } from "../types";
 import { Combobox, type Option } from "./Picker";
 
 export function planCounts(geometry: GeometryView | null | undefined) {
-  return geometry?.closure ?? {
+  return geometry?.summary?.closure ?? {
     total: 0,
     closed: 0,
     ready: 0,

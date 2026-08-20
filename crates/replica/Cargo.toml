@@ -4,7 +4,7 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "LAIT Replica semantics: Body identity, schemas, descriptors, semantic frontiers, transaction plans, incorporation, and Convergence — above mechanics and Fabric, naming neither the CRDT engine nor any product/consumer type."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 # Not published. These are lait's internal boundaries, not a library surface —
 # the descriptions above say so ("the ONLY crate that names loro", "the ONLY
 # crate that names iroh"), and those are architecture invariants rather than a
@@ -16,6 +16,7 @@ publish = false
 
 [features]
 fault-injection = ["journal/fault-injection"]
+scale-fixtures = []
 
 [dependencies]
 # mechanics — identity, authority, custody, key legitimacy. Replica combines
@@ -28,7 +29,7 @@ mechanics = { path = "../mechanics" }
 fabric = { path = "../fabric" }
 journal = { path = "../journal" }
 
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 # `[u8; 64]` signature fields on the S5 Body-transaction records.
 serde-byte-array = "0.1"
 postcard = { version = "1", features = ["use-std"] }
@@ -38,6 +39,7 @@ getrandom = "0.3"
 anyhow = "1"
 tracing = "0.1"
 imbl = "7.0.1"
+smallvec = { version = "1.15.1", features = ["serde"] }
 
 [lints]
 workspace = true
