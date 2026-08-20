@@ -84,3 +84,28 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 @media (max-width:759px) { .operational-bar .bar-version { display:none; } }
 @media (max-width:619px) { .operational-bar .bar-spaces { display:none; } }
 .world-settings-tip { margin-left:auto; }
+
+/* Big Picture — always black: it is a screen, not a page. */
+.page.presenting { min-height:100vh; background:#000; }
+.big-picture { position:fixed; inset:0; display:grid; background:#000; }
+.big-picture:not([data-choosing]) { cursor:none; }
+.presented-frame { width:100%; height:100%; object-fit:contain; grid-area:1 / 1; }
+.present-said { display:grid; place-content:center; gap:8px; text-align:center; grid-area:1 / 1; }
+.present-said strong { color:#fff; font-size:18px; }
+.present-said small { color:#fff9; font-size:12px; }
+.present-center { display:grid; place-items:center; overflow:auto; grid-area:1 / 1; padding:24px; }
+.present-chooser { display:grid; gap:14px; width:min(560px,100%); }
+.present-chooser h1 { margin:0 0 10px; color:#fff; text-align:center; font-size:18px; letter-spacing:-.015em; }
+.present-chooser label { display:grid; gap:6px; color:#fff9; font-size:10px; font-weight:750; letter-spacing:.07em; }
+.present-chooser input,.present-chooser select,.present-chooser textarea { border:1px solid #ffffff2e; border-radius:5px; padding:8px 9px; color:#fff; background:#101010; font:inherit; font-size:12px; letter-spacing:normal; font-weight:400; }
+.present-chooser .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.present-hint { color:#fff6; font-size:11px; }
+.present-hint.centered { text-align:center; }
+.present-chrome { grid-area:1 / 1; display:flex; flex-direction:column; justify-content:space-between; padding:24px; pointer-events:none; }
+.present-title-row { display:flex; justify-content:space-between; gap:12px; color:#fff9; font-size:12px; }
+.present-banners { display:grid; gap:6px; }
+.present-banner { margin:0; padding:10px 16px; color:#fff; background:#1a1a1acc; font-size:12px; }
+.present-tip { margin-left:0; }
+.present-control { display:grid; place-items:center; width:34px; height:32px; border:0; color:var(--muted); background:transparent; }
+.present-control:hover { color:var(--text); background:var(--surface-200); }
+.present-control:focus-visible { outline:2px solid var(--brand); outline-offset:-2px; }

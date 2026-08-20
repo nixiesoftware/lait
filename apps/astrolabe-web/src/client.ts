@@ -89,6 +89,36 @@ export interface DisplayPairing { pairing: string; confirmationPhrase: string[];
 export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
 
+/** Big Picture: this machine as a screen. Present while the mode is entered. */
+export interface PresentationFacts {
+  chosen: PresentationChoice | null;
+  /** The last verified render, kept across a failed re-ask so a screen goes stale rather than dark. */
+  program: PresentedProgram | null;
+  /** Why the last attempt did not answer — beside `program`, never instead of it. */
+  failure: string | null;
+}
+export interface PresentationChoice { orbit: string; world: string; surface: string; title: string; }
+export interface PresentedProgram {
+  /** `current`, `partial`, or `unavailable`. */
+  assessment: string;
+  partialReasons: string[];
+  /** `hold_last`, `loop`, `poll_at_end`, or `blank_at_end`. */
+  cycle: string;
+  refreshAfterMs: number | null;
+  items: PresentedItem[];
+}
+export interface PresentedItem {
+  id: string;
+  durationMs: number | null;
+  assessment: string;
+  spokenSummary: string | null;
+  scene: PresentedScene;
+}
+export type PresentedScene =
+  | { kind: "frame"; uri: string; width: number; height: number }
+  | { kind: "blank"; reason: string }
+  | { kind: "unsupported"; output: string };
+
 export type Staleness =
   | { kind: "neverLoaded" }
   | { kind: "signalled"; reason: string };
@@ -108,6 +138,7 @@ export interface ClientView {
   space: Space | null;
   book: Book | null;
   mcp: McpBinding | null;
+  presentation: PresentationFacts | null;
   notices: Notice[];
   failures: Failure[];
   /** Core action keys, not UI-local flags. */
@@ -116,7 +147,7 @@ export interface ClientView {
 
 export type ClientAction =
   | { type: "refresh" }
-  | { type: "open"; entryPath: string }
+  | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
   | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
@@ -129,11 +160,14 @@ export type ClientAction =
   | { type: "installMcp"; client: string; scope: string | null; name: string; agent: string | null; noAgent: boolean; project: string; world: string | null; preview: boolean }
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
   | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
-  | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string };
+  | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
+  | { type: "enterPresentation" }
+  | { type: "presentHere"; orbit: string; world: string; surface: string; input: string; title: string }
+  | { type: "presentRefresh" } | { type: "leavePresentation" };
 
 export const actionKey = {
   refresh: "refresh",
-  open: (entryPath: string) => `open:${entryPath}`,
+  open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
   startDevice: (id: string) => `device.start:${id}`,
   stopDevice: (id: string) => `device.stop:${id}`,
@@ -160,12 +194,16 @@ export const actionKey = {
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
+  enterPresentation: "present.enter",
+  presentHere: "present.choose",
+  presentRefresh: "present.refresh",
+  leavePresentation: "present.leave",
 } as const;
 
 export function keyFor(action: ClientAction): string {
   switch (action.type) {
     case "refresh": return actionKey.refresh;
-    case "open": return actionKey.open(action.entryPath);
+    case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
     case "stopDevice": return actionKey.stopDevice(action.id);
@@ -194,6 +232,10 @@ export function keyFor(action: ClientAction): string {
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
+    case "enterPresentation": return actionKey.enterPresentation;
+    case "presentHere": return actionKey.presentHere;
+    case "presentRefresh": return actionKey.presentRefresh;
+    case "leavePresentation": return actionKey.leavePresentation;
   }
 }
 
@@ -358,10 +400,29 @@ export const loadingClientView: ClientView = {
   space: null,
   book: null,
   mcp: null,
+  presentation: null,
   notices: [],
   failures: [],
   inFlight: [],
 };
+
+/**
+ * Big Picture takes the display, not the work area. The desktop host does it
+ * at the window; the browser preview asks the document, and a refusal there
+ * is a preview limitation rather than an error.
+ */
+export async function setFullscreen(fullscreen: boolean): Promise<void> {
+  if (isTauri()) {
+    await invoke("set_fullscreen", { fullscreen });
+    return;
+  }
+  try {
+    if (fullscreen) await document.documentElement.requestFullscreen();
+    else if (document.fullscreenElement !== null) await document.exitFullscreen();
+  } catch {
+    // The preview stays a window; the surface itself still fills it.
+  }
+}
 
 /**
  * The standalone build never silently pretends that it has a local identity.
@@ -451,6 +512,42 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
             heads: current.heads.filter((head) => head.id !== action.id),
             notices: [{ said: "Stopped the local browser head.", launched: null }, ...current.notices],
           }));
+          break;
+        case "enterPresentation":
+          complete(key, (current) => ({
+            ...current,
+            presentation: { chosen: null, program: null, failure: null },
+          }));
+          break;
+        case "presentHere":
+          complete(key, (current) => ({
+            ...current,
+            presentation: {
+              chosen: { orbit: action.orbit, world: action.world, surface: action.surface, title: action.title },
+              program: {
+                assessment: "current",
+                partialReasons: [],
+                cycle: "hold_last",
+                refreshAfterMs: null,
+                items: [{
+                  id: "itm_fixture",
+                  durationMs: null,
+                  assessment: "current",
+                  spokenSummary: null,
+                  scene: {
+                    kind: "frame",
+                    uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+                    width: 1,
+                    height: 1,
+                  },
+                }],
+              },
+              failure: null,
+            },
+          }));
+          break;
+        case "leavePresentation":
+          complete(key, (current) => ({ ...current, presentation: null }));
           break;
         case "updateWorld":
           complete(key, (current) => ({
@@ -590,6 +687,7 @@ export const fixtureClientView: ClientView = {
     }],
   },
   mcp: null,
+  presentation: null,
   inFlight: [],
   failures: [],
   notices: [],

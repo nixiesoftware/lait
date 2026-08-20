@@ -274,6 +274,8 @@ version = "0.1.0"
 dependencies = [
  "addressbook",
  "anyhow",
+ "correspondence",
+ "data-encoding",
  "flutter_rust_bridge",
  "fs2",
  "lait",
@@ -1169,6 +1171,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
 dependencies = [
  "libm",
+]
+
+[[package]]
+name = "correspondence"
+version = "0.7.8"
+dependencies = [
+ "blake3",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "lait-post",
+ "mechanics",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]
@@ -4476,6 +4494,8 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -4484,6 +4504,8 @@ version = "0.7.8"
 dependencies = [
  "anyhow",
  "data-encoding",
+ "font8x8",
+ "image",
  "lait-issues",
  "mechanics",
  "postcard",
@@ -4492,9 +4514,27 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "typst",
  "typst-html",
  "world-interface",
+]
+
+[[package]]
+name = "lait-post"
+version = "0.7.8"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "mechanics",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4535,6 +4575,7 @@ dependencies = [
  "blake3",
  "fs2",
  "lait",
+ "libc",
  "mechanics",
  "schemars 1.2.2",
  "serde",
@@ -6706,6 +6747,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde-byte-array",
+ "smallvec",
  "tracing",
 ]
 
@@ -6830,6 +6872,7 @@ dependencies = [
  "fabric",
  "fs2",
  "getrandom 0.3.4",
+ "imbl",
  "journal",
  "mechanics",
  "postcard",
@@ -9322,6 +9365,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

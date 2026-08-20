@@ -36,9 +36,57 @@ struct WebClientView {
     space: Option<WebSpace>,
     book: Option<WebBook>,
     mcp: Option<WebMcpBinding>,
+    presentation: Option<WebPresentationFacts>,
     notices: Vec<WebNotice>,
     failures: Vec<WebFailure>,
     in_flight: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebPresentationFacts {
+    chosen: Option<WebPresentationChoice>,
+    program: Option<WebPresentedProgram>,
+    failure: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebPresentationChoice {
+    orbit: String,
+    world: String,
+    surface: String,
+    title: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebPresentedProgram {
+    assessment: String,
+    partial_reasons: Vec<String>,
+    cycle: String,
+    refresh_after_ms: Option<u32>,
+    items: Vec<WebPresentedItem>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebPresentedItem {
+    id: String,
+    duration_ms: Option<u32>,
+    assessment: String,
+    spoken_summary: Option<String>,
+    scene: WebPresentedScene,
+}
+
+/// A frame crosses as a data URI rather than a byte array: the WebView draws
+/// it straight into an `img` without a second encode on the JS side.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebPresentedScene {
+    Frame { uri: String, width: u32, height: u32 },
+    Blank { reason: String },
+    Unsupported { output: String },
 }
 
 #[derive(Clone, Serialize)]
@@ -558,6 +606,52 @@ impl From<ClientView> for WebClientView {
                     })
                     .collect(),
             }),
+            presentation: view.presentation.map(|presentation| WebPresentationFacts {
+                chosen: presentation.chosen.map(|chosen| WebPresentationChoice {
+                    orbit: chosen.orbit,
+                    world: chosen.world,
+                    surface: chosen.surface,
+                    title: chosen.title,
+                }),
+                program: presentation.program.map(|program| WebPresentedProgram {
+                    assessment: program.assessment,
+                    partial_reasons: program.partial_reasons,
+                    cycle: program.cycle,
+                    refresh_after_ms: program.refresh_after_ms,
+                    items: program
+                        .items
+                        .into_iter()
+                        .map(|item| WebPresentedItem {
+                            id: item.id,
+                            duration_ms: item.duration_ms,
+                            assessment: item.assessment,
+                            spoken_summary: item.spoken_summary,
+                            scene: match item.scene {
+                                api::PresentedScene::Frame {
+                                    media_type,
+                                    width,
+                                    height,
+                                    bytes,
+                                } => WebPresentedScene::Frame {
+                                    uri: format!(
+                                        "data:image/{media_type};base64,{}",
+                                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                                    ),
+                                    width,
+                                    height,
+                                },
+                                api::PresentedScene::Blank { reason } => {
+                                    WebPresentedScene::Blank { reason }
+                                }
+                                api::PresentedScene::Unsupported { output } => {
+                                    WebPresentedScene::Unsupported { output }
+                                }
+                            },
+                        })
+                        .collect(),
+                }),
+                failure: presentation.failure,
+            }),
             mcp: view.mcp.map(|mcp| WebMcpBinding {
                 path: mcp.path,
                 detail: mcp.detail,
@@ -633,7 +727,7 @@ fn display_sync_mode_name(mode: api::DisplaySyncMode) -> &'static str {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum WebAction {
     Refresh,
-    Open { entry_path: String },
+    Open { world: String, entry_path: String },
     UpdateWorld { world: String },
     StartDevice { id: String },
     StopDevice { id: String },
@@ -684,6 +778,16 @@ enum WebAction {
     },
     DisplayAssignmentRevoke { assignment: String },
     DisplayDeviceRevoke { device: String },
+    EnterPresentation,
+    PresentHere {
+        orbit: String,
+        world: String,
+        surface: String,
+        input: String,
+        title: String,
+    },
+    PresentRefresh,
+    LeavePresentation,
 }
 
 /// The Flutter client owns exactly these two auxiliary top-level windows.
@@ -745,7 +849,7 @@ impl From<WebAction> for ActionRequest {
     fn from(action: WebAction) -> Self {
         match action {
             WebAction::Refresh => Self::Refresh,
-            WebAction::Open { entry_path } => Self::Open { entry_path },
+            WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
             WebAction::StartDevice { id } => Self::StartDevice { id },
             WebAction::StopDevice { id } => Self::StopDevice { id },
@@ -812,8 +916,24 @@ impl From<WebAction> for ActionRequest {
             },
             WebAction::DisplayAssignmentRevoke { assignment } => Self::DisplayAssignmentRevoke { assignment },
             WebAction::DisplayDeviceRevoke { device } => Self::DisplayDeviceRevoke { device },
+            WebAction::EnterPresentation => Self::EnterPresentation,
+            WebAction::PresentHere { orbit, world, surface, input, title } => {
+                Self::PresentHere { orbit, world, surface, input, title }
+            }
+            WebAction::PresentRefresh => Self::PresentRefresh,
+            WebAction::LeavePresentation => Self::LeavePresentation,
         }
     }
+}
+
+/// Big Picture takes the display, not the work area — and gives it back on
+/// the way out, whatever the reason for leaving. Kept as a host command so
+/// the WebView needs no window capability of its own.
+#[tauri::command]
+async fn set_fullscreen(window: tauri::WebviewWindow, fullscreen: bool) -> Result<(), String> {
+    window
+        .set_fullscreen(fullscreen)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -987,6 +1107,7 @@ fn main() {
             client_current,
             client_dispatch,
             world_artwork,
+            set_fullscreen,
             summon_owned_window,
             summon_world_settings
         ])

@@ -22,7 +22,8 @@ describe("client transport", () => {
 
   it("uses the core action-key vocabulary", () => {
     expect(keyFor({ type: "refresh" })).toBe(actionKey.refresh);
-    expect(keyFor({ type: "open", entryPath: "/issues" })).toBe("open:/issues");
+    expect(keyFor({ type: "open", world: "issues", entryPath: "/" })).toBe("open:issues");
+    expect(keyFor({ type: "enterPresentation" })).toBe("present.enter");
     expect(keyFor({ type: "updateWorld", world: "issues" })).toBe("world.update:issues");
     expect(keyFor({ type: "stopHead", id: "identity:default" })).toBe("head.stop:identity:default");
     expect(keyFor({ type: "bookMerge", from: "old", into: "new" })).toBe("book.merge:old:new");
@@ -36,9 +37,9 @@ describe("client transport", () => {
     const observed: string[][] = [];
     const stop = transport.watch((view) => observed.push(view.inFlight));
 
-    const immediate = await transport.dispatch({ type: "open", entryPath: "/" });
-    expect(immediate.inFlight).toEqual(["open:/"]);
-    expect(observed).toEqual([["open:/"]]);
+    const immediate = await transport.dispatch({ type: "open", world: "issues", entryPath: "/" });
+    expect(immediate.inFlight).toEqual(["open:issues"]);
+    expect(observed).toEqual([["open:issues"]]);
 
     await vi.advanceTimersByTimeAsync(500);
     const complete = await transport.current();

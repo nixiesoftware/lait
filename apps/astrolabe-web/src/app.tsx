@@ -22,6 +22,7 @@ import {
 } from "./client";
 import { BookSurface } from "./book";
 import { DisplaysSurface } from "./displays";
+import { BigPictureSurface } from "./present";
 import { WorldSettingsSurface } from "./settings";
 import { FacePlate, PersonTile, presenceLabel } from "./kit";
 import { activityLine, glanceTiers, identityStatus } from "./record";
@@ -78,10 +79,20 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
 
   if (ownedSurface !== null) return <OwnedSurfaceWindow surface={ownedSurface} view={view} dispatch={dispatch} dark={dark} />;
 
+  // Big Picture replaces the window rather than filling it. The client's own
+  // chrome is exactly what a screen must not have, so the caption and the
+  // operational bar are absent here — not hidden behind it.
+  if (view.presentation !== null) {
+    return <main className="page presenting">
+      <BigPictureSurface presentation={view.presentation} view={view} dispatch={dispatch} />
+    </main>;
+  }
+
   return <main className="page" data-theme={dark ? "dark" : "light"}>
     <section className="astrolabe-window" aria-label="Astrolabe">
       <Caption platform={platform} dark={dark} setDark={setDark} onSummonWindow={summonOwnedWindow}
-        version={view.host?.version ?? null}
+        version={view.host?.version ?? null} loading={view.loading}
+        onPresent={() => void dispatch({ type: "enterPresentation" })}
         refreshing={refreshing} onRefresh={() => void dispatch({ type: "refresh" })} />
       <div className="client-body">
         <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} dark={dark} />
@@ -147,9 +158,10 @@ function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedW
  * the application menu where the system does not carry one, and the rest of
  * it is a drag surface.
  */
-function Caption({ platform, dark, setDark, refreshing, version, onRefresh, onSummonWindow }: {
+function Caption({ platform, dark, setDark, refreshing, version, loading, onRefresh, onPresent, onSummonWindow }: {
   platform: PlatformProfile; dark: boolean; setDark(next: boolean): void; refreshing: boolean;
-  version: string | null; onRefresh(): void; onSummonWindow(surface: OwnedWindowSurface): void;
+  version: string | null; loading: boolean; onRefresh(): void; onPresent(): void;
+  onSummonWindow(surface: OwnedWindowSurface): void;
 }) {
   const systemMenu = platform === "macos";
   return <header className="caption" data-tauri-drag-region style={{ height: utilityBarHeight }}>
@@ -164,7 +176,37 @@ function Caption({ platform, dark, setDark, refreshing, version, onRefresh, onSu
       </Menu></Popover>
     </MenuTrigger>}
     <div className="caption-drag" />
+    <PresentHere loading={loading} onPresent={onPresent} />
   </header>;
+}
+
+/**
+ * Enter Big Picture. Pressing it enters, full stop — no dialog stands in
+ * front of it asking what to show, because that is the wrong order: a person
+ * presses this to *become* a screen, and choosing is what they do once they
+ * are one. The press is the consent.
+ */
+function PresentHere({ loading, onPresent }: { loading: boolean; onPresent(): void }) {
+  return <span className="tip present-tip" title={loading ? "Still reading this machine." : "Make this machine a screen."}>
+    <Button className="present-control" aria-label="Present on this screen" isDisabled={loading} onPress={onPresent}>
+      <ScreenMark />
+    </Button>
+  </span>;
+}
+
+/**
+ * A screen, painted rather than typed. Not the four maximise arrows — that is
+ * the OS header's idea, one cluster over. A monitor says the other thing: not
+ * *bigger*, but *a screen* — this machine showing a World rather than
+ * launching one.
+ */
+function ScreenMark() {
+  return <svg width="14" height="12" viewBox="0 0 14 12" aria-hidden fill="none"
+    stroke="currentColor" strokeWidth="1.25">
+    <rect x="0.5" y="0.5" width="13" height="7.5" rx="1.5" />
+    <line x1="7" y1="8" x2="7" y2="10.5" />
+    <line x1="4" y1="11" x2="10" y2="11" />
+  </svg>;
 }
 
 function Library({ view, showing, onSelect, dispatch, dark }: {
@@ -251,7 +293,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
     <div className="world-action-band">
       {stopping ? <PendingAction label="STOPPING" />
         : running ? <RunningAction owned={stoppable !== undefined}
-          onOpen={entryPath === null ? undefined : () => void dispatch({ type: "open", entryPath })}
+          onOpen={entryPath === null ? undefined : () => void dispatch({ type: "open", world: world.worldMount, entryPath })}
           onStop={() => { if (stoppable !== undefined) void dispatch({ type: "stopHead", id: stoppable.id }); }} />
         : opening ? <PendingAction label="LAUNCHING" />
         : updating ? <PendingAction label="UPDATING" />
@@ -262,7 +304,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
             onPress={() => void dispatch({ type: "updateWorld", world: world.worldMount })}>↻ <span>UPDATE</span></Button></span>
         : state === "Ready" ? <span className="tip" title="Start this World and hand it to my browser">
           <Button className="launch-control" aria-label="Launch World" onPress={() => {
-            if (world.opensAt !== null) void dispatch({ type: "open", entryPath: world.opensAt });
+            if (world.opensAt !== null) void dispatch({ type: "open", world: world.worldMount, entryPath: world.opensAt });
           }}>▶ <span>LAUNCH</span></Button></span>
         : <div className="lifecycle-state">ⓘ {state}</div>}
       <span className="tip world-settings-tip" title="World settings">
@@ -376,7 +418,7 @@ function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Runnin
   return isRunning(view) ? "Running" : "Ready";
 }
 function isOpening(view: ClientView, world: LibraryWorld): boolean {
-  return world.opensAt !== null && view.inFlight.includes(actionKey.open(world.opensAt));
+  return world.opensAt !== null && view.inFlight.includes(actionKey.open(world.worldMount));
 }
 function isRunning(view: ClientView): boolean { return view.heads.some((head) => head.orbit === null); }
 function accentColor(world: LibraryWorld): string {
