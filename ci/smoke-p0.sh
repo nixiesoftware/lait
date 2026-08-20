@@ -112,9 +112,18 @@ has "$founded" '"host":"founded"'
 # founding. Serving that is what let a renamed Space answer to its birth name
 # whenever a probe missed.
 spaces_json="$(curl -sS --fail-with-body "http://127.0.0.1:${PORT}/api/spaces" -H "Authorization: Bearer ${TOKEN}")"
+# Which of the two no-reading paths this run took depends on whether the 300ms
+# probe beat a loaded runner, so assert what holds either way: no invented name,
+# a stated reason, and — the thing that was wrong — no claim of a Station.
 has "$spaces_json" '"name":null'
-has "$spaces_json" '"unnamed":"not-probed"'
-has "$spaces_json" '"status":"idle"'
+has "$spaces_json" '"unnamed":'
+case "$spaces_json" in
+  *'"status":"up"'*)
+    echo "::error::an Orbit with nothing placed at it reported a running Station:"
+    echo "$spaces_json"
+    exit 1
+    ;;
+esac
 ORBIT="$(printf '%s' "$spaces_json" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 [ -n "$ORBIT" ] || { echo "::error::no orbit id in:"; echo "$spaces_json"; exit 1; }
 
