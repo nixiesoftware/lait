@@ -10,9 +10,9 @@
 //! product's own strict schema, tagged `cmd` and rendered in snake case, so
 //! the browser's wire shape *is* that enum and this module is a decoder rather
 //! than a second protocol. Adding a request variant reaches the browser with
-//! no edit here, which is the property worth having: two hand-written
-//! translations of one schema is how the head and the daemon come to disagree
-//! about what a request means.
+//! no edit here beyond [`COMMANDS`], which is the property worth having: two
+//! hand-written translations of one schema is how the head and the daemon come
+//! to disagree about what a request means.
 
 use runtime::world::call::Access;
 use serde_json::Value;
@@ -22,7 +22,14 @@ use crate::protocol::SignageRequest;
 
 /// The `cmd` values this build serves, named in a refusal so a caller learns
 /// what was available rather than only that it was wrong.
-const COMMANDS: &str = "program_get, program_list, program_put, program_delete";
+///
+/// Pinned against the request enum by test, because a list that lags the enum
+/// misleads exactly the caller who is already lost.
+const COMMANDS: &str = "program_get, program_list, program_put, program_delete, \
+     media_get, media_list, media_put, media_delete, media_used_by, \
+     screen_get, screen_list, screen_put, screen_delete, screen_showing, screen_plays, \
+     group_get, group_list, group_put, group_delete, \
+     config_get, config_list, config_put, config_delete";
 
 /// Construct one Signage World invocation with package-owned client policy.
 ///
@@ -65,11 +72,25 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::every_verb;
     use replica::body::BodyId;
     use serde_json::json;
 
     fn program_id() -> String {
         BodyId::from_bytes([7; 16]).render()
+    }
+
+    /// The wire form of a request, which is what a browser actually posts.
+    fn wire(request: &SignageRequest) -> Value {
+        serde_json::to_value(request).unwrap()
+    }
+
+    fn command_of(request: &SignageRequest) -> String {
+        wire(request)
+            .get("cmd")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned()
     }
 
     #[test]
@@ -80,36 +101,65 @@ mod tests {
         assert!(invocation.confirmation_question().is_none());
     }
 
+    /// Every verb survives the round trip through the browser's wire form with
+    /// the class and the question the protocol assigned it.
     #[test]
-    fn a_delete_is_a_command_and_asks_first() {
-        let id = program_id();
-        let invocation = parse_web(json!({ "cmd": "program_delete", "program": id })).unwrap();
-        assert_eq!(invocation.access(), ClientAccess::Command);
-        let question = invocation
-            .confirmation_question()
-            .expect("deleting a replicated Body asks before it converges");
-        assert!(question.contains(&id), "the question names what it deletes");
+    fn every_verb_parses_back_with_the_class_the_protocol_assigns() {
+        for (request, access) in every_verb() {
+            let command = command_of(&request);
+            let expected = match access {
+                Access::Query => ClientAccess::Query,
+                Access::Command => ClientAccess::Command,
+            };
+            let asks = request.destructive_question().is_some();
+            let invocation = parse_web(wire(&request)).unwrap_or_else(|error| {
+                panic!("{command} did not parse: {error}");
+            });
+            assert_eq!(invocation.access(), expected, "{command}");
+            assert_eq!(
+                invocation.confirmation_question().is_some(),
+                asks,
+                "{command}"
+            );
+        }
     }
 
     #[test]
-    fn a_put_is_a_command_that_does_not_ask() {
-        let program = signage::SignageProgram {
-            id: program_id(),
-            name: "Lobby".into(),
-            cycle: signage::ProgramCycle::Loop,
-            items: vec![signage::SignageItem {
-                id: "a".into(),
-                title: "Welcome".into(),
-                body: String::new(),
-                background: "101010".into(),
-                foreground: "fafafa".into(),
-                live_resource: None,
-                duration_ms: Some(5_000),
-            }],
-            windows: Vec::new(),
-        };
-        let input = serde_json::to_value(SignageRequest::ProgramPut { program }).unwrap();
-        let invocation = parse_web(input).unwrap();
+    fn every_delete_is_a_command_and_asks_by_name() {
+        let mut deletes = 0;
+        for (request, _) in every_verb() {
+            let Some(question) = request.destructive_question() else {
+                continue;
+            };
+            deletes += 1;
+            let wire = wire(&request);
+            let target = wire
+                .as_object()
+                .unwrap()
+                .iter()
+                .find(|(field, _)| field.as_str() != "cmd")
+                .and_then(|(_, value)| value.as_str())
+                .unwrap()
+                .to_owned();
+            let invocation = parse_web(wire).unwrap();
+            assert_eq!(invocation.access(), ClientAccess::Command);
+            assert_eq!(
+                invocation.confirmation_question(),
+                Some(question.as_str()),
+                "the head asks the protocol's question, not its own"
+            );
+            assert!(question.contains(&target), "got: {question}");
+        }
+        assert_eq!(deletes, 5, "one delete per document type");
+    }
+
+    #[test]
+    fn a_media_put_is_a_command_that_does_not_ask() {
+        let (request, _) = every_verb()
+            .into_iter()
+            .find(|(request, _)| matches!(request, SignageRequest::MediaPut { .. }))
+            .expect("the verb table serves a media put");
+        let invocation = parse_web(wire(&request)).unwrap();
         assert_eq!(invocation.access(), ClientAccess::Command);
         assert!(invocation.confirmation_question().is_none());
     }
@@ -141,6 +191,24 @@ mod tests {
         let message = diagnostic(&error);
         assert!(message.contains("program_publish"), "got: {message}");
         assert!(message.contains("program_list"), "got: {message}");
+        assert!(message.contains("media_put"), "got: {message}");
+        assert!(message.contains("screen_showing"), "got: {message}");
+    }
+
+    /// The listed commands are the served commands, both ways.
+    ///
+    /// A name here that no verb answers sends a caller to write a request that
+    /// cannot work, and a verb missing from it is unreachable by anyone reading
+    /// the refusal.
+    #[test]
+    fn the_refusal_lists_exactly_the_commands_this_build_serves() {
+        let listed: std::collections::BTreeSet<&str> = COMMANDS.split(',').map(str::trim).collect();
+        let served: std::collections::BTreeSet<String> = every_verb()
+            .iter()
+            .map(|(request, _)| command_of(request))
+            .collect();
+        let served: std::collections::BTreeSet<&str> = served.iter().map(String::as_str).collect();
+        assert_eq!(listed, served);
     }
 
     #[test]

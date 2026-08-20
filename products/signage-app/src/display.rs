@@ -5,7 +5,7 @@
     reason = "bounded raster coordinates are checked before image access"
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -14,11 +14,12 @@ use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use signage::contract::{MediaSource, SignageMedia};
 use world_interface::display::{
     BlankReason, CanonicalDisplayInput, DisplayAssessment, DisplayOutputKind, DisplayProjection,
-    DisplayRenderer, DisplayRequest, DisplaySurface, DisplaySurfaceDescriptor, DisplaySurfaceId,
-    FrameMediaType, ProgramCycle, RenderedFrame, RenderedProgram, RenderedProgramItem,
-    RenderedScene,
+    DisplayRenderer, DisplayRequest, DisplayResourceId, DisplaySurface, DisplaySurfaceDescriptor,
+    DisplaySurfaceId, FrameMediaType, MediaProtocol, ProgramCycle, RenderedFrame, RenderedMedia,
+    RenderedProgram, RenderedProgramItem, RenderedScene,
 };
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
@@ -36,7 +37,9 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
     let mut input_digest = Sha256::new();
     input_digest.update(b"signage.program.input.v1:{program:body-id}");
     let mut renderer_identity = Sha256::new();
-    renderer_identity.update(b"signage.program.renderer.v3:font8x8:png:lait-live:rolling-windows");
+    renderer_identity.update(
+        b"signage.program.renderer.v5:font8x8:png:library:content:lait-live:rolling-windows",
+    );
     let mut descriptor = DisplaySurfaceDescriptor {
         id: DisplaySurfaceId::new(SURFACE_ID)?,
         title: "Signage program".into(),
@@ -99,6 +102,7 @@ impl DisplayRenderer for SignageRenderer {
                 .map_err(|error| Failure::new(format!("decode Signage projection: {error}")))?;
             let crate::SignageResponse::Program {
                 program: Some(program),
+                media,
             } = response
             else {
                 return Err(Failure::new("Signage program is unavailable"));
@@ -119,32 +123,22 @@ impl DisplayRenderer for SignageRenderer {
                     .ok()
                     .filter(|delay| *delay <= request.window_horizon_ms)
             });
+            let library: BTreeMap<&str, &SignageMedia> = media
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry))
+                .collect();
             let idle = scheduled.items.is_empty();
             let mut items = Vec::with_capacity(scheduled.items.len().max(1));
             for item in scheduled.items {
-                let scene = if let Some(resource) = &item.live_resource {
-                    RenderedScene::Media(world_interface::display::RenderedMedia {
-                        resource: world_interface::display::DisplayResourceId::new(
-                            resource.clone(),
-                        )?,
-                        protocol: world_interface::display::MediaProtocol::Hls,
-                        live: true,
-                    })
-                } else {
-                    let bytes = render_item(item, request.width, request.height)?;
-                    RenderedScene::Frame(RenderedFrame {
-                        media_type: FrameMediaType::Png,
-                        width: request.width,
-                        height: request.height,
-                        bytes,
-                    })
-                };
+                let entry = library.get(item.media.as_str()).copied();
                 items.push(RenderedProgramItem {
                     id: item.id.clone(),
-                    duration_ms: item.duration_ms,
-                    scene,
+                    duration_ms: item
+                        .duration_ms
+                        .or_else(|| entry.and_then(|entry| entry.duration_ms)),
+                    scene: scene(entry, request.width, request.height)?,
                     assessment: DisplayAssessment::Current,
-                    spoken_summary: Some(spoken_summary(item)),
+                    spoken_summary: spoken_summary(entry),
                 });
             }
             if idle {
@@ -182,17 +176,76 @@ fn cycle(value: signage::ProgramCycle) -> ProgramCycle {
     }
 }
 
-fn spoken_summary(item: &signage::SignageItem) -> String {
-    if item.body.trim().is_empty() {
-        item.title.clone()
-    } else {
-        format!("{}. {}", item.title, item.body)
+/// What one library entry looks like on a screen.
+///
+/// An entry this renderer cannot present blanks, and the rest of the program
+/// still plays. That covers a dangling item, whose reference resolved to
+/// nothing, and an integration, whose renderer lives in the app that owns the
+/// kind rather than here.
+fn scene(entry: Option<&SignageMedia>, width: u32, height: u32) -> Result<RenderedScene, Failure> {
+    let Some(entry) = entry else {
+        return Ok(RenderedScene::Blank(BlankReason::Unsupported));
+    };
+    match &entry.source {
+        MediaSource::Card {
+            title,
+            body,
+            background,
+            foreground,
+        } => Ok(RenderedScene::Frame(RenderedFrame {
+            media_type: FrameMediaType::Png,
+            width,
+            height,
+            bytes: render_card(title, body, background, foreground, width, height)?,
+        })),
+        MediaSource::Stored { content, .. } => Ok(media_scene(content, false)),
+        MediaSource::Live { resource } => Ok(media_scene(resource, true)),
+        MediaSource::Kind { .. } => Ok(RenderedScene::Blank(BlankReason::Unsupported)),
     }
 }
 
-fn render_item(item: &signage::SignageItem, width: u32, height: u32) -> Result<Vec<u8>, Failure> {
-    let background = rgb(&item.background)?;
-    let foreground = rgb(&item.foreground)?;
+/// `live` is the whole difference: both planes hand the receiver a name it
+/// resolves when it fetches, and the stored one names bytes on the content
+/// plane rather than the entry that describes them. HLS is the only transport a
+/// receiver can declare without also declaring live positional sync.
+///
+/// A name the display grammar cannot carry blanks rather than failing the
+/// render — a content id may run to 128 bytes and [`DisplayResourceId`] to 96.
+fn media_scene(resource: &str, live: bool) -> RenderedScene {
+    match DisplayResourceId::new(resource) {
+        Ok(resource) => RenderedScene::Media(RenderedMedia {
+            resource,
+            protocol: MediaProtocol::Hls,
+            live,
+        }),
+        Err(_) => RenderedScene::Blank(BlankReason::Unsupported),
+    }
+}
+
+/// A card speaks the words it was authored with; everything else speaks the
+/// name the library gave it, which is the only name a listener would recognise.
+fn spoken_summary(entry: Option<&SignageMedia>) -> Option<String> {
+    let entry = entry?;
+    let MediaSource::Card { title, body, .. } = &entry.source else {
+        return Some(entry.name.clone());
+    };
+    Some(if body.trim().is_empty() {
+        title.clone()
+    } else {
+        format!("{title}. {body}")
+    })
+}
+
+fn render_card(
+    title: &str,
+    body: &str,
+    background: &str,
+    foreground: &str,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, Failure> {
+    let background = rgb(background)?;
+    let foreground = rgb(foreground)?;
     let mut image = RgbaImage::from_pixel(width, height, background);
     let inset = width.min(height) / 12;
     let title_scale = (width / 180).min(height / 80).clamp(2, 12);
@@ -200,7 +253,7 @@ fn render_item(item: &signage::SignageItem, width: u32, height: u32) -> Result<V
     let title_y = height / 4;
     draw_wrapped(
         &mut image,
-        &item.title,
+        title,
         inset,
         title_y,
         width.saturating_sub(inset.saturating_mul(2)),
@@ -211,7 +264,7 @@ fn render_item(item: &signage::SignageItem, width: u32, height: u32) -> Result<V
     let body_y = title_y.saturating_add(title_scale.saturating_mul(11));
     draw_wrapped(
         &mut image,
-        &item.body,
+        body,
         inset,
         body_y,
         width.saturating_sub(inset.saturating_mul(2)),
@@ -329,19 +382,128 @@ fn draw_character(
 mod tests {
     use super::*;
 
-    #[test]
-    fn authored_slide_renders_to_a_real_png() {
-        let item = signage::SignageItem {
-            id: "welcome".into(),
+    fn entry(source: MediaSource) -> SignageMedia {
+        SignageMedia {
+            id: replica::body::BodyId::from_bytes([5; 16]).render(),
+            name: "Ribbon cutting".into(),
+            source,
+            duration_ms: None,
+            width: None,
+            height: None,
+            poster: None,
+        }
+    }
+
+    fn card() -> SignageMedia {
+        entry(MediaSource::Card {
             title: "Welcome".into(),
             body: "Open house at 6".into(),
             background: "102030".into(),
             foreground: "ffffff".into(),
-            live_resource: None,
-            duration_ms: Some(10_000),
+        })
+    }
+
+    #[test]
+    fn authored_slide_renders_to_a_real_png() {
+        let card = card();
+        let RenderedScene::Frame(frame) = scene(Some(&card), 640, 360).unwrap() else {
+            panic!("an authored card is rendered here, not fetched");
         };
-        let png = render_item(&item, 640, 360).unwrap();
-        assert_eq!(png.get(..8), Some(b"\x89PNG\r\n\x1a\n".as_slice()));
-        assert!(png.len() > 1_000);
+        assert_eq!(frame.media_type, FrameMediaType::Png);
+        assert_eq!(frame.bytes.get(..8), Some(b"\x89PNG\r\n\x1a\n".as_slice()));
+        assert!(frame.bytes.len() > 1_000);
+        assert_eq!(
+            spoken_summary(Some(&card)).as_deref(),
+            Some("Welcome. Open house at 6")
+        );
+    }
+
+    #[test]
+    fn a_stored_entry_names_its_content_and_is_not_live() {
+        let stored = entry(MediaSource::Stored {
+            content: "cnt_7f3a".into(),
+            size: 4_096,
+            mime: "video/mp4".into(),
+        });
+        let RenderedScene::Media(rendered) = scene(Some(&stored), 640, 360).unwrap() else {
+            panic!("durable bytes are fetched, not rasterised");
+        };
+        assert_eq!(
+            rendered.resource.as_str(),
+            "cnt_7f3a",
+            "the content id, never the entry that describes it"
+        );
+        assert!(!rendered.live);
+        assert_eq!(
+            spoken_summary(Some(&stored)).as_deref(),
+            Some("Ribbon cutting")
+        );
+    }
+
+    #[test]
+    fn a_live_entry_is_still_marked_live() {
+        let live = entry(MediaSource::Live {
+            resource: "lobby-cam".into(),
+        });
+        let RenderedScene::Media(rendered) = scene(Some(&live), 640, 360).unwrap() else {
+            panic!("a live rendition is media");
+        };
+        assert_eq!(rendered.resource.as_str(), "lobby-cam");
+        assert!(rendered.live);
+        assert_eq!(rendered.protocol, MediaProtocol::Hls);
+    }
+
+    /// Both absences are the same fact to a screen: this renderer cannot draw
+    /// the entry. Dropping the item instead would shorten the program silently.
+    #[test]
+    fn an_integration_and_a_dangling_item_both_blank_rather_than_vanish() {
+        let integration = entry(MediaSource::Kind {
+            kind: "weather".into(),
+            settings: [("units".to_owned(), "metric".to_owned())].into(),
+        });
+        for absent in [Some(&integration), None] {
+            assert!(matches!(
+                scene(absent, 640, 360).unwrap(),
+                RenderedScene::Blank(BlankReason::Unsupported)
+            ));
+        }
+        assert_eq!(spoken_summary(None), None);
+        assert_eq!(
+            spoken_summary(Some(&integration)).as_deref(),
+            Some("Ribbon cutting"),
+            "an app draws it, and the library still named it"
+        );
+    }
+
+    /// Every content id the World admits is one a surface can be told about.
+    ///
+    /// Both bounds are now the same constant, so this cannot reopen by someone
+    /// widening one of them — it reopens only by deliberately unbinding them,
+    /// and then this fails.
+    #[test]
+    fn a_content_id_the_world_accepts_is_always_expressible_to_a_surface() {
+        let longest = entry(MediaSource::Stored {
+            content: "c".repeat(signage::contract::MAX_CONTENT_ID_BYTES),
+            size: 1,
+            mime: "video/mp4".into(),
+        });
+        assert!(longest.validate(), "the longest admissible id");
+        let RenderedScene::Media(rendered) = scene(Some(&longest), 640, 360).unwrap() else {
+            panic!("an admissible id renders rather than blanking");
+        };
+        assert_eq!(
+            rendered.resource.as_str().len(),
+            signage::contract::MAX_CONTENT_ID_BYTES
+        );
+
+        let over = entry(MediaSource::Stored {
+            content: "c".repeat(signage::contract::MAX_CONTENT_ID_BYTES + 1),
+            size: 1,
+            mime: "video/mp4".into(),
+        });
+        assert!(
+            !over.validate(),
+            "the World refuses what no surface could be told about"
+        );
     }
 }

@@ -4060,13 +4060,17 @@ name = "lait-signage"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "data-encoding",
+ "fabric",
  "jiff",
  "mechanics",
+ "register",
  "replica",
  "runtime",
  "schedule",
  "serde",
  "serde_json",
+ "world-interface",
 ]
 
 [[package]]
