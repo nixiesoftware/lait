@@ -724,6 +724,35 @@ pub enum Request {
     /// with each op's authorization verdict (cryptographic provenance).
     MemberLog,
 
+    /// Identity-scoped correspondence. Daemon route only.
+    ///
+    /// Here rather than in the client because a World's head can reach this
+    /// plane and cannot reach Astrolabe, and because the daemon is the process
+    /// that is still running when a window is closed. What is carried is the
+    /// identity's; what an invitation grants is the Space's, and this never
+    /// decides the second.
+    ///
+    /// Publish this identity's reach and answer the artifact to hand over.
+    ReachShare,
+    /// Take a correspondent in, by the announcement they handed over.
+    ReachLearn {
+        announcement: String,
+    },
+    /// The correspondents this identity holds, and its own reach.
+    ReachView,
+    /// Seal a message to a learned correspondent and deposit it.
+    CorrespondSend {
+        to: String,
+        body: String,
+    },
+    /// Ask the carrier for anything waiting and file it.
+    CorrespondCollect,
+    /// Carry an invitation this identity already holds to a correspondent.
+    /// Minting one is the Space's authority and stays there.
+    CorrespondInvite {
+        to: String,
+        link: String,
+    },
     /// Identity-scoped address book. Daemon route only; never places an Orbit.
     /// The book is the one namer: member and presence rows leave the Station
     /// bare and the daemon decorates them from Cards — the `MemberAlias` verb
@@ -1681,6 +1710,12 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ConfigReload
         | Request::Stop
         | Request::Hello { .. }
+        | Request::ReachShare
+        | Request::ReachLearn { .. }
+        | Request::ReachView
+        | Request::CorrespondSend { .. }
+        | Request::CorrespondCollect
+        | Request::CorrespondInvite { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }

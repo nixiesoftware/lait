@@ -612,6 +612,7 @@ pub struct Router {
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
+    correspondence: Arc<crate::daemon::correspondence::CorrespondenceService>,
     asks: crate::daemon::sponsorship::SponsorshipAsks,
 }
 
@@ -632,6 +633,9 @@ impl Router {
         let book = crate::daemon::address_book::AddressBookService::open(&identity)
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        let correspondence = Arc::new(crate::daemon::correspondence::CorrespondenceService::open(
+            &identity,
+        ));
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
         Self {
             catalog,
@@ -643,6 +647,7 @@ impl Router {
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
             book,
+            correspondence,
             asks,
         }
     }
@@ -653,6 +658,10 @@ impl Router {
 
     pub(crate) fn book(&self) -> Result<&crate::daemon::address_book::AddressBookService, String> {
         self.book.as_ref().map(Arc::as_ref).map_err(Clone::clone)
+    }
+
+    pub(crate) fn correspondence(&self) -> &crate::daemon::correspondence::CorrespondenceService {
+        &self.correspondence
     }
 
     pub(crate) fn asks(&self) -> &crate::daemon::sponsorship::SponsorshipAsks {

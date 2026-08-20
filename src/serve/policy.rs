@@ -53,6 +53,10 @@ pub fn is_read(req: &Request) -> bool {
         | Request::HostWorldUpdateStatus { .. }
         | Request::HostContext
         | Request::Hello { .. }
+        // The view alone. Sharing publishes and appends to a log; learning
+        // files a correspondent; sending and inviting deposit; collecting
+        // drains a mailbox. Only one of the six is a read.
+        | Request::ReachView
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookLookup { .. }
@@ -158,7 +162,15 @@ pub fn is_read(req: &Request) -> bool {
         | Request::BookMigrate
         | Request::BookPropose { .. }
         | Request::BookSuggestAccept { .. }
-        | Request::BookSuggestDismiss { .. } => false,
+        | Request::BookSuggestDismiss { .. }
+        // Publishing appends to a log, learning files a correspondent, sending
+        // and inviting deposit at a carrier, and collecting drains a mailbox.
+        // None of them is a read, however much they feel like looking.
+        | Request::ReachShare
+        | Request::ReachLearn { .. }
+        | Request::CorrespondSend { .. }
+        | Request::CorrespondCollect
+        | Request::CorrespondInvite { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -241,6 +253,15 @@ pub fn is_host_plane(req: &Request) -> bool {
         // *under* the server, which survives to stand a fresh one up.
         | Request::HostRestart
         | Request::HostContext
+        // Correspondence is the identity's, not a Space's, so it answers on
+        // the host plane — which is also the plane a World's head can reach,
+        // and the whole reason this lives on the daemon at all.
+        | Request::ReachShare
+        | Request::ReachLearn { .. }
+        | Request::ReachView
+        | Request::CorrespondSend { .. }
+        | Request::CorrespondCollect
+        | Request::CorrespondInvite { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
