@@ -7,6 +7,19 @@
 //! version claim the ALPN did not negotiate is refused as malformed, because
 //! the ALPN is the version gate and inside it there is no skew to discuss.
 
+/// How long a step here waits for the other end of a real connection.
+///
+/// These are synchronisation waits, not latency assertions: nothing in this
+/// file measures how fast a refusal arrives, only that one arrives instead of
+/// the flow hanging. So the budget is generous on purpose. Five seconds was
+/// not — a loaded Windows runner spent it on scheduling and failed
+/// `an_exec_dial_is_judged_answered_and_serves_no_flow_yet` for a reason that
+/// is not the property, while the same test takes 0.16s on an idle machine.
+///
+/// A genuine hang still fails, just later, which is the right trade for a
+/// deadline whose only job is to stop a wedge from becoming a timeout.
+const ANSWERED: std::time::Duration = std::time::Duration::from_secs(30);
+
 use std::sync::Arc;
 
 use mechanics::{ids::SpaceId, station::Key};
@@ -105,7 +118,7 @@ async fn an_exec_dial_is_judged_answered_and_serves_no_flow_yet() {
     flow.write_all(&open.encode()).await.expect("send opening");
     flow.finish().expect("finish opening");
 
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let answer = tokio::time::timeout(ANSWERED, async {
         let mut recv = connection.accept_uni().await.ok()??;
         recv.read_to_end(bounds::MAX_OPENING_BYTES).await.ok()
     })
@@ -127,12 +140,9 @@ async fn an_exec_dial_is_judged_answered_and_serves_no_flow_yet() {
         .write_all(b"anything")
         .await
         .expect("probe write");
-    let refused = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        probe_recv.read_to_end(bounds::MAX_OPENING_BYTES),
-    )
-    .await
-    .expect("the refusal arrives within the deadline");
+    let refused = tokio::time::timeout(ANSWERED, probe_recv.read_to_end(bounds::MAX_OPENING_BYTES))
+        .await
+        .expect("the refusal arrives within the deadline");
     assert!(
         refused.is_err(),
         "a foundation-plane flow must be reset, not answered or left open"
@@ -166,7 +176,7 @@ async fn a_version_claim_inside_the_exec_alpn_is_malformed_not_negotiable() {
     flow.write_all(&open.encode()).await.expect("send opening");
     flow.finish().expect("finish opening");
 
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let answer = tokio::time::timeout(ANSWERED, async {
         let mut recv = connection.accept_uni().await.ok()??;
         recv.read_to_end(bounds::MAX_OPENING_BYTES).await.ok()
     })
