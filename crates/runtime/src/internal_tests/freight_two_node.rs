@@ -1665,3 +1665,64 @@ async fn paging_at_media_sizes() {
         );
     }
 }
+
+// A lossy-network paging test does not belong here yet, and the harness is why:
+// `MemNet::admit` decides one delivery per *dial*, so `Faults` gate whether a
+// connection or datagram happens and never reach the bytes on an established
+// flow. A 4 MiB transfer reports `sent: 1, dropped: 0`. Making Freight lossy
+// needs per-write injection on the flow, which the simulator does not have —
+// until then such a test would be the slow way of testing the happy path this
+// suite's own rule warns about.
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_partition_stops_a_paged_read_and_healing_resumes_it() {
+    // The reader must not decide the content is short because the path went
+    // away. It stops where it stopped, and continues from there.
+    use runtime::content_cursor::{Advance, ContentCursor};
+
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "part-holder", [43u8; 32], true);
+    let seeker = node_with_quota(&net, "part-seeker", [44u8; 32], false, 2 * 1024 * 1024);
+
+    let plaintext = filler(29, 2 * 1024 * 1024);
+    let content = seed_content(&holder, 29, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    // Read the first chunk with the path up, then cut it.
+    let space = space();
+    let allow = |_: ContentAction<'_>| Ok(());
+    let policy = seeker.policy(&space, &allow);
+    let supply = Arc::new(Wanted::default());
+    let cursor =
+        ContentCursor::open(seeker.host.clone(), &policy, &content, supply.clone()).expect("open");
+    let Advance::Blocked { cursor, .. } = cursor.next(&policy) else {
+        panic!("nothing is resident yet, so the first step is a hole");
+    };
+    let stalled_at = cursor.position();
+
+    net.partition(&holder.station.as_device(), &seeker.station.as_device());
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [43u8; 16],
+    )
+    .await;
+    assert!(
+        provider.is_err(),
+        "a partitioned peer is not reachable, which is the premise of this test"
+    );
+    assert_eq!(
+        cursor.position(),
+        stalled_at,
+        "a path that went away did not move the read"
+    );
+
+    // Healed, the same cursor carries on from where it stopped.
+    net.heal();
+    drop(cursor);
+    let (read, _) = page_through(&seeker, &holder, &content, 43, 2 * 1024 * 1024).await;
+    assert_eq!(read.len(), plaintext.len());
+    assert!(read == plaintext);
+}
