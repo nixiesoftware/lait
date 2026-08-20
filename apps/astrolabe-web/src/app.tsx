@@ -3,15 +3,19 @@ import { Button, Menu, MenuItem, MenuTrigger, Popover, Separator } from "react-a
 
 import {
   actionKey,
+  closeOwnedWindow,
   createClientTransport,
+  currentOwnedWindowSurface,
   keyFor,
   loadingClientView,
+  summonOwnedWindow,
   type ClientAction,
   type ClientTransport,
   type ClientView,
   type LibraryWorld,
+  type OwnedWindowSurface,
 } from "./client";
-import { BookSurface, DisplaysSurface, RecordSurface, type SecondarySurface } from "./lifecycle";
+import { BookSurface, DisplaysSurface } from "./lifecycle";
 import { resolvePlatform, type PlatformProfile } from "./platform";
 
 const utilityBarHeight = 32;
@@ -24,7 +28,7 @@ export function App() {
   const transport = useMemo(() => createClientTransport(), []);
   const { view, dispatch } = useClient(transport);
   const [selected, setSelected] = useState<string | null>(null);
-  const [surface, setSurface] = useState<SecondarySurface | null>(null);
+  const ownedSurface = currentOwnedWindowSurface();
 
   useEffect(() => { document.documentElement.dataset.platform = platform; }, [platform]);
   useEffect(() => {
@@ -34,8 +38,8 @@ export function App() {
         void dispatch({ type: "refresh" });
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
-        const target = event.key.toLowerCase() === "b" ? "book" : event.key.toLowerCase() === "d" ? "displays" : event.key.toLowerCase() === "r" ? "record" : null;
-        if (target !== null) { event.preventDefault(); setSurface(target); }
+        const target = event.key.toLowerCase() === "b" ? "book" : event.key.toLowerCase() === "d" ? "displays" : null;
+        if (target !== null) { event.preventDefault(); void summonOwnedWindow(target); }
       }
     };
     window.addEventListener("keydown", shortcut);
@@ -48,16 +52,15 @@ export function App() {
     [selected, worlds],
   );
 
+  if (ownedSurface !== null) return <OwnedSurfaceWindow surface={ownedSurface} view={view} dispatch={dispatch} dark={dark} />;
+
   return <main className="page" data-theme={dark ? "dark" : "light"}>
     <section className="astrolabe-window" aria-label="Astrolabe">
-      <Caption platform={platform} dark={dark} setDark={setDark} onShowSurface={setSurface}
+      <Caption platform={platform} dark={dark} setDark={setDark} onSummonWindow={summonOwnedWindow}
         refreshing={view.inFlight.includes(actionKey.refresh)} onRefresh={() => void dispatch({ type: "refresh" })} />
       <div className="client-body">
-        {surface === null && <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} />}
-        {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={() => setSurface(null)} />}
-        {surface === "displays" && <DisplaysSurface view={view} dispatch={dispatch} onBack={() => setSurface(null)} />}
-        {surface === "record" && <RecordSurface view={view} dispatch={dispatch} onBack={() => setSurface(null)} />}
-        <OperationalBar view={view} onShowSurface={setSurface} />
+        <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} />
+        <OperationalBar view={view} onSummonWindow={summonOwnedWindow} />
       </div>
     </section>
   </main>;
@@ -105,8 +108,16 @@ function withDispatchFailure(view: ClientView, what: string, error: unknown, act
   };
 }
 
-function Caption({ platform, dark, setDark, refreshing, onRefresh, onShowSurface }: {
-  platform: PlatformProfile; dark: boolean; setDark(next: boolean): void; refreshing: boolean; onRefresh(): void; onShowSurface(surface: SecondarySurface): void;
+function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedWindowSurface; view: ClientView; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
+  const close = () => { void closeOwnedWindow(); };
+  return <main className="page owned-window" data-theme={dark ? "dark" : "light"}>
+    {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
+    {surface === "displays" && <DisplaysSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
+  </main>;
+}
+
+function Caption({ platform, dark, setDark, refreshing, onRefresh, onSummonWindow }: {
+  platform: PlatformProfile; dark: boolean; setDark(next: boolean): void; refreshing: boolean; onRefresh(): void; onSummonWindow(surface: OwnedWindowSurface): void;
 }) {
   const systemMenu = platform === "macos";
   return <header className="caption" data-tauri-drag-region style={{ height: utilityBarHeight }}>
@@ -115,9 +126,8 @@ function Caption({ platform, dark, setDark, refreshing, onRefresh, onShowSurface
       <Popover className="settings-popover"><Menu className="settings-menu" aria-label="Astrolabe settings">
         <header className="settings-header"><strong>ASTROLABE</strong></header><Separator />
         <span className="settings-section">CLIENT SETTINGS</span>
-        <MenuItem id="book" onAction={() => onShowSurface("book")}>Address book <kbd>⌘⇧B</kbd></MenuItem>
-        <MenuItem id="displays" onAction={() => onShowSurface("displays")}>Displays <kbd>⌘⇧D</kbd></MenuItem>
-        <MenuItem id="record" onAction={() => onShowSurface("record")}>Local record <kbd>⌘⇧R</kbd></MenuItem>
+        <MenuItem id="book" onAction={() => void onSummonWindow("book")}>Address book <kbd>⌘⇧B</kbd></MenuItem>
+        <MenuItem id="displays" onAction={() => void onSummonWindow("displays")}>Displays <kbd>⌘⇧D</kbd></MenuItem>
         <MenuItem id="refresh" isDisabled={refreshing} onAction={onRefresh}>Refresh local state <kbd>F5</kbd></MenuItem>
         <MenuItem id="theme" onAction={() => setDark(!dark)}>{dark ? "Use light theme" : "Use dark theme"}</MenuItem>
       </Menu></Popover>
@@ -208,7 +218,7 @@ function PendingAction({ label }: { label: string }) { return <div className="pe
 function LoadingLibrary() { return <section className="library loading-library"><aside className="library-rail" style={{ width: railWidth }}><div className="skeleton heading" /><div className="skeleton row" /><div className="skeleton row" /></aside><div className="skeleton hero" /></section>; }
 function EmptyLibrary() { return <section className="empty-library"><h1>Library</h1><p>This build installs no Worlds.</p><p>A World ships inside the client. This binary was built without any, so there is nothing to open.</p></section>; }
 
-function OperationalBar({ view, onShowSurface }: { view: ClientView; onShowSurface(surface: SecondarySurface): void }) {
+function OperationalBar({ view, onSummonWindow }: { view: ClientView; onSummonWindow(surface: OwnedWindowSurface): void }) {
   const status = view.loading ? "Connecting to local identity" : view.failures.length > 0 ? "Needs attention" : view.stale ? "Local identity degraded" : view.host === null ? "Local identity unavailable" : "Local identity online";
   const activity = view.inFlight.includes(actionKey.refresh) ? "Reading local state…" : view.notices[0]?.said ?? "All local systems current";
   const spaces = view.host?.orbitCount ?? 0;
@@ -216,7 +226,7 @@ function OperationalBar({ view, onShowSurface }: { view: ClientView; onShowSurfa
     <span className="identity-status"><span className="status-icon">⌁</span>{status}</span><span className="bar-divider" />
     <span className="activity">{activity}</span><span>{view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
     <span>{spaces} {spaces === 1 ? "Space" : "Spaces"}</span>{view.host !== null && <code>v{view.host.version}</code>}
-    <span className="bar-divider" /><Button className="bar-icon" aria-label="Displays" onPress={() => onShowSurface("displays")}>⌁</Button><Button className="bar-icon" aria-label="Address book" onPress={() => onShowSurface("book")}>◉</Button><Button className="bar-icon" aria-label="Local record" onPress={() => onShowSurface("record")}>≡</Button>
+    <span className="bar-divider" /><Button className="bar-icon" aria-label="Displays" onPress={() => void onSummonWindow("displays")}>⌁</Button><Button className="bar-icon" aria-label="Address book" onPress={() => void onSummonWindow("book")}>◉</Button>
   </footer>;
 }
 

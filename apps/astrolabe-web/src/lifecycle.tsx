@@ -16,16 +16,17 @@ type SurfaceProps = {
   view: ClientView;
   dispatch(action: ClientAction): Promise<void>;
   onBack(): void;
+  ownedWindow?: boolean;
 };
 
-export function BookSurface({ view, dispatch, onBack }: SurfaceProps) {
+export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: SurfaceProps) {
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const book = view.book;
   const card = editing === null || editing === "new" ? undefined : book?.cards.find((item) => item.card === editing);
 
   if (editing !== null) return <BookEditor key={editing} card={card} all={book?.cards ?? []} view={view} dispatch={dispatch} onBack={() => setEditing(null)} />;
 
-  return <SecondaryFrame title="Address book" detail="Your authored Cards, contacts, and staged exchanges." onBack={onBack}
+  return <SecondaryFrame title="Address book" detail="Your authored Cards, contacts, and staged exchanges." onBack={onBack} backLabel={ownedWindow ? "Close window" : "← Library"}
     actions={<><button className="quiet-button" onClick={() => void dispatch({ type: "refresh" })}>Refresh</button><button className="primary-button" onClick={() => setEditing("new")}>New card</button></>}>
     {book === null ? <Unread what="The address book has not been read." /> : <BookList book={book} onEdit={setEditing} dispatch={dispatch} />}
   </SecondaryFrame>;
@@ -68,9 +69,9 @@ function BookEditor({ card, all, view, dispatch, onBack }: { card: Card | undefi
   </SecondaryFrame>;
 }
 
-export function DisplaysSurface({ view, dispatch, onBack }: SurfaceProps) {
+export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }: SurfaceProps) {
   const display = view.display;
-  return <SecondaryFrame title="Displays" detail="Enroll receivers and pin each one to an exact World surface." onBack={onBack} actions={<button className="quiet-button" onClick={() => void dispatch({ type: "refresh" })}>Refresh</button>}>
+  return <SecondaryFrame title="Displays" detail="Enroll receivers and pin each one to an exact World surface." onBack={onBack} backLabel={ownedWindow ? "Close window" : "← Library"} actions={<button className="quiet-button" onClick={() => void dispatch({ type: "refresh" })}>Refresh</button>}>
     {display === null ? <Unread what="The display coordinator has not answered yet." /> : <DisplaysBody display={display} view={view} dispatch={dispatch} />}
   </SecondaryFrame>;
 }
@@ -129,7 +130,7 @@ function McpPanel({ binding, worlds, dispatch }: { binding: McpBinding | null; w
   return <section className="section-block"><div className="section-heading">MCP BINDING</div>{binding !== null && <Notice tone="good">{binding.written ? "Written" : "Preview"}: {binding.detail}</Notice>}<div className="mcp-form"><select value={client} onChange={(event) => setClient(event.target.value)}><option value="claude">Claude</option><option value="cursor">Cursor</option><option value="windsurf">Windsurf</option><option value="generic">Generic</option></select><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Binding name" /><input value={project} onChange={(event) => setProject(event.target.value)} placeholder="Project path" /><select value={world} onChange={(event) => setWorld(event.target.value)}><option value="">Default World</option>{worlds.map((item) => <option key={item.worldMount} value={item.worldMount}>{item.displayName}</option>)}</select><div className="button-row"><button className="quiet-button" disabled={name.trim() === "" || project.trim() === ""} onClick={() => void dispatch({ type: "installMcp", client, scope: null, name: name.trim(), agent: null, noAgent: false, project: project.trim(), world: world || null, preview: true })}>Preview</button><button className="primary-button" disabled={name.trim() === "" || project.trim() === ""} onClick={() => void dispatch({ type: "installMcp", client, scope: null, name: name.trim(), agent: null, noAgent: false, project: project.trim(), world: world || null, preview: false })}>Write binding</button></div></div></section>;
 }
 
-function SecondaryFrame({ title, detail, onBack, actions, children }: { title: string; detail: string; onBack(): void; actions?: ReactNode; children: ReactNode }) { return <section className="secondary-surface"><header className="secondary-header"><button className="back-button" onClick={onBack}>← Library</button><div><h1>{title}</h1><p>{detail}</p></div><div className="header-actions">{actions}</div></header>{children}</section>; }
+function SecondaryFrame({ title, detail, onBack, backLabel = "← Library", actions, children }: { title: string; detail: string; onBack(): void; backLabel?: string; actions?: ReactNode; children: ReactNode }) { return <section className="secondary-surface"><header className="secondary-header"><button className="back-button" onClick={onBack}>{backLabel}</button><div><h1>{title}</h1><p>{detail}</p></div><div className="header-actions">{actions}</div></header>{children}</section>; }
 function Unread({ what }: { what: string }) { return <div className="secondary-scroll"><Empty what={what} next="Refresh local state to ask the daemon." /></div>; }
 function Empty({ what, next }: { what: string; next?: string }) { return <div className="empty-state"><strong>{what}</strong>{next !== undefined && <p>{next}</p>}</div>; }
 function Notice({ tone, children }: { tone: "warn" | "danger" | "good"; children: ReactNode }) { return <p className={`notice notice-${tone}`}>{children}</p>; }

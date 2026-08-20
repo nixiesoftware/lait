@@ -6,7 +6,7 @@
 
 use astrolabe::api::{self, ActionRequest, ClientView, Staleness};
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const CLIENT_VIEW_EVENT: &str = "astrolabe://client-view";
 
@@ -685,6 +685,39 @@ enum WebAction {
     DisplayDeviceRevoke { device: String },
 }
 
+/// The Flutter client owns exactly these two auxiliary top-level windows.
+/// A request is a summon, never a navigation command: the existing window is
+/// restored and focused rather than creating a second Book or Displays view.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum OwnedWindowSurface {
+    Book,
+    Displays,
+}
+
+impl OwnedWindowSurface {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Book => "address-book",
+            Self::Displays => "displays",
+        }
+    }
+
+    fn query(&self) -> &'static str {
+        match self {
+            Self::Book => "book",
+            Self::Displays => "displays",
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Book => "Address book — Astrolabe",
+            Self::Displays => "Displays — Astrolabe",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum WebDisplayTheme {
@@ -792,6 +825,66 @@ fn client_dispatch(action: WebAction) -> WebClientView {
     api::dispatch(action.into()).into()
 }
 
+#[tauri::command]
+async fn summon_owned_window(
+    app: tauri::AppHandle,
+    surface: OwnedWindowSurface,
+) -> Result<(), String> {
+    let label = surface.label();
+    if let Some(window) = app.get_webview_window(label) {
+        if window.is_minimized().map_err(|error| error.to_string())? {
+            window.unminimize().map_err(|error| error.to_string())?;
+        }
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    // `dev_url` keeps child windows on Vite's live document; packaged builds
+    // use the app protocol and retain the same explicit route identity.
+    let url = if let Some(mut dev_url) = app.config().build.dev_url.clone() {
+        dev_url.set_query(Some(&format!("surface={}", surface.query())));
+        WebviewUrl::External(dev_url)
+    } else {
+        WebviewUrl::CustomProtocol(
+            format!("tauri://localhost/index.html?surface={}", surface.query())
+                .parse()
+                .map_err(|error| format!("invalid owned-window URL: {error}"))?,
+        )
+    };
+
+    let builder = WebviewWindowBuilder::new(&app, label, url)
+        .title(surface.title())
+        .resizable(true)
+        .minimizable(true)
+        .visible(true);
+
+    match surface {
+        // Flutter's address-book host is permanently portrait: it can resize
+        // within the rolodex range, but never maximise into a workspace.
+        OwnedWindowSurface::Book => {
+            builder
+                .inner_size(370.0, 760.0)
+                .min_inner_size(320.0, 600.0)
+                .max_inner_size(440.0, 4096.0)
+                .maximizable(false)
+                .build()
+                .map_err(|error| error.to_string())?;
+        }
+        // Displays is a resizable coordination workspace, matching Flutter's
+        // 860×720 opening shape and 700×600 lower bound.
+        OwnedWindowSurface::Displays => {
+            builder
+                .inner_size(860.0, 720.0)
+                .min_inner_size(700.0, 600.0)
+                .maximizable(true)
+                .build()
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .append_invoke_initialization_script(PLATFORM_INIT)
@@ -803,7 +896,7 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![client_current, client_dispatch])
+        .invoke_handler(tauri::generate_handler![client_current, client_dispatch, summon_owned_window])
         .run(tauri::generate_context!())
         .expect("run Astrolabe Web desktop host");
 }

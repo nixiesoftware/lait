@@ -218,6 +218,39 @@ export interface ClientTransport extends AstrolabeClientBridge {
   readonly mode: "host" | "tauri" | "fixture" | "unavailable";
 }
 
+/** The two Flutter-owned top-level surfaces. They are singleton OS windows. */
+export type OwnedWindowSurface = "book" | "displays";
+
+export function currentOwnedWindowSurface(location = window.location): OwnedWindowSurface | null {
+  const surface = new URLSearchParams(location.search).get("surface");
+  return surface === "book" || surface === "displays" ? surface : null;
+}
+
+/**
+ * Ask the native host to create or restore the owned window. The browser
+ * preview mirrors that shape with a named popup, never by replacing Library.
+ */
+export async function summonOwnedWindow(surface: OwnedWindowSurface): Promise<void> {
+  if (isTauri()) {
+    await invoke("summon_owned_window", { surface });
+    return;
+  }
+  if (import.meta.env.DEV) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("surface", surface);
+    window.open(url, `astrolabe-${surface}`, surface === "book" ? "width=370,height=760" : "width=860,height=720");
+  }
+}
+
+export async function closeOwnedWindow(): Promise<void> {
+  if (isTauri()) {
+    const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    await getCurrentWebviewWindow().close();
+    return;
+  }
+  window.close();
+}
+
 export const loadingClientView: ClientView = {
   loading: true,
   stale: { kind: "neverLoaded" },

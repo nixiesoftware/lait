@@ -4,6 +4,7 @@ import {
   actionKey,
   createClientTransport,
   createFixtureTransport,
+  currentOwnedWindowSurface,
   fixtureClientView,
   keyFor,
   type AstrolabeClientBridge,
@@ -53,6 +54,12 @@ describe("client transport", () => {
     const transport = createClientTransport();
     expect(transport.mode).toBe("host");
     expect(await transport.current()).toBe(fixtureClientView);
+  });
+
+  it("only routes Flutter-owned top-level surfaces into secondary windows", () => {
+    expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=book") as unknown as Location)).toBe("book");
+    expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=displays") as unknown as Location)).toBe("displays");
+    expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=record") as unknown as Location)).toBeNull();
   });
 
   it("settles fixture-only lifecycle actions", async () => {
