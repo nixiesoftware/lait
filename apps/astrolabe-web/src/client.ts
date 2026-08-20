@@ -407,9 +407,19 @@ export const loadingClientView: ClientView = {
 };
 
 /**
+ * Whether the desktop host owns the display. There, fullscreen is a window
+ * fact nothing in the page can revoke; in a browser it is a grant that can be
+ * refused or taken back, and the surface has to watch it.
+ */
+export function hostOwnsFullscreen(): boolean {
+  return isTauri();
+}
+
+/**
  * Big Picture takes the display, not the work area. The desktop host does it
- * at the window; the browser preview asks the document, and a refusal there
- * is a preview limitation rather than an error.
+ * at the window; a browser grants it only inside a user gesture, so callers
+ * invoke this in the press itself. A refusal leaves the surface windowed —
+ * still drawn, and offering the retake control.
  */
 export async function setFullscreen(fullscreen: boolean): Promise<void> {
   if (isTauri()) {
@@ -417,10 +427,14 @@ export async function setFullscreen(fullscreen: boolean): Promise<void> {
     return;
   }
   try {
-    if (fullscreen) await document.documentElement.requestFullscreen();
-    else if (document.fullscreenElement !== null) await document.exitFullscreen();
+    if (fullscreen && document.fullscreenElement === null) {
+      await document.documentElement.requestFullscreen();
+    } else if (!fullscreen && document.fullscreenElement !== null) {
+      await document.exitFullscreen();
+    }
   } catch {
-    // The preview stays a window; the surface itself still fills it.
+    // Refused or unavailable: the page stays a window; the surface still
+    // fills it and keeps offering fullscreen from its own control.
   }
 }
 

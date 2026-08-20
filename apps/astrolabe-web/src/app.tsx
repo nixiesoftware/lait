@@ -9,6 +9,7 @@ import {
   currentWorldSettingsSnapshot,
   keyFor,
   loadingClientView,
+  setFullscreen,
   summonOwnedWindow,
   summonWorldSettings,
   worldArtwork,
@@ -187,10 +188,18 @@ function Caption({ platform, dark, setDark, refreshing, version, loading, onRefr
  * are one. The press is the consent.
  */
 function PresentHere({ loading, onPresent }: { loading: boolean; onPresent(): void }) {
+  // A native button, deliberately: the press is the consent, and in a browser
+  // it is also the one moment fullscreen may be taken — so it is taken here,
+  // inside the native click's own activation, rather than after the
+  // round-trip that answers the mode or behind a synthetic press event that
+  // a browser may not honour as a gesture.
   return <span className="tip present-tip" title={loading ? "Still reading this machine." : "Make this machine a screen."}>
-    <Button className="present-control" aria-label="Present on this screen" isDisabled={loading} onPress={onPresent}>
+    <button className="present-control" aria-label="Present on this screen" disabled={loading} onClick={() => {
+      void setFullscreen(true);
+      onPresent();
+    }}>
       <ScreenMark />
-    </Button>
+    </button>
   </span>;
 }
 

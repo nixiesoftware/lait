@@ -88,7 +88,7 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 /* Big Picture — always black: it is a screen, not a page. */
 .page.presenting { min-height:100vh; background:#000; }
 .big-picture { position:fixed; inset:0; display:grid; background:#000; }
-.big-picture:not([data-choosing]) { cursor:none; }
+.big-picture:not([data-choosing]):not([data-windowed]) { cursor:none; }
 .presented-frame { width:100%; height:100%; object-fit:contain; grid-area:1 / 1; }
 .present-said { display:grid; place-content:center; gap:8px; text-align:center; grid-area:1 / 1; }
 .present-said strong { color:#fff; font-size:18px; }
@@ -109,3 +109,7 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 .present-control { display:grid; place-items:center; width:34px; height:32px; border:0; color:var(--muted); background:transparent; }
 .present-control:hover { color:var(--text); background:var(--surface-200); }
 .present-control:focus-visible { outline:2px solid var(--brand); outline-offset:-2px; }
+.present-retake { border:1px solid #ffffff42; border-radius:5px; padding:6px 10px; color:#fff; background:#1a1a1acc; font-size:11px; font-weight:650; pointer-events:auto; cursor:pointer; }
+.present-retake:hover { background:#2a2a2acc; }
+.present-retake.corner { position:absolute; top:16px; right:16px; }
+.present-control:disabled { opacity:.45; pointer-events:none; }

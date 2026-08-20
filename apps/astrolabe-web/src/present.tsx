@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  hostOwnsFullscreen,
   setFullscreen,
   type ClientAction,
   type ClientView,
@@ -61,9 +62,61 @@ export function advance(cycle: string, index: number, length: number): Advance {
   }
 }
 
+/**
+ * Whether the page holds the display, watched. The desktop host answers
+ * `null`: fullscreen there is a window fact the page can neither lose nor
+ * need to retake. A browser can take it back at any time — its own Escape
+ * never reaches this page — so the surface tracks the grant and keeps a
+ * retake control on screen while it is missing.
+ */
+function useBrowserFullscreen(): boolean | null {
+  const [held, setHeld] = useState<boolean | null>(
+    () => hostOwnsFullscreen() ? null : document.fullscreenElement !== null,
+  );
+  useEffect(() => {
+    if (hostOwnsFullscreen()) return;
+    const update = () => setHeld(document.fullscreenElement !== null);
+    document.addEventListener("fullscreenchange", update);
+    return () => document.removeEventListener("fullscreenchange", update);
+  }, []);
+  return held;
+}
+
+/**
+ * A screen must not sleep mid-program. Held while presenting, and re-asked
+ * when the tab becomes visible again — the browser releases the lock on
+ * every hide. Absence of the API is a quiet no: the surface still draws.
+ */
+function useScreenWakeLock(): void {
+  useEffect(() => {
+    let lock: WakeLockSentinel | null = null;
+    let alive = true;
+    const acquire = async () => {
+      if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+      try {
+        const sentinel = await navigator.wakeLock.request("screen");
+        if (alive) lock = sentinel;
+        else void sentinel.release();
+      } catch {
+        // Power settings or policy said no; the program plays regardless.
+      }
+    };
+    const onVisible = () => { void acquire(); };
+    void acquire();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisible);
+      void lock?.release();
+    };
+  }, []);
+}
+
 export function BigPictureSurface({ presentation, view, dispatch }: {
   presentation: PresentationFacts; view: ClientView; dispatch: Dispatch;
 }) {
+  const fullscreen = useBrowserFullscreen();
+  useScreenWakeLock();
   // The shown item, with a nonce so a loop back onto the same index still
   // re-arms its hold timer.
   const [shown, setShown] = useState({ index: 0, nonce: 0 });
@@ -127,16 +180,29 @@ export function BigPictureSurface({ presentation, view, dispatch }: {
 
   const item = shown.index < items.length ? items[shown.index] : null;
   return <section className="big-picture" data-choosing={presentation.chosen === null || undefined}
-    aria-label="Big Picture">
+    data-windowed={fullscreen === false || undefined} aria-label="Big Picture">
     {presentation.chosen === null
       // Entered and not yet pointed at anything. A real state, and the one
       // the person is in the instant they press the control.
       ? <PresentationChooser view={view} dispatch={dispatch} />
       : <>
         <Scene item={item} empty={program !== null && items.length === 0} />
-        <PresentationChrome presentation={presentation} />
+        <PresentationChrome presentation={presentation} fullscreen={fullscreen} />
       </>}
+    {presentation.chosen === null && <RetakeFullscreen fullscreen={fullscreen} corner />}
   </section>;
+}
+
+/**
+ * The browser's way back to the display. Its own Escape exits fullscreen
+ * without ever reaching this page, and a grant can only be re-asked from a
+ * fresh gesture — so while the display is lost, this control stays on the
+ * screen offering exactly that gesture. The desktop host never draws it.
+ */
+function RetakeFullscreen({ fullscreen, corner = false }: { fullscreen: boolean | null; corner?: boolean }) {
+  if (fullscreen !== false) return null;
+  return <button className={corner ? "present-retake corner" : "present-retake"}
+    onClick={() => void setFullscreen(true)}>⛶ Fullscreen</button>;
 }
 
 /** What the current item draws, or an honest statement of why it does not. */
@@ -176,13 +242,14 @@ function Said({ headline, detail }: { headline: string; detail: string }) {
  * defect wherever it runs — so this draws over the frame, and only when
  * there is something to say.
  */
-function PresentationChrome({ presentation }: { presentation: PresentationFacts }) {
+function PresentationChrome({ presentation, fullscreen }: { presentation: PresentationFacts; fullscreen: boolean | null }) {
   const program = presentation.program;
   const assessment = program?.assessment ?? null;
   const degraded = assessment !== null && assessment !== "current";
   return <div className="present-chrome">
     <div className="present-title-row">
       <span>{presentation.chosen?.title ?? ""}</span>
+      <RetakeFullscreen fullscreen={fullscreen} />
       <span className="present-hint">Esc to leave</span>
     </div>
     <div className="present-banners">
