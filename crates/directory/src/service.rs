@@ -234,3 +234,49 @@ fn unavailable(error: anyhow::Error) -> Refusal {
     tracing::warn!(%error, "the directory store could not answer");
     Refusal::Unavailable("store".into())
 }
+
+/// One directory that several callers both reach.
+///
+/// The shape a deployed service has, without one — and the same reasoning
+/// `correspondence::SharedMem` gives for existing beside `MemCarrier`: a
+/// directory is a place two people both publish into and resolve from, and one
+/// owned by a single caller is not that. A test built on a private directory
+/// per identity proves nothing about the thing it stands in for.
+#[derive(Clone)]
+pub struct Shared(std::sync::Arc<std::sync::Mutex<Service<crate::MemStore>>>);
+
+impl Shared {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Service::new(
+            crate::MemStore::new(),
+        ))))
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Service<crate::MemStore>> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::Directory for Shared {
+    fn challenge(&mut self, device: &DeviceId, now: u64) -> Result<Challenge, Refusal> {
+        self.held().challenge(device, now)
+    }
+
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal> {
+        self.held().publish(request, now)
+    }
+
+    fn resolve(&mut self, request: &SignedResolve, now: u64) -> Result<Vec<u8>, Refusal> {
+        self.held().resolve(request, now)
+    }
+}

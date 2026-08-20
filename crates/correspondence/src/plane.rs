@@ -120,6 +120,20 @@ pub struct Collected {
 /// tests, a hosted Post today, a direct peer later — keeps it behind `dyn`, and
 /// a `Sized` bound would refuse exactly that holder while claiming the plane is
 /// indifferent to where material waits.
+/// What learning an announcement would change about a profile already held.
+///
+/// Carries both sets rather than a boolean, because the person answering
+/// "accept this?" is being asked to notice a substitution, and a question that
+/// does not say what changed is a question that gets answered yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceChange {
+    pub profile: ProfileId,
+    /// What this identity currently believes.
+    pub held: Vec<DeviceId>,
+    /// What the announcement avows.
+    pub incoming: Vec<DeviceId>,
+}
+
 pub struct ReachPlane {
     /// This identity's device seeds. All of them collect and open; the
     /// **canonical** one composes letters and proves egress.
@@ -141,6 +155,9 @@ pub struct ReachPlane {
     /// letter once it is acknowledged, so this is the only durable copy of the
     /// half a person wrote.
     sent: std::collections::BTreeMap<String, Vec<addressbook::reach_store::Sent>>,
+    /// The address a directory issued, if one has. Never minted locally: an
+    /// address a holder could choose is one a holder could squat.
+    address: Option<String>,
 }
 
 impl ReachPlane {
@@ -183,9 +200,11 @@ impl ReachPlane {
         let genesis = DeviceLink::seal(&first, &second, GENESIS_NONCE, GENESIS_EPOCH)
             .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
         let mut sent = std::collections::BTreeMap::new();
+        let mut address = None;
         let (mut registry, epoch, canonical) = match state {
             Some(held) => {
                 sent = held.sent;
+                address = held.address;
                 (held.registry, held.epoch, held.canonical)
             }
             None => (Registry::new(), 1, 0),
@@ -229,6 +248,7 @@ impl ReachPlane {
             mailbox: Mailbox::new(),
             epoch,
             sent,
+            address,
         })
     }
 
@@ -240,7 +260,60 @@ impl ReachPlane {
             canonical: self.canonical,
             registry: self.registry.clone(),
             sent: self.sent.clone(),
+            address: self.address.clone(),
         }
+    }
+
+    /// The short address a directory issued this identity, if one has.
+    #[must_use]
+    pub fn address(&self) -> Option<&str> {
+        self.address.as_deref()
+    }
+
+    /// Record the address a directory issued.
+    ///
+    /// Takes what the service answered rather than deriving anything: issuance
+    /// is the directory's act, and a plane that could compute its own address
+    /// would be a plane that could choose one.
+    pub fn issued(&mut self, address: String) {
+        self.address = Some(address);
+    }
+
+    /// What `announcement` would change about a profile this identity already
+    /// holds, without absorbing it.
+    ///
+    /// AUTH-18's v1 rung, and the reason it is a *question* rather than a
+    /// side effect: a directory that answered with a substituted key must not
+    /// be able to cause a seal to it. Learning is what commits, so a caller asks
+    /// this first and a person answers.
+    ///
+    /// `None` when this profile is new, or when the avowed set is unchanged —
+    /// both of which are safe to take silently. `Some` names the two sets, and a
+    /// caller must **block** rather than badge: field studies put manual
+    /// verification at 13 to 14 percent, so a warning nobody reads is a warning
+    /// that does not exist.
+    #[must_use]
+    pub fn change_on_learning(
+        &self,
+        announcement: &Announcement,
+        reader: &Standing,
+    ) -> Option<DeviceChange> {
+        let held = self.registry.resolve(&announcement.profile)?;
+        let mut scratch = Registry::new();
+        let absorbed = scratch
+            .absorb(
+                announcement.projection.clone(),
+                &announcement.genesis,
+                reader,
+            )
+            .ok()?;
+        let incoming = scratch.resolve(&absorbed).unwrap_or_default();
+        let same = held.len() == incoming.len() && held.iter().all(|d| incoming.contains(d));
+        (!same).then(|| DeviceChange {
+            profile: announcement.profile.clone(),
+            held,
+            incoming,
+        })
     }
 
     /// This identity's own profile — the address a correspondent reaches it by.
@@ -1012,6 +1085,50 @@ mod tests {
     /// this identity publishes has more than one in it. Asking only the
     /// canonical device leaves the rest of the mail to expire unread — which a
     /// surface cannot tell from nobody having written.
+    #[test]
+    fn a_device_set_that_grew_is_a_change_a_person_has_to_answer_for() {
+        // Ada, on two devices, announced once and learned by Bob.
+        let mut ada = ReachPlane::found(vec![[71u8; 32], [72u8; 32]], NOW).expect("found");
+        let mut bob = ReachPlane::found(vec![[81u8; 32], [82u8; 32]], NOW).expect("found");
+        let first = ada
+            .announce(Audience::Public, &bob.standing())
+            .expect("announce");
+        bob.learn(first.clone(), &bob.standing()).expect("learn");
+
+        // Nothing changed: re-announcing the same set is not a question.
+        let unchanged = ada
+            .announce(Audience::Public, &bob.standing())
+            .expect("announce again");
+        assert_eq!(
+            bob.change_on_learning(&unchanged, &bob.standing()),
+            None,
+            "an unchanged device set was raised as a change, which trains a person to say yes"
+        );
+
+        // A third device joins, and now it is.
+        let mut wider =
+            ReachPlane::found(vec![[71u8; 32], [72u8; 32], [73u8; 32]], NOW).expect("found");
+        let grown = wider
+            .announce(Audience::Public, &bob.standing())
+            .expect("announce");
+        let change = bob
+            .change_on_learning(&grown, &bob.standing())
+            .expect("a device set that grew is a change");
+        assert_eq!(change.profile, *ada.profile());
+        assert!(
+            change.incoming.len() > change.held.len(),
+            "the change did not carry both sets: {change:?}"
+        );
+
+        // And asking is not learning — the answer must not have been absorbed
+        // as a side effect of the question.
+        assert_eq!(
+            bob.resolve(ada.profile()).map(|d| d.len()),
+            Some(change.held.len()),
+            "asking about a change absorbed it"
+        );
+    }
+
     #[test]
     fn a_collect_asks_every_device_the_identity_holds() {
         let mut carrier = MemCarrier::new();

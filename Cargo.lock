@@ -3911,6 +3911,7 @@ dependencies = [
  "hyper-util",
  "include_dir",
  "interprocess",
+ "lait-directory",
  "lait-issues",
  "lait-issues-app",
  "lait-signage",

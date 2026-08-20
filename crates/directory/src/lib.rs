@@ -50,7 +50,7 @@ mod words;
 pub use address::Address;
 pub use client::Remote;
 pub use firestore::{Credentials, FirestoreStore};
-pub use service::Service;
+pub use service::{Service, Shared};
 pub use store::{MemStore, Published, Store};
 pub use wire::{sign, Challenge, SignedPublish, SignedResolve};
 

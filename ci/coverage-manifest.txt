@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2329
-pr-platform    1883
-nightly        2357
+pr             2336
+pr-platform    1888
+nightly        2364
 mutants        106
 
 [gates]
@@ -195,6 +195,7 @@ astrolabe-stub tests::nothing_staged_is_the_ordinary_launch_and_touches_nothing
 astrolabe-stub tests::stale_scratch_is_swept_when_the_installation_is_claimed
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
+astrolabe::packaging every_platform_stages_the_terms_where_the_update_tree_will_find_them
 astrolabe::packaging every_shell_artifact_points_at_the_stub_and_never_into_a_release
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
 astrolabe::packaging the_client_and_its_sidecar_agree_about_the_layout
@@ -202,6 +203,7 @@ astrolabe::packaging the_dmg_refuses_a_bundle_missing_either_half_of_the_pair
 astrolabe::packaging the_dmg_refuses_a_non_distribution_signing_identity
 astrolabe::packaging the_dmg_ships_the_notices_inside_the_bundle
 astrolabe::packaging the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep
+astrolabe::packaging the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed
 astrolabe::packaging the_dmg_staples_assesses_and_keeps_identity_out_of_the_project
 astrolabe::packaging the_installer_asks_for_no_elevation
 astrolabe::packaging the_installer_carries_nothing_from_the_retired_stacks
@@ -210,10 +212,12 @@ astrolabe::packaging the_installer_carries_the_whole_flutter_bundle
 astrolabe::packaging the_installer_is_written_where_the_caller_asked
 astrolabe::packaging the_installer_places_both_binaries_in_one_directory
 astrolabe::packaging the_installer_registers_the_lait_url_scheme
+astrolabe::packaging the_installer_ships_and_shows_the_licence
 astrolabe::packaging the_installer_ships_the_third_party_notices
 astrolabe::packaging the_linux_bundle_refuses_a_missing_or_mismatched_pair
 astrolabe::packaging the_linux_package_carries_the_whole_flutter_bundle_and_notices
 astrolabe::packaging the_linux_package_names_its_target_and_refuses_unresolved_libraries
+astrolabe::packaging the_linux_package_ships_the_licence
 astrolabe::packaging the_notices_say_they_are_generated_and_name_what_generates_them
 astrolabe::packaging uninstalling_removes_the_program_and_never_the_persons_data
 comms iroh::tests::framing_golden_bytes
@@ -622,6 +626,7 @@ lait orbits::router::tests::one_orbit_places_once_for_concurrent_callers
 lait orbits::router::tests::required_query_refuses_a_command_before_it_places_a_station
 lait orbits::router::tests::saturated_open_lane_refuses_without_stalling_the_reactor
 lait orbits::router::tests::vacant_orbit_is_owned_in_process_and_shutdown_returns_it_to_vacancy
+lait orbits::tests::a_row_persists_coordinates_and_no_contents
 lait orbits::tests::forget_removes_by_path_or_id_prefix
 lait orbits::tests::list_is_newest_first
 lait orbits::tests::missing_registry_is_empty_not_an_error
@@ -1174,6 +1179,8 @@ lait::it mcp_parity::the_stdio_head_answers_discover_and_serves_planning_tools
 lait::it mixed_root_guard::any_product_cache_must_register_with_a_mixed_root_proof
 lait::it mixed_root_guard::every_registered_cache_names_a_real_test
 lait::it mixed_root_guard::the_detector_has_teeth
+lait::it orbit_registry::a_listed_row_carries_no_contents
+lait::it orbit_registry::serving_a_space_records_the_open
 lait::it orbital_admission::a_contributor_invite_installs_the_expansion_atomically
 lait::it orbital_admission::a_non_delegating_issuer_cannot_escalate
 lait::it orbital_admission::a_reusable_capability_admits_multiple_candidates

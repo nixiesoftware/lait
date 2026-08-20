@@ -28,9 +28,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use correspondence::Contractor;
+use lait_directory::Directory;
 use mechanics::kinship::{Audience, ProfileId};
 
 use crate::control::{Request, Response};
+
+/// The directory this deployment is pointed at, if any.
+///
+/// `LAIT_DIRECTORY_URL` names one. Nothing is assumed absent it, for the reason
+/// the carrier gives one function down and one this service is even more
+/// exposed to: a directory that answers "not available" because it was
+/// misconfigured is indistinguishable, at the surface, from a person who does
+/// not exist. An absent directory refuses in words instead.
+#[must_use]
+pub fn configured_directory() -> Option<Box<dyn Directory + Send>> {
+    let base = std::env::var("LAIT_DIRECTORY_URL").ok()?;
+    let base = base.trim();
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        return None;
+    }
+    Some(Box::new(lait_directory::Remote::at(base)))
+}
 
 /// The carrier this deployment is pointed at, if any.
 ///
@@ -96,6 +114,11 @@ pub struct CorrespondenceService {
 struct Plane {
     reach: correspondence::plane::ReachPlane,
     contractor: Box<dyn Contractor>,
+    /// Where a short address is issued and resolved. Separate from the carrier
+    /// on purpose: the two answer different questions — *who is this person and
+    /// which devices do they hold* against *may you read this mailbox* — and
+    /// one being down must not take the other with it.
+    directory: Option<Box<dyn Directory + Send>>,
 }
 
 impl CorrespondenceService {
@@ -120,6 +143,18 @@ impl CorrespondenceService {
     /// a person hands out names them on every start. Durable reach state is
     /// read here and written back by anything that changes it.
     pub fn carry_over(&self, contractor: Box<dyn Contractor>, now: u64) -> Result<(), String> {
+        self.carry_over_with(contractor, configured_directory(), now)
+    }
+
+    /// The same, with the directory named rather than read from the
+    /// environment. What the tests use, and what keeps `carry_over` honest
+    /// about having exactly one source of deployment truth.
+    pub fn carry_over_with(
+        &self,
+        contractor: Box<dyn Contractor>,
+        directory: Option<Box<dyn Directory + Send>>,
+        now: u64,
+    ) -> Result<(), String> {
         let seeds = crate::config::load_or_create_kinship_seeds(&self.identity)
             .map_err(|error| error.to_string())?;
         let held = addressbook::ReachStore::at(&self.identity)
@@ -131,7 +166,11 @@ impl CorrespondenceService {
             .plane
             .lock()
             .map_err(|_| "the correspondence plane is poisoned".to_string())?;
-        *plane = Some(Plane { reach, contractor });
+        *plane = Some(Plane {
+            reach,
+            contractor,
+            directory,
+        });
         Ok(())
     }
 
@@ -227,6 +266,7 @@ impl CorrespondenceService {
                 .card(&plane.reach.standing())
                 .and_then(|card| card.render().ok()),
             profile: mine,
+            address: plane.reach.address().map(ToOwned::to_owned),
             correspondents: held,
             conversations,
         }))
@@ -256,7 +296,73 @@ impl CorrespondenceService {
 
             Request::ReachShare => {
                 let reader = plane.reach.standing();
-                match plane.reach.announce(Audience::Public, &reader) {
+                let announcement = match plane.reach.announce(Audience::Public, &reader) {
+                    Ok(announcement) => announcement,
+                    Err(error) => return Response::err(format!("{error}")),
+                };
+                // Publishing to a directory is best-effort and deliberately so.
+                // Announcing is what makes this identity reachable *at all* —
+                // the pasted artifact works with no service anywhere — and a
+                // directory being down must not take that with it. What is lost
+                // when it fails is the short spelling, and the next share
+                // publishes again.
+                if let Some(directory) = plane.directory.as_deref_mut() {
+                    let seed = plane.reach.seed_for(&plane.reach.canonical_device());
+                    match seed {
+                        Some(seed) => {
+                            match lait_directory::publish_as(directory, &seed, &announcement, now) {
+                                Ok(address) => plane.reach.issued(address.as_str().to_owned()),
+                                Err(refusal) => {
+                                    tracing::warn!(%refusal, "the directory did not take this publication");
+                                }
+                            }
+                        }
+                        None => tracing::warn!("no seed for the canonical device"),
+                    }
+                }
+                match self.keep(plane) {
+                    Ok(()) => self.reach_view(plane),
+                    Err(error) => Response::err(error),
+                }
+            }
+
+            Request::ReachResolve {
+                address,
+                accept_change,
+            } => {
+                let Ok(address) = lait_directory::Address::parse(&address) else {
+                    return Response::err("that is not an address");
+                };
+                let Some(directory) = plane.directory.as_deref_mut() else {
+                    // Not "nobody by that name". The two are different facts and
+                    // only one is worth acting on.
+                    return Response::err("no directory is configured to resolve an address");
+                };
+                let Some(seed) = plane.reach.seed_for(&plane.reach.canonical_device()) else {
+                    return Response::err("no seed for the canonical device");
+                };
+                let announcement = match lait_directory::resolve_as(directory, &seed, &address, now)
+                {
+                    Ok(announcement) => announcement,
+                    Err(refusal) => return Response::err(format!("{refusal}")),
+                };
+
+                // AUTH-18, and the reason this is a refusal rather than a
+                // badge: a directory that answered with a substituted key must
+                // not be able to cause a seal to it, and a warning is not a
+                // defence when 13 to 14 percent of people read one.
+                let reader = plane.reach.standing();
+                if !accept_change {
+                    if let Some(change) = plane.reach.change_on_learning(&announcement, &reader) {
+                        return Response::err(format!(
+                            "the devices {} avows have changed since you learned them                              ({} held, {} offered) — accept the change to go on",
+                            change.profile.as_str(),
+                            change.held.len(),
+                            change.incoming.len()
+                        ));
+                    }
+                }
+                match plane.reach.learn(announcement, &reader) {
                     Ok(_) => match self.keep(plane) {
                         Ok(()) => self.reach_view(plane),
                         Err(error) => Response::err(error),
@@ -620,11 +726,111 @@ mod tests {
         );
     }
 
+    /// Sharing publishes to the directory too, and the address comes back in
+    /// the view — the short, speakable thing a person says out loud instead of
+    /// pasting two thousand base32 characters.
+    #[tokio::test]
+    async fn sharing_a_reach_issues_a_short_address() {
+        let world = World::new("issued", &["ada"]).await;
+        let answer = world.service("ada").handle(Request::ReachShare).await;
+        let view = reach(&answer);
+        let address = view.address.as_deref().expect("an address was issued");
+        assert!(
+            lait_directory::Address::parse(address).is_ok(),
+            "{address} is not something this build would spell"
+        );
+
+        // Stable afterwards. A person hands this out; it cannot move under them.
+        let again = world.service("ada").handle(Request::ReachShare).await;
+        assert_eq!(reach(&again).address.as_deref(), Some(address));
+    }
+
+    /// The acceptance line, through the daemon: one identity says an address,
+    /// the other reaches them with no other channel and no pasted artifact.
+    #[tokio::test]
+    async fn a_short_address_is_all_one_identity_needs_to_reach_another() {
+        let world = World::new("byaddr", &["ada", "bob"]).await;
+
+        let shared = world.service("ada").handle(Request::ReachShare).await;
+        let address = reach(&shared).address.clone().expect("ada has an address");
+        let ada = reach(&shared).profile.clone();
+
+        let learned = world
+            .service("bob")
+            .handle(Request::ReachResolve {
+                address,
+                accept_change: false,
+            })
+            .await;
+        assert!(
+            reach(&learned).correspondents.contains(&ada),
+            "bob resolved an address and did not learn who it named"
+        );
+
+        // And the relationship is usable, which is the only thing that makes
+        // the address worth having.
+        world
+            .service("bob")
+            .handle(Request::CorrespondSend {
+                to: ada,
+                body: "found you by address".into(),
+            })
+            .await;
+        let collected = world
+            .service("ada")
+            .handle(Request::CorrespondCollect)
+            .await;
+        let arrived: Vec<&str> = reach(&collected)
+            .conversations
+            .iter()
+            .flat_map(|c| c.letters.iter())
+            .filter_map(|l| l.body.as_deref())
+            .collect();
+        assert!(
+            arrived.contains(&"found you by address"),
+            "nothing arrived: {arrived:?}"
+        );
+    }
+
+    /// No directory is not "nobody by that name".
+    ///
+    /// The discipline this whole plane is most careful about, at the one place
+    /// it is easiest to get wrong: a misconfigured directory and a person who
+    /// does not exist look identical at a surface, and only one is worth acting
+    /// on.
+    #[tokio::test]
+    async fn with_no_directory_an_address_refuses_in_words() {
+        let root = std::env::temp_dir().join(format!("corr-nodir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::config::load_or_create_identity(&root).expect("identity");
+        let service = CorrespondenceService::open(&root);
+        service
+            .carry_over_with(Box::new(correspondence::SharedMem::new()), None, now_secs())
+            .expect("carry");
+
+        let answer = service
+            .handle(Request::ReachResolve {
+                address: "act-able-zoo-1234".into(),
+                accept_change: false,
+            })
+            .await;
+        assert!(
+            matches!(&answer, Response::Error { message, .. } if message.contains("no directory")),
+            "{answer:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Several identities, one carrier between them — the Post's shape without
     /// the Post.
     struct World {
         root: std::path::PathBuf,
         carrier: correspondence::SharedMem,
+        /// One directory all of them reach, for the reason `SharedMem` exists:
+        /// a directory is a place several people publish into and resolve from,
+        /// and one owned by a single identity is not that.
+        directory: lait_directory::Shared,
         services: BTreeMap<String, CorrespondenceService>,
     }
 
@@ -633,6 +839,7 @@ mod tests {
             let root = std::env::temp_dir().join(format!("corr-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let carrier = correspondence::SharedMem::new();
+            let directory = lait_directory::Shared::new();
             let mut services = BTreeMap::new();
             for name in who {
                 let home = root.join(name);
@@ -640,13 +847,18 @@ mod tests {
                 crate::config::load_or_create_identity(&home).expect("identity");
                 let service = CorrespondenceService::open(&home);
                 service
-                    .carry_over(Box::new(carrier.clone()), now_secs())
+                    .carry_over_with(
+                        Box::new(carrier.clone()),
+                        Some(Box::new(directory.clone())),
+                        now_secs(),
+                    )
                     .expect("carry");
                 services.insert((*name).to_owned(), service);
             }
             Self {
                 root,
                 carrier,
+                directory,
                 services,
             }
         }

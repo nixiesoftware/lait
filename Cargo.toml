@@ -130,6 +130,12 @@ addressbook = { path = "crates/addressbook" }
 # same plane serves issue notifications, invitation delivery, agent messages and
 # a chat client, and every one of those is a caller rather than the owner.
 correspondence = { path = "crates/correspondence" }
+# The identity directory's *client* half. The daemon reaches a deployed one to
+# publish this identity's reach and to resolve a short address; the service half
+# in the same crate is what `lait-post` runs, and nothing here mounts it. One
+# crate because the wire format is one thing — the same reason `lait_post::sign`
+# lives beside its verifier.
+lait-directory = { path = "crates/directory" }
 # The orbital runtime + Replica semantics. The product adopts the orbital
 # lifecycle through these — hosting a World, docking Sessions, and committing
 # through the Replica/Fabric path — the same public API any consumer uses. This

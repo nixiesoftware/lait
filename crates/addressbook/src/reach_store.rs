@@ -47,6 +47,14 @@ pub struct ReachState {
     /// conversation.
     #[serde(default)]
     pub sent: std::collections::BTreeMap<String, Vec<Sent>>,
+    /// The short address a directory issued this profile, once one has.
+    ///
+    /// Held here rather than re-asked, because it is *"minted on first publish
+    /// and stable afterwards"* and a person hands it out by voice. A profile
+    /// that had to ask a service what its own address was would be a profile
+    /// with no address whenever that service was unreachable.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 /// One letter this identity composed.
@@ -164,6 +172,7 @@ mod tests {
             canonical: 0,
             registry,
             sent: std::collections::BTreeMap::new(),
+            address: None,
         }
     }
 
