@@ -328,7 +328,7 @@ impl ContentCursor {
 
     /// One step: at most one chunk, verified and opened.
     ///
-    /// Standing is asked for before any byte exists, and the epoch key is
+    /// Permission is asked for before any byte exists, and the epoch key is
     /// resolved again here rather than held — so revoking either stops playback
     /// at the next chunk instead of at the next open.
     pub fn next(mut self, policy: &ContentPolicy<'_>) -> Advance {
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn every_step_asks_permission_again() {
-        // A cursor is not a capability. Standing is asked for before any byte
+        // A cursor is not a capability. Permission is asked for before any byte
         // exists, so a revocation lands on the next step.
         let fx = fixture("authz");
         let space = space();
