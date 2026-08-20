@@ -1726,3 +1726,82 @@ async fn a_partition_stops_a_paged_read_and_healing_resumes_it() {
     assert_eq!(read.len(), plaintext.len());
     assert!(read == plaintext);
 }
+
+/// A cursor reads a peer's content, and this test never fetches anything.
+///
+/// That is the whole point, and it is what every other read in this file does
+/// not do: they call `connect_provider` and `fetch_chunks` by hand, which
+/// proves the plane moves bytes and proves nothing about whether a running
+/// Station can obtain a byte it does not hold. `Fetcher::fetch` had no
+/// production caller at all, so the acquiring half was reachable only from a
+/// test that did the acquiring itself.
+///
+/// Here the supply dials, asks and fetches. The loop below only steps the
+/// cursor and waits — if `PeerSupply` did nothing, this would spin until the
+/// bound and yield an empty read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cursor_reads_from_a_peer_without_the_test_fetching() {
+    use runtime::content_cursor::{Advance, ContentCursor};
+    use runtime::peer_supply::{MemberMayAcquire, PeerSupply, SupplyContext};
+
+    let space = space();
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "holder", [61u8; 32], true);
+    let seeker = node(&net, "seeker", [62u8; 32], false);
+    let plaintext = filler(11, replica::content::CHUNK_PLAINTEXT_LEN as usize * 3 + 17);
+    let content = seed_content(&holder, 11, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    // The one thing the test tells it: who is out there. Discovery in
+    // production reads the neighbour registry; here the answer is the peer.
+    let peer = holder.station.clone();
+    let supply = Arc::new(
+        PeerSupply::spawn(SupplyContext {
+            fetcher: fetcher(&seeker),
+            transport: seeker.transport.clone(),
+            local: seeker.station.clone(),
+            authority: Box::new(MemberMayAcquire),
+            candidates: Arc::new(move || vec![peer.clone()]),
+            cancel: CancelToken::new(),
+        })
+        .expect("the fetch driver starts"),
+    );
+
+    let allow = |_: ContentAction<'_>| Ok(());
+    let policy = seeker.policy(&space, &allow);
+    let mut cursor =
+        ContentCursor::open(seeker.host.clone(), &policy, &content, supply).expect("open");
+
+    let mut out = Vec::new();
+    let mut blocked = 0usize;
+    loop {
+        match cursor.next(&policy) {
+            Advance::Yielded { cursor: next, span } => {
+                out.extend_from_slice(span.bytes());
+                cursor = next;
+            }
+            Advance::Blocked { cursor: next, gap } => {
+                // The two answers that are about reach rather than waiting.
+                // Failing on them here is what keeps this test honest: a supply
+                // that quietly did nothing would answer one of these forever
+                // rather than blocking on a fetch that is really running.
+                assert!(
+                    !matches!(gap, runtime::content_cursor::Gap::Unsupplied),
+                    "the cursor was built with a supply"
+                );
+                blocked += 1;
+                assert!(blocked < 600, "gave up waiting on the supply: {gap:?}");
+                cursor = next;
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            Advance::Finished { .. } => break,
+            Advance::Refused(failure) => panic!("refused: {failure:?}"),
+        }
+    }
+
+    assert_eq!(out, plaintext, "the peer's bytes, read through the supply");
+    assert!(
+        blocked > 0,
+        "nothing was missing, so this proved nothing about fetching"
+    );
+}

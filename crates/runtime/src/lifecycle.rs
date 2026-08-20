@@ -750,6 +750,7 @@ impl Orbit {
         ));
 
         let station = Station {
+            supply: Mutex::new(None),
             store: self.store,
             registry: self.registry,
             authority: self.authority,
@@ -819,6 +820,14 @@ impl Orbit {
             let local_station =
                 Key::from_device(&mechanics::actor::device_from_seed(&station_seed))
                     .ok_or(Failure::Integrity(Integrity::StationKey))?;
+
+            // One registry for both halves of Freight, and this is load-bearing
+            // rather than tidy. `FreightService::maintain` sweeps staging using
+            // *its* registry's live operations as the set to keep — so a
+            // Fetcher with a registry of its own would have its in-flight
+            // staging slots swept out from under it by the serving side, and
+            // the failure would look like a peer that stopped sending.
+            let transfers = Arc::new(crate::transfer::TransferRegistry::new());
             if options.planes.freight_enabled {
                 if let Some(queue) = plane_transport.take_session_queue(crate::plane::FREIGHT_ALPN)
                 {
@@ -839,7 +848,7 @@ impl Orbit {
                     };
                     let service = crate::plane::freight::FreightService::new(
                         station.content.clone(),
-                        Arc::new(crate::transfer::TransferRegistry::new()),
+                        transfers.clone(),
                         Arc::new(crate::content_host::StationContentKeys::new(
                             station.keys.clone(),
                         )),
@@ -888,7 +897,7 @@ impl Orbit {
                     let context = crate::plane_driver::PlaneContext {
                         plane: crate::plane::Plane::Live,
                         space: station.store.space().clone(),
-                        local_station,
+                        local_station: local_station.clone(),
                         authority: station.authority.clone(),
                         policy: options.planes.policy(),
                         cancel: station.cancel.clone(),
@@ -934,6 +943,53 @@ impl Orbit {
                     cancel: station.cancel.clone(),
                 };
                 station.spawn_tracked(move |_cancel| crate::plane::live::run_dialer(dial))?;
+            }
+
+            // The acquiring half of the content plane, which until now had no
+            // production caller at all: `Fetcher::fetch` existed and only tests
+            // ever reached it, so a Station could serve bytes it held and never
+            // obtain bytes it did not.
+            //
+            // Mounted whether or not Freight's inbound queue was claimed, for
+            // the reason the Live dialer is: fetching from a peer is not the
+            // same capability as accepting a fetch, and a Station whose queue
+            // was already taken can still go and get what it is missing.
+            if options.planes.freight_enabled {
+                let neighbours = station.neighbor_registry.clone();
+                let supply = crate::peer_supply::SupplyContext {
+                    fetcher: crate::fetch::Fetcher {
+                        host: station.content.clone(),
+                        registry: transfers.clone(),
+                        space: station.store.space().clone(),
+                        keys: Arc::new(crate::content_host::StationContentKeys::new(
+                            station.keys.clone(),
+                        )),
+                        cache_quota_bytes: options.content.cache_quota_bytes,
+                        max_content_len: options.content.max_content_len,
+                    },
+                    transport: plane_transport.clone(),
+                    local: local_station.clone(),
+                    authority: Box::new(crate::peer_supply::MemberMayAcquire),
+                    // `eligible` rather than `snapshot`: a Station in backoff is
+                    // one this node has already failed to reach, and a fetch
+                    // behind a playhead is the worst place to spend a dial
+                    // finding that out again.
+                    candidates: Arc::new(move || {
+                        neighbours
+                            .lock_recovering()
+                            .eligible(mechanics::wallclock::now_millis())
+                    }),
+                    cancel: station.cancel.clone(),
+                };
+                match crate::peer_supply::PeerSupply::spawn(supply) {
+                    Ok(supply) => *station.supply.lock_recovering() = Some(Arc::new(supply)),
+                    // A Station that cannot start its fetch thread still serves
+                    // and still reads what it holds. What it cannot do is
+                    // acquire — and a cursor built with no supply answers
+                    // `Unsupplied`, which is the truthful end rather than a
+                    // stall.
+                    Err(_) => *station.supply.lock_recovering() = None,
+                }
             }
         }
         Ok(station)
@@ -1029,6 +1085,16 @@ pub struct Station {
     /// still answers "who is here" — with nobody — and a caller that had to
     /// branch on whether the plane exists would write that branch everywhere.
     live: Arc<crate::plane::live::LiveHandle>,
+    /// How this Station obtains bytes it does not hold.
+    ///
+    /// `None` when Freight is disabled, when there is no transport, or when the
+    /// fetch thread would not start. All three are the same fact to a reader —
+    /// nothing here can go and get it — and a cursor built without a supply
+    /// answers `Unsupplied`, which is a truthful end rather than a stall.
+    ///
+    /// Behind a `Mutex` because it is installed after the planes are mounted
+    /// and read by whoever opens a cursor.
+    supply: Mutex<Option<Arc<crate::peer_supply::PeerSupply>>>,
     /// The largest single content this Station will ingest, from operator
     /// policy. Kept here because every local content call has to enforce it and
     /// the options struct does not outlive activation.
