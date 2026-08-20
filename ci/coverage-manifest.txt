@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2435
-pr-platform    1967
-nightly        2463
+pr             2470
+pr-platform    2002
+nightly        2498
 mutants        106
 
 [gates]
@@ -1070,20 +1070,55 @@ lait-post tests::the_challenge_map_is_bounded_without_becoming_a_wall
 lait-post tests::unblocking_a_sender_lets_their_next_letter_through
 lait-post::over_http a_letter_crosses_the_wire_and_only_its_recipient_collects_it
 lait-signage contract::tests::a_program_grant_and_a_fleet_grant_both_satisfy_writing_that_program
+lait-signage contract::tests::a_screen_reports_when_its_answer_changes_with_nobody_writing
+lait-signage contract::tests::a_screen_schedule_is_validated_like_the_rest
+lait-signage contract::tests::a_window_selects_from_the_items_the_program_actually_has
+lait-signage contract::tests::an_absent_duration_is_legal_anywhere_and_a_declared_one_is_bounded
 lait-signage contract::tests::an_unusable_id_demands_fleet_wide_standing_rather_than_a_truncated_grant
 lait-signage contract::tests::highest_priority_active_window_selects_items_and_exposes_the_next_boundary
 lait-signage contract::tests::one_programs_grant_does_not_reach_another
+lait-signage contract::tests::overlapping_screen_windows_resolve_by_priority_then_id
+lait-signage contract::tests::playback_falls_through_override_schedule_direct_then_group
 lait-signage contract::tests::programs_are_bounded_and_have_one_canonical_identity
 lait-signage contract::tests::the_resource_spellings_are_the_grant_format
+lait-signage world::tests::a_kind_is_configured_when_its_document_is_in_the_list
+lait-signage world::tests::a_program_arrives_with_the_entries_its_items_name
+lait-signage world::tests::a_program_put_still_stages_one_atomic_replacement
+lait-signage world::tests::a_schema_this_world_does_not_declare_is_refused_both_ways
+lait-signage world::tests::a_screen_put_is_satisfied_by_the_screen_its_group_or_the_fleet
+lait-signage world::tests::a_second_configuration_of_one_kind_is_refused_and_editing_the_first_is_not
+lait-signage world::tests::a_stored_entry_declares_the_content_it_names
+lait-signage world::tests::a_stored_entry_naming_an_unrenderable_content_id_is_refused
+lait-signage world::tests::an_entry_that_names_no_bytes_declares_none
+lait-signage world::tests::an_ungrouped_screen_demands_itself_or_the_fleet
+lait-signage world::tests::deleting_a_library_entry_releases_its_content
+lait-signage world::tests::deleting_any_of_the_five_tombstones_its_row
+lait-signage world::tests::every_declared_schema_dispatches
+lait-signage world::tests::plays_returns_the_screen_with_the_group_it_inherits_from
 lait-signage world::tests::reviewed_implementation_is_stable_and_nonzero
+lait-signage world::tests::showing_finds_the_screens_that_intend_that_program
+lait-signage world::tests::showing_sees_a_program_named_only_by_an_override
+lait-signage world::tests::the_library_lists_what_was_put_there
+lait-signage world::tests::two_entries_of_one_kind_carry_their_own_settings
+lait-signage world::tests::used_by_finds_the_programs_whose_items_name_an_entry
+lait-signage-app display::tests::a_content_id_the_world_accepts_is_always_expressible_to_a_surface
+lait-signage-app display::tests::a_live_entry_is_still_marked_live
+lait-signage-app display::tests::a_stored_entry_names_its_content_and_is_not_live
+lait-signage-app display::tests::an_integration_and_a_dangling_item_both_blank_rather_than_vanish
 lait-signage-app display::tests::authored_slide_renders_to_a_real_png
 lait-signage-app host::tests::a_body_without_a_command_is_not_a_signage_request
-lait-signage-app host::tests::a_delete_is_a_command_and_asks_first
 lait-signage-app host::tests::a_known_command_with_a_wrong_payload_is_refused_as_a_payload_problem
-lait-signage-app host::tests::a_put_is_a_command_that_does_not_ask
+lait-signage-app host::tests::a_media_put_is_a_command_that_does_not_ask
 lait-signage-app host::tests::a_query_parses_and_stays_a_query
 lait-signage-app host::tests::an_unknown_command_is_refused_by_name_and_lists_what_exists
+lait-signage-app host::tests::every_delete_is_a_command_and_asks_by_name
+lait-signage-app host::tests::every_verb_parses_back_with_the_class_the_protocol_assigns
 lait-signage-app host::tests::the_package_now_exposes_a_web_client_interface
+lait-signage-app host::tests::the_refusal_lists_exactly_the_commands_this_build_serves
+lait-signage-app protocol::tests::a_media_put_round_trips_through_the_call
+lait-signage-app protocol::tests::a_program_answer_carries_the_entries_its_items_name
+lait-signage-app protocol::tests::each_document_carries_its_own_schema_pair
+lait-signage-app protocol::tests::every_delete_asks_and_names_what_it_deletes
 lait-signage-app protocol::tests::query_and_command_classification_is_product_owned
 lait-signage-app tests::package_registers_the_exact_signage_program_surface
 lait-workbench api::tests::contract_endpoint_is_authenticated_and_versioned

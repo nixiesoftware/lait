@@ -707,8 +707,23 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
   );
 }
 
+/**
+ * `unknown` is deliberately not a fourth colour on the same scale. The other
+ * three are readings; that one is the absence of one, so it draws hollow — a
+ * filled dot in any colour would say this device looked and found something.
+ */
 function StatusDot({ status }: { status: SpaceRow["status"] }) {
-  const cls = { up: "bg-ok", idle: "bg-mute", missing: "bg-danger" }[status];
-  const label = { up: "Local daemon running", idle: "Local daemon idle", missing: "Local replica unavailable" }[status];
+  const cls = {
+    up: "bg-ok",
+    idle: "bg-mute",
+    missing: "bg-danger",
+    unknown: "border-line-strong border",
+  }[status];
+  const label = {
+    up: "Local daemon running",
+    idle: "Local daemon idle",
+    missing: "Local replica unavailable",
+    unknown: "Could not reach the local daemon to ask",
+  }[status];
   return <span className={cn("size-mark-xs shrink-0 rounded-full", cls)} title={label} role="img" aria-label={label} />;
 }
