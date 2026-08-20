@@ -522,9 +522,6 @@ pub struct SignageMedia {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    /// Another library entry to show while this one is not ready.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub poster: Option<String>,
 }
 
 impl SignageMedia {
@@ -536,10 +533,6 @@ impl SignageMedia {
             && self
                 .duration_ms
                 .is_none_or(|d| (MIN_ITEM_DURATION_MS..=MAX_ITEM_DURATION_MS).contains(&d))
-            && self
-                .poster
-                .as_ref()
-                .is_none_or(|id| BodyId::parse(id).is_some())
     }
 
     pub fn body_key(&self) -> Option<BodyKey> {

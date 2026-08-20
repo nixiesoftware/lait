@@ -815,7 +815,6 @@ mod tests {
             duration_ms: Some(10_000),
             width: Some(1_920),
             height: Some(1_080),
-            poster: None,
         }
     }
 

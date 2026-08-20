@@ -383,7 +383,6 @@ fn signage_card(tag: u8, title: &str, body: &str, background: &str) -> signage::
         duration_ms: Some(2_000),
         width: None,
         height: None,
-        poster: None,
     }
 }
 

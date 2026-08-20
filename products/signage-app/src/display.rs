@@ -390,7 +390,6 @@ mod tests {
             duration_ms: None,
             width: None,
             height: None,
-            poster: None,
         }
     }
 
