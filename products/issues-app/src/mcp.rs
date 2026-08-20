@@ -295,9 +295,12 @@ struct VerifyArgs {
     reff: String,
     /// Pinned repository ContentRef (64 lowercase hex).
     source: Hex32Bytes,
-    /// Exact caller-selected Build id. Execution begins only when that Build
-    /// is trusted and available in the selected Space.
-    build: Hex32Bytes,
+    /// Exact caller-selected Build id. Omit to use the bundled in-process
+    /// verifier (the check records package_filled). That verifier binds the
+    /// pinned source; it does not compile or isolate. Execution begins only
+    /// when the named Build is installed locally.
+    #[serde(default)]
+    build: Option<Hex32Bytes>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -913,7 +916,7 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<VerifyArgs>(
             "verify",
-            "Start a durable issue verification against one pinned repository ContentRef. Returns the stable Run id; execution waits until the selected Build is trusted and available in the Space.",
+            "Start a durable issue verification Run against one pinned repository ContentRef. Returns the stable Run id. The local Station may perform an Attempt after commit when a matching handler is installed. The bundled in-process verifier binds the pinned source; it does not compile the repository or isolate the host. Omit build to select that bundled Build — the check then records package_filled.",
             verify,
         ),
         tool::<AcceptCheckArgs>(
@@ -1603,7 +1606,9 @@ fn verify(input: Value) -> Result<ClientInvocation, Failure> {
     world(IssuesRequest::Verify {
         reff: a.reff,
         source: a.source.into_string(),
-        build: a.build.into_string(),
+        // Empty means omitted: the router fills the bundled Build and records
+        // package_filled. Filling here would look like a caller-named Build.
+        build: a.build.map(Hex32Bytes::into_string).unwrap_or_default(),
     })
 }
 

@@ -207,11 +207,53 @@ impl CancelToken {
     }
 }
 
+/// How the local Exec drain paces its own labor.
+///
+/// Options rather than constants, per the compatibility doctrine: a bound an
+/// operator cannot set is decorative. Every field paces the Station's *own*
+/// work — none of this ranks candidates for a Run, which stays behind the
+/// direction gate. Hand-written `Default` because zero fails closed: a
+/// zero-action pass performs nothing, forever.
+///
+/// There is deliberately no failure backoff here yet. Under the current
+/// failure classes only an Unknown-classed stale lease is ever re-tried,
+/// and delaying that would delay honest crash recovery; a retry loop a
+/// backoff could tame only exists once an external performer backend can
+/// die mid-Attempt. The field joins this struct in the same commit as the
+/// backend that makes it real — never before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecPacing {
+    /// Most perform actions one drain pass may commit.
+    pub actions_per_pass: u32,
+    /// The idle beat between drain passes; a fresh commit still wakes the
+    /// drain immediately through the exec tick.
+    pub drain_interval: Duration,
+    /// How long a resolved, uncited Run is kept before its reserved Body is
+    /// tombstoned. `None` — the default — keeps everything forever: disposal
+    /// of signed history is something an operator turns on, never something
+    /// a default does. Eligibility is a reachability projection; this window
+    /// is only the grace on top of it, counted in activation memory, so a
+    /// restart forgets elapsed grace and can only ever delay disposal.
+    pub retention_window: Option<Duration>,
+}
+
+impl Default for ExecPacing {
+    fn default() -> Self {
+        Self {
+            actions_per_pass: 16,
+            drain_interval: Duration::from_millis(50),
+            retention_window: None,
+        }
+    }
+}
+
 /// Options for activating an Orbit into a Station.
 #[derive(Debug, Default)]
 pub struct Activation {
     /// The deadline for draining tracked tasks at dormancy.
     pub drain_deadline: Duration,
+    /// How the local Exec drain paces its own labor.
+    pub exec: ExecPacing,
     /// The content plane's local policy: how much disk it may hold, and how
     /// large a single content this Station will accept.
     pub content: ContentOptions,
@@ -233,6 +275,7 @@ impl Activation {
     pub fn offline() -> Self {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
+            exec: ExecPacing::default(),
             content: ContentOptions::default(),
             find: crate::find::Policy::default(),
             planes: PlaneOptions::default(),
@@ -282,6 +325,8 @@ pub struct PlaneOptions {
     pub freight_enabled: bool,
     /// Whether this Station answers on the Live plane.
     pub live_enabled: bool,
+    /// Whether this Station answers on the Exec plane.
+    pub exec_enabled: bool,
     /// Whether a file offered by one of this identity's own devices may land on
     /// disk without anyone clicking.
     ///
@@ -297,6 +342,7 @@ impl Default for PlaneOptions {
         Self {
             freight_enabled: true,
             live_enabled: true,
+            exec_enabled: true,
             auto_accept_offers: false,
         }
     }
@@ -308,6 +354,7 @@ impl PlaneOptions {
             serve_enabled: self.freight_enabled,
             fetch_enabled: self.freight_enabled,
             live_enabled: self.live_enabled,
+            exec_enabled: self.exec_enabled,
             auto_accept_offers: self.auto_accept_offers,
         }
     }
@@ -659,6 +706,7 @@ impl Orbit {
             )
             .map_err(|_| Failure::ReadCapacity)?,
         );
+        core.set_exec_pacing(options.exec);
 
         // The resident cache lives beside the store rather than inside it: the
         // journal's promise is that everything a root names is present, and a
@@ -801,6 +849,29 @@ impl Orbit {
                     // Spawned tracked, so `drain_tasks` joins it rather than
                     // leaving a thread holding a queue after the Station is
                     // gone.
+                    station.spawn_tracked(move |_cancel| {
+                        crate::plane_driver::run_driver(context, queue, service)
+                    })?;
+                }
+            }
+
+            // The exec plane's driver: opening and admission only in this
+            // foundation — an admitted connection is held and every flow is
+            // stopped loudly until the typed flow vocabulary lands. Same
+            // shared driver, same replay table, same revocation watch.
+            if options.planes.exec_enabled {
+                if let Some(queue) = plane_transport.take_session_queue(crate::plane::EXEC_ALPN) {
+                    let context = crate::plane_driver::PlaneContext {
+                        plane: crate::plane::Plane::Exec,
+                        space: station.store.space().clone(),
+                        local_station: local_station.clone(),
+                        authority: station.authority.clone(),
+                        policy: options.planes.policy(),
+                        cancel: station.cancel.clone(),
+                        drain_deadline,
+                        authority_tick: Some(station.core.authority_tick()),
+                    };
+                    let service = crate::plane::exec::Service::new();
                     station.spawn_tracked(move |_cancel| {
                         crate::plane_driver::run_driver(context, queue, service)
                     })?;
@@ -984,6 +1055,17 @@ impl Station {
     /// This activation's epoch.
     pub fn epoch(&self) -> Epoch {
         self.epoch
+    }
+
+    /// Watch for durable Exec outbox work. The Station host drains on this
+    /// tick; product RPCs do not.
+    /// How this activation paces its local Exec drain.
+    pub fn exec_pacing(&self) -> ExecPacing {
+        self.core.exec_pacing()
+    }
+
+    pub fn exec_tick(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.core.exec_tick()
     }
 
     /// What a World declared at registration.
@@ -1660,6 +1742,7 @@ mod tests {
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
         let opts = Activation {
+            exec: Default::default(),
             drain_deadline: Duration::from_millis(20),
             ..Default::default()
         };

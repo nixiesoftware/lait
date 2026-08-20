@@ -384,6 +384,7 @@ fn activate_with(
     rt.materialize(coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -567,6 +568,7 @@ fn two_stations_converge_through_the_public_contact_api() {
         .acquire(&space)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),

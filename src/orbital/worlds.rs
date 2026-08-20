@@ -618,6 +618,24 @@ impl WorldHost {
         &self.exec
     }
 
+    /// Observe committed unresolved Runs and perform one local Attempt pass.
+    pub fn perform(
+        &self,
+        session: &Session,
+        put_output: impl FnMut(&[u8]) -> Result<replica::content::ContentRef, runtime::world::Failure>,
+    ) -> Result<runtime::exec::PerformReport, runtime::world::Failure> {
+        session.perform(&self.exec, put_output)
+    }
+
+    /// Dispose of resolved, uncited Runs past the activation's retention
+    /// grace. A no-op unless the operator set a window.
+    pub fn sweep_runs(
+        &self,
+        session: &Session,
+    ) -> Result<Vec<runtime::exec::RunId>, runtime::world::Failure> {
+        session.sweep_resolved_runs()
+    }
+
     /// Ensure the Space's primary identity has a Session for this World.
     ///
     /// Docking remains lazy: an unadmitted joiner can keep its StationHost

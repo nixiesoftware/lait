@@ -282,11 +282,49 @@ pub fn verify_limits() -> runtime::exec::Limits {
     }
 }
 
-/// `issue.verify/v1`: one pinned repository input and one report output.
+/// Bundled in-process verifier Build for `issue.verify/v1`.
 ///
-/// Build publication is intentionally not claimed here. Until E4 lands, the
-/// caller supplies an exact Build id which Runtime binds into the Run; dispatch
-/// still refuses to imply that the Build was published or attested.
+/// Build publication is identity, not a dispatch gate. Runtime binds the
+/// exact caller-selected Build id into the Run and still refuses to imply
+/// that the Build was published or attested. The bundled handler is selected
+/// from the application package. Callers of `issues_verify` may name this id
+/// explicitly or omit it so the application package fills it in.
+pub fn verify_build(world_build: [u8; 32]) -> runtime::exec::Build {
+    let seed = *blake3::hash(b"lait/issues/verify-build-seed/1").as_bytes();
+    let publisher = mechanics::ids::ActorId::from_incept_hash(
+        &data_encoding::HEXLOWER.encode(blake3::hash(b"lait/issues/verify-publisher/1").as_bytes()),
+    );
+    let handler = replica::content::ContentRef {
+        content_id: *blake3::hash(b"lait/issues/verify-handler/1").as_bytes(),
+    };
+    runtime::exec::Build {
+        id: runtime::exec::BuildId::from_bytes([0; 32]),
+        world: replica::body::WorldId::parse(PRODUCT_WORLD).expect("product World id"),
+        world_build,
+        spec: verify_spec_ref(),
+        handler,
+        dependencies: None,
+        environment: *blake3::hash(b"lait/issues/verify-environment/1").as_bytes(),
+        config: Vec::new(),
+        checkpoint: None,
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher,
+        signature: runtime::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&seed)
+    .expect("bundled verify Build signs")
+}
+
+/// Canonical lowercase hex of [`verify_build`] for the given World implementation.
+pub fn verify_build_hex(world_build: [u8; 32]) -> String {
+    data_encoding::HEXLOWER.encode(&verify_build(world_build).id.as_bytes())
+}
+
 pub fn verify_spec() -> runtime::exec::Spec {
     let contributor = demand_contributor();
     runtime::exec::Spec {
@@ -1410,6 +1448,10 @@ pub enum IssueIntent {
         run: String,
         source: String,
         build: String,
+        /// True when the application package filled `build` because the caller
+        /// omitted it. False means the caller named the Build.
+        #[serde(default)]
+        package_filled: bool,
         actor: String,
         device: String,
         ts: u64,
@@ -2436,6 +2478,12 @@ pub struct VerifyInput {
     pub source: String,
 }
 
+impl VerifyInput {
+    pub fn from_json(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
 /// Canonical inline result of an `issue.verify/v1` handler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2458,6 +2506,9 @@ pub struct CheckRecord {
     pub state: String,
     pub by: String,
     pub ts: u64,
+    /// The application package named this Build because the caller omitted it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub package_filled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

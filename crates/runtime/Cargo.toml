@@ -65,6 +65,12 @@ tracing = "0.1"
 [lints]
 workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# The wall limit is enforced by killing, and killing a *process* is not killing
+# what it started. `std` has no group signal, and a subprocess Handler running
+# `sh -c` is exactly the shape that forks — see `Subprocess::stop_tree`.
+libc = "0.2"
+
 [dev-dependencies]
 replica = { path = "../replica", features = ["scale-fixtures"] }
 regex = "1.13.1"

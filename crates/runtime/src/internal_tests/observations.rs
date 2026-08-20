@@ -192,6 +192,7 @@ fn station_with_capacity(root: &std::path::Path, capacity: usize) -> Station {
         .create()
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),

@@ -418,6 +418,7 @@ fn work_output(reply: runtime::exec::WorkReply) -> Value {
                 "attempt": hex_bytes(attempt.attempt.as_bytes()),
                 "station": attempt.station.to_string(),
                 "build": hex_bytes(attempt.build.as_bytes()),
+                "offer": attempt.offer.map(|id| hex_bytes(id.as_bytes())),
                 "began": attempt.began.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
                 "checkpoints": attempt.checkpoints.into_iter().map(|fact| json!({
                     "event": hex_bytes(fact.event.as_bytes()),
@@ -431,8 +432,23 @@ fn work_output(reply: runtime::exec::WorkReply) -> Value {
                         runtime::exec::TerminalClass::Succeeded => "succeeded",
                         runtime::exec::TerminalClass::ApplicationFailed => "application_failed",
                     },
+                    "output": fact
+                        .output_content
+                        .into_iter()
+                        .map(|content| hex_bytes(content.content_id))
+                        .collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
-                "failed": attempt.failed.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
+                "failed": attempt.failed.into_iter().map(|fact| json!({
+                    "event": hex_bytes(fact.event.as_bytes()),
+                    "class": match fact.class {
+                        runtime::exec::FailureClass::Handler => "handler",
+                        runtime::exec::FailureClass::Backend => "backend",
+                        runtime::exec::FailureClass::Protocol => "protocol",
+                        runtime::exec::FailureClass::Deadline => "deadline",
+                        runtime::exec::FailureClass::Fence => "fence",
+                        runtime::exec::FailureClass::Unknown => "unknown",
+                    },
+                })).collect::<Vec<_>>(),
                 "cancelled": attempt.cancelled.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "accepted": state.accepted.into_iter().map(|fact| json!({

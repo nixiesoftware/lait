@@ -420,7 +420,7 @@ fn exec_schema(name: &str) -> crate::exec::SchemaRef {
 
 fn exec_limits() -> crate::exec::Limits {
     crate::exec::Limits {
-        attempts: 1,
+        attempts: 3,
         events: 16,
         checkpoints: 0,
         child_runs: 1,
@@ -465,10 +465,15 @@ struct ExecAtomicWorld {
     id: WorldId,
     schemas: Vec<Schema>,
     specs: Vec<crate::exec::Spec>,
+    build: crate::exec::BuildId,
 }
 
 impl ExecAtomicWorld {
     fn new() -> Self {
+        Self::with_build(crate::exec::BuildId::from_bytes([0x32; 32]))
+    }
+
+    fn with_build(build: crate::exec::BuildId) -> Self {
         Self {
             id: WorldId::parse("com.example.exec-atomic").unwrap(),
             schemas: vec![Schema {
@@ -479,6 +484,7 @@ impl ExecAtomicWorld {
                 readable_predecessors: Vec::new(),
             }],
             specs: vec![exec_spec()],
+            build,
         }
     }
 
@@ -501,6 +507,42 @@ impl World for ExecAtomicWorld {
     }
 
     fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        if let Some(rest) = intent.payload.strip_prefix(b"accept:") {
+            if rest.len() != 32 {
+                return Err(Rejection::InvalidRequest);
+            }
+            let mut run = [0u8; 16];
+            run.copy_from_slice(&rest[..16]);
+            let mut attempt = [0u8; 16];
+            attempt.copy_from_slice(&rest[16..]);
+            return Ok(Effect {
+                content_refs: Vec::new(),
+                exec: vec![crate::exec::Cmd::Accept {
+                    run: crate::exec::RunId::from_bytes(run),
+                    attempt: crate::exec::AttemptId::from_bytes(attempt),
+                }],
+                operations: vec![(
+                    self.product_body(),
+                    Op::ReplaceAtomic {
+                        value: intent.payload.clone(),
+                    },
+                )],
+                bodies: vec![self.product_body()],
+                effect: b"accepted-check".to_vec(),
+                declarations: Vec::new(),
+                demand: exec_demand("request.write"),
+            });
+        }
+        let source = if let Some(rest) = intent.payload.strip_prefix(b"repeat:") {
+            if rest.len() != 16 {
+                return Err(Rejection::InvalidRequest);
+            }
+            let mut id = [0u8; 16];
+            id.copy_from_slice(rest);
+            Some(crate::exec::RunId::from_bytes(id))
+        } else {
+            None
+        };
         let spec = if intent.payload == b"invalid-spec" {
             exec_schema("agent.missing")
         } else {
@@ -510,14 +552,14 @@ impl World for ExecAtomicWorld {
             content_refs: Vec::new(),
             exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
                 spec,
-                build: crate::exec::BuildId::from_bytes([0x32; 32]),
+                build: self.build,
                 input: crate::exec::Input {
                     inline: intent.payload.clone(),
                     content: Vec::new(),
                     content_bytes: 0,
                 },
                 parent: None,
-                source: None,
+                source,
                 service: None,
                 resources: Vec::new(),
                 limits: exec_limits(),
@@ -802,6 +844,612 @@ fn invalid_start_rolls_back_the_companion_world_mutation() {
         })
         .unwrap();
     assert!(projection.bytes.is_empty());
+}
+
+fn exec_signed_build(world: &WorldId) -> crate::exec::Build {
+    let spec = exec_spec();
+    let seed = [0x61; 32];
+    crate::exec::Build {
+        id: crate::exec::BuildId::from_bytes([0; 32]),
+        world: world.clone(),
+        world_build: [0; 32],
+        spec: crate::exec::SchemaRef {
+            name: spec.name,
+            version: spec.version,
+        },
+        handler: replica::content::ContentRef {
+            content_id: [0x62; 32],
+        },
+        dependencies: None,
+        environment: [0x63; 32],
+        config: Vec::new(),
+        checkpoint: None,
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&seed)
+    .unwrap()
+}
+
+struct EchoHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for EchoHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        _context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: b"ok".to_vec(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+struct PanicHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for PanicHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        _context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        panic!("inherited Began must not re-enter a handler");
+    }
+}
+
+fn exec_package(
+    build: &crate::exec::Build,
+    handler: Arc<dyn crate::exec::Handler>,
+) -> crate::exec::Package {
+    crate::exec::Package::new()
+        .with_spec(exec_spec())
+        .with_build(build.clone())
+        .with_handler(handler)
+}
+
+fn echo_package(build: &crate::exec::Build) -> crate::exec::Package {
+    exec_package(
+        build,
+        Arc::new(EchoHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: build.spec.clone(),
+                build: build.id,
+                artifact: build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+        }),
+    )
+}
+
+#[test]
+fn local_perform_commits_try_began_and_returned() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0x64; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"perform locally".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+
+    let package = echo_package(&build);
+    let report = session
+        .perform(&package, |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Tried { .. })));
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Began { .. })));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x65; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].returned.len(), 1);
+    assert!(state.unresolved);
+    assert!(state.accepted.is_empty());
+
+    let idle = session
+        .perform(&package, |_| {
+            panic!("a Returned Attempt is not invoked again");
+        })
+        .unwrap();
+    assert!(idle.steps.is_empty());
+}
+
+fn announced_offer(
+    session: &crate::session::Session,
+    identity: &LocalIdentity,
+    build: crate::exec::BuildId,
+    expiry: u64,
+) -> crate::exec::Offer {
+    crate::exec::Offer {
+        id: crate::exec::OfferId::from_bytes([0; 16]),
+        space: session.space_id().clone(),
+        station: mechanics::station::Key::from_device(identity.device()).unwrap(),
+        station_epoch: session.epoch(),
+        actor: ActorId::from_incept_hash(&"a".repeat(64)),
+        device: identity.device().clone(),
+        world: session.world_id().clone(),
+        world_build: session.implementation(),
+        builds: vec![crate::exec::OfferedBuild {
+            id: build,
+            spec: exec_schema("agent.implement"),
+        }],
+        resources: vec![crate::exec::Resource {
+            name: SchemaId::parse(crate::exec::MEMORY_BYTES).unwrap(),
+            amount: 65_536,
+        }],
+        backend: SchemaId::parse("in-process.rust").unwrap(),
+        enforcement: crate::exec::Enforcement::Advisory,
+        resident: Vec::new(),
+        availability: crate::exec::Availability::Ready,
+        epoch: 1,
+        expiry,
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&WRITER_SEED),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&WRITER_SEED)
+    .unwrap()
+}
+
+#[test]
+fn announced_offer_news_is_lossy_and_does_not_own_a_run() {
+    let _clock = mechanics::wallclock::Frozen::at_millis(1_000);
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+
+    let live = announced_offer(&session, &identity, build.id, 2_000);
+    let id = session.announce(live.clone()).expect("valid news is held");
+    assert_eq!(id, live.id);
+    assert_eq!(session.news(id).map(|held| held.id), Some(id));
+
+    let challenge = session.challenge(id).expect("live news can be challenged");
+    let answer = crate::exec::Ready::sign(&challenge, &WRITER_SEED).unwrap();
+    assert_eq!(session.ready(answer).expect("signed Ready is held"), id);
+    assert!(matches!(
+        session.ready(crate::exec::Ready::sign(&challenge, &WRITER_SEED).unwrap()),
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    ));
+
+    let mut foreign = live.clone();
+    foreign.station = mechanics::station::Key::from_key_bytes([0x99; 32]);
+    foreign = foreign.sign(&WRITER_SEED).unwrap();
+    assert!(matches!(
+        session.announce(foreign),
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    ));
+
+    let expired = announced_offer(&session, &identity, build.id, 500);
+    assert!(matches!(
+        session.announce(expired),
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    ));
+
+    let request = crate::action::RequestId::from_bytes([0x85; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"offer is not ownership".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let report = session
+        .perform(&echo_package(&build), |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Tried { .. })));
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id,
+                run,
+            },
+            [0x89; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].offer, Some(id));
+    assert_eq!(state.attempts[0].returned.len(), 1);
+}
+
+#[test]
+fn published_build_is_durable_identity_and_does_not_rerank_open_runs() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+
+    let published = session
+        .publish_build(build.clone())
+        .expect("a signed Build publishes into the reserved Body");
+    assert_eq!(published, build.id);
+    assert_eq!(
+        session
+            .published_build(build.id)
+            .expect("published Build is readable")
+            .map(|held| held.id),
+        Some(build.id)
+    );
+    assert_eq!(
+        session
+            .publish_build(build.clone())
+            .expect("same envelope is idempotent"),
+        build.id
+    );
+
+    let request = crate::action::RequestId::from_bytes([0x86; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"pin this Build".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let crate::exec::WorkReply::State(before) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x87; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(before.build, build.id);
+
+    let mut later = build.clone();
+    later.environment = [0x99; 32];
+    later = later.sign(&[0x61; 32]).unwrap();
+    assert_ne!(later.id, build.id);
+    session
+        .publish_build(later)
+        .expect("a different Build id publishes beside the pinned one");
+
+    let crate::exec::WorkReply::State(after) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id,
+                run,
+            },
+            [0x88; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(after.build, build.id);
+}
+
+#[test]
+fn prior_epoch_leased_without_began_is_failed_and_retried() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let orbit = rt.create().unwrap();
+    let space = orbit.space_id().clone();
+    let station = orbit.open(Activation::default()).unwrap();
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"recover leased without began".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = echo_package(&build);
+    let (run, attempt) = session.test_lease(&package).unwrap();
+    let orbit = station.vacate().unwrap();
+    drop(orbit);
+
+    let station = rt
+        .acquire(&space)
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let report = session
+        .perform(&package, |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed_run,
+            attempt: failed_attempt,
+            class: crate::exec::FailureClass::Unknown,
+        } if *failed_run == run && *failed_attempt == attempt
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+}
+
+#[test]
+fn inherited_began_is_failed_not_retried() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"recover inherited begin".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let binding = crate::exec::HandlerBinding {
+        spec: build.spec.clone(),
+        build: build.id,
+        artifact: build.handler,
+        role: None,
+        links: Vec::new(),
+    };
+    let package = exec_package(&build, Arc::new(PanicHandler { binding }));
+    let (run, attempt) = session.test_lease_and_begin(&package).unwrap();
+    let report = session
+        .perform(&package, |_| {
+            panic!("recovery must not ingest output");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed_run,
+            attempt: failed_attempt,
+            class: crate::exec::FailureClass::Unknown,
+        } if *failed_run == run && *failed_attempt == attempt
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Tried { run: next_run, attempt: next_attempt }
+            if *next_run == run && *next_attempt != attempt
+    )));
+}
+
+#[test]
+fn unknown_recovery_retries_once_then_a_return_is_idle() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"recover then return".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let package = echo_package(&build);
+    let (run, attempt) = session.test_lease_and_begin(&package).unwrap();
+    let report = session
+        .perform(&package, |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed_run,
+            attempt: failed_attempt,
+            class: crate::exec::FailureClass::Unknown,
+        } if *failed_run == run && *failed_attempt == attempt
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+
+    let idle = session
+        .perform(&package, |_| {
+            panic!("a Returned Attempt is not another outbox retry");
+        })
+        .unwrap();
+    assert!(idle.steps.is_empty());
+}
+
+#[test]
+fn handler_failure_is_not_an_automatic_retry() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"handler failure is terminal for the outbox".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let binding = crate::exec::HandlerBinding {
+        spec: build.spec.clone(),
+        build: build.id,
+        artifact: build.handler,
+        role: None,
+        links: Vec::new(),
+    };
+    let package = exec_package(&build, Arc::new(PanicHandler { binding }));
+    let report = session
+        .perform(&package, |_| {
+            panic!("a panicking handler stages no output");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            class: crate::exec::FailureClass::Backend,
+            ..
+        }
+    )));
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .filter(|step| matches!(step, crate::exec::PerformStep::Tried { .. }))
+            .count(),
+        1
+    );
+
+    let idle = session
+        .perform(&package, |_| {
+            panic!("handler failure must not mint another outbox Attempt");
+        })
+        .unwrap();
+    assert!(idle.steps.is_empty());
 }
 
 #[test]
@@ -1883,6 +2531,7 @@ fn station_find_policy_can_only_tighten_a_query() {
         .create()
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             find: crate::find::Policy {
                 bound: find_bound(1),
             },
@@ -2791,6 +3440,7 @@ fn invalid_station_find_policy_refuses_activation() {
 
     assert!(matches!(
         rt.create().unwrap().open(Activation {
+            exec: Default::default(),
             find: crate::find::Policy { bound: invalid },
             ..Activation::default()
         }),
@@ -3809,4 +4459,2254 @@ fn observation_cursor_starts_at_a_reset_boundary() {
     let mut stream = session.observe(None);
     let first = stream.try_next().unwrap().unwrap();
     assert!(first.reset);
+}
+
+// ===== The bounded Find client inside an Attempt (scenarios 19 and 20) =====
+
+fn query_exec_demand(capability: &str) -> Vec<u8> {
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("com.example.exec-query", capability),
+        mechanics::authorization::Resource::root("com.example.exec-query"),
+    )
+    .encode_canonical()
+    .unwrap()
+}
+
+fn note_grant(bound_value: u64) -> crate::find::Grant {
+    let schema = crate::find::SchemaRef {
+        name: SchemaId::parse("note").unwrap(),
+        version: 1,
+    };
+    crate::find::Grant {
+        schemas: vec![schema.clone()],
+        ops: crate::find::OpSet::SEEK,
+        fields: vec![crate::find::FieldRef {
+            schema,
+            name: SchemaId::parse("text").unwrap(),
+        }],
+        edges: Vec::new(),
+        gates: Vec::new(),
+        modes: crate::find::ModeSet::EXACT,
+        features: Vec::new(),
+        bound: find_bound(bound_value),
+    }
+}
+
+fn note_query(text: &str, bound_value: u64) -> crate::find::Query {
+    let mut query = find_query(bound_value);
+    let crate::find::Op::Seek(crate::find::Seek::Term { text: term, .. }) = &mut query.steps[0].op
+    else {
+        panic!("find_query seeds a term seek");
+    };
+    *term = text.to_owned();
+    query
+}
+
+fn query_spec(name: &str, grant_bound: u64) -> crate::exec::Spec {
+    let payload = |name| crate::exec::PayloadSpec {
+        schema: exec_schema(name),
+        max_inline_bytes: 1_024,
+        max_content_refs: 0,
+        max_content_bytes: 0,
+        read: query_exec_demand("payload.read"),
+        max_additional_input_bytes: 0,
+    };
+    crate::exec::Spec {
+        name: SchemaId::parse(name).unwrap(),
+        version: 1,
+        access: crate::exec::Access {
+            start: query_exec_demand("run.start"),
+            offer: query_exec_demand("run.offer"),
+            control: query_exec_demand("run.control"),
+            accept: query_exec_demand("run.accept"),
+        },
+        input: payload("agent.input"),
+        output: payload("agent.output"),
+        mode: crate::exec::Mode::Unary,
+        resume: crate::exec::Resume::Restart,
+        effects: crate::exec::Effects::Pure,
+        accept: crate::exec::AcceptRule::World,
+        queries: vec![note_grant(grant_bound)],
+        service: None,
+        links: Vec::new(),
+        limits: exec_limits(),
+    }
+}
+
+/// Declared grant ceilings for the query worlds: the parent Spec may compose
+/// up to 60 units of work per query, the child only 20 — narrower on purpose,
+/// so ambient parent privilege is distinguishable from the child's own.
+const PARENT_GRANT_BOUND: u64 = 60;
+const CHILD_GRANT_BOUND: u64 = 20;
+/// The parent Attempt's whole wall budget: admits one 60-unit query, refuses
+/// the second.
+const PARENT_ATTEMPT_WALL: u64 = 100;
+
+struct QueryExecWorld {
+    id: WorldId,
+    schemas: Vec<Schema>,
+    find_schemas: Vec<crate::find::Schema>,
+    find_extractors: Vec<crate::find::Extractor>,
+    specs: Vec<crate::exec::Spec>,
+    build: crate::exec::BuildId,
+    child_build: crate::exec::BuildId,
+}
+
+impl QueryExecWorld {
+    fn new(build: crate::exec::BuildId, child_build: crate::exec::BuildId) -> Self {
+        let find_schema = note_find_schema();
+        let find_extractor = crate::find::Extractor {
+            schema: find_schema.reference.clone(),
+            source: crate::find::SourceRef {
+                name: SchemaId::parse("note").unwrap(),
+                version: 1,
+            },
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x35; 32],
+            shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
+        };
+        Self {
+            id: WorldId::parse("com.example.exec-query").unwrap(),
+            schemas: vec![
+                Schema {
+                    id: SchemaId::parse("note").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("text.utf8").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: Vec::new(),
+                },
+                Schema {
+                    id: SchemaId::parse("marker").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("bytes").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: Vec::new(),
+                },
+            ],
+            find_schemas: vec![find_schema],
+            find_extractors: vec![find_extractor],
+            specs: vec![
+                query_spec("agent.search", PARENT_GRANT_BOUND),
+                query_spec("agent.child", CHILD_GRANT_BOUND),
+            ],
+            build,
+            child_build,
+        }
+    }
+
+    fn note_body(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x41; 16]))
+    }
+
+    fn marker_body(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x42; 16]))
+    }
+}
+
+impl World for QueryExecWorld {
+    fn id(&self) -> WorldId {
+        self.id.clone()
+    }
+
+    fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+
+    fn find_schemas(&self) -> &[crate::find::Schema] {
+        &self.find_schemas
+    }
+
+    fn find_extractors(&self) -> &[crate::find::Extractor] {
+        &self.find_extractors
+    }
+
+    fn extract(
+        &self,
+        ctx: &crate::world::ExtractionContext<'_>,
+        extractor: &crate::find::Extractor,
+        body: &BodyKey,
+    ) -> Result<crate::find::BodyExtraction, Rejection> {
+        if extractor != &self.find_extractors[0] {
+            return Err(Rejection::ContractViolation);
+        }
+        let value = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
+        let text = std::str::from_utf8(&value).map_err(|_| Rejection::StateCorrupt)?;
+        let schema = self.find_schemas[0].reference.clone();
+        let field = self.find_schemas[0].fields[0].reference.clone();
+        let terms = text
+            .split_whitespace()
+            .map(|term| Arc::<[u8]>::from(term.to_lowercase().into_bytes()))
+            .collect();
+        Ok(crate::find::BodyExtraction {
+            body: body.clone(),
+            stamp: ctx.body_stamp(body).unwrap_or_default(),
+            nodes: vec![crate::find::ExtractedNode {
+                key: crate::find::NodeKey {
+                    schema,
+                    node: crate::find::NodeId::new(body.body.as_bytes().to_vec())
+                        .map_err(|_| Rejection::ContractViolation)?,
+                },
+                gate: None,
+                fields: vec![crate::find::ExtractedField {
+                    reference: field,
+                    value: crate::find::Value::text(text),
+                    gate: None,
+                    terms,
+                }],
+                edges: Vec::new(),
+                features: Vec::new(),
+            }],
+        })
+    }
+
+    fn exec_specs(&self) -> &[crate::exec::Spec] {
+        &self.specs
+    }
+
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        if let Some(text) = intent.payload.strip_prefix(b"note:") {
+            return Ok(Effect {
+                content_refs: Vec::new(),
+                exec: Vec::new(),
+                operations: vec![(
+                    self.note_body(),
+                    Op::ReplaceAtomic {
+                        value: text.to_vec(),
+                    },
+                )],
+                bodies: vec![self.note_body()],
+                effect: b"noted".to_vec(),
+                declarations: Vec::new(),
+                demand: query_exec_demand("note.write"),
+            });
+        }
+        let declared = note_grant(PARENT_GRANT_BOUND);
+        let start = crate::exec::Start {
+            spec: exec_schema("agent.search"),
+            build: self.build,
+            input: crate::exec::Input {
+                inline: intent.payload.clone(),
+                content: Vec::new(),
+                content_bytes: 0,
+            },
+            parent: None,
+            source: None,
+            service: None,
+            resources: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 3,
+                events: 16,
+                checkpoints: 0,
+                child_runs: 1,
+                progress_bytes: 4_096,
+                checkpoint_bytes: 0,
+                wall_millis: PARENT_ATTEMPT_WALL,
+            },
+            queries: vec![crate::exec::QueryGrant {
+                parent: declared.digest().unwrap(),
+                grant: declared,
+            }],
+        };
+        Ok(Effect {
+            content_refs: Vec::new(),
+            exec: vec![crate::exec::Cmd::Start(start)],
+            operations: vec![(
+                self.marker_body(),
+                Op::ReplaceAtomic {
+                    value: intent.payload.clone(),
+                },
+            )],
+            bodies: vec![self.marker_body()],
+            effect: b"searching".to_vec(),
+            declarations: Vec::new(),
+            demand: query_exec_demand("search.write"),
+        })
+    }
+
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Err(Rejection::InvalidRequest)
+    }
+}
+
+fn wide_query_publication() -> crate::publication::PublicationId {
+    crate::publication::PublicationId::new(
+        [0x77; 32],
+        [0x78; 32],
+        crate::publication::ExtractorSchemaDigest::from_digest([0x79; 32]),
+    )
+}
+
+struct SearchHandler {
+    binding: crate::exec::HandlerBinding,
+    child_build: crate::exec::BuildId,
+}
+
+impl crate::exec::Handler for SearchHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        // An admitted query answers over the corpus pinned at the Run's
+        // parent Manifest root.
+        let answer = context.query(note_query("alpha", PARENT_GRANT_BOUND))?;
+        assert_eq!(answer.rows().len(), 1, "the committed note is findable");
+
+        // Naming another historical interpretation is root widening.
+        let mut widened = note_query("alpha", PARENT_GRANT_BOUND);
+        widened.publication = Some(wide_query_publication());
+        assert!(matches!(
+            context.query(widened),
+            Err(crate::exec::Failure::QueryRefused(
+                crate::find::Invalid::Widening("publication")
+            ))
+        ));
+
+        // A field outside the instantiated Grant refuses before evaluation.
+        let mut ungranted = note_query("alpha", PARENT_GRANT_BOUND);
+        let crate::find::Op::Seek(crate::find::Seek::Term { field, .. }) =
+            &mut ungranted.steps[0].op
+        else {
+            panic!("note_query seeds a term seek");
+        };
+        field.name = SchemaId::parse("missing").unwrap();
+        assert!(matches!(
+            context.query(ungranted),
+            Err(crate::exec::Failure::QueryRefused(_))
+        ));
+
+        // A work bound above the Grant's ceiling refuses before evaluation.
+        assert!(matches!(
+            context.query(note_query("alpha", PARENT_GRANT_BOUND + 30)),
+            Err(crate::exec::Failure::QueryRefused(_))
+        ));
+
+        // The declared work of admitted queries charges the Attempt's wall
+        // budget: a second 60 would exceed 100.
+        assert!(matches!(
+            context.query(note_query("beta", PARENT_GRANT_BOUND)),
+            Err(crate::exec::Failure::QueryBudget)
+        ));
+
+        // The child Run instantiates the CHILD Spec's own declared Grant —
+        // or, when asked to misbehave, the parent's, which must refuse
+        // downstream because the child's declaration never contained it.
+        let misbehave = context.input_inline() == b"bad-child";
+        let declared = if misbehave {
+            note_grant(PARENT_GRANT_BOUND)
+        } else {
+            note_grant(CHILD_GRANT_BOUND)
+        };
+        let child = crate::exec::Start {
+            spec: exec_schema("agent.child"),
+            build: self.child_build,
+            input: crate::exec::Input {
+                inline: b"child".to_vec(),
+                content: Vec::new(),
+                content_bytes: 0,
+            },
+            parent: Some(context.run()),
+            source: None,
+            service: None,
+            resources: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 3,
+                events: 16,
+                checkpoints: 0,
+                child_runs: 0,
+                progress_bytes: 4_096,
+                checkpoint_bytes: 0,
+                wall_millis: 50,
+            },
+            queries: vec![crate::exec::QueryGrant {
+                parent: declared.digest().unwrap(),
+                grant: declared,
+            }],
+        };
+        context.start_child(child)?;
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: b"searched".to_vec(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+struct ChildProbeHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for ChildProbeHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        // The child's own independently authorized Grant admits its work…
+        let answer = context.query(note_query("alpha", CHILD_GRANT_BOUND))?;
+        assert_eq!(answer.rows().len(), 1);
+        // …and the parent's wider instantiation was never inherited.
+        assert!(matches!(
+            context.query(note_query("alpha", PARENT_GRANT_BOUND)),
+            Err(crate::exec::Failure::QueryRefused(_))
+        ));
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: b"probed".to_vec(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+fn query_exec_build(world: &WorldId, spec: &crate::exec::Spec, seed: u8) -> crate::exec::Build {
+    let signer_seed = [seed; 32];
+    crate::exec::Build {
+        id: crate::exec::BuildId::from_bytes([0; 32]),
+        world: world.clone(),
+        world_build: [0; 32],
+        spec: crate::exec::SchemaRef {
+            name: spec.name.clone(),
+            version: spec.version,
+        },
+        handler: replica::content::ContentRef {
+            content_id: [seed.wrapping_add(1); 32],
+        },
+        dependencies: None,
+        environment: [seed.wrapping_add(2); 32],
+        config: Vec::new(),
+        checkpoint: None,
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&signer_seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&signer_seed)
+    .unwrap()
+}
+
+fn query_perform_fixture(
+    payload: &[u8],
+) -> (
+    crate::lifecycle::Station,
+    crate::session::Session,
+    crate::exec::Package,
+    crate::exec::RunId,
+) {
+    let world_id = WorldId::parse("com.example.exec-query").unwrap();
+    let parent_build = query_exec_build(
+        &world_id,
+        &query_spec("agent.search", PARENT_GRANT_BOUND),
+        0x71,
+    );
+    let child_build = query_exec_build(
+        &world_id,
+        &query_spec("agent.child", CHILD_GRANT_BOUND),
+        0x81,
+    );
+    let world = Arc::new(QueryExecWorld::new(parent_build.id, child_build.id));
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+
+    // The note commits first so the Run's parent Manifest root already
+    // carries it: the Attempt's queries read the interpretation the Grants
+    // were instantiated against, never a co-committed or later state.
+    let note_request = crate::action::RequestId::from_bytes([0x66; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    note_request,
+                    Intent {
+                        schema: SchemaId::parse("note").unwrap(),
+                        schema_version: 1,
+                        payload: b"note:alpha beta".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+
+    let search_request = crate::action::RequestId::from_bytes([0x67; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    search_request,
+                    Intent {
+                        schema: SchemaId::parse("note").unwrap(),
+                        schema_version: 1,
+                        payload: payload.to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        search_request.as_bytes(),
+        0,
+    );
+
+    let package = crate::exec::Package::new()
+        .with_spec(query_spec("agent.search", PARENT_GRANT_BOUND))
+        .with_spec(query_spec("agent.child", CHILD_GRANT_BOUND))
+        .with_build(parent_build.clone())
+        .with_build(child_build.clone())
+        .with_handler(Arc::new(SearchHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: parent_build.spec.clone(),
+                build: parent_build.id,
+                artifact: parent_build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+            child_build: child_build.id,
+        }))
+        .with_handler(Arc::new(ChildProbeHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: child_build.spec.clone(),
+                build: child_build.id,
+                artifact: child_build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+        }));
+    (station, session, package, run)
+}
+
+#[test]
+fn attempt_query_is_grant_bounded_root_pinned_and_budget_charged() {
+    let (_station, session, package, run) = query_perform_fixture(b"search");
+    let report = session
+        .perform(&package, |_| {
+            panic!("these handlers stage no output content");
+        })
+        .unwrap();
+    // The parent Attempt returned: every in-handler admission assertion held.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    // The child Run was admitted and returned under its own narrower Grant.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned != run
+    )));
+}
+
+#[test]
+fn a_child_grant_outside_its_own_spec_declaration_is_refused() {
+    let (_station, session, package, run) = query_perform_fixture(b"bad-child");
+    let report = session
+        .perform(&package, |_| {
+            panic!("these handlers stage no output content");
+        })
+        .unwrap();
+    // The parent handler tried to lend its own wider Grant to the child.
+    // The child Spec's declaration never contained it, so the completion is
+    // refused and the Attempt fails — no child Run exists to perform.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
+    )));
+    assert!(!report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
+
+// ===== Continuation: composition tests for the checkpoint forks ==========
+//
+// Each test pins one architectural decision at the composed level — real
+// Station, real durable store, real perform loop, restart by vacate/acquire —
+// before the plumbing that satisfies it is trusted.
+//
+// Fork 1 (who seals checkpoint bytes): the handler stages bytes; the host
+// seals them under its own content authority; a `Saved` event exists only
+// with readable sealed content. The adversarial-performer shape — BOINC's
+// upload-then-validate, not Ray's worker-writes-the-shared-store.
+//
+// Fork 2 (resume admission): resume binds to a committed `Saved` of the same
+// Run, and the drain's automatic resume is the same Station mechanically
+// recovering its own work — never a choice among candidates. Temporal lets
+// any queue worker continue because its workers are trusted and replay is
+// deterministic; neither holds here.
+//
+// Fork 3 (read admission): an Attempt reads exactly what its Run's committed
+// truth names — Started inputs and its own resume checkpoint — never what
+// the Station happens to hold. A capability derived from commitment, not
+// from possession.
+
+fn checkpoint_demand(capability: &str) -> Vec<u8> {
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("com.example.exec-checkpoint", capability),
+        mechanics::authorization::Resource::root("com.example.exec-checkpoint"),
+    )
+    .encode_canonical()
+    .unwrap()
+}
+
+fn checkpoint_spec() -> crate::exec::Spec {
+    let payload = |name| crate::exec::PayloadSpec {
+        schema: exec_schema(name),
+        max_inline_bytes: 1_024,
+        max_content_refs: 2,
+        max_content_bytes: 64 * 1024,
+        read: checkpoint_demand("payload.read"),
+        max_additional_input_bytes: 0,
+    };
+    crate::exec::Spec {
+        name: SchemaId::parse("agent.resumable").unwrap(),
+        version: 1,
+        access: crate::exec::Access {
+            start: checkpoint_demand("run.start"),
+            offer: checkpoint_demand("run.offer"),
+            control: checkpoint_demand("run.control"),
+            accept: checkpoint_demand("run.accept"),
+        },
+        input: payload("agent.input"),
+        output: payload("agent.output"),
+        mode: crate::exec::Mode::Unary,
+        resume: crate::exec::Resume::Checkpoint {
+            codec: exec_schema("agent.checkpoint"),
+        },
+        effects: crate::exec::Effects::Pure,
+        accept: crate::exec::AcceptRule::World,
+        queries: Vec::new(),
+        service: None,
+        links: Vec::new(),
+        limits: crate::exec::Limits {
+            attempts: 3,
+            events: 16,
+            checkpoints: 2,
+            child_runs: 0,
+            progress_bytes: 4_096,
+            checkpoint_bytes: 1_024,
+            wall_millis: 30_000,
+        },
+    }
+}
+
+fn checkpoint_build(world: &WorldId) -> crate::exec::Build {
+    let spec = checkpoint_spec();
+    let seed = [0x91; 32];
+    crate::exec::Build {
+        id: crate::exec::BuildId::from_bytes([0; 32]),
+        world: world.clone(),
+        world_build: [0; 32],
+        spec: crate::exec::SchemaRef {
+            name: spec.name,
+            version: spec.version,
+        },
+        handler: replica::content::ContentRef {
+            content_id: [0x92; 32],
+        },
+        dependencies: None,
+        environment: [0x93; 32],
+        config: Vec::new(),
+        checkpoint: Some(exec_schema("agent.checkpoint")),
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&seed)
+    .unwrap()
+}
+
+const CHECKPOINT_BYTES: &[u8] = b"halfway: 21 pages summarized";
+
+/// Intent payload tags for [`CheckpointWorld`]. `plain` stages a bare Start;
+/// `with-input:` carries a sealed input's id/len plus one foreign committed
+/// id the handler must be refused; `bad-ref` makes the handler stage a
+/// fabricated committed-checkpoint reference.
+struct CheckpointWorld {
+    id: WorldId,
+    schemas: Vec<Schema>,
+    specs: Vec<crate::exec::Spec>,
+    build: crate::exec::BuildId,
+}
+
+impl CheckpointWorld {
+    fn new(build: crate::exec::BuildId) -> Self {
+        Self {
+            id: WorldId::parse("com.example.exec-checkpoint").unwrap(),
+            schemas: vec![Schema {
+                id: SchemaId::parse("agent.request").unwrap(),
+                version: 1,
+                encoding: EncodingId::parse("bytes").unwrap(),
+                mutation: MutationModel::Atomic,
+                readable_predecessors: Vec::new(),
+            }],
+            specs: vec![checkpoint_spec()],
+            build,
+        }
+    }
+
+    fn marker(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x51; 16]))
+    }
+}
+
+impl World for CheckpointWorld {
+    fn id(&self) -> WorldId {
+        self.id.clone()
+    }
+
+    fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+
+    fn exec_specs(&self) -> &[crate::exec::Spec] {
+        &self.specs
+    }
+
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let (content, content_bytes) =
+            if let Some(rest) = intent.payload.strip_prefix(b"with-input:") {
+                // 32 bytes input id, 8 bytes length, 32 bytes foreign id.
+                if rest.len() != 72 {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&rest[..32]);
+                let mut len = [0u8; 8];
+                len.copy_from_slice(&rest[32..40]);
+                let reference = replica::content::ContentRef { content_id: id };
+                if ctx.content_status(&reference).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                (vec![reference], u64::from_be_bytes(len))
+            } else {
+                (Vec::new(), 0)
+            };
+        Ok(Effect {
+            content_refs: content
+                .first()
+                .map(|reference| (self.marker(), vec![*reference]))
+                .into_iter()
+                .collect(),
+            exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
+                spec: exec_schema("agent.resumable"),
+                build: self.build,
+                input: crate::exec::Input {
+                    inline: intent.payload.clone(),
+                    content,
+                    content_bytes,
+                },
+                parent: None,
+                source: None,
+                service: None,
+                resources: Vec::new(),
+                limits: checkpoint_spec().limits,
+                queries: Vec::new(),
+            })],
+            operations: vec![(
+                self.marker(),
+                Op::ReplaceAtomic {
+                    value: intent.payload.clone(),
+                },
+            )],
+            bodies: vec![self.marker()],
+            effect: b"started".to_vec(),
+            declarations: Vec::new(),
+            demand: checkpoint_demand("request.write"),
+        })
+    }
+
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Err(Rejection::InvalidRequest)
+    }
+}
+
+struct ResumableHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for ResumableHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        let inline = context.input_inline().to_vec();
+        let output = if let Some(checkpoint) = context.resume_checkpoint().cloned() {
+            // Fork 2 + 3: the resumed Attempt reads exactly the state its
+            // lease bound, through the host's content authority.
+            let bytes = context.read_content(&checkpoint.content, 0, CHECKPOINT_BYTES.len())?;
+            assert_eq!(
+                bytes, CHECKPOINT_BYTES,
+                "the resumed state is the saved state"
+            );
+            b"resumed".to_vec()
+        } else if inline == b"bad-ref" {
+            // Fork 1's negative half: a fabricated committed-checkpoint
+            // reference must not survive to a durable dangling Saved.
+            context.save_checkpoint(crate::exec::CheckpointRef {
+                content: replica::content::ContentRef {
+                    content_id: [0xEE; 32],
+                },
+                build: context.build(),
+                sequence: 1,
+            })?;
+            b"staged-dangling".to_vec()
+        } else if let Some(rest) = inline.strip_prefix(b"with-input:") {
+            // Fork 3: the Started input is readable; a committed ref the Run
+            // never named refuses before the host is asked.
+            let mut input_id = [0u8; 32];
+            input_id.copy_from_slice(&rest[..32]);
+            let mut len = [0u8; 8];
+            len.copy_from_slice(&rest[32..40]);
+            let mut foreign_id = [0u8; 32];
+            foreign_id.copy_from_slice(&rest[40..72]);
+            let input = replica::content::ContentRef {
+                content_id: input_id,
+            };
+            let read = context.read_content(
+                &input,
+                0,
+                usize::try_from(u64::from_be_bytes(len)).unwrap(),
+            )?;
+            assert!(!read.is_empty(), "the commissioned input is readable");
+            let foreign = replica::content::ContentRef {
+                content_id: foreign_id,
+            };
+            assert!(
+                matches!(
+                    context.read_content(&foreign, 0, 8),
+                    Err(crate::exec::Failure::ContentRefused)
+                ),
+                "content the Run never named refuses before the host is asked"
+            );
+            b"read-bounded".to_vec()
+        } else {
+            // Fork 1: stage checkpoint bytes for the host to seal.
+            context.save_checkpoint_bytes(CHECKPOINT_BYTES.to_vec())?;
+            b"saved".to_vec()
+        };
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: output,
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+fn checkpoint_package(build: &crate::exec::Build) -> crate::exec::Package {
+    crate::exec::Package::new()
+        .with_spec(checkpoint_spec())
+        .with_build(build.clone())
+        .with_handler(Arc::new(ResumableHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: build.spec.clone(),
+                build: build.id,
+                artifact: build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+        }))
+}
+
+fn checkpoint_perform_io<'a>(
+    station: &'a crate::lifecycle::Station,
+    identity: &'a crate::world::LocalIdentity,
+) -> (
+    impl FnMut(&[u8]) -> Result<replica::content::ContentRef, crate::world::Failure> + 'a,
+    impl Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, crate::world::Failure> + 'a,
+) {
+    let put = move |bytes: &[u8]| {
+        station
+            .content_write(
+                identity,
+                crate::world::RequestId::mint().as_bytes(),
+                &mut std::io::Cursor::new(bytes.to_vec()),
+            )
+            .map_err(|error| crate::world::Failure::PersistenceCause {
+                operation: "exec.test.output",
+                reason: error.to_string(),
+            })
+    };
+    let read = move |content: &replica::content::ContentRef, offset: u64, len: usize| {
+        station
+            .content_read(identity, content, offset, len)
+            .map_err(|error| crate::world::Failure::PersistenceCause {
+                operation: "exec.test.read",
+                reason: error.to_string(),
+            })
+    };
+    (put, read)
+}
+
+#[test]
+fn a_checkpointed_attempt_resumes_across_restart_from_its_committed_save() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let orbit = rt.create().unwrap();
+    let space = orbit.space_id().clone();
+    let station = orbit.open(Activation::default()).unwrap();
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"plain".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = checkpoint_package(&build);
+    // The crash window: Leased + Began + a committed Saved, no Returned.
+    let (run, attempt) = session.test_lease_and_begin(&package).unwrap();
+    let saved = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(CHECKPOINT_BYTES.to_vec()),
+        )
+        .unwrap();
+    session
+        .test_checkpoint(
+            run,
+            attempt,
+            crate::exec::CheckpointRef {
+                content: saved,
+                build: build.id,
+                sequence: 1,
+            },
+        )
+        .unwrap();
+    let orbit = station.vacate().unwrap();
+    drop(orbit);
+
+    // Restart: a new activation epoch on the same durable truth.
+    let station = rt
+        .acquire(&space)
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    let report = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    // The inherited lease fails honestly, then the same Station mechanically
+    // resumes its own Run from the committed checkpoint — no choice among
+    // candidates was made, so the provisional selector holds.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed,
+            class: crate::exec::FailureClass::Unknown,
+            ..
+        } if *failed == run
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x95; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 2);
+    let resumed = state
+        .attempts
+        .iter()
+        .find(|candidate| !candidate.returned.is_empty())
+        .expect("the resuming Attempt returned");
+    assert_eq!(
+        resumed.checkpoint.as_ref().map(|c| c.content),
+        Some(saved),
+        "the new lease bound the committed checkpoint"
+    );
+}
+
+#[test]
+fn a_saved_checkpoint_is_sealed_bytes_or_it_does_not_exist() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"plain".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    let report = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    let run = report
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            crate::exec::PerformStep::Returned { run, .. } => Some(*run),
+            _ => None,
+        })
+        .expect("the first pass returns after saving");
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x96; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    // Fork 1, positive half: the Saved event names sealed content the host
+    // can open — never a coordinate the handler invented.
+    let saved = &state.attempts[0].checkpoints;
+    assert_eq!(saved.len(), 1);
+    let bytes = station
+        .content_read(
+            &identity,
+            &saved[0].checkpoint.content,
+            0,
+            CHECKPOINT_BYTES.len(),
+        )
+        .expect("a committed Saved's content is readable through the host");
+    assert_eq!(bytes, CHECKPOINT_BYTES);
+}
+
+#[test]
+fn a_fabricated_checkpoint_reference_never_becomes_a_durable_save() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"bad-ref".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    let report = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    // Fork 1, negative half: the Attempt fails rather than committing a
+    // Saved whose bytes nobody holds.
+    let run = report
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            crate::exec::PerformStep::Failed { run, .. } => Some(*run),
+            _ => None,
+        })
+        .expect("a dangling checkpoint reference fails the Attempt");
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x97; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert!(
+        state
+            .attempts
+            .iter()
+            .all(|attempt| attempt.checkpoints.is_empty()),
+        "no dangling Saved survives"
+    );
+}
+
+#[test]
+fn an_attempt_reads_only_content_its_run_names() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let input = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(b"the commissioned repository".to_vec()),
+        )
+        .unwrap();
+    let foreign = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(b"someone else's material".to_vec()),
+        )
+        .unwrap();
+    let mut payload = b"with-input:".to_vec();
+    payload.extend_from_slice(&input.content_id);
+    payload.extend_from_slice(&(b"the commissioned repository".len() as u64).to_be_bytes());
+    payload.extend_from_slice(&foreign.content_id);
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload,
+        },
+    )
+    .unwrap();
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    let report = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    // The handler asserted both halves of fork 3 in-Attempt; a Returned step
+    // means the commissioned input was readable and the foreign ref refused.
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
+
+// ===== Fair drain: composition tests for the pacing forks ================
+//
+// Rotation is per action, the field norm — a Temporal task queue interleaves
+// activities from many workflows the same way — so three commissioned Runs
+// make progress together instead of finishing in RunId order. Pacing is an
+// Activation option, not a constant, and the round-robin cursor lives in
+// activation memory: durable truth stays the Attempt ledger.
+
+#[test]
+fn the_drain_interleaves_runs_instead_of_finishing_the_lowest_id_first() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    for seed in [0x71u8, 0x72, 0x73] {
+        session
+            .submit(
+                identity
+                    .sign_action(
+                        &session,
+                        crate::action::RequestId::from_bytes([seed; 16]),
+                        Intent {
+                            schema: SchemaId::parse("agent.request").unwrap(),
+                            schema_version: 1,
+                            payload: vec![seed],
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let package = echo_package(&build);
+    let report = session
+        .perform(&package, |_| {
+            panic!("the echo handler stages no output content");
+        })
+        .unwrap();
+    // The first three actions lease three distinct Runs: progress rotates
+    // rather than driving the lowest RunId to completion first.
+    let leased: Vec<_> = report
+        .steps
+        .iter()
+        .take(3)
+        .filter_map(|step| match step {
+            crate::exec::PerformStep::Tried { run, .. } => Some(*run),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(leased.len(), 3, "the first three actions are three leases");
+    assert_eq!(
+        leased
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "three distinct Runs, not one Run three times"
+    );
+    // And everything still completes within the pass.
+    let returned = report
+        .steps
+        .iter()
+        .filter(|step| matches!(step, crate::exec::PerformStep::Returned { .. }))
+        .count();
+    assert_eq!(returned, 3);
+}
+
+#[test]
+fn perform_pacing_is_an_activation_option_not_a_constant() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let station = rt
+        .create()
+        .unwrap()
+        .open(Activation {
+            exec: crate::lifecycle::ExecPacing {
+                actions_per_pass: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"paced".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = echo_package(&build);
+    let first = session
+        .perform(&package, |_| {
+            panic!("the echo handler stages no output content");
+        })
+        .unwrap();
+    assert_eq!(
+        first.steps.len(),
+        2,
+        "a two-action pass stops after two actions"
+    );
+    let second = session
+        .perform(&package, |_| {
+            panic!("the echo handler stages no output content");
+        })
+        .unwrap();
+    assert!(second
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
+
+// ===== Retention: composition tests for the disposal forks ===============
+//
+// Deletion is a Runtime-authored tombstone of the reserved Run Body, riding
+// the same signed transaction path as every other Runtime effect — Temporal
+// archives to an operator's blob store before deleting rows; here product
+// truth is deliberately self-describing (the mixed-fleet argument) and the
+// replicated tombstone is the disposal record. Eligibility is a reachability
+// projection, never a guessed timer: unresolved Runs and Runs cited as
+// another Run's parent or source are not collectible, and the operator
+// window is activation memory — a restart forgets elapsed grace and starts
+// counting again, which only ever delays disposal.
+
+fn retention_station(
+    window: Option<std::time::Duration>,
+) -> (crate::lifecycle::Station, WorldId, crate::exec::Build) {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let station = rt
+        .create()
+        .unwrap()
+        .open(Activation {
+            exec: crate::lifecycle::ExecPacing {
+                retention_window: window,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    (station, world_id, build)
+}
+
+fn accept_run(
+    session: &crate::session::Session,
+    identity: &crate::world::LocalIdentity,
+    seed: u8,
+    run: crate::exec::RunId,
+    attempt: crate::exec::AttemptId,
+) {
+    let mut payload = b"accept:".to_vec();
+    payload.extend_from_slice(&run.as_bytes());
+    payload.extend_from_slice(&attempt.as_bytes());
+    session
+        .submit(
+            identity
+                .sign_action(
+                    session,
+                    crate::action::RequestId::from_bytes([seed; 16]),
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+}
+
+fn returned_attempt(
+    session: &crate::session::Session,
+    world_id: &WorldId,
+    run: crate::exec::RunId,
+    op: u8,
+) -> crate::exec::AttemptId {
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [op; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    state
+        .attempts
+        .iter()
+        .find(|attempt| !attempt.returned.is_empty())
+        .expect("a returned Attempt")
+        .attempt
+}
+
+#[test]
+fn an_unresolved_run_is_never_collected() {
+    let (station, world_id, build) = retention_station(Some(std::time::Duration::ZERO));
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"linger".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = echo_package(&build);
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    // Returned but never accepted: the Run is unresolved and untouchable
+    // even under a zero window.
+    let collected = session.sweep_resolved_runs().unwrap();
+    assert!(collected.is_empty(), "an unresolved Run is not collectible");
+}
+
+#[test]
+fn an_accepted_run_collects_after_the_window_and_product_truth_survives() {
+    let (station, world_id, build) = retention_station(Some(std::time::Duration::ZERO));
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xA1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"collect me".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = echo_package(&build);
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let attempt = returned_attempt(&session, &world_id, run, 0xA2);
+    accept_run(&session, &identity, 0xA3, run, attempt);
+
+    let collected = session.sweep_resolved_runs().unwrap();
+    assert_eq!(collected, vec![run], "the resolved, uncited Run collects");
+    // The Run Body is gone…
+    assert!(matches!(
+        session.work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xA4; 16],
+        ),
+        Err(crate::exec::WorkRefusal::NotFound(_))
+    ));
+    // …and the World's own record — the mixed-fleet self-description — is
+    // exactly as durable as it was.
+    let projection = session
+        .query(Query {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+            publication: None,
+        })
+        .unwrap();
+    assert!(
+        !projection.bytes.is_empty(),
+        "product truth survives disposal"
+    );
+}
+
+#[test]
+fn a_cited_run_outlives_its_citer_and_collects_only_after_it() {
+    let (station, world_id, build) = retention_station(Some(std::time::Duration::ZERO));
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let package = echo_package(&build);
+
+    // Run A completes and is accepted.
+    let first = crate::action::RequestId::from_bytes([0xB1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    first,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"the original".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let original = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        first.as_bytes(),
+        0,
+    );
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let attempt = returned_attempt(&session, &world_id, original, 0xB2);
+    accept_run(&session, &identity, 0xB3, original, attempt);
+
+    // Run B repeats A, recording it as source — a durable citation.
+    let mut payload = b"repeat:".to_vec();
+    payload.extend_from_slice(&original.as_bytes());
+    let second = crate::action::RequestId::from_bytes([0xB4; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    second,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let repeat = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        second.as_bytes(),
+        0,
+    );
+
+    // While B exists — even unresolved — A is cited and untouchable.
+    assert!(session.sweep_resolved_runs().unwrap().is_empty());
+
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let repeat_attempt = returned_attempt(&session, &world_id, repeat, 0xB5);
+    accept_run(&session, &identity, 0xB6, repeat, repeat_attempt);
+
+    // Both resolved: the citer collects first, its subject only after the
+    // citation is gone — reachability, not a timer.
+    assert_eq!(session.sweep_resolved_runs().unwrap(), vec![repeat]);
+    assert_eq!(session.sweep_resolved_runs().unwrap(), vec![original]);
+}
+
+#[test]
+fn retention_disabled_is_the_default_and_collects_nothing() {
+    let (station, world_id, build) = retention_station(None);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xC1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"keep forever".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = echo_package(&build);
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let attempt = returned_attempt(&session, &world_id, run, 0xC2);
+    accept_run(&session, &identity, 0xC3, run, attempt);
+    assert!(session.sweep_resolved_runs().unwrap().is_empty());
+}
+
+// ===== Interactive input, shape (a): the probe ===========================
+//
+// The fork probe for Run-addressed input, built entirely from shipped
+// primitives. What it demonstrates: an Interactive-style loop where the
+// Attempt yields by RETURNING ITS QUESTION as an honest Outcome (the Spec's
+// output is the union "final result or question" — "progress is never an
+// Outcome" holds because a question is not progress, it is the product), and
+// the authorized answer is CONTROL-SHAPED: the adapter resumes from the
+// committed checkpoint to approve, or cancels to deny. The resumption *is*
+// the answer.
+//
+// What the probe deliberately does NOT do — and this is the recorded finding
+// — is deliver data-shaped input to the resumed Attempt. An answer committed
+// after Started is invisible to the Attempt's Find (pinned to the Run's
+// parent Manifest root: "latest" never enters a Run) and refused by its
+// content facet (which admits only Started inputs and the lease's own
+// checkpoint). Both refusals are correct, which is the point: parameterized
+// input cannot ride shape (a) without either violating root pinning or
+// extending vocabulary — and the minimal honest extension is the
+// continuation Try carrying bounded, root-stamped additional input (the
+// bound `max_additional_input_bytes` already declares), not a new event
+// kind. That extension waits for the wire's input flow to inform it.
+
+#[test]
+fn an_interactive_run_yields_its_question_and_an_authorized_resume_is_the_answer() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xD1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"plain".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+
+    // Pass 1: the Attempt does its work up to the decision point, commits
+    // its state, and returns its question as the Outcome.
+    let first = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(first.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD2; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert!(state.unresolved, "a question is not acceptance");
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].returned.len(), 1);
+    // The legibility gap, pinned as a fact rather than papered over: at the
+    // generic surface, "yielded awaiting an answer" and "done awaiting
+    // acceptance" are the same shape — unresolved, returned, checkpointed.
+    // Only the product knows which. This is the cost shape (a) carries.
+    let checkpoint = state.attempts[0].checkpoints[0].checkpoint.content;
+
+    // The adapter-chained answer: an authorized resume from the committed
+    // checkpoint. Who may answer is the product's question — the adapter
+    // sits behind the product's own authorization, exactly like the RunId
+    // minting precedent.
+    session
+        .work(
+            crate::exec::WorkRequest::Resume {
+                world: world_id.clone(),
+                run,
+                checkpoint,
+            },
+            [0xD3; 16],
+        )
+        .unwrap();
+
+    // Pass 2: the resumed Attempt reads its own committed state back and
+    // completes. The resumption itself carried the approval.
+    let second = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(second.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD4; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 2);
+    let resumed = state
+        .attempts
+        .iter()
+        .find(|attempt| attempt.checkpoint.is_some())
+        .expect("the answering Attempt bound the committed checkpoint");
+    assert_eq!(
+        resumed.checkpoint.as_ref().map(|c| c.content),
+        Some(checkpoint),
+        "the lease bound exactly the state the question was asked from"
+    );
+    assert!(!resumed.returned.is_empty());
+}
+
+#[test]
+fn a_denied_question_is_a_cancellation_not_a_silent_stall() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xD5; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"plain".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+
+    // Denial is the other control verb: a committed cancellation request,
+    // visible on the Run — never an answer that simply fails to arrive.
+    session
+        .work(
+            crate::exec::WorkRequest::Cancel {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD6; 16],
+        )
+        .unwrap();
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD7; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert!(
+        !state.cancel_asked.is_empty(),
+        "the denial is durable and named"
+    );
+    // And the drain honors it: a cancel-asked Run gets no further Attempt.
+    let after = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(
+        after.steps.is_empty(),
+        "a denied question is not retried behind the denier's back"
+    );
+}
+
+#[test]
+fn an_answer_committed_after_started_is_invisible_to_the_pinned_attempt() {
+    // The boundary probe: shape (a)'s data-input ceiling, asserted as a
+    // FEATURE of root pinning rather than discovered as a surprise in some
+    // product. The Attempt's Find evaluates at the Run's parent Manifest
+    // root; a Body committed after Started does not exist there.
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let input = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(b"the commissioned repository".to_vec()),
+        )
+        .unwrap();
+    // A ref sealed AFTER the Run starts — the "late answer".
+    let mut payload = b"with-input:".to_vec();
+    payload.extend_from_slice(&input.content_id);
+    payload.extend_from_slice(&(b"the commissioned repository".len() as u64).to_be_bytes());
+    let late = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(b"the late answer".to_vec()),
+        )
+        .unwrap();
+    payload.extend_from_slice(&late.content_id);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    crate::action::RequestId::from_bytes([0xD8; 16]),
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    // The handler's with-input arm asserts the commissioned ref reads and
+    // the un-named ref refuses — the late answer is exactly an un-named ref.
+    let report = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
+
+// ===== The subprocess performer: composition tests (unix) ================
+//
+// The M1 fork probes, written before the mechanism. The architectural bet:
+// an external performer is a `Handler` implementation, not a new dispatcher
+// seam — the Handler trait is already the performer contract, and "backend"
+// names what enforces limits and what trust is claimed, which is exactly
+// what `Enforcement` states per handler. Ray and Temporal both wrap worker
+// processes in a framework protocol; here the protocol is the trait, and
+// the OCI runtime spec's spawn contract (argv, stdio, limits) is the
+// reference for the child side.
+//
+// Trust surface: v1 spawns only programs named at composition — the same
+// trust as a compiled-in handler, no new surface. A subprocess is a process
+// boundary, never a sandbox; the threat model's line holds: capability is
+// added, trust is not.
+
+#[cfg(unix)]
+mod subprocess_perform {
+    use super::*;
+
+    fn transform_spec() -> crate::exec::Spec {
+        let payload = |name| crate::exec::PayloadSpec {
+            schema: exec_schema(name),
+            max_inline_bytes: 4 * 1024,
+            max_content_refs: 0,
+            max_content_bytes: 0,
+            read: exec_demand("payload.read"),
+            max_additional_input_bytes: 0,
+        };
+        crate::exec::Spec {
+            name: SchemaId::parse("batch.transform").unwrap(),
+            version: 1,
+            access: crate::exec::Access {
+                start: exec_demand("run.start"),
+                offer: exec_demand("run.offer"),
+                control: exec_demand("run.control"),
+                accept: exec_demand("run.accept"),
+            },
+            input: payload("batch.input"),
+            output: payload("batch.output"),
+            mode: crate::exec::Mode::Unary,
+            resume: crate::exec::Resume::Restart,
+            effects: crate::exec::Effects::Pure,
+            accept: crate::exec::AcceptRule::World,
+            queries: Vec::new(),
+            service: None,
+            links: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 3,
+                events: 16,
+                checkpoints: 0,
+                child_runs: 0,
+                progress_bytes: 64 * 1024,
+                checkpoint_bytes: 0,
+                wall_millis: 5_000,
+            },
+        }
+    }
+
+    fn transform_build(world: &WorldId) -> crate::exec::Build {
+        let spec = transform_spec();
+        let seed = [0xA1; 32];
+        crate::exec::Build {
+            id: crate::exec::BuildId::from_bytes([0; 32]),
+            world: world.clone(),
+            world_build: [0; 32],
+            spec: crate::exec::SchemaRef {
+                name: spec.name,
+                version: spec.version,
+            },
+            handler: replica::content::ContentRef {
+                content_id: *blake3::hash(b"test/subprocess/uppercase/1").as_bytes(),
+            },
+            dependencies: None,
+            environment: [0xA2; 32],
+            config: Vec::new(),
+            checkpoint: None,
+            replay_commands: None,
+            compatible_from: Vec::new(),
+            publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+            signature: crate::exec::Signature {
+                signer: mechanics::actor::device_from_seed(&seed),
+                algorithm: 1,
+                bytes: [0; 64],
+            },
+        }
+        .sign(&seed)
+        .unwrap()
+    }
+
+    struct TransformWorld {
+        id: WorldId,
+        schemas: Vec<Schema>,
+        specs: Vec<crate::exec::Spec>,
+        build: crate::exec::BuildId,
+        wall_millis: u64,
+    }
+
+    impl TransformWorld {
+        fn new(build: crate::exec::BuildId, wall_millis: u64) -> Self {
+            Self {
+                id: WorldId::parse("com.example.exec-batch").unwrap(),
+                schemas: vec![Schema {
+                    id: SchemaId::parse("batch.request").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("bytes").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: Vec::new(),
+                }],
+                specs: vec![transform_spec()],
+                build,
+                wall_millis,
+            }
+        }
+
+        fn marker(&self) -> BodyKey {
+            BodyKey::new(self.id.clone(), BodyId::from_bytes([0x61; 16]))
+        }
+    }
+
+    impl World for TransformWorld {
+        fn id(&self) -> WorldId {
+            self.id.clone()
+        }
+
+        fn schemas(&self) -> &[Schema] {
+            &self.schemas
+        }
+
+        fn exec_specs(&self) -> &[crate::exec::Spec] {
+            &self.specs
+        }
+
+        fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+            Ok(Effect {
+                content_refs: Vec::new(),
+                exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
+                    spec: exec_schema("batch.transform"),
+                    build: self.build,
+                    input: crate::exec::Input {
+                        inline: intent.payload.clone(),
+                        content: Vec::new(),
+                        content_bytes: 0,
+                    },
+                    parent: None,
+                    source: None,
+                    service: None,
+                    resources: Vec::new(),
+                    limits: crate::exec::Limits {
+                        wall_millis: self.wall_millis,
+                        ..transform_spec().limits
+                    },
+                    queries: Vec::new(),
+                })],
+                operations: vec![(
+                    self.marker(),
+                    Op::ReplaceAtomic {
+                        value: intent.payload.clone(),
+                    },
+                )],
+                bodies: vec![self.marker()],
+                effect: b"queued".to_vec(),
+                declarations: Vec::new(),
+                demand: exec_demand("request.write"),
+            })
+        }
+
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
+        }
+    }
+
+    fn transform_station(
+        wall_millis: u64,
+    ) -> (crate::lifecycle::Station, WorldId, crate::exec::Build) {
+        let build = transform_build(&WorldId::parse("com.example.exec-batch").unwrap());
+        let world = Arc::new(TransformWorld::new(build.id, wall_millis));
+        let world_id = world.id();
+        let station = station_with(world.descriptor(), world);
+        (station, world_id, build)
+    }
+
+    fn subprocess_package(
+        build: &crate::exec::Build,
+        program: &str,
+        args: &[&str],
+    ) -> crate::exec::Package {
+        crate::exec::Package::new()
+            .with_spec(transform_spec())
+            .with_build(build.clone())
+            .with_handler(Arc::new(crate::exec::Subprocess::new(
+                &transform_spec(),
+                build,
+                std::path::PathBuf::from(program),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            )))
+    }
+
+    fn start_run(
+        session: &crate::session::Session,
+        station: &crate::lifecycle::Station,
+        world_id: &WorldId,
+        identity: &crate::world::LocalIdentity,
+        seed: u8,
+        payload: &[u8],
+    ) -> crate::exec::RunId {
+        let request = crate::action::RequestId::from_bytes([seed; 16]);
+        session
+            .submit(
+                identity
+                    .sign_action(
+                        session,
+                        request,
+                        Intent {
+                            schema: SchemaId::parse("batch.request").unwrap(),
+                            schema_version: 1,
+                            payload: payload.to_vec(),
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        crate::exec::derive_run_id(
+            station.space_id(),
+            world_id,
+            identity.device(),
+            request.as_bytes(),
+            0,
+        )
+    }
+
+    /// The reference batch transform: real bytes through a real child.
+    /// Input rides stdin, output rides stdout, exit zero is Succeeded, and
+    /// the Outcome's usage carries measured wall time.
+    #[test]
+    fn a_subprocess_transforms_committed_input_into_a_sealed_outcome() {
+        let (station, world_id, build) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(
+            &session,
+            &station,
+            &world_id,
+            &identity,
+            0xE1,
+            b"make me loud",
+        );
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "tr a-z A-Z"]);
+        let report = session
+            .perform(&package, |_| panic!("inline output stages no content"))
+            .unwrap();
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+        )));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xE2; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert_eq!(state.attempts.len(), 1);
+        assert_eq!(state.attempts[0].returned.len(), 1);
+        assert_eq!(
+            state.attempts[0].returned[0].terminal,
+            crate::exec::TerminalClass::Succeeded
+        );
+    }
+
+    /// A child that exits nonzero is an honest ApplicationFailed Outcome —
+    /// returned and judged, never a dispatch error.
+    #[test]
+    fn a_nonzero_exit_is_an_application_failure_not_a_dispatch_error() {
+        let (station, world_id, build) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE3, b"doomed");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "exit 3"]);
+        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+        )));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xE4; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert_eq!(
+            state.attempts[0].returned[0].terminal,
+            crate::exec::TerminalClass::ApplicationFailed
+        );
+    }
+
+    /// The wall limit is enforced by killing the child — Process-grade
+    /// enforcement, honestly claimed — and the Attempt fails rather than
+    /// parking forever. The durable ledger still allows another Attempt.
+    #[test]
+    fn a_wall_limited_child_is_killed_and_the_attempt_fails_honestly() {
+        let (station, world_id, build) = transform_station(400);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE5, b"stall");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let began = std::time::Instant::now();
+        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "the kill happens at the wall, not at the child's leisure"
+        );
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
+        )));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+    }
+
+    /// A committed cancellation before dispatch means the child never spawns.
+    #[test]
+    fn a_cancelled_run_never_spawns_its_child() {
+        let (station, world_id, build) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE6, b"never");
+        session
+            .work(
+                crate::exec::WorkRequest::Cancel {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xE7; 16],
+            )
+            .unwrap();
+        // A program whose execution would be unmissable if it ran.
+        let sentinel =
+            std::env::temp_dir().join(format!("lait-subprocess-sentinel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&sentinel);
+        let command = format!("touch {}", sentinel.display());
+        let package = subprocess_package(&build, "/bin/sh", &["-c", &command]);
+        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+        assert!(
+            !sentinel.exists(),
+            "a cancelled Run's child must never have run"
+        );
+    }
 }

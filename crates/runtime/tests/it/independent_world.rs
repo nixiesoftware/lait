@@ -439,6 +439,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .create()
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -621,6 +622,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -643,6 +645,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -665,6 +668,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -739,6 +743,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
