@@ -196,7 +196,7 @@ async fn wait_for_unassigned(path: &Path, device: &str) {
     panic!("enrolled receiver never presented its authenticated unassigned state");
 }
 
-async fn wait_for_assigned(path: &Path, assignment: &str, program: &str) -> (String, String) {
+async fn wait_for_assigned(path: &Path, assignment: &str, program: &str) -> String {
     for _ in 0..200 {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -209,7 +209,7 @@ async fn wait_for_assigned(path: &Path, assignment: &str, program: &str) -> (Str
                         && !revision.is_empty()
                         && !item.is_empty()
                     {
-                        return (revision.to_owned(), item.to_owned());
+                        return revision.to_owned();
                     }
                 }
             }
@@ -225,7 +225,7 @@ async fn wait_for_revision_change(
     program: &str,
     prior_revision: &str,
     phase: &str,
-) -> (String, String) {
+) -> String {
     for _ in 0..200 {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -238,7 +238,7 @@ async fn wait_for_revision_change(
                         && revision != prior_revision
                         && !item.is_empty()
                     {
-                        return (revision.to_owned(), item.to_owned());
+                        return revision.to_owned();
                     }
                 }
             }
@@ -248,7 +248,23 @@ async fn wait_for_revision_change(
     panic!("assigned receiver never received the {phase} semantic revision");
 }
 
-async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &str) {
+/// Wait for the coordinator to observe this receiver displaying `revision`.
+///
+/// Matched on the revision alone, and deliberately. The revision names the
+/// program that was presented and does not move; the *item* is whichever frame
+/// of that program is on screen right now, and a looping program advances every
+/// couple of seconds by design. Requiring a specific item asserted something
+/// that is only true for one item's duration at a time — and it was a snapshot
+/// taken from the receiver's own `active.json` before this call, so the
+/// receiver had usually moved on before the coordinator observed anything.
+///
+/// That failed as *"never observed health"*, which is the opposite of what was
+/// happening: the receiver was online, displaying, and reporting a perfectly
+/// correct different item.
+///
+/// The item is still checked — for being *present*, which is the part that
+/// would break if the receiver stopped tracking its position.
+async fn wait_for_health(client: &Client, device: &str, revision: &str) {
     let mut last = String::from("the coordinator was never reached");
     for _ in 0..200 {
         let display = client.display_status().await.expect("read receiver health");
@@ -257,7 +273,7 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
             .iter()
             .find(|row| row.device == device)
             .and_then(|row| row.health.as_ref())
-            .filter(|health| health.revision == revision && health.current_item == item)
+            .filter(|health| health.revision == revision && !health.current_item.is_empty())
         {
             assert_eq!(health.connection, "online");
             assert_eq!(health.playback, "displaying");
@@ -285,7 +301,7 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
                 Some(health) => format!(
                     "device {device} last reported revision {seen_revision}/item {seen_item} \
                      (connection {connection}, playback {playback}, last_error {error}) \
-                     while this waited for {revision}/{item}",
+                     while this waited for revision {revision}",
                     seen_revision = health.revision,
                     seen_item = health.current_item,
                     connection = health.connection,
@@ -852,7 +868,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             .expect("the receiver has one active assignment");
         let assignment_id = assignment.assignment.clone();
         let receiver_program = assignment.program.clone();
-        let (revision, item) = wait_for_assigned(
+        let revision = wait_for_assigned(
             &output_path.join("active.json"),
             &assignment_id,
             &receiver_program,
@@ -865,7 +881,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             Some(b"\x89PNG\r\n\x1a\n".as_slice()),
             "the assigned Signage surface did not present a PNG frame"
         );
-        wait_for_health(&client, &device, &revision, &item).await;
+        wait_for_health(&client, &device, &revision).await;
 
         // A second independently paired process joins the same requested
         // positional group. Both reference receivers declare boundary-only
@@ -945,13 +961,13 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         );
         let second_assignment_id = second_assignment.assignment.clone();
         let second_receiver_program = second_assignment.program.clone();
-        let (second_revision, second_item) = wait_for_assigned(
+        let second_revision = wait_for_assigned(
             &second_output_path.join("active.json"),
             &second_assignment_id,
             &second_receiver_program,
         )
         .await;
-        wait_for_health(&client, &second_device, &second_revision, &second_item).await;
+        wait_for_health(&client, &second_device, &second_revision).await;
         wait_for_group_boundary(
             &output_path.join("active.json"),
             &second_output_path.join("active.json"),
@@ -965,7 +981,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         // held long poll, recompiles, and pushes the second semantic revision.
         let boundary =
             schedule_signage_boundary(&client, &assignment.space, &signage_program).await;
-        let (before_revision, _) = wait_for_revision_change(
+        let before_revision = wait_for_revision_change(
             &output_path.join("active.json"),
             &assignment_id,
             &receiver_program,
@@ -973,7 +989,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             "pre-boundary",
         )
         .await;
-        let (second_before_revision, _) = wait_for_revision_change(
+        let second_before_revision = wait_for_revision_change(
             &second_output_path.join("active.json"),
             &second_assignment_id,
             &second_receiver_program,
@@ -987,7 +1003,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             mechanics::wallclock::now_millis() < boundary,
             "the test failed to observe the pre-boundary revision before its deadline"
         );
-        let (revision, item) = wait_for_revision_change(
+        let revision = wait_for_revision_change(
             &output_path.join("active.json"),
             &assignment_id,
             &receiver_program,
@@ -995,7 +1011,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             "post-boundary",
         )
         .await;
-        let (second_revision, second_item) = wait_for_revision_change(
+        let second_revision = wait_for_revision_change(
             &second_output_path.join("active.json"),
             &second_assignment_id,
             &second_receiver_program,
@@ -1013,8 +1029,8 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             before_frame, after_frame,
             "the boundary revision did not change presented content"
         );
-        wait_for_health(&client, &device, &revision, &item).await;
-        wait_for_health(&client, &second_device, &second_revision, &second_item).await;
+        wait_for_health(&client, &device, &revision).await;
+        wait_for_health(&client, &second_device, &second_revision).await;
 
         client.shutdown().await;
         drop(signals);
@@ -1062,8 +1078,8 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             }),
             "restarted daemon lost the second synchronized Signage assignment"
         );
-        wait_for_health(&restarted, &device, &revision, &item).await;
-        wait_for_health(&restarted, &second_device, &second_revision, &second_item).await;
+        wait_for_health(&restarted, &device, &revision).await;
+        wait_for_health(&restarted, &second_device, &second_revision).await;
         restarted
             .display_device_revoke(device.clone())
             .await

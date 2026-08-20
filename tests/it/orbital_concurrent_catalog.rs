@@ -55,6 +55,48 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+/// Create an issue, retrying while the catalog says somebody else got there
+/// first.
+///
+/// This test writes to both daemons' catalogs *at the same time*, on purpose —
+/// that is the thing it is about. Under optimistic concurrency the loser of a
+/// compare-and-swap is told "that change conflicts with the current state",
+/// which is the mechanic working, not a defect: a real client re-reads and
+/// tries again. Asserting the first attempt always wins asserted that the
+/// concurrency this test creates never actually happens, and CI's interleaving
+/// obliged often enough to fail.
+///
+/// A conflict that never clears is still a failure — the budget is what
+/// separates "contended" from "wedged".
+fn issue_new_eventually(rt: &tokio::runtime::Runtime, home: &Path, title: &str) -> IssueResponse {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let resp = issue_req(
+            rt,
+            home,
+            issues_app::IssuesRequest::IssueNew {
+                due: None,
+                estimate: None,
+                title: title.to_owned(),
+                project: None,
+                project_hint: None,
+                assignees: vec![],
+                priority: None,
+                labels: vec![],
+                body: None,
+            },
+        );
+        let contended = matches!(
+            &resp,
+            IssueResponse::Error { message, .. } if message.contains("conflicts with the current state")
+        );
+        if !contended || std::time::Instant::now() >= deadline {
+            return resp;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
@@ -259,37 +301,9 @@ fn concurrent_issue_creation_converges_across_daemons() {
 
     // Both sides now create issues CONCURRENTLY (catalog writes on each).
     for i in 0..3 {
-        let resp = issue_req(
-            &rt,
-            &founder_home,
-            issues_app::IssuesRequest::IssueNew {
-                due: None,
-                estimate: None,
-                title: format!("founder concurrent {i}"),
-                project: None,
-                project_hint: None,
-                assignees: vec![],
-                priority: None,
-                labels: vec![],
-                body: None,
-            },
-        );
+        let resp = issue_new_eventually(&rt, &founder_home, &format!("founder concurrent {i}"));
         assert!(matches!(resp, IssueResponse::Ref { .. }), "{resp:?}");
-        let resp = issue_req(
-            &rt,
-            &joiner_home,
-            issues_app::IssuesRequest::IssueNew {
-                due: None,
-                estimate: None,
-                title: format!("joiner concurrent {i}"),
-                project: None,
-                project_hint: None,
-                assignees: vec![],
-                priority: None,
-                labels: vec![],
-                body: None,
-            },
-        );
+        let resp = issue_new_eventually(&rt, &joiner_home, &format!("joiner concurrent {i}"));
         assert!(matches!(resp, IssueResponse::Ref { .. }), "{resp:?}");
     }
 
