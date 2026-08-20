@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { filterCards, partCards } from "./book";
+import { filterCards, listedCards, partCards } from "./book";
 import type { Card } from "./client";
 import { isAgentCard, pictureUri, presenceLabel } from "./kit";
 
@@ -33,6 +33,14 @@ describe("the book's list rules", () => {
     // Offline, so the unmeasured card stays up top with the contacts.
     expect(contacts.map((row) => row.card)).toEqual(["online", "away", "unmeasured"]);
     expect(offline.map((row) => row.card)).toEqual(["offline"]);
+  });
+
+  it("never lists the claimed card: the canonical band is its one presentation", () => {
+    const rows = [
+      card({ card: "crd_me", selfClaim: true, presence: "online" }),
+      card({ card: "crd_ada", presence: "online" }),
+    ];
+    expect(listedCards(rows).map((row) => row.card)).toEqual(["crd_ada"]);
   });
 
   it("searches what a card says about itself: name, note, id, handles", () => {

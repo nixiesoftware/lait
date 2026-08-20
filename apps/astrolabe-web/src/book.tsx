@@ -23,6 +23,14 @@ export function filterCards(cards: Card[], query: string): Card[] {
 }
 
 /**
+ * The claimed card never draws as a list row: the canonical band at the top
+ * of the window is its one presentation, so the list holds everyone else.
+ */
+export function listedCards(cards: Card[]): Card[] {
+  return cards.filter((card) => !card.selfClaim);
+}
+
+/**
  * Presence parts the list, not kind: everyone reachable — or not askable —
  * sits together, ordered by how present they are, and only the measured
  * absence gets a section of its own. An unmeasured card stays up top:
@@ -80,7 +88,8 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
   }, [dialog, profile]);
 
   const mine = book?.cards.find((card) => card.selfClaim) ?? null;
-  const shown = filterCards(book?.cards ?? [], query);
+  const listed = listedCards(book?.cards ?? []);
+  const shown = filterCards(listed, query);
   const { contacts, offline } = partCards(shown);
   const busy = (key: string) => view.inFlight.includes(key);
 
@@ -120,8 +129,8 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
           <div className="book-list">
             {shown.length === 0
               ? <div className="book-gutter"><Empty
-                  said={book.cards.length === 0 ? "No cards." : "No cards match that search."}
-                  next={book.cards.length === 0
+                  said={listed.length === 0 ? "No cards." : "No cards match that search."}
+                  next={listed.length === 0
                     ? "The book is this identity's, even with no Space open."
                     : "Clear the search to see every Card."} /></div>
               : <>
@@ -170,7 +179,7 @@ function SectionHead({ label, count }: { label: string; count?: number }) {
 function PersonRow({ card, onOpen }: { card: Card; onOpen(): void }) {
   return <button className="person-row" onClick={onOpen} aria-label={`Open the profile of ${card.name}`}>
     <PersonTile name={card.name} picture={card.picture} presence={card.presence} agent={isAgentCard(card)}
-      note={card.note} trailing={card.selfClaim ? <Badge label="My Card" solid /> : undefined} />
+      note={card.note} />
   </button>;
 }
 
