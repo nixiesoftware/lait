@@ -96,6 +96,18 @@ async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Resu
     )?))
 }
 
+/// How long a caller keeps asking while a node answers "busy".
+///
+/// This test kills the approach station and asks the survivors to converge, so
+/// a node being busy is the *situation*, not an anomaly — and ten seconds of it
+/// was not enough on a four-vCPU runner with the rest of the suite alongside.
+/// It failed there while passing on any idle machine.
+///
+/// Thirty is not a hope that the busy period is shorter than the budget. A node
+/// busy for the whole of it still fails, which is the property worth keeping:
+/// "contended" and "wedged" have to stay distinguishable.
+const BUSY_BUDGET: Duration = Duration::from_secs(30);
+
 fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
@@ -113,7 +125,7 @@ fn issue_req(
                 error_kind: issues_app::IssuesErrorKind::Retry,
                 ..
             }
-        ) || started.elapsed() >= Duration::from_secs(10)
+        ) || started.elapsed() >= BUSY_BUDGET
         {
             return response;
         }
