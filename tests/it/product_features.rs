@@ -156,6 +156,7 @@ fn read_content(
                         content: content.to_string(),
                         offset: got.len() as u64,
                         len: 256 * 1024,
+                        patience_ms: 0,
                     },
                 ),
             )

@@ -1521,6 +1521,15 @@ pub enum ContentCall {
         content: String,
         offset: u64,
         len: u64,
+        /// How long the Station may spend fetching what it does not hold.
+        ///
+        /// Zero — and so an older caller, which sends no field at all — reads
+        /// only what is already here and refuses the rest, which is what this
+        /// call has always done. Above zero the Station goes and gets it, and
+        /// may answer `Fetching`: bytes are on their way and asking again is
+        /// the thing to do.
+        #[serde(default)]
+        patience_ms: u32,
     },
     /// Seal and commit the bytes this request's body carries.
     Write {
@@ -1563,8 +1572,16 @@ pub enum ContentErrorCode {
     /// No descriptor here — and deliberately the same answer whether the
     /// content never existed or this Station simply never heard of it.
     Unknown,
-    /// The descriptor is here and the bytes are not. Retryable, after a fetch.
+    /// The descriptor is here and the bytes are not, and nothing is going to
+    /// change that on its own. Retryable, after a fetch.
     NotResident,
+    /// The descriptor is here, the bytes are not, and a fetch is under way.
+    ///
+    /// Distinct from [`ContentErrorCode::NotResident`] because the caller does
+    /// something different: one says *make* it happen, the other says *let* it.
+    /// Folding them would put a caller that only had to wait into the same
+    /// branch as one that has to go and arrange something.
+    Fetching,
     /// The bytes are here and sealed to an epoch this Station has no key for.
     /// A fetch cannot help.
     Sealed,

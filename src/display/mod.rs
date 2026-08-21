@@ -7,6 +7,7 @@
 mod cmaf;
 mod compiler;
 mod coordinator;
+mod demux;
 mod hls;
 mod http;
 
@@ -27,6 +28,7 @@ pub use cmaf::{
 };
 pub use compiler::{CompiledProgram, PlaybackAlignment, ProgramCompiler};
 pub use coordinator::{DisplayCoordinator, SurfaceRender};
+pub use demux::{track_shapes, Failure as DemuxFailure, TrackShape};
 pub use hls::{Failure as HlsFailure, HlsCatalogPackager, HlsRenditionDescription, HlsSegment};
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
 pub use live::{LiveMediaHub, LiveMediaPacket, LiveMediaSnapshot, LiveMediaTrack, LiveTransport};

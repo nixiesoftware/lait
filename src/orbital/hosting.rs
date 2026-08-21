@@ -887,6 +887,7 @@ impl StationHost {
                 content,
                 offset,
                 len,
+                patience_ms,
             } => {
                 let Some(content) = parse_content_ref(content) else {
                     return (invalid_content_id(), Vec::new());
@@ -903,16 +904,49 @@ impl StationHost {
                         Vec::new(),
                     );
                 }
-                match self
-                    .station
-                    .content_read(&self.identity, &content, *offset, *len as usize)
-                {
-                    Ok(bytes) => (
-                        ContentReply::ContentStream {
-                            len: bytes.len() as u64,
-                        },
-                        bytes,
-                    ),
+                if *patience_ms == 0 {
+                    return match self.station.content_read(
+                        &self.identity,
+                        &content,
+                        *offset,
+                        *len as usize,
+                    ) {
+                        Ok(bytes) => (
+                            ContentReply::ContentStream {
+                                len: bytes.len() as u64,
+                            },
+                            bytes,
+                        ),
+                        Err(error) => (content_refusal(&error), Vec::new()),
+                    };
+                }
+                match self.station.content_acquire(
+                    &self.identity,
+                    &content,
+                    *offset,
+                    *len,
+                    Duration::from_millis(u64::from(*patience_ms)),
+                ) {
+                    // Short of the window is not short of the answer: the
+                    // caller asked for a range and gets what arrived, then asks
+                    // again from where it got to. Only an empty answer has to
+                    // say why nothing came.
+                    Ok(runtime::Acquired::Whole(bytes))
+                    | Ok(runtime::Acquired::Short { bytes, .. })
+                        if !bytes.is_empty() =>
+                    {
+                        (
+                            ContentReply::ContentStream {
+                                len: bytes.len() as u64,
+                            },
+                            bytes,
+                        )
+                    }
+                    Ok(runtime::Acquired::Whole(_)) => {
+                        // An empty whole window is the end of the content.
+                        (ContentReply::ContentStream { len: 0 }, Vec::new())
+                    }
+                    Ok(runtime::Acquired::Short { gap, .. }) => (gap_refusal(gap), Vec::new()),
                     Err(error) => (content_refusal(&error), Vec::new()),
                 }
             }
@@ -4488,6 +4522,37 @@ fn invalid_content_id() -> ContentReply {
         ContentErrorCode::Invalid,
         "a content id is 32 bytes of lowercase hex",
     )
+}
+
+/// Translate a demand-paged read's hole into the same vocabulary.
+///
+/// The plane keeps five kinds of absence apart, and this boundary keeps the one
+/// distinction a caller acts on: bytes that are coming, and bytes that are not.
+/// Everything else is "go and arrange a transfer", which is what `NotResident`
+/// has always meant here.
+fn gap_refusal(gap: runtime::Gap) -> ContentReply {
+    match gap {
+        runtime::Gap::Fetching => ContentReply::error(
+            ContentErrorCode::Fetching,
+            "the bytes are on their way; ask again",
+        ),
+        runtime::Gap::Unoffered => ContentReply::error(
+            ContentErrorCode::NotResident,
+            "asked, and no peer offered those bytes",
+        ),
+        runtime::Gap::Unsupplied => ContentReply::error(
+            ContentErrorCode::NotResident,
+            "this Station has nothing that could fetch those bytes",
+        ),
+        runtime::Gap::Unasked => ContentReply::error(
+            ContentErrorCode::NotResident,
+            "no peer could be asked for those bytes",
+        ),
+        runtime::Gap::Refused => ContentReply::error(
+            ContentErrorCode::NotResident,
+            "the supply refused the ask for those bytes",
+        ),
+    }
 }
 
 /// Translate a content refusal into the vocabulary a local surface maps to its

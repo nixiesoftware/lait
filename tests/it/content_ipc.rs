@@ -218,6 +218,7 @@ fn a_body_whose_first_bytes_landed_in_the_header_buffer_round_trips_by_digest() 
                 content: content.clone(),
                 offset: got.len() as u64,
                 len: 256 * 1024,
+                patience_ms: 0,
             })
             .expect("read");
         assert!(
@@ -263,6 +264,7 @@ fn a_body_that_ends_early_commits_nothing() {
             content,
             offset: 0,
             len: 4096,
+            patience_ms: 0,
         })
         .expect("read");
     assert_eq!(
@@ -387,6 +389,7 @@ fn forgetting_keeps_the_name_and_drops_the_bytes() {
             content,
             offset: 0,
             len: 1024,
+            patience_ms: 0,
         })
         .expect("read");
     assert!(
