@@ -412,7 +412,7 @@ impl DisplayCoordinator {
             .map(<[u8]>::to_vec))
     }
 
-    pub fn current_live_resource(
+    pub fn current_media_resource(
         &self,
         device: &DisplayDeviceId,
         manifest: &DisplayAssetId,
@@ -422,7 +422,7 @@ impl DisplayCoordinator {
             .lock()
             .map_err(|_| anyhow!("display program cache lock was poisoned"))?
             .get(device.as_str())
-            .and_then(|compiled| compiled.live_resource(manifest))
+            .and_then(|compiled| compiled.media_resource(manifest))
             .map(str::to_string))
     }
 
@@ -487,7 +487,7 @@ impl DisplayCoordinator {
             _ => {}
         }
         let resource = compiled
-            .live_resource(manifest)
+            .media_resource(manifest)
             .map(str::to_string)
             .ok_or_else(|| anyhow!("live manifest has no coordinator resource"))?;
         let resolved = self

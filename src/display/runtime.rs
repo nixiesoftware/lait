@@ -878,8 +878,9 @@ mod tests {
                 "live",
                 RenderedScene::Media(RenderedMedia {
                     protocol: MediaProtocol::Mse,
-                    resource: DisplayResourceId::new("res".to_string()).unwrap(),
-                    live: true,
+                    origin: world_interface::display::MediaOrigin::Live(
+                        DisplayResourceId::new("res".to_string()).unwrap(),
+                    ),
                 }),
             )]),
         );

@@ -18,8 +18,8 @@ use signage::contract::{MediaSource, SignageMedia};
 use world_interface::display::{
     BlankReason, CanonicalDisplayInput, DisplayAssessment, DisplayOutputKind, DisplayProjection,
     DisplayRenderer, DisplayRequest, DisplayResourceId, DisplaySurface, DisplaySurfaceDescriptor,
-    DisplaySurfaceId, FrameMediaType, MediaProtocol, ProgramCycle, RenderedFrame, RenderedMedia,
-    RenderedProgram, RenderedProgramItem, RenderedScene,
+    DisplaySurfaceId, FrameMediaType, MediaOrigin, MediaProtocol, ProgramCycle, RenderedFrame,
+    RenderedMedia, RenderedProgram, RenderedProgramItem, RenderedScene,
 };
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
@@ -198,28 +198,29 @@ fn scene(entry: Option<&SignageMedia>, width: u32, height: u32) -> Result<Render
             height,
             bytes: render_card(title, body, background, foreground, width, height)?,
         })),
-        MediaSource::Stored { content, .. } => Ok(media_scene(content, false)),
-        MediaSource::Live { resource } => Ok(media_scene(resource, true)),
+        MediaSource::Stored { .. } => Ok(entry
+            .source
+            .content_ref()
+            .map_or(RenderedScene::Blank(BlankReason::Unsupported), |content| {
+                media_scene(MediaOrigin::Stored(content))
+            })),
+        MediaSource::Live { resource } => Ok(DisplayResourceId::new(resource)
+            .map_or(RenderedScene::Blank(BlankReason::Unsupported), |resource| {
+                media_scene(MediaOrigin::Live(resource))
+            })),
         MediaSource::Kind { .. } => Ok(RenderedScene::Blank(BlankReason::Unsupported)),
     }
 }
 
-/// `live` is the whole difference: both planes hand the receiver a name it
-/// resolves when it fetches, and the stored one names bytes on the content
-/// plane rather than the entry that describes them. HLS is the only transport a
-/// receiver can declare without also declaring live positional sync.
+/// HLS is the only transport a receiver can declare without also declaring live
+/// positional sync.
 ///
-/// A name the display grammar cannot carry blanks rather than failing the
-/// render — a content id may run to 128 bytes and [`DisplayResourceId`] to 96.
-fn media_scene(resource: &str, live: bool) -> RenderedScene {
-    match DisplayResourceId::new(resource) {
-        Ok(resource) => RenderedScene::Media(RenderedMedia {
-            resource,
-            protocol: MediaProtocol::Hls,
-            live,
-        }),
-        Err(_) => RenderedScene::Blank(BlankReason::Unsupported),
-    }
+/// A name neither namespace can carry blanks rather than failing the render.
+fn media_scene(origin: MediaOrigin) -> RenderedScene {
+    RenderedScene::Media(RenderedMedia {
+        protocol: MediaProtocol::Hls,
+        origin,
+    })
 }
 
 /// A card speaks the words it was authored with; everything else speaks the
@@ -417,25 +418,48 @@ mod tests {
         );
     }
 
+    /// A content id in the only shape the upload route writes.
+    const REAL_CONTENT_ID: &str =
+        "7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a";
+
     #[test]
     fn a_stored_entry_names_its_content_and_is_not_live() {
         let stored = entry(MediaSource::Stored {
-            content: "cnt_7f3a".into(),
+            content: REAL_CONTENT_ID.into(),
             size: 4_096,
             mime: "video/mp4".into(),
         });
+        assert!(stored.validate(), "a real id is admissible");
         let RenderedScene::Media(rendered) = scene(Some(&stored), 640, 360).unwrap() else {
             panic!("durable bytes are fetched, not rasterised");
         };
+        let MediaOrigin::Stored(content) = rendered.origin else {
+            panic!("a library entry names the content plane, not a rendition");
+        };
         assert_eq!(
-            rendered.resource.as_str(),
-            "cnt_7f3a",
+            Some(content),
+            stored.source.content_ref(),
             "the content id, never the entry that describes it"
         );
-        assert!(!rendered.live);
         assert_eq!(
             spoken_summary(Some(&stored)).as_deref(),
             Some("Ribbon cutting")
+        );
+    }
+
+    /// The two namespaces cannot be confused for each other, because neither is
+    /// a string by the time a surface sees it.
+    #[test]
+    fn a_rendition_name_is_not_a_content_id() {
+        let masquerading = entry(MediaSource::Live {
+            resource: REAL_CONTENT_ID.into(),
+        });
+        let RenderedScene::Media(rendered) = scene(Some(&masquerading), 640, 360).unwrap() else {
+            panic!("a live rendition is media whatever it is called");
+        };
+        assert!(
+            matches!(rendered.origin, MediaOrigin::Live(_)),
+            "a live entry names a rendition even when the name looks like a content id"
         );
     }
 
@@ -447,8 +471,10 @@ mod tests {
         let RenderedScene::Media(rendered) = scene(Some(&live), 640, 360).unwrap() else {
             panic!("a live rendition is media");
         };
-        assert_eq!(rendered.resource.as_str(), "lobby-cam");
-        assert!(rendered.live);
+        let MediaOrigin::Live(rendition) = &rendered.origin else {
+            panic!("a live entry names a rendition on the live plane");
+        };
+        assert_eq!(rendition.as_str(), "lobby-cam");
         assert_eq!(rendered.protocol, MediaProtocol::Hls);
     }
 
@@ -474,35 +500,42 @@ mod tests {
         );
     }
 
-    /// Every content id the World admits is one a surface can be told about.
+    /// Admitted and renderable are the same set.
     ///
-    /// Both bounds are now the same constant, so this cannot reopen by someone
-    /// widening one of them — it reopens only by deliberately unbinding them,
-    /// and then this fails.
+    /// This used to bind two byte-length constants together, because both
+    /// namespaces went through one string type and the World accepted any
+    /// lowercase token up to 96 bytes. Such an entry validated, replicated, and
+    /// then rendered as a blank forever — nothing that could decode it ever saw
+    /// it. The World now admits exactly what a reference can be built from.
     #[test]
     fn a_content_id_the_world_accepts_is_always_expressible_to_a_surface() {
-        let longest = entry(MediaSource::Stored {
-            content: "c".repeat(signage::contract::MAX_CONTENT_ID_BYTES),
+        let admitted = entry(MediaSource::Stored {
+            content: REAL_CONTENT_ID.into(),
             size: 1,
             mime: "video/mp4".into(),
         });
-        assert!(longest.validate(), "the longest admissible id");
-        let RenderedScene::Media(rendered) = scene(Some(&longest), 640, 360).unwrap() else {
+        assert!(admitted.validate(), "an admissible id");
+        let RenderedScene::Media(rendered) = scene(Some(&admitted), 640, 360).unwrap() else {
             panic!("an admissible id renders rather than blanking");
         };
-        assert_eq!(
-            rendered.resource.as_str().len(),
-            signage::contract::MAX_CONTENT_ID_BYTES
-        );
+        assert!(matches!(rendered.origin, MediaOrigin::Stored(_)));
 
-        let over = entry(MediaSource::Stored {
-            content: "c".repeat(signage::contract::MAX_CONTENT_ID_BYTES + 1),
-            size: 1,
-            mime: "video/mp4".into(),
-        });
-        assert!(
-            !over.validate(),
-            "the World refuses what no surface could be told about"
-        );
+        for refused in [
+            "cnt_7f3a",                      // the shape the fixtures used to carry
+            &"a".repeat(63),                 // one nibble short
+            &"a".repeat(65),                 // one over
+            &format!("{}g", "a".repeat(63)), // right length, not hex
+            &REAL_CONTENT_ID.to_uppercase(), // hex, wrong case
+        ] {
+            let entry = entry(MediaSource::Stored {
+                content: (*refused).into(),
+                size: 1,
+                mime: "video/mp4".into(),
+            });
+            assert!(
+                !entry.validate(),
+                "{refused} is not an id any read could resolve"
+            );
+        }
     }
 }
