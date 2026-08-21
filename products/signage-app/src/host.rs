@@ -16,7 +16,9 @@
 
 use runtime::world::call::Access;
 use serde_json::Value;
-use world_interface::{ClientAccess, ClientInvocation, Failure};
+use world_interface::{
+    ClientAccess, ClientHost, ClientInvocation, Failure, HostContentRequest, LocalInvocation,
+};
 
 use crate::protocol::SignageRequest;
 
@@ -30,6 +32,169 @@ const COMMANDS: &str = "program_get, program_list, program_put, program_delete, 
      screen_get, screen_list, screen_put, screen_delete, screen_showing, screen_plays, \
      group_get, group_list, group_put, group_delete, \
      config_get, config_list, config_put, config_delete";
+
+/// The one local operation this package owns.
+///
+/// Ingest cannot be a World command, because the derivation has to read the
+/// file and a World may not read plaintext by design. It cannot be the caller's
+/// job either, because the refusal is the point: a file that cannot meet the
+/// plane's baseline has no valid catalog, and the person uploading it is the
+/// one who can do something about that — telling them at a render instead
+/// reaches a screen at three in the morning.
+pub const LOCAL_MEDIA_INGEST: &str = "signage.media_ingest";
+
+/// One local invocation: derive, seal, record.
+pub fn execute<'a>(
+    host: &'a dyn ClientHost,
+    local: LocalInvocation,
+) -> world_interface::ClientFuture<'a, Value> {
+    Box::pin(async move {
+        if local.operation != LOCAL_MEDIA_INGEST {
+            return Err(Failure::new(format!(
+                "unsupported Signage local operation '{}'",
+                local.operation
+            )));
+        }
+        let path = local
+            .input
+            .get("file")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Failure::new("media_ingest requires a 'file' path"))?
+            .to_string();
+        let name = local
+            .input
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                std::path::Path::new(&path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone())
+            });
+        run_media_ingest(host, path, name, local.input).await
+    })
+}
+
+/// Derive the catalog, seal the bytes, write the library entry.
+///
+/// The order is the contract. Derivation runs first because it is the step
+/// that can refuse, and a refusal must cost nothing: no content is sealed, no
+/// record written, the person is told and the Space never hears about it. The
+/// content is committed second, and the entry that names it third — the
+/// substrate refuses a declaration whose descriptor is not committed, so this
+/// order cannot race, it can only fail cleanly.
+async fn run_media_ingest(
+    host: &dyn ClientHost,
+    path: String,
+    name: String,
+    input: Value,
+) -> Result<Value, Failure> {
+    // 1. Derive, from the local file, before anything is spent. `find_moov`
+    //    walks box headers, so this reads the table of contents and the sample
+    //    tables — not the film.
+    let file = std::fs::File::open(&path)
+        .map_err(|error| Failure::new(format!("could not open {path}: {error}")))?;
+    let total = file
+        .metadata()
+        .map_err(|error| Failure::new(format!("could not stat {path}: {error}")))?
+        .len();
+    let policy = mediabox::CatalogPolicy {
+        max_group_duration_ms: runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS,
+        target_latency_ms: runtime::plane::live::media::DEFAULT_MAX_LATENCY_MS,
+        jitter_hint_ms: 50,
+        // The rendition a receiver's ticket resolves against is the content's
+        // own name once one exists; until the seal below there is none, so a
+        // placeholder derives and the record's id is authoritative.
+        rendition: "main".into(),
+    };
+    let media = {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = file;
+        let read = |offset: u64, size: u32| {
+            let mut bytes =
+                vec![0u8; usize::try_from(size).map_err(|_| mediabox::Failure::Container)?];
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|_| mediabox::Failure::Container)?;
+            let mut filled = 0usize;
+            while let Some(window) = bytes.get_mut(filled..).filter(|window| !window.is_empty()) {
+                match file.read(window) {
+                    Ok(0) => break,
+                    Ok(n) => filled = filled.saturating_add(n),
+                    Err(_) => return Err(mediabox::Failure::Container),
+                }
+            }
+            bytes.truncate(filled);
+            Ok(bytes)
+        };
+        mediabox::read_catalog(total, read, &policy).map_err(|error| {
+            Failure::new(format!("{name} cannot be served as signage media: {error}"))
+        })?
+    };
+    let catalog = String::from_utf8(
+        media
+            .catalog
+            .encode_canonical()
+            .map_err(|_| Failure::new("the derived catalog would not encode"))?,
+    )
+    .map_err(|_| Failure::new("the derived catalog is not UTF-8"))?;
+    let (width, height) = media
+        .tracks
+        .iter()
+        .find_map(|(_, shape)| shape.width.zip(shape.height))
+        .map(|(w, h)| (Some(w), Some(h)))
+        .unwrap_or((None, None));
+
+    // 2. Seal. The file is streamed by the shell, never read into this process
+    //    a second time.
+    let stored = host
+        .call_content(HostContentRequest::Write {
+            path: std::path::PathBuf::from(&path),
+        })
+        .await?;
+    let content = stored
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::new("the content plane stored the file but did not name it"))?
+        .to_string();
+    let size = stored
+        .get("size")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+
+    // 3. Record. The id is minted here, the way the web parser's `media_put`
+    //    path mints one, so the caller supplies intent and never identity.
+    let entry = signage::contract::SignageMedia {
+        id: replica::body::BodyId::mint()
+            .map_err(|error| Failure::new(format!("could not mint a media id: {error}")))?
+            .render(),
+        name,
+        source: signage::contract::MediaSource::Stored {
+            content,
+            size,
+            mime: input
+                .get("mime")
+                .and_then(Value::as_str)
+                .unwrap_or("video/mp4")
+                .to_string(),
+        },
+        duration_ms: None,
+        width,
+        height,
+        catalog: Some(catalog),
+    };
+    let call = crate::encode_call(&SignageRequest::MediaPut {
+        media: entry.clone(),
+    })
+    .map_err(|error| Failure::new(error.to_string()))?;
+    let reply = host.call_world(call.clone()).await?;
+    crate::decode_reply(&call, reply).map_err(|error| Failure::new(error.to_string()))?;
+    Ok(serde_json::json!({
+        "kind": "media",
+        "media": entry.id,
+        "tracks": entry.catalog.is_some(),
+    }))
+}
 
 /// Construct one Signage World invocation with package-owned client policy.
 ///
@@ -72,6 +237,142 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host that records what was asked of it and answers like the shell.
+    struct RecordingHost {
+        content_writes: std::sync::Mutex<Vec<std::path::PathBuf>>,
+        world_calls: std::sync::Mutex<Vec<runtime::world::call::Call>>,
+    }
+
+    impl RecordingHost {
+        fn new() -> Self {
+            Self {
+                content_writes: std::sync::Mutex::new(Vec::new()),
+                world_calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl world_interface::ClientHost for RecordingHost {
+        fn local_root(&self) -> &std::path::Path {
+            std::path::Path::new(".")
+        }
+
+        fn call_world<'a>(
+            &'a self,
+            call: runtime::world::call::Call,
+        ) -> world_interface::ClientFuture<'a, runtime::world::call::Reply> {
+            self.world_calls.lock().unwrap().push(call.clone());
+            Box::pin(async move {
+                let body = serde_json::to_vec(&serde_json::json!({"kind": "ok"})).unwrap();
+                Ok(runtime::world::call::Reply::ok(&call, body))
+            })
+        }
+
+        fn call_work<'a>(
+            &'a self,
+            _request: runtime::exec::WorkRequest,
+        ) -> world_interface::ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::new("no work here")) })
+        }
+
+        fn call_control<'a>(
+            &'a self,
+            _request: world_interface::HostControlRequest,
+        ) -> world_interface::ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::new("no control here")) })
+        }
+
+        fn call_content<'a>(
+            &'a self,
+            request: HostContentRequest,
+        ) -> world_interface::ClientFuture<'a, Value> {
+            let path = match &request {
+                HostContentRequest::Write { path } => path.clone(),
+                _ => return Box::pin(async { Err(Failure::new("only writes here")) }),
+            };
+            self.content_writes.lock().unwrap().push(path);
+            Box::pin(async {
+                Ok(serde_json::json!({
+                    "content": "ab".repeat(32),
+                    "size": 4_096,
+                }))
+            })
+        }
+
+        fn call_identity<'a>(
+            &'a self,
+            _handles: Vec<world_interface::PresentationHandle>,
+        ) -> world_interface::ClientFuture<'a, world_interface::PresentationResolution> {
+            Box::pin(async { Ok(world_interface::PresentationResolution::unavailable()) })
+        }
+    }
+
+    /// Nothing in the mock host pends, so a noop waker is the whole executor —
+    /// the same precedent issues-app's host tests set.
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("the ingest seam must not pend against a mock"),
+        }
+    }
+
+    /// The ingest seam: derive, seal, record — and refuse before spending.
+    ///
+    /// The refusal half is the point of the seam existing. A file the plane
+    /// cannot package is told to the person uploading it, and costs nothing:
+    /// no content sealed, no record written, the Space never hears of it.
+    #[test]
+    fn media_ingest_derives_before_it_seals_and_refuses_before_it_spends() {
+        let dir = std::env::temp_dir().join(format!("signage-ingest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A real container, from the shared fixtures: ftyp, mdat, moov after.
+        let film = dir.join("ribbon-cutting.mp4");
+        std::fs::write(&film, mediabox::testkit::whole_file()).unwrap();
+
+        let host = RecordingHost::new();
+        let outcome = block_on(execute(
+            &host,
+            world_interface::LocalInvocation {
+                operation: LOCAL_MEDIA_INGEST.into(),
+                input: json!({"file": film.to_string_lossy(), "name": "Ribbon cutting"}),
+            },
+        ))
+        .expect("a real container ingests");
+        assert_eq!(outcome.get("kind").and_then(Value::as_str), Some("media"));
+
+        // Derive ran first and the seal second: exactly one write, and one
+        // MediaPut carrying what the derivation built.
+        assert_eq!(host.content_writes.lock().unwrap().len(), 1);
+        assert_eq!(host.world_calls.lock().unwrap().len(), 1);
+
+        // A file the plane cannot package is refused with nothing spent.
+        let noise = dir.join("noise.bin");
+        std::fs::write(&noise, b"this is not a container at all").unwrap();
+        let spent = RecordingHost::new();
+        let refused = block_on(execute(
+            &spent,
+            world_interface::LocalInvocation {
+                operation: LOCAL_MEDIA_INGEST.into(),
+                input: json!({"file": noise.to_string_lossy()}),
+            },
+        ));
+        assert!(refused.is_err(), "noise is refused where the person is");
+        assert!(
+            spent.content_writes.lock().unwrap().is_empty(),
+            "a refusal costs nothing: no content sealed"
+        );
+        assert!(
+            spent.world_calls.lock().unwrap().is_empty(),
+            "a refusal costs nothing: no record written"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::protocol::every_verb;
     use replica::body::BodyId;
     use serde_json::json;

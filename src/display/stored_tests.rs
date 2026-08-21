@@ -26,76 +26,8 @@ use super::{CmafTrackPackager, LiveMediaHub};
 fn a_whole_file_reads_from_its_bytes_and_serves() {
     use mp4_atom::{Avc1, Avcc, Encode, FourCC, Ftyp, Mdhd, Moov, Mvhd, Stsd, Visual};
 
-    // Six access units, each a four-byte length and a two-byte IDR NAL.
     let unit = [0u8, 0, 0, 2, 0x65, 0x88];
-    let sample_count = 6usize;
-    let mdat_payload: Vec<u8> = unit
-        .iter()
-        .copied()
-        .cycle()
-        .take(unit.len() * sample_count)
-        .collect();
-
-    let mut file = Vec::new();
-    Ftyp {
-        major_brand: FourCC::new(b"iso6"),
-        minor_version: 1,
-        compatible_brands: vec![FourCC::new(b"iso6")],
-    }
-    .encode(&mut file)
-    .unwrap();
-    let mdat_at = file.len();
-    file.extend_from_slice(&mdat_box(&mdat_payload));
-    // Samples begin after the mdat's own eight-byte header.
-    let first_sample_at = u32::try_from(mdat_at + 8).unwrap();
-
-    let mut trak = sampled_trak(
-        vec![u32::try_from(unit.len()).unwrap(); sample_count],
-        Some(vec![1, 4]),
-        None,
-    );
-    // Point the sample table at where the bytes actually are, and give the
-    // track a codec so `tracks` can read a shape from it.
-    trak.mdia.minf.stbl.stco = Some(Stco {
-        entries: vec![first_sample_at, first_sample_at + 18],
-    });
-    trak.mdia.mdhd = Mdhd {
-        timescale: 90_000,
-        ..Default::default()
-    };
-    trak.mdia.minf.stbl.stsd = Stsd {
-        codecs: vec![Avc1 {
-            visual: Visual {
-                data_reference_index: 1,
-                width: 1280,
-                height: 720,
-                ..Default::default()
-            },
-            avcc: Avcc::decode(
-                &mut avcc_box(
-                    &data_encoding::HEXLOWER
-                        .decode(b"0142c01effe100046742c01e01000268ce")
-                        .unwrap(),
-                )
-                .as_slice(),
-            )
-            .unwrap(),
-            ..Default::default()
-        }
-        .into()],
-        ..Default::default()
-    };
-    Moov {
-        mvhd: Mvhd {
-            timescale: 90_000,
-            ..Default::default()
-        },
-        trak: vec![trak],
-        ..Default::default()
-    }
-    .encode(&mut file)
-    .unwrap();
-
+    let file = whole_file();
     let total = u64::try_from(file.len()).unwrap();
     let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
     let bytes = file.clone();

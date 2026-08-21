@@ -848,6 +848,79 @@ pub mod testkit {
 
     pub const SAMPLES_PER_CHUNK: usize = 3;
 
+    /// A complete container: `ftyp`, an `mdat` of key-frame units, then the
+    /// `moov` after it — where a camera or an editor writes one.
+    pub fn whole_file() -> Vec<u8> {
+        use mp4_atom::{Avc1, Avcc, Decode, Encode, FourCC, Ftyp, Mdhd, Moov, Mvhd, Stsd, Visual};
+
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let sample_count = 6usize;
+        let mdat_payload: Vec<u8> = unit
+            .iter()
+            .copied()
+            .cycle()
+            .take(unit.len() * sample_count)
+            .collect();
+
+        let mut file = Vec::new();
+        Ftyp {
+            major_brand: FourCC::new(b"iso6"),
+            minor_version: 1,
+            compatible_brands: vec![FourCC::new(b"iso6")],
+        }
+        .encode(&mut file)
+        .unwrap();
+        let mdat_at = file.len();
+        file.extend_from_slice(&mdat_box(&mdat_payload));
+        let first_sample_at = u32::try_from(mdat_at + 8).unwrap();
+
+        let mut trak = sampled_trak(
+            vec![u32::try_from(unit.len()).unwrap(); sample_count],
+            Some(vec![1, 4]),
+            None,
+        );
+        trak.mdia.minf.stbl.stco = Some(Stco {
+            entries: vec![first_sample_at, first_sample_at + 18],
+        });
+        trak.mdia.mdhd = Mdhd {
+            timescale: 90_000,
+            ..Default::default()
+        };
+        trak.mdia.minf.stbl.stsd = Stsd {
+            codecs: vec![Avc1 {
+                visual: Visual {
+                    data_reference_index: 1,
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                },
+                avcc: Avcc::decode(
+                    &mut avcc_box(
+                        &data_encoding::HEXLOWER
+                            .decode(b"0142c01effe100046742c01e01000268ce")
+                            .unwrap(),
+                    )
+                    .as_slice(),
+                )
+                .unwrap(),
+                ..Default::default()
+            }
+            .into()],
+            ..Default::default()
+        };
+        Moov {
+            mvhd: Mvhd {
+                timescale: 90_000,
+                ..Default::default()
+            },
+            trak: vec![trak],
+            ..Default::default()
+        }
+        .encode(&mut file)
+        .unwrap();
+        file
+    }
+
     pub fn video_track() -> CatalogTrack {
         CatalogTrack {
             track: "video-main".into(),
