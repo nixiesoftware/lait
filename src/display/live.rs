@@ -83,11 +83,43 @@ struct PresentationKey {
     connection: String,
 }
 
+/// How much of a presentation the hub keeps, and whether more is coming.
+///
+/// These were one constant applied at two call sites, which is the same as
+/// saying every source is a live edge. A live edge keeps the last few because
+/// nothing will ask for what fell off it, and never completes — the peer
+/// disconnects and the presentation goes with it. A finite source keeps
+/// everything, because a player joining late still has to reach its first
+/// segment, and completes, which is what lets the playlist say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retention {
+    /// Keep the last `n`. There is always a next one.
+    Rolling(usize),
+    /// Keep every segment. `complete` once the last group is in.
+    Whole { complete: bool },
+}
+
+impl Retention {
+    fn trim<T>(self, retained: &mut VecDeque<T>) {
+        if let Self::Rolling(depth) = self {
+            while retained.len() > depth {
+                retained.pop_front();
+            }
+        }
+    }
+
+    /// Whether a playlist built from this may declare its end.
+    const fn is_complete(self) -> bool {
+        matches!(self, Self::Whole { complete: true })
+    }
+}
+
 struct Presentation {
     cmaf_tracks: Vec<CmafTrackDescription>,
     cmaf_fragments: BTreeMap<String, VecDeque<CmafFragment>>,
     hls_renditions: Vec<HlsRenditionDescription>,
     hls_segments: BTreeMap<String, VecDeque<HlsSegment>>,
+    retention: Retention,
     updates: broadcast::Sender<LiveMediaPacket>,
 }
 
@@ -258,6 +290,9 @@ impl LiveMediaHub {
             "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_seconds}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
             first.group_sequence
         );
+        if presentation.retention.is_complete() {
+            playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        }
         for segment in segments {
             if segment.discontinuity {
                 playlist.push_str("#EXT-X-DISCONTINUITY\n");
@@ -267,6 +302,9 @@ impl LiveMediaHub {
                 f64::from(segment.duration_ms) / 1_000.0,
                 segment.group_sequence
             ));
+        }
+        if presentation.retention.is_complete() {
+            playlist.push_str("#EXT-X-ENDLIST\n");
         }
         Ok(playlist)
     }
@@ -292,7 +330,10 @@ impl LiveMediaHub {
                     .find(|segment| segment.group_sequence == sequence)
             })
             .map(|segment| segment.bytes.clone())
-            .ok_or_else(|| anyhow!("HLS segment is outside the live window"))
+            .ok_or_else(|| match presentation.retention {
+                Retention::Rolling(_) => anyhow!("HLS segment is outside the live window"),
+                Retention::Whole { .. } => anyhow!("HLS segment is not in this presentation"),
+            })
     }
 
     pub fn has_resource(&self, orbit: &str, resource: &str, transport: LiveTransport) -> bool {
@@ -512,6 +553,7 @@ async fn install_catalog(
                 cmaf_fragments: BTreeMap::new(),
                 hls_renditions,
                 hls_segments: BTreeMap::new(),
+                retention: Retention::Rolling(RETAINED_SEGMENTS),
                 updates,
             },
         );
@@ -548,14 +590,13 @@ fn publish_cmaf(
     else {
         return;
     };
+    let retention = presentation.retention;
     let retained = presentation
         .cmaf_fragments
         .entry(fragment.rendition.clone())
         .or_default();
     retained.push_back(fragment.fragment.clone());
-    while retained.len() > RETAINED_SEGMENTS {
-        retained.pop_front();
-    }
+    retention.trim(retained);
     let packet = LiveMediaPacket::Fragment {
         rendition: fragment.rendition,
         group_sequence: fragment.fragment.group_sequence,
@@ -583,14 +624,13 @@ fn publish_hls(
     else {
         return;
     };
+    let retention = presentation.retention;
     let retained = presentation
         .hls_segments
         .entry(segment.rendition.clone())
         .or_default();
     retained.push_back(segment);
-    while retained.len() > RETAINED_SEGMENTS {
-        retained.pop_front();
-    }
+    retention.trim(retained);
 }
 
 fn unique_presentation<'a>(
@@ -677,8 +717,13 @@ mod tests {
     use super::*;
 
     fn hls_presentation() -> Presentation {
+        hls_presentation_with(Retention::Rolling(RETAINED_SEGMENTS))
+    }
+
+    fn hls_presentation_with(retention: Retention) -> Presentation {
         let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
         Presentation {
+            retention,
             cmaf_tracks: Vec::new(),
             cmaf_fragments: BTreeMap::new(),
             hls_renditions: vec![HlsRenditionDescription {
@@ -742,6 +787,110 @@ mod tests {
             376
         );
         assert!(hub.hls_segment("space/orbit", "main", "main", 40).is_err());
+    }
+
+    /// A finite presentation says it is finite, and says where it ends.
+    ///
+    /// Without `#EXT-X-PLAYLIST-TYPE:VOD` and `#EXT-X-ENDLIST` a player treats
+    /// the last segment as the live edge and keeps re-fetching the playlist
+    /// waiting for one more — the file plays through and then hangs instead of
+    /// ending. Neither line appears anywhere in a live playlist, and neither
+    /// appeared anywhere in this repo before there was a finite source to emit
+    /// them for.
+    #[test]
+    fn a_complete_presentation_declares_its_end_and_a_live_one_never_does() {
+        let hub = LiveMediaHub::default();
+        {
+            let mut state = lock(&hub.inner).unwrap();
+            state.presentations.insert(
+                PresentationKey {
+                    orbit: "space/orbit".into(),
+                    peer: "peer".into(),
+                    connection: "connection".into(),
+                },
+                hls_presentation_with(Retention::Whole { complete: true }),
+            );
+        }
+        let finite = hub
+            .hls_media_playlist("space/orbit", "main", "main", "..")
+            .unwrap();
+        assert!(finite.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(finite.trim_end().ends_with("#EXT-X-ENDLIST"));
+
+        let live = LiveMediaHub::default();
+        {
+            let mut state = lock(&live.inner).unwrap();
+            state.presentations.insert(
+                PresentationKey {
+                    orbit: "space/orbit".into(),
+                    peer: "peer".into(),
+                    connection: "connection".into(),
+                },
+                hls_presentation(),
+            );
+        }
+        let rolling = live
+            .hls_media_playlist("space/orbit", "main", "main", "..")
+            .unwrap();
+        assert!(!rolling.contains("#EXT-X-ENDLIST"));
+        assert!(!rolling.contains("#EXT-X-PLAYLIST-TYPE"));
+    }
+
+    /// A segment nobody kept and a segment that never existed are different
+    /// facts, and only the first is about a window that moved.
+    #[test]
+    fn a_missing_segment_says_which_kind_of_missing_it_is() {
+        let rolling = LiveMediaHub::default();
+        {
+            let mut state = lock(&rolling.inner).unwrap();
+            state.presentations.insert(
+                PresentationKey {
+                    orbit: "space/orbit".into(),
+                    peer: "peer".into(),
+                    connection: "connection".into(),
+                },
+                hls_presentation(),
+            );
+        }
+        let aged_out = rolling
+            .hls_segment("space/orbit", "main", "main", 40)
+            .unwrap_err()
+            .to_string();
+        assert!(aged_out.contains("live window"), "{aged_out}");
+
+        let whole = LiveMediaHub::default();
+        {
+            let mut state = lock(&whole.inner).unwrap();
+            state.presentations.insert(
+                PresentationKey {
+                    orbit: "space/orbit".into(),
+                    peer: "peer".into(),
+                    connection: "connection".into(),
+                },
+                hls_presentation_with(Retention::Whole { complete: true }),
+            );
+        }
+        let never_was = whole
+            .hls_segment("space/orbit", "main", "main", 40)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !never_was.contains("live window"),
+            "a finite presentation has no live window: {never_was}"
+        );
+    }
+
+    /// Retention is the whole difference between the two sources.
+    #[test]
+    fn a_whole_presentation_keeps_what_a_rolling_one_drops() {
+        let mut rolling = VecDeque::from([1, 2, 3, 4, 5, 6, 7]);
+        Retention::Rolling(RETAINED_SEGMENTS).trim(&mut rolling);
+        assert_eq!(rolling.len(), RETAINED_SEGMENTS);
+        assert_eq!(rolling.front().copied(), Some(2), "the oldest fell off");
+
+        let mut whole = VecDeque::from([1, 2, 3, 4, 5, 6, 7]);
+        Retention::Whole { complete: false }.trim(&mut whole);
+        assert_eq!(whole.len(), 7, "a player joining late reaches the first");
     }
 
     #[test]
