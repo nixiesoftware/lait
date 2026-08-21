@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use runtime::plane::live::media::{
-    Catalog, Control, Event, EventBody, RequestKeyframe, Session, Subscribe, TrackKind,
-    CATALOG_TRACK, DEFAULT_MAX_LATENCY_MS,
+    Catalog, Control, Event, EventBody, ReceivedGroup, RequestKeyframe, Session, Subscribe,
+    TrackKind, CATALOG_TRACK, DEFAULT_MAX_LATENCY_MS,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -23,6 +23,8 @@ const CATALOG_SUBSCRIPTION_ID: u64 = 1;
 const FIRST_MEDIA_SUBSCRIPTION_ID: u64 = 2;
 const RETAINED_SEGMENTS: usize = 6;
 const RECEIVER_QUEUE: usize = 16;
+/// The peer slot for a presentation no peer produced.
+const STORED_SOURCE: &str = "stored";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -173,6 +175,90 @@ impl LiveMediaHub {
             }
             hub.remove_orbit(&orbit);
         });
+        Ok(())
+    }
+
+    /// Install a presentation from a finite, already-written sequence of groups.
+    ///
+    /// The packagers are the reusable half of this plane: they take a `Catalog`
+    /// and `ReceivedGroup`s and know nothing about where either came from —
+    /// they are already unit-tested from struct literals. What was missing was
+    /// any way to put one behind a presentation without a live session to hang
+    /// it off, so a stored content had no route to a receiver even though every
+    /// piece between the two existed.
+    ///
+    /// Keyed under `STORED_SOURCE` rather than a peer and connection, because a
+    /// finite source has neither. `unique_presentation` still requires the
+    /// resource to be unique per Orbit, so a stored id and a live rendition of
+    /// the same name refuse each other rather than one shadowing the other.
+    pub fn install_whole(
+        &self,
+        orbit: &str,
+        resource: &str,
+        catalog: &Catalog,
+        groups: impl IntoIterator<Item = ReceivedGroup>,
+    ) -> Result<()> {
+        let mut cmaf = CmafCatalogPackager::new(catalog).ok();
+        let mut hls = HlsCatalogPackager::new(catalog).ok();
+        if cmaf.is_none() && hls.is_none() {
+            return Err(anyhow!("no rendition in this catalog can be packaged"));
+        }
+        let mut cmaf_fragments: BTreeMap<String, VecDeque<CmafFragment>> = BTreeMap::new();
+        let mut hls_segments: BTreeMap<String, VecDeque<HlsSegment>> = BTreeMap::new();
+        for group in groups {
+            if let Some(packager) = cmaf.as_mut() {
+                match packager.push_group(&group) {
+                    Ok(fragment) => cmaf_fragments
+                        .entry(fragment.rendition)
+                        .or_default()
+                        .push_back(fragment.fragment),
+                    // A group the CMAF side cannot take is not fatal to the HLS
+                    // side, which packages a different subset of the catalog.
+                    Err(error) => {
+                        tracing::debug!(%error, "stored group refused by the CMAF packager")
+                    }
+                }
+            }
+            if let Some(packager) = hls.as_mut() {
+                match packager.push_group(&group) {
+                    Ok(Some(segment)) => hls_segments
+                        .entry(segment.rendition.clone())
+                        .or_default()
+                        .push_back(segment),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(%error, "stored group refused by the HLS packager")
+                    }
+                }
+            }
+        }
+        if cmaf_fragments.is_empty() && hls_segments.is_empty() {
+            return Err(anyhow!("no group in this content produced a segment"));
+        }
+        let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
+        let mut state = lock(&self.inner)?;
+        state.presentations.insert(
+            PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            },
+            Presentation {
+                cmaf_tracks: cmaf
+                    .as_ref()
+                    .map(|packager| packager.descriptions().to_vec())
+                    .unwrap_or_default(),
+                cmaf_fragments,
+                hls_renditions: hls
+                    .as_ref()
+                    .map(|packager| packager.descriptions().to_vec())
+                    .unwrap_or_default(),
+                hls_segments,
+                // Every group is already in, so this is complete on arrival.
+                retention: Retention::Whole { complete: true },
+                updates,
+            },
+        );
         Ok(())
     }
 
@@ -715,6 +801,146 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use runtime::plane::live::media::{
+        CatalogTrack, Frame, FrameHeader, FrameKind, GroupHeader, CATALOG_VERSION,
+        DEFAULT_MAX_GROUP_DURATION_MS, DEFAULT_MAX_LATENCY_MS,
+    };
+
+    /// One H.264 rendition, the baseline `Catalog::validate` insists on.
+    fn stored_catalog() -> Catalog {
+        Catalog {
+            version: CATALOG_VERSION,
+            jitter_hint_ms: 50,
+            tracks: vec![CatalogTrack {
+                track: "video-main".into(),
+                kind: TrackKind::Video,
+                codec: "avc1.42c01e".into(),
+                timescale: 90_000,
+                decoder_config_hex: "0142c01effe100046742c01e01000268ce".into(),
+                max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+                target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+                bitrate_bps: 2_000_000,
+                width: Some(1280),
+                height: Some(720),
+                frame_rate_milli: Some(30_000),
+                sample_rate: None,
+                channels: None,
+                render_group: Some("film".into()),
+                cmaf_rendition: Some("film".into()),
+                hls_v3_rendition: Some("film".into()),
+            }],
+        }
+    }
+
+    fn stored_group(sequence: u64) -> ReceivedGroup {
+        let payload = vec![0, 0, 0, 2, 0x65, 0x88];
+        ReceivedGroup {
+            header: GroupHeader {
+                subscription_id: 2,
+                track: "video-main".into(),
+                track_kind: TrackKind::Video,
+                group_sequence: sequence,
+                published_at_micros: 1_000_000,
+                timescale: 90_000,
+                max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+            },
+            frames: vec![Frame {
+                header: FrameHeader {
+                    timestamp: i64::try_from(sequence).unwrap() * 90_000,
+                    duration: Some(90_000),
+                    timescale: 90_000,
+                    kind: FrameKind::Key,
+                    payload_len: u32::try_from(payload.len()).unwrap(),
+                },
+                payload,
+            }],
+        }
+    }
+
+    /// A finite source reaches a receiver through the same packagers a peer
+    /// feeds, and the whole of it stays reachable.
+    ///
+    /// Ten groups is more than `RETAINED_SEGMENTS`, so a rolling window would
+    /// have dropped the first four — the assertion on segment 0 is what makes
+    /// this a test of retention rather than of the packagers, which already
+    /// have their own.
+    #[test]
+    fn a_stored_presentation_serves_every_segment_and_declares_its_end() {
+        let hub = LiveMediaHub::default();
+        hub.install_whole(
+            "space/orbit",
+            "film",
+            &stored_catalog(),
+            (0..10).map(stored_group),
+        )
+        .expect("a finite catalog and its groups install");
+
+        let playlist = hub
+            .hls_media_playlist("space/orbit", "film", "film", "..")
+            .expect("a finite presentation serves a playlist");
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
+        assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0"));
+        assert_eq!(
+            playlist.matches("#EXTINF:").count(),
+            10,
+            "every group is listed, not the last {RETAINED_SEGMENTS}"
+        );
+
+        let first = hub
+            .hls_segment("space/orbit", "film", "film", 0)
+            .expect("the first segment outlives a window it does not have");
+        assert_eq!(first.len() % 188, 0, "a real transport stream");
+        assert_eq!(first.first(), Some(&0x47));
+        assert!(hub.hls_segment("space/orbit", "film", "film", 10).is_err());
+    }
+
+    /// The MSE half of the same install, since both packagers run on one pass.
+    #[test]
+    fn a_stored_presentation_also_serves_its_mse_snapshot() {
+        let hub = LiveMediaHub::default();
+        hub.install_whole(
+            "space/orbit",
+            "film",
+            &stored_catalog(),
+            (0..10).map(stored_group),
+        )
+        .unwrap();
+
+        let snapshot = hub.mse_snapshot("space/orbit", "film").unwrap();
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(snapshot.tracks[0].rendition, "film");
+        let inits = snapshot
+            .packets
+            .iter()
+            .filter(|packet| matches!(packet, LiveMediaPacket::Init { .. }))
+            .count();
+        let fragments = snapshot
+            .packets
+            .iter()
+            .filter(|packet| matches!(packet, LiveMediaPacket::Fragment { .. }))
+            .count();
+        assert_eq!(inits, 1, "one init segment per rendition");
+        assert_eq!(fragments, 10, "the whole file, not a catch-up window");
+    }
+
+    /// A catalog nothing can package is refused where the caller can see it.
+    #[test]
+    fn a_stored_install_refuses_rather_than_leaving_an_empty_presentation() {
+        let hub = LiveMediaHub::default();
+        let mut catalog = stored_catalog();
+        catalog.tracks[0].cmaf_rendition = None;
+        catalog.tracks[0].hls_v3_rendition = None;
+        assert!(hub
+            .install_whole("space/orbit", "film", &catalog, (0..2).map(stored_group))
+            .is_err());
+        assert!(
+            hub.hls_media_playlist("space/orbit", "film", "film", "..")
+                .is_err(),
+            "a refused install leaves nothing behind"
+        );
+    }
 
     fn hls_presentation() -> Presentation {
         hls_presentation_with(Retention::Rolling(RETAINED_SEGMENTS))
