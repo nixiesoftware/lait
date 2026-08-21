@@ -6595,10 +6595,14 @@ mod subprocess_perform {
         let report = session
             .perform(&package, |_| panic!("inline output stages no content"))
             .unwrap();
-        assert!(report.steps.iter().any(|step| matches!(
-            step,
-            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
-        )));
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+            )),
+            "the child never returned; the pass recorded {:?}",
+            report.steps
+        );
         let crate::exec::WorkReply::State(state) = session
             .work(
                 crate::exec::WorkRequest::Inspect {
@@ -6629,10 +6633,14 @@ mod subprocess_perform {
         let run = start_run(&session, &station, &world_id, &identity, 0xE3, b"doomed");
         let package = subprocess_package(&build, "/bin/sh", &["-c", "exit 3"]);
         let report = session.perform(&package, |_| panic!("no content")).unwrap();
-        assert!(report.steps.iter().any(|step| matches!(
-            step,
-            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
-        )));
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+            )),
+            "the child never returned; the pass recorded {:?}",
+            report.steps
+        );
         let crate::exec::WorkReply::State(state) = session
             .work(
                 crate::exec::WorkRequest::Inspect {
@@ -6667,10 +6675,14 @@ mod subprocess_perform {
             began.elapsed() < std::time::Duration::from_secs(10),
             "the kill happens at the wall, not at the child's leisure"
         );
-        assert!(report.steps.iter().any(|step| matches!(
-            step,
-            crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
-        )));
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
+            )),
+            "the wall did not fail the run; the pass recorded {:?}",
+            report.steps
+        );
         assert!(!report
             .steps
             .iter()
