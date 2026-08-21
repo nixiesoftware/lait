@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2513
-pr-platform    2043
-nightly        2541
+pr             2516
+pr-platform    2046
+nightly        2544
 mutants        106
 
 [gates]
@@ -560,8 +560,10 @@ lait display::cmaf::tests::incomplete_or_replayed_groups_fail_closed
 lait display::cmaf::tests::init_segment_is_mse_shaped_and_carries_the_decoder_config
 lait display::cmaf::tests::media_segment_is_styp_moof_mdat_with_bounded_sample_metadata
 lait display::cmaf::tests::sequence_or_timeline_gaps_are_explicit_discontinuities
+lait display::compiler::tests::a_stored_and_a_live_scene_of_the_same_name_are_different_assets
 lait display::compiler::tests::compilation_binds_assets_and_revision_to_the_assignment
 lait display::compiler::tests::live_media_is_compiled_for_each_receiver_playback_tier
+lait display::compiler::tests::stored_media_degrades_on_a_frame_tier_receiver
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
 lait display::hls::tests::avcc_and_aac_are_converted_to_transport_elementary_streams
 lait display::hls::tests::hls_v3_segment_is_real_mpeg_ts_and_discontinuities_are_explicit
@@ -1103,6 +1105,7 @@ lait-signage world::tests::two_entries_of_one_kind_carry_their_own_settings
 lait-signage world::tests::used_by_finds_the_programs_whose_items_name_an_entry
 lait-signage-app display::tests::a_content_id_the_world_accepts_is_always_expressible_to_a_surface
 lait-signage-app display::tests::a_live_entry_is_still_marked_live
+lait-signage-app display::tests::a_rendition_name_is_not_a_content_id
 lait-signage-app display::tests::a_stored_entry_names_its_content_and_is_not_live
 lait-signage-app display::tests::an_integration_and_a_dangling_item_both_blank_rather_than_vanish
 lait-signage-app display::tests::authored_slide_renders_to_a_real_png
