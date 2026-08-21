@@ -45,6 +45,7 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         decode_client_reply,
     )?
     .with_web_parser(host::parse_web)
+    .with_local_handler(host::execute)
     .with_display(DISPLAY_NAME, Some("▣"), None)?
     .with_tagline("Author durable programs for managed displays")?
     .with_accent(0x009B_5DE5)?

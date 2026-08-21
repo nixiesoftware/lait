@@ -12,6 +12,8 @@ font8x8 = "0.3.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 mechanics = { path = "../../crates/mechanics" }
 replica = { path = "../../crates/replica" }
+# The container reader: media_ingest derives a catalog before sealing.
+mediabox = { path = "../../crates/mediabox" }
 runtime = { path = "../../crates/runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,3 +23,6 @@ world-interface = { path = "../../crates/world-interface" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+mediabox = { path = "../../crates/mediabox", features = ["testkit"] }

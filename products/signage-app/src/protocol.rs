@@ -808,13 +808,15 @@ mod tests {
             id: id(2),
             name: "Lobby loop".into(),
             source: contract::MediaSource::Stored {
-                content: "cnt_lobby_loop".into(),
+                // A content id in the only shape the upload route writes.
+                content: "ab".repeat(32),
                 size: 4_096,
                 mime: "video/mp4".into(),
             },
             duration_ms: Some(10_000),
             width: Some(1_920),
             height: Some(1_080),
+            catalog: None,
         }
     }
 

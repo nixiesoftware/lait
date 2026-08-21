@@ -374,6 +374,7 @@ dependencies = [
  "lait-signage-app",
  "lait-workbench",
  "mechanics",
+ "mediabox",
  "replica",
  "schedule",
  "serde",
@@ -3919,6 +3920,7 @@ dependencies = [
  "libc",
  "libmpegts",
  "mechanics",
+ "mediabox",
  "mp4-atom",
  "n0-future",
  "postcard",
@@ -4081,6 +4083,7 @@ dependencies = [
  "image",
  "lait-signage",
  "mechanics",
+ "mediabox",
  "replica",
  "runtime",
  "serde",
@@ -4458,6 +4461,15 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "x25519-dalek",
+]
+
+[[package]]
+name = "mediabox"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "mp4-atom",
+ "runtime",
 ]
 
 [[package]]

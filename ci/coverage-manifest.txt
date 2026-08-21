@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2544
-pr-platform    2074
-nightly        2572
+pr             2550
+pr-platform    2080
+nightly        2578
 mutants        106
 
 [gates]
@@ -565,26 +565,6 @@ lait display::compiler::tests::compilation_binds_assets_and_revision_to_the_assi
 lait display::compiler::tests::live_media_is_compiled_for_each_receiver_playback_tier
 lait display::compiler::tests::stored_media_degrades_on_a_frame_tier_receiver
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
-lait display::demux::tests::a_box_that_cannot_advance_is_refused_rather_than_looped_on
-lait display::demux::tests::a_built_catalog_packages
-lait display::demux::tests::a_catalog_takes_its_rates_from_the_file_and_its_names_from_policy
-lait display::demux::tests::a_container_without_a_moov_is_refused
-lait display::demux::tests::a_file_that_cannot_meet_the_baseline_is_refused_where_a_person_is
-lait display::demux::tests::a_moov_after_a_huge_mdat_is_found_without_reading_the_mdat
-lait display::demux::tests::a_moov_at_the_front_is_found_too
-lait display::demux::tests::a_sample_table_walks_to_offsets_times_and_sync_flags
-lait display::demux::tests::a_short_read_is_refused_rather_than_packaged
-lait display::demux::tests::a_table_that_disagrees_with_itself_is_refused
-lait display::demux::tests::a_track_reads_into_groups_the_packagers_accept
-lait display::demux::tests::a_track_without_a_sync_table_is_all_sync_not_none
-lait display::demux::tests::a_video_track_survives_the_round_trip_through_its_own_init_segment
-lait display::demux::tests::a_zero_composition_table_is_not_a_b_frame
-lait display::demux::tests::an_audio_track_survives_the_round_trip_through_its_own_init_segment
-lait display::demux::tests::an_empty_track_has_no_samples_and_no_groups
-lait display::demux::tests::bytes_that_are_not_a_container_are_refused_not_read_as_empty
-lait display::demux::tests::composition_offsets_are_refused_because_neither_muxer_can_write_them
-lait display::demux::tests::groups_start_on_sync_samples_and_respect_the_duration_budget
-lait display::demux::tests::the_groups_a_track_produces_package_into_real_segments
 lait display::hls::tests::avcc_and_aac_are_converted_to_transport_elementary_streams
 lait display::hls::tests::hls_v3_segment_is_real_mpeg_ts_and_discontinuities_are_explicit
 lait display::http::tests::every_display_route_is_a_pattern_the_router_accepts
@@ -592,6 +572,7 @@ lait display::http::tests::the_hls_filenames_keep_their_extensions_and_reject_wh
 lait display::live::tests::a_complete_presentation_declares_its_end_and_a_live_one_never_does
 lait display::live::tests::a_gap_in_the_sequence_is_still_addressable_on_both_sides
 lait display::live::tests::a_missing_segment_says_which_kind_of_missing_it_is
+lait display::live::tests::a_planned_presentation_serves_any_segment_without_holding_all_of_them
 lait display::live::tests::a_resource_is_refused_when_two_source_sessions_claim_it
 lait display::live::tests::a_stored_install_refuses_rather_than_leaving_an_empty_presentation
 lait display::live::tests::a_stored_presentation_also_serves_its_mse_snapshot
@@ -614,6 +595,12 @@ lait display::store::tests::policy_is_portable_and_holds_no_credential
 lait display::store::tests::revocation_keeps_the_credential_so_the_refusal_stays_honest
 lait display::store::tests::state_is_atomic_versioned_and_reopens
 lait display::store::tests::the_identifier_key_survives_losing_the_machine_that_minted_it
+lait display::stored_tests::a_built_catalog_packages
+lait display::stored_tests::a_stored_origin_plans_installs_and_serves_on_demand
+lait display::stored_tests::a_video_track_survives_the_round_trip_through_its_own_init_segment
+lait display::stored_tests::a_whole_file_reads_from_its_bytes_and_serves
+lait display::stored_tests::an_audio_track_survives_the_round_trip_through_its_own_init_segment
+lait display::stored_tests::the_groups_a_track_produces_package_into_real_segments
 lait display::tls::tests::tls_identity_is_stable_and_private
 lait host_client::tests::a_book_resolution_crosses_as_labels_not_cards
 lait host_client::tests::a_directory_selected_scope_cannot_address_a_sibling_orbit
@@ -1099,6 +1086,7 @@ lait-post tests::one_persons_mailbox_is_not_anothers
 lait-post tests::the_challenge_map_is_bounded_without_becoming_a_wall
 lait-post tests::unblocking_a_sender_lets_their_next_letter_through
 lait-post::over_http a_letter_crosses_the_wire_and_only_its_recipient_collects_it
+lait-signage contract::tests::a_catalog_is_canonical_or_absent_and_only_bytes_carry_one
 lait-signage contract::tests::a_program_grant_and_a_fleet_grant_both_satisfy_writing_that_program
 lait-signage contract::tests::a_screen_reports_when_its_answer_changes_with_nobody_writing
 lait-signage contract::tests::a_screen_schedule_is_validated_like_the_rest
@@ -1144,6 +1132,7 @@ lait-signage-app host::tests::a_query_parses_and_stays_a_query
 lait-signage-app host::tests::an_unknown_command_is_refused_by_name_and_lists_what_exists
 lait-signage-app host::tests::every_delete_is_a_command_and_asks_by_name
 lait-signage-app host::tests::every_verb_parses_back_with_the_class_the_protocol_assigns
+lait-signage-app host::tests::media_ingest_derives_before_it_seals_and_refuses_before_it_spends
 lait-signage-app host::tests::the_package_now_exposes_a_web_client_interface
 lait-signage-app host::tests::the_refusal_lists_exactly_the_commands_this_build_serves
 lait-signage-app protocol::tests::a_media_put_round_trips_through_the_call
@@ -1688,6 +1677,23 @@ mechanics::it world_policy::historical_grant_then_removal_evaluated_at_each_fron
 mechanics::it world_policy::implementation_pin_refuses_unapproved_id
 mechanics::it world_policy::receipt_verifies_and_every_substitution_is_caught
 mechanics::it world_policy::require_all_any_witness_selection_and_historical_evaluation
+mediabox tests::a_box_that_cannot_advance_is_refused_rather_than_looped_on
+mediabox tests::a_catalog_takes_its_rates_from_the_file_and_its_names_from_policy
+mediabox tests::a_container_without_a_moov_is_refused
+mediabox tests::a_file_that_cannot_meet_the_baseline_is_refused_where_a_person_is
+mediabox tests::a_moov_after_a_huge_mdat_is_found_without_reading_the_mdat
+mediabox tests::a_moov_at_the_front_is_found_too
+mediabox tests::a_plan_serves_one_group_without_materialising_the_rest
+mediabox tests::a_sample_table_walks_to_offsets_times_and_sync_flags
+mediabox tests::a_short_read_is_refused_rather_than_packaged
+mediabox tests::a_table_that_disagrees_with_itself_is_refused
+mediabox tests::a_track_reads_into_groups_the_packagers_accept
+mediabox tests::a_track_without_a_sync_table_is_all_sync_not_none
+mediabox tests::a_zero_composition_table_is_not_a_b_frame
+mediabox tests::an_empty_track_has_no_samples_and_no_groups
+mediabox tests::bytes_that_are_not_a_container_are_refused_not_read_as_empty
+mediabox tests::composition_offsets_are_refused_because_neither_muxer_can_write_them
+mediabox tests::groups_start_on_sync_samples_and_respect_the_duration_budget
 register tests::a_slot_names_its_member_so_two_winners_cannot_be_represented
 register tests::an_empty_slot_is_in_force_as_nothing
 register tests::an_override_ends_without_anyone_writing

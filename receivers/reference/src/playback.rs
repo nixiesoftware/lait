@@ -22,6 +22,14 @@ pub struct StagedAsset {
 pub struct Runtime {
     program: DisplayProgram,
     staged: BTreeMap<DisplayAssetId, StagedAsset>,
+    /// Ticketed playlist URLs, one per media manifest, minted at adoption.
+    ///
+    /// Minted when the program is adopted because that is when a session is in
+    /// hand; re-presented from here during recovery, when there is none. A
+    /// ticket lives a day and every revision re-adopts, so the one program
+    /// that outruns its grant is a revision unchanged for over 24 hours — a
+    /// bound worth knowing and not worth a clock this receiver does not trust.
+    media: BTreeMap<DisplayAssetId, String>,
     current_index: usize,
     elapsed_base_ms: u64,
     item_started_at: Instant,
@@ -33,13 +41,18 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(program: DisplayProgram, staged: BTreeMap<DisplayAssetId, StagedAsset>) -> Self {
+    pub fn new(
+        program: DisplayProgram,
+        staged: BTreeMap<DisplayAssetId, StagedAsset>,
+        media: BTreeMap<DisplayAssetId, String>,
+    ) -> Self {
         let current_index = usize::from(program.playback.current_index);
         let elapsed_base_ms = u64::from(program.playback.elapsed_ms);
         let now = Instant::now();
         Self {
             program,
             staged,
+            media,
             current_index,
             elapsed_base_ms,
             item_started_at: now,
@@ -186,7 +199,13 @@ impl Runtime {
                     PlaybackViewScene::Frame(staged)
                 }
                 DisplayScene::Blank { reason } => PlaybackViewScene::Blank(*reason),
-                DisplayScene::Media { .. } => PlaybackViewScene::Unsupported,
+                DisplayScene::Media { manifest, .. } => {
+                    let url = self
+                        .media
+                        .get(&manifest.id)
+                        .ok_or_else(|| anyhow!("current media item holds no ticket"))?;
+                    PlaybackViewScene::Media { url }
+                }
             }
         };
         Ok(PlaybackView {
@@ -225,6 +244,7 @@ impl Runtime {
                 PlaybackState::Displaying,
             ),
             PlaybackViewScene::Blank(_) => (None, PlaybackState::Blank),
+            PlaybackViewScene::Media { .. } => (None, PlaybackState::Displaying),
             PlaybackViewScene::Unsupported => (None, PlaybackState::Unsupported),
         };
         Ok((
@@ -289,6 +309,11 @@ fn remaining_ms(since: Instant, interval_ms: u32) -> u32 {
 
 pub enum PlaybackViewScene<'a> {
     Frame(&'a StagedAsset),
+    /// A media item's ticketed playlist URL, minted when the program was
+    /// adopted.
+    Media {
+        url: &'a str,
+    },
     Blank(BlankReason),
     Unsupported,
 }
@@ -318,6 +343,7 @@ impl Presenter {
     pub fn present(&mut self, view: &PlaybackView<'_>) -> Result<()> {
         let scene_key = match view.scene {
             PlaybackViewScene::Frame(staged) => staged.descriptor.id.as_str(),
+            PlaybackViewScene::Media { url } => url,
             PlaybackViewScene::Blank(_) => "blank",
             PlaybackViewScene::Unsupported => "unsupported",
         };
@@ -333,6 +359,7 @@ impl Presenter {
                 atomic_copy(&staged.path, &self.output.join("frame.png"))?;
                 PresentedScene::Frame { path: "frame.png" }
             }
+            PlaybackViewScene::Media { url } => PresentedScene::Media { url },
             PlaybackViewScene::Blank(reason) => PresentedScene::Blank { reason },
             PlaybackViewScene::Unsupported => PresentedScene::Unsupported,
         };
@@ -367,8 +394,17 @@ impl Presenter {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PresentedScene<'a> {
-    Frame { path: &'a str },
-    Blank { reason: BlankReason },
+    Frame {
+        path: &'a str,
+    },
+    /// The atomic handoff for media: whatever consumes the output directory
+    /// plays this URL. It is the ticketed playlist, absolute, same-origin.
+    Media {
+        url: &'a str,
+    },
+    Blank {
+        reason: BlankReason,
+    },
     Unsupported,
 }
 

@@ -1,0 +1,29 @@
+[package]
+name = "mediabox"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+# Reading an ISO-BMFF container into the live plane's own vocabulary.
+#
+# A crate rather than a module of the binary, because the two callers sit on
+# opposite sides of it: the display coordinator packages what this reads, and a
+# product's app boundary derives a catalog at ingest — and an app package
+# cannot depend on the binary. This landed inside `src/display` first, which
+# stranded the capability where its second caller could not reach it.
+
+[dependencies]
+# The container codec. Already in the workspace for the CMAF packager; used
+# bidirectionally there and read-only here.
+mp4-atom = "0.15"
+# The live plane's media vocabulary: Catalog, ReceivedGroup, the bounds.
+runtime = { path = "../runtime" }
+data-encoding = "2.6"
+
+[features]
+testkit = []
+
+[lints]
+workspace = true

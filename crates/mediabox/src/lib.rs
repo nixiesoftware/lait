@@ -96,6 +96,17 @@ pub struct TrackShape {
 /// the catalog's own baseline rule is what decides whether what remains is
 /// enough.
 pub fn track_shapes(init: &[u8]) -> Result<Vec<TrackShape>, Failure> {
+    Ok(tracks(init)?.into_iter().map(|(_, shape)| shape).collect())
+}
+
+/// Every packageable track an initialization segment describes, paired with the
+/// `Trak` it came from.
+///
+/// The pairing is the point. A shape says what a track *is* and a `Trak` holds
+/// the sample table that says where its bytes are, and [`catalog`] needs both —
+/// so returning only shapes meant a caller had to decode the same container a
+/// second time to get back what this function had already read.
+pub fn tracks(init: &[u8]) -> Result<Vec<(mp4_atom::Trak, TrackShape)>, Failure> {
     let mut cursor = init;
     let moov = loop {
         let Ok(header) = mp4_atom::Header::decode(&mut cursor) else {
@@ -125,16 +136,19 @@ pub fn track_shapes(init: &[u8]) -> Result<Vec<TrackShape>, Failure> {
                     avc1.avcc
                         .encode_body(&mut decoder_config)
                         .map_err(|_| Failure::Container)?;
-                    shapes.push(TrackShape {
-                        kind: TrackKind::Video,
-                        codec: format!("avc1.{profile:02x}{compat:02x}{level:02x}"),
-                        timescale,
-                        decoder_config,
-                        width: Some(u32::from(avc1.visual.width)),
-                        height: Some(u32::from(avc1.visual.height)),
-                        sample_rate: None,
-                        channels: None,
-                    });
+                    shapes.push((
+                        trak.clone(),
+                        TrackShape {
+                            kind: TrackKind::Video,
+                            codec: format!("avc1.{profile:02x}{compat:02x}{level:02x}"),
+                            timescale,
+                            decoder_config,
+                            width: Some(u32::from(avc1.visual.width)),
+                            height: Some(u32::from(avc1.visual.height)),
+                            sample_rate: None,
+                            channels: None,
+                        },
+                    ));
                 }
                 Codec::Mp4a(mp4a) => {
                     let decoder_config = mp4a
@@ -147,16 +161,19 @@ pub fn track_shapes(init: &[u8]) -> Result<Vec<TrackShape>, Failure> {
                         .ok_or(Failure::Incomplete)?;
                     let channels =
                         u8::try_from(mp4a.audio.channel_count).map_err(|_| Failure::Incomplete)?;
-                    shapes.push(TrackShape {
-                        kind: TrackKind::Audio,
-                        codec: "mp4a.40.2".into(),
-                        timescale,
-                        decoder_config,
-                        width: None,
-                        height: None,
-                        sample_rate: Some(u32::from(mp4a.audio.sample_rate.integer())),
-                        channels: Some(channels),
-                    });
+                    shapes.push((
+                        trak.clone(),
+                        TrackShape {
+                            kind: TrackKind::Audio,
+                            codec: "mp4a.40.2".into(),
+                            timescale,
+                            decoder_config,
+                            width: None,
+                            height: None,
+                            sample_rate: Some(u32::from(mp4a.audio.sample_rate.integer())),
+                            channels: Some(channels),
+                        },
+                    ));
                 }
                 _ => {}
             }
@@ -446,7 +463,7 @@ pub fn find_moov(
     let mut at = 0u64;
     while at < total {
         let header = read(at, LARGE_BOX_HEADER_BYTES)?;
-        let (size, kind, header_len) = parse_box_header(&header, total, at)?;
+        let (size, kind, header_len) = box_header(&header, total, at)?;
         if &kind == b"moov" {
             let body = size
                 .checked_sub(u64::from(header_len))
@@ -470,7 +487,7 @@ pub fn find_moov(
 /// real size follows as 64 bits. Both are legal and both are refused if they
 /// would not advance — a box that does not move the cursor is how a malformed
 /// file becomes an infinite loop.
-fn parse_box_header(header: &[u8], total: u64, at: u64) -> Result<(u64, [u8; 4], u32), Failure> {
+pub fn box_header(header: &[u8], total: u64, at: u64) -> Result<(u64, [u8; 4], u32), Failure> {
     let short = header.get(..8).ok_or(Failure::Container)?;
     let (declared_bytes, kind_bytes) = short.split_at(4);
     let declared = u32::from_be_bytes(declared_bytes.try_into().map_err(|_| Failure::Container)?);
@@ -613,19 +630,332 @@ pub fn catalog(
     Ok(catalog)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Read a stored file's catalog: find the `moov`, read its tracks, derive.
+///
+/// The composition the pieces above exist for, and the one a caller should
+/// reach for. `read` is a seam rather than a content handle — the demuxer says
+/// which bytes and knows nothing about where they live — so this runs against
+/// an in-memory file, a `ContentCursor`, or a control-plane range read without
+/// any of them knowing about the others.
+pub fn read_catalog(
+    total: u64,
+    read: impl FnMut(u64, u32) -> Result<Vec<u8>, Failure>,
+    policy: &CatalogPolicy,
+) -> Result<StoredMedia, Failure> {
+    let moov = find_moov(total, read)?;
+    let tracks = tracks(&moov)?;
+    let catalog = catalog(&tracks, policy)?;
+    Ok(StoredMedia { catalog, tracks })
+}
 
-    use crate::display::CmafTrackPackager;
-    use mp4_atom::{
-        Ctts, CttsEntry, Stco, Stsc, StscEntry, Stss, Stsz, StszSamples, Stts, SttsEntry, Trak,
-    };
+/// A stored file's catalog and the tracks it was derived from.
+///
+/// The tracks travel with it because the next thing anyone does is read groups,
+/// and re-deriving them would mean reading the container again for something
+/// this call already holds.
+pub struct StoredMedia {
+    pub catalog: Catalog,
+    pub tracks: Vec<(mp4_atom::Trak, TrackShape)>,
+}
+
+impl StoredMedia {
+    /// Read every packageable track's groups, in catalog order.
+    pub fn groups(
+        &self,
+        max_group_ms: u32,
+        mut read: impl FnMut(u64, u32) -> Result<Vec<u8>, Failure>,
+    ) -> Result<Vec<ReceivedGroup>, Failure> {
+        let mut out = Vec::new();
+        for (index, (trak, shape)) in self.tracks.iter().enumerate() {
+            let name = self
+                .catalog
+                .tracks
+                .get(index)
+                .ok_or(Failure::Malformed)?
+                .track
+                .clone();
+            out.extend(track_groups(trak, shape, &name, max_group_ms, &mut read)?);
+        }
+        Ok(out)
+    }
+}
+
+/// A stored file's shape, held so any one group can be read without the rest.
+///
+/// The reason this exists rather than a list of finished segments: a two-hour
+/// film at two-second groups is about 3,600 of them, and materialising every
+/// one to serve the first is the same defect as holding a whole file in memory
+/// to answer a range request. What is held here is the *table*, which is small
+/// — a hundred thousand samples is a couple of megabytes — while the `mdat`
+/// stays where it is until somebody asks for a segment out of it.
+pub struct StoredPlan {
+    pub catalog: Catalog,
+    tracks: Vec<PlannedTrack>,
+    max_group_ms: u32,
+}
+
+struct PlannedTrack {
+    name: String,
+    shape: TrackShape,
+    samples: Vec<Sample>,
+    groups: Vec<std::ops::Range<usize>>,
+}
+
+/// The bytes one group needs, as ranges into the file.
+///
+/// Answered without touching the content plane so a caller can read them
+/// however it likes — and, in the coordinator's case, read them *off* the lock
+/// that guards the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentPlan {
+    pub ranges: Vec<(u64, u32)>,
+}
+
+impl StoredPlan {
+    /// Plan a stored file from its `moov` bytes alone.
+    ///
+    /// [`StoredPlan::read`] drives a synchronous reader, which suits an ingest
+    /// boundary holding a file. A coordinator's reads go over a control channel
+    /// and are async, so it fetches the `moov` itself — walking boxes with
+    /// [`box_header`] — and hands the bytes here. Everything after the fetch is
+    /// pure: the sample tables are in the `moov`, and no further byte of the
+    /// file is needed to plan all of it.
+    pub fn from_moov(moov: &[u8], policy: &CatalogPolicy) -> Result<Self, Failure> {
+        let tracks = tracks(moov)?;
+        let catalog = catalog(&tracks, policy)?;
+        let mut planned = Vec::new();
+        for (index, (trak, shape)) in tracks.iter().enumerate() {
+            let samples = samples(trak)?;
+            let groups = groups(&samples, shape.timescale, policy.max_group_duration_ms);
+            planned.push(PlannedTrack {
+                name: catalog
+                    .tracks
+                    .get(index)
+                    .ok_or(Failure::Malformed)?
+                    .track
+                    .clone(),
+                shape: shape.clone(),
+                samples,
+                groups,
+            });
+        }
+        Ok(Self {
+            catalog,
+            tracks: planned,
+            max_group_ms: policy.max_group_duration_ms,
+        })
+    }
+
+    /// Plan a stored file: read its catalog, then walk each track's table once.
+    pub fn read(
+        total: u64,
+        read: impl FnMut(u64, u32) -> Result<Vec<u8>, Failure>,
+        policy: &CatalogPolicy,
+    ) -> Result<Self, Failure> {
+        let media = read_catalog(total, read, policy)?;
+        let mut tracks = Vec::new();
+        for (index, (trak, shape)) in media.tracks.iter().enumerate() {
+            let samples = samples(trak)?;
+            let groups = groups(&samples, shape.timescale, policy.max_group_duration_ms);
+            tracks.push(PlannedTrack {
+                name: media
+                    .catalog
+                    .tracks
+                    .get(index)
+                    .ok_or(Failure::Malformed)?
+                    .track
+                    .clone(),
+                shape: shape.clone(),
+                samples,
+                groups,
+            });
+        }
+        Ok(Self {
+            catalog: media.catalog,
+            tracks,
+            max_group_ms: policy.max_group_duration_ms,
+        })
+    }
+
+    /// How many groups this file has. The playlist lists exactly this many.
+    pub fn group_count(&self) -> usize {
+        self.tracks
+            .first()
+            .map(|track| track.groups.len())
+            .unwrap_or(0)
+    }
+
+    /// One group's duration in milliseconds, for the playlist's `EXTINF`.
+    pub fn group_duration_ms(&self, sequence: usize) -> Option<u32> {
+        let track = self.tracks.first()?;
+        let range = track.groups.get(sequence)?;
+        let members = track.samples.get(range.clone())?;
+        let ticks: u64 = members.iter().map(|s| u64::from(s.duration)).sum();
+        ticks
+            .saturating_mul(1_000)
+            .checked_div(u64::from(track.shape.timescale))
+            .and_then(|value| u32::try_from(value).ok())
+    }
+
+    /// Which bytes group `sequence` needs, across every track.
+    pub fn plan(&self, sequence: usize) -> Option<SegmentPlan> {
+        let mut ranges = Vec::new();
+        for track in &self.tracks {
+            let range = track.groups.get(sequence)?;
+            for sample in track.samples.get(range.clone())? {
+                ranges.push((sample.offset, sample.size));
+            }
+        }
+        Some(SegmentPlan { ranges })
+    }
+
+    /// Build group `sequence` from bytes read against its own plan.
+    ///
+    /// `bytes` must be the plan's ranges in order. A caller that read something
+    /// else gets `Malformed` rather than a group built from the wrong samples —
+    /// which would package cleanly and play as noise.
+    pub fn build(&self, sequence: usize, bytes: &[Vec<u8>]) -> Result<Vec<ReceivedGroup>, Failure> {
+        let mut supplied = bytes.iter();
+        let mut out = Vec::new();
+        for track in &self.tracks {
+            let range = track.groups.get(sequence).ok_or(Failure::Malformed)?;
+            let members = track.samples.get(range.clone()).ok_or(Failure::Malformed)?;
+            let mut frames = Vec::with_capacity(members.len());
+            for sample in members {
+                let payload = supplied.next().ok_or(Failure::Malformed)?;
+                if payload.len() != usize::try_from(sample.size).map_err(|_| Failure::Malformed)? {
+                    return Err(Failure::Malformed);
+                }
+                frames.push(Frame {
+                    header: FrameHeader {
+                        timestamp: i64::try_from(sample.decode_time)
+                            .map_err(|_| Failure::Malformed)?,
+                        duration: Some(u64::from(sample.duration)),
+                        timescale: track.shape.timescale,
+                        kind: if sample.sync {
+                            FrameKind::Key
+                        } else {
+                            FrameKind::Delta
+                        },
+                        payload_len: sample.size,
+                    },
+                    payload: payload.clone(),
+                });
+            }
+            let first = members.first().ok_or(Failure::Malformed)?;
+            out.push(ReceivedGroup {
+                header: GroupHeader {
+                    subscription_id: STORED_SUBSCRIPTION,
+                    track: track.name.clone(),
+                    track_kind: track.shape.kind,
+                    group_sequence: u64::try_from(sequence).map_err(|_| Failure::Malformed)?,
+                    published_at_micros: presentation_micros(
+                        first.decode_time,
+                        track.shape.timescale,
+                    )?,
+                    timescale: track.shape.timescale,
+                    max_group_duration_ms: self.max_group_ms,
+                },
+                frames,
+            });
+        }
+        if supplied.next().is_some() {
+            return Err(Failure::Malformed);
+        }
+        Ok(out)
+    }
+}
+
+/// Fixtures shared by this crate's tests and its consumers' tests.
+///
+/// Feature-gated rather than duplicated: the display coordinator's tests
+/// exercise the same containers this crate's do, and a private copy on
+/// each side is two fixtures that drift apart the first time one learns
+/// something.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit {
+    use super::*;
+    use mp4_atom::{Ctts, Stco, Stsc, StscEntry, Stss, Stsz, StszSamples, Stts, SttsEntry, Trak};
     use runtime::plane::live::media::{
         CatalogTrack, DEFAULT_MAX_GROUP_DURATION_MS, DEFAULT_MAX_LATENCY_MS,
     };
 
-    fn video_track() -> CatalogTrack {
+    pub const SAMPLES_PER_CHUNK: usize = 3;
+
+    /// A complete container: `ftyp`, an `mdat` of key-frame units, then the
+    /// `moov` after it — where a camera or an editor writes one.
+    pub fn whole_file() -> Vec<u8> {
+        use mp4_atom::{Avc1, Avcc, Decode, Encode, FourCC, Ftyp, Mdhd, Moov, Mvhd, Stsd, Visual};
+
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let sample_count = 6usize;
+        let mdat_payload: Vec<u8> = unit
+            .iter()
+            .copied()
+            .cycle()
+            .take(unit.len() * sample_count)
+            .collect();
+
+        let mut file = Vec::new();
+        Ftyp {
+            major_brand: FourCC::new(b"iso6"),
+            minor_version: 1,
+            compatible_brands: vec![FourCC::new(b"iso6")],
+        }
+        .encode(&mut file)
+        .unwrap();
+        let mdat_at = file.len();
+        file.extend_from_slice(&mdat_box(&mdat_payload));
+        let first_sample_at = u32::try_from(mdat_at + 8).unwrap();
+
+        let mut trak = sampled_trak(
+            vec![u32::try_from(unit.len()).unwrap(); sample_count],
+            Some(vec![1, 4]),
+            None,
+        );
+        trak.mdia.minf.stbl.stco = Some(Stco {
+            entries: vec![first_sample_at, first_sample_at + 18],
+        });
+        trak.mdia.mdhd = Mdhd {
+            timescale: 90_000,
+            ..Default::default()
+        };
+        trak.mdia.minf.stbl.stsd = Stsd {
+            codecs: vec![Avc1 {
+                visual: Visual {
+                    data_reference_index: 1,
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                },
+                avcc: Avcc::decode(
+                    &mut avcc_box(
+                        &data_encoding::HEXLOWER
+                            .decode(b"0142c01effe100046742c01e01000268ce")
+                            .unwrap(),
+                    )
+                    .as_slice(),
+                )
+                .unwrap(),
+                ..Default::default()
+            }
+            .into()],
+            ..Default::default()
+        };
+        Moov {
+            mvhd: Mvhd {
+                timescale: 90_000,
+                ..Default::default()
+            },
+            trak: vec![trak],
+            ..Default::default()
+        }
+        .encode(&mut file)
+        .unwrap();
+        file
+    }
+
+    pub fn video_track() -> CatalogTrack {
         CatalogTrack {
             track: "video-main".into(),
             kind: TrackKind::Video,
@@ -646,7 +976,7 @@ mod tests {
         }
     }
 
-    fn audio_track() -> CatalogTrack {
+    pub fn audio_track() -> CatalogTrack {
         CatalogTrack {
             track: "audio-main".into(),
             kind: TrackKind::Audio,
@@ -667,8 +997,18 @@ mod tests {
         }
     }
 
+    /// An `mdat` box around a payload.
+    pub fn mdat_box(payload: &[u8]) -> Vec<u8> {
+        boxed(b"mdat", payload)
+    }
+
+    /// An `avcC` box around a decoder configuration record.
+    pub fn avcc_box(config: &[u8]) -> Vec<u8> {
+        boxed(b"avcC", config)
+    }
+
     /// A box of `kind` and `payload` bytes, as a container writes one.
-    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    pub fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         let size = u32::try_from(payload.len() + 8).unwrap();
         out.extend_from_slice(&size.to_be_bytes());
@@ -678,7 +1018,7 @@ mod tests {
     }
 
     /// A reader over an in-memory file, counting what it actually read.
-    fn file_reader(
+    pub fn file_reader(
         bytes: Vec<u8>,
         read_bytes: std::rc::Rc<std::cell::Cell<u64>>,
     ) -> impl FnMut(u64, u32) -> Result<Vec<u8>, Failure> {
@@ -691,6 +1031,152 @@ mod tests {
             read_bytes.set(read_bytes.get() + slice.len() as u64);
             Ok(slice.to_vec())
         }
+    }
+
+    pub fn ingest_policy() -> CatalogPolicy {
+        CatalogPolicy {
+            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+            target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+            jitter_hint_ms: 50,
+            rendition: "film".into(),
+        }
+    }
+
+    pub fn video_shape() -> TrackShape {
+        TrackShape {
+            kind: TrackKind::Video,
+            codec: "avc1.42c01e".into(),
+            timescale: 90_000,
+            decoder_config: data_encoding::HEXLOWER
+                .decode(b"0142c01effe100046742c01e01000268ce")
+                .unwrap(),
+            width: Some(1280),
+            height: Some(720),
+            sample_rate: None,
+            channels: None,
+        }
+    }
+
+    pub fn sampled_trak(sizes: Vec<u32>, stss: Option<Vec<u32>>, ctts: Option<Ctts>) -> Trak {
+        let sample_count = sizes.len();
+        let mut trak = Trak::default();
+        trak.mdia.mdhd.timescale = 90_000;
+        trak.mdia.minf.stbl.stts = Stts {
+            entries: vec![SttsEntry {
+                sample_count: u32::try_from(sizes.len()).unwrap(),
+                sample_delta: 90_000,
+            }],
+        };
+        trak.mdia.minf.stbl.stsz = Stsz {
+            samples: StszSamples::Different { sizes },
+        };
+        trak.mdia.minf.stbl.stsc = Stsc {
+            entries: vec![StscEntry {
+                first_chunk: 1,
+                samples_per_chunk: u32::try_from(SAMPLES_PER_CHUNK).unwrap(),
+                sample_description_index: 1,
+            }],
+        };
+        // One offset per chunk, derived so the boxes cannot disagree by
+        // accident — a fixture that contradicts itself tests the refusal
+        // instead of the walk.
+        let chunks = sample_count.div_ceil(SAMPLES_PER_CHUNK);
+        trak.mdia.minf.stbl.stco = Some(Stco {
+            entries: (0..chunks)
+                .map(|chunk| 1_000 + u32::try_from(chunk).unwrap() * 4_000)
+                .collect(),
+        });
+        trak.mdia.minf.stbl.stss = stss.map(|entries| Stss { entries });
+        trak.mdia.minf.stbl.ctts = ctts;
+        trak
+    }
+
+    /// The catalog those groups are packaged against, with the policy fields a
+    /// container does not carry.
+    pub fn demuxed_catalog() -> runtime::plane::live::media::Catalog {
+        runtime::plane::live::media::Catalog {
+            version: runtime::plane::live::media::CATALOG_VERSION,
+            jitter_hint_ms: 50,
+            tracks: vec![video_track()],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testkit::*;
+    use super::*;
+
+    use mp4_atom::{Ctts, CttsEntry, Stts, SttsEntry};
+    use runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS;
+
+    /// A plan serves any one group without materialising the rest.
+    ///
+    /// The property that makes a film servable: what is held is the table, and
+    /// a segment's bytes are read when that segment is asked for. The plan for
+    /// group N is answered without reading a byte of the mdat, and building
+    /// group N takes exactly the bytes its own plan named.
+    #[test]
+    fn a_plan_serves_one_group_without_materialising_the_rest() {
+        let trak = sampled_trak(vec![6; 12], Some(vec![1, 4, 7, 10]), None);
+        let plan_tracks = vec![(trak, video_shape())];
+        let media = StoredMedia {
+            catalog: demuxed_catalog(),
+            tracks: plan_tracks,
+        };
+        // Assemble the plan from already-read parts, the way `StoredPlan::read`
+        // does after `read_catalog`.
+        let plan = StoredPlan {
+            catalog: media.catalog.clone(),
+            tracks: media
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(index, (trak, shape))| {
+                    let samples = samples(trak).unwrap();
+                    let groups = groups(&samples, shape.timescale, 2_000);
+                    PlannedTrack {
+                        name: media.catalog.tracks[index].track.clone(),
+                        shape: shape.clone(),
+                        samples,
+                        groups,
+                    }
+                })
+                .collect(),
+            max_group_ms: 2_000,
+        };
+
+        assert_eq!(plan.group_count(), 4);
+        assert_eq!(
+            plan.group_duration_ms(0),
+            Some(3_000),
+            "three one-second samples"
+        );
+
+        // The plan names bytes; nothing has read any.
+        let segment = plan.plan(2).expect("group two exists");
+        assert_eq!(segment.ranges.len(), 3, "three samples in the group");
+
+        // Feed exactly those bytes back and get a group the packagers accept.
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let bytes: Vec<Vec<u8>> = segment.ranges.iter().map(|_| unit.to_vec()).collect();
+        let built = plan.build(2, &bytes).expect("built from its own plan");
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].header.group_sequence, 2);
+        assert_eq!(built[0].frames.len(), 3);
+        assert_eq!(built[0].frames[0].header.kind, FrameKind::Key);
+
+        // The wrong number of bytes is refused, not built into noise.
+        assert_eq!(
+            plan.build(2, &bytes[..2].to_vec()).unwrap_err(),
+            Failure::Malformed
+        );
+        let mut short = bytes.clone();
+        short[1] = vec![0, 0];
+        assert_eq!(plan.build(2, &short).unwrap_err(), Failure::Malformed);
+
+        // A group past the end is absent, not an error dressed as one.
+        assert!(plan.plan(4).is_none());
     }
 
     /// The `moov` is found after the `mdat`, and the `mdat` is never read.
@@ -780,30 +1266,6 @@ mod tests {
         );
     }
 
-    fn ingest_policy() -> CatalogPolicy {
-        CatalogPolicy {
-            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
-            target_latency_ms: DEFAULT_MAX_LATENCY_MS,
-            jitter_hint_ms: 50,
-            rendition: "film".into(),
-        }
-    }
-
-    fn video_shape() -> TrackShape {
-        TrackShape {
-            kind: TrackKind::Video,
-            codec: "avc1.42c01e".into(),
-            timescale: 90_000,
-            decoder_config: data_encoding::HEXLOWER
-                .decode(b"0142c01effe100046742c01e01000268ce")
-                .unwrap(),
-            width: Some(1280),
-            height: Some(720),
-            sample_rate: None,
-            channels: None,
-        }
-    }
-
     /// A catalog is built from the file's own numbers plus this coordinator's
     /// policy, and the two stay separable.
     #[test]
@@ -830,28 +1292,6 @@ mod tests {
         assert_eq!(track.codec, "avc1.42c01e");
         assert_eq!(track.timescale, 90_000);
         assert_eq!(track.width, Some(1280));
-    }
-
-    /// The catalog it produces is one the packagers accept.
-    #[test]
-    fn a_built_catalog_packages() {
-        let trak = sampled_trak(vec![6; 6], Some(vec![1, 4]), None);
-        let shape = video_shape();
-        let built = catalog(&[(trak.clone(), shape.clone())], &ingest_policy()).unwrap();
-
-        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
-        let groups = track_groups(&trak, &shape, &built.tracks[0].track, 2_000, |_, _| {
-            Ok(unit.to_vec())
-        })
-        .unwrap();
-
-        let hub = crate::display::LiveMediaHub::default();
-        hub.install_whole("space/orbit", "film", &built, groups)
-            .expect("a catalog derived at ingest packages at serve");
-        assert!(hub
-            .hls_media_playlist("space/orbit", "film", "film", "..")
-            .unwrap()
-            .contains("#EXT-X-ENDLIST"));
     }
 
     /// A file that cannot meet the baseline is refused at ingest.
@@ -881,41 +1321,6 @@ mod tests {
     ///
     /// Two chunks of three samples each, at file offsets 1000 and 5000; every
     /// sample 90000 ticks long (one second at 90 kHz); samples 1 and 4 sync.
-    const SAMPLES_PER_CHUNK: usize = 3;
-
-    fn sampled_trak(sizes: Vec<u32>, stss: Option<Vec<u32>>, ctts: Option<Ctts>) -> Trak {
-        let sample_count = sizes.len();
-        let mut trak = Trak::default();
-        trak.mdia.mdhd.timescale = 90_000;
-        trak.mdia.minf.stbl.stts = Stts {
-            entries: vec![SttsEntry {
-                sample_count: u32::try_from(sizes.len()).unwrap(),
-                sample_delta: 90_000,
-            }],
-        };
-        trak.mdia.minf.stbl.stsz = Stsz {
-            samples: StszSamples::Different { sizes },
-        };
-        trak.mdia.minf.stbl.stsc = Stsc {
-            entries: vec![StscEntry {
-                first_chunk: 1,
-                samples_per_chunk: u32::try_from(SAMPLES_PER_CHUNK).unwrap(),
-                sample_description_index: 1,
-            }],
-        };
-        // One offset per chunk, derived so the boxes cannot disagree by
-        // accident — a fixture that contradicts itself tests the refusal
-        // instead of the walk.
-        let chunks = sample_count.div_ceil(SAMPLES_PER_CHUNK);
-        trak.mdia.minf.stbl.stco = Some(Stco {
-            entries: (0..chunks)
-                .map(|chunk| 1_000 + u32::try_from(chunk).unwrap() * 4_000)
-                .collect(),
-        });
-        trak.mdia.minf.stbl.stss = stss.map(|entries| Stss { entries });
-        trak.mdia.minf.stbl.ctts = ctts;
-        trak
-    }
 
     #[test]
     fn a_sample_table_walks_to_offsets_times_and_sync_flags() {
@@ -1111,96 +1516,6 @@ mod tests {
             Ok(vec![0, 0, 0, 2])
         });
         assert_eq!(result.unwrap_err(), Failure::Malformed);
-    }
-
-    /// The groups this produces are the groups the real packager takes.
-    ///
-    /// Asserting the shape by hand would only pin what this file believes.
-    /// Running them through `HlsCatalogPackager` pins what the consumer
-    /// accepts, which is the property that matters.
-    #[test]
-    fn the_groups_a_track_produces_package_into_real_segments() {
-        let trak = sampled_trak(vec![6; 6], Some(vec![1, 4]), None);
-        let shape = TrackShape {
-            kind: TrackKind::Video,
-            codec: "avc1.42c01e".into(),
-            timescale: 90_000,
-            decoder_config: Vec::new(),
-            width: Some(1280),
-            height: Some(720),
-            sample_rate: None,
-            channels: None,
-        };
-        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
-        let groups = track_groups(&trak, &shape, "video-main", 2_000, |_offset, _size| {
-            Ok(unit.to_vec())
-        })
-        .unwrap();
-
-        let hub = crate::display::LiveMediaHub::default();
-        hub.install_whole("space/orbit", "film", &demuxed_catalog(), groups)
-            .expect("demuxed groups install through the real packagers");
-        let playlist = hub
-            .hls_media_playlist("space/orbit", "film", "film", "..")
-            .unwrap();
-        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
-        assert!(hub.hls_segment("space/orbit", "film", "film", 0).is_ok());
-    }
-
-    /// The catalog those groups are packaged against, with the policy fields a
-    /// container does not carry.
-    fn demuxed_catalog() -> runtime::plane::live::media::Catalog {
-        runtime::plane::live::media::Catalog {
-            version: runtime::plane::live::media::CATALOG_VERSION,
-            jitter_hint_ms: 50,
-            tracks: vec![video_track()],
-        }
-    }
-
-    /// The reader agrees with the writer, on the writer's own output.
-    ///
-    /// This is the property worth having: `cmaf.rs` builds an initialization
-    /// segment from a catalog track, and reading it back must recover the facts
-    /// the container was given. A parser tested only against files somebody
-    /// else wrote can drift from the encoder in this same repo and nothing
-    /// says so.
-    #[test]
-    fn a_video_track_survives_the_round_trip_through_its_own_init_segment() {
-        let track = video_track();
-        let packager = CmafTrackPackager::new(&track).unwrap();
-        let shapes = track_shapes(packager.init_segment()).unwrap();
-
-        assert_eq!(shapes.len(), 1);
-        let shape = &shapes[0];
-        assert_eq!(shape.kind, TrackKind::Video);
-        assert_eq!(shape.codec, track.codec, "profile, compatibility and level");
-        assert_eq!(shape.timescale, track.timescale);
-        assert_eq!(shape.width, track.width);
-        assert_eq!(shape.height, track.height);
-        assert_eq!(
-            data_encoding::HEXLOWER.encode(&shape.decoder_config),
-            track.decoder_config_hex,
-            "exactly the bytes the catalog carried"
-        );
-    }
-
-    #[test]
-    fn an_audio_track_survives_the_round_trip_through_its_own_init_segment() {
-        let track = audio_track();
-        let packager = CmafTrackPackager::new(&track).unwrap();
-        let shapes = track_shapes(packager.init_segment()).unwrap();
-
-        assert_eq!(shapes.len(), 1);
-        let shape = &shapes[0];
-        assert_eq!(shape.kind, TrackKind::Audio);
-        assert_eq!(shape.codec, "mp4a.40.2");
-        assert_eq!(shape.timescale, track.timescale);
-        assert_eq!(shape.sample_rate, track.sample_rate);
-        assert_eq!(shape.channels, track.channels);
-        assert_eq!(
-            data_encoding::HEXLOWER.encode(&shape.decoder_config),
-            track.decoder_config_hex
-        );
     }
 
     /// Bytes that are not a container are refused, rather than read as an empty
