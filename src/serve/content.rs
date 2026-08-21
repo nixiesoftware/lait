@@ -30,6 +30,7 @@
 //! attachment rendered inline would run there.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -87,6 +88,21 @@ const RETRY_AFTER_SECONDS: &str = "1";
 /// independently, because a browser asking for more would get a short read and
 /// have to guess why.
 const MAX_RANGE_BYTES: u64 = runtime::plane::freight::content::MAX_RANGE_BYTES as u64;
+
+/// How long one range may spend fetching before it answers with what it has.
+///
+/// Short, because the answer is a stream: a range that comes back `Fetching`
+/// costs one more round trip and the loop asks again, so a long budget here
+/// only makes the *first* refusal slower to arrive without making the file
+/// arrive sooner.
+const READ_PATIENCE_MS: u32 = 500;
+
+/// How long a body may make no progress at all before it ends short.
+///
+/// A slow transfer is not a stalled one, so this resets on every byte that
+/// lands. What it bounds is a transfer that has stopped advancing — which must
+/// not hold one of the browser's six connections for the life of the process.
+const STREAM_STALL_BUDGET: Duration = Duration::from_secs(30);
 
 /// The permits every content route acquires before it moves a byte.
 ///
@@ -166,6 +182,10 @@ fn refuse_content(code: ContentErrorCode, message: &str) -> Response {
         ContentErrorCode::Denied => (StatusCode::FORBIDDEN, ErrorKind::Error),
         ContentErrorCode::Unknown => (StatusCode::NOT_FOUND, ErrorKind::NotFound),
         ContentErrorCode::NotResident => (StatusCode::CONFLICT, ErrorKind::Error),
+        // A transfer is running. `503` with a `Retry-After` is the one status a
+        // browser and every download manager already act on correctly, and it
+        // says something a `409` does not: nothing needs arranging, just time.
+        ContentErrorCode::Fetching => (StatusCode::SERVICE_UNAVAILABLE, ErrorKind::Error),
         ContentErrorCode::Sealed => (StatusCode::GONE, ErrorKind::Error),
         ContentErrorCode::Bounds => (StatusCode::RANGE_NOT_SATISFIABLE, ErrorKind::Error),
         ContentErrorCode::Storage => (StatusCode::SERVICE_UNAVAILABLE, ErrorKind::Error),
@@ -360,6 +380,7 @@ pub(super) async fn download(
         let _transfer = transfer;
         let mut at = start;
         let mut left = length;
+        let mut waited = Duration::ZERO;
         while left > 0 {
             let want = left.min(MAX_RANGE_BYTES);
             let answer = crate::control::content_call(
@@ -370,12 +391,28 @@ pub(super) async fn download(
                         content: content.clone(),
                         offset: at,
                         len: want,
+                        patience_ms: READ_PATIENCE_MS,
                     },
                 ),
             )
             .await;
             let piece = match answer {
                 Ok((ContentReply::ContentStream { .. }, bytes)) if !bytes.is_empty() => bytes,
+                // Still coming. The status line is long spent, so ending the
+                // body here would be a truncated file — and this is the one
+                // answer that says waiting is all it needs. Bounded, because a
+                // transfer that never advances must not hold the connection for
+                // the life of the process.
+                Ok((
+                    ContentReply::ContentError {
+                        code: ContentErrorCode::Fetching,
+                        ..
+                    },
+                    _,
+                )) if waited < STREAM_STALL_BUDGET => {
+                    waited = waited.saturating_add(Duration::from_millis(READ_PATIENCE_MS.into()));
+                    continue;
+                }
                 // Anything else mid-stream is a truncated file, and the only
                 // honest report is to end the body short — the status line was
                 // spent before the first byte.
@@ -386,6 +423,9 @@ pub(super) async fn download(
                     return;
                 }
             };
+            // Progress resets the stall budget: a slow transfer is not a
+            // stalled one, and a long file should not fail for taking long.
+            waited = Duration::ZERO;
             at += piece.len() as u64;
             left = left.saturating_sub(piece.len() as u64);
             if tx.send(Ok(piece.into())).await.is_err() {
