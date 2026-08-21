@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2516
-pr-platform    2046
-nightly        2544
+pr             2526
+pr-platform    2056
+nightly        2554
 mutants        106
 
 [gates]
@@ -565,11 +565,21 @@ lait display::compiler::tests::compilation_binds_assets_and_revision_to_the_assi
 lait display::compiler::tests::live_media_is_compiled_for_each_receiver_playback_tier
 lait display::compiler::tests::stored_media_degrades_on_a_frame_tier_receiver
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
+lait display::demux::tests::a_video_track_survives_the_round_trip_through_its_own_init_segment
+lait display::demux::tests::an_audio_track_survives_the_round_trip_through_its_own_init_segment
+lait display::demux::tests::bytes_that_are_not_a_container_are_refused_not_read_as_empty
 lait display::hls::tests::avcc_and_aac_are_converted_to_transport_elementary_streams
 lait display::hls::tests::hls_v3_segment_is_real_mpeg_ts_and_discontinuities_are_explicit
 lait display::http::tests::every_display_route_is_a_pattern_the_router_accepts
 lait display::http::tests::the_hls_filenames_keep_their_extensions_and_reject_what_lacks_them
+lait display::live::tests::a_complete_presentation_declares_its_end_and_a_live_one_never_does
+lait display::live::tests::a_gap_in_the_sequence_is_still_addressable_on_both_sides
+lait display::live::tests::a_missing_segment_says_which_kind_of_missing_it_is
 lait display::live::tests::a_resource_is_refused_when_two_source_sessions_claim_it
+lait display::live::tests::a_stored_install_refuses_rather_than_leaving_an_empty_presentation
+lait display::live::tests::a_stored_presentation_also_serves_its_mse_snapshot
+lait display::live::tests::a_stored_presentation_serves_every_segment_and_declares_its_end
+lait display::live::tests::a_whole_presentation_keeps_what_a_rolling_one_drops
 lait display::live::tests::hls_urls_are_relative_to_the_opaque_ticket_and_window_is_bounded
 lait display::pairing::tests::approval_enrolls_only_after_receiver_proves_the_new_key
 lait display::runtime::tests::a_degraded_source_keeps_its_reasons_instead_of_reading_as_empty
