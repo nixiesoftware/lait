@@ -411,9 +411,14 @@ impl LiveMediaHub {
             .hls_segments
             .get(rendition)
             .and_then(|segments| {
+                // Both packagers refuse a sequence that does not advance, so a
+                // deque is sorted by construction. A linear scan cost nothing
+                // over six retained segments; over a whole film a player walks
+                // every one of them and pays for the walk each time.
                 segments
-                    .iter()
-                    .find(|segment| segment.group_sequence == sequence)
+                    .binary_search_by_key(&sequence, |segment| segment.group_sequence)
+                    .ok()
+                    .and_then(|index| segments.get(index))
             })
             .map(|segment| segment.bytes.clone())
             .ok_or_else(|| match presentation.retention {
@@ -894,6 +899,39 @@ mod tests {
         assert_eq!(first.len() % 188, 0, "a real transport stream");
         assert_eq!(first.first(), Some(&0x47));
         assert!(hub.hls_segment("space/orbit", "film", "film", 10).is_err());
+    }
+
+    /// A dropped group leaves a gap, and a lookup has to survive it.
+    ///
+    /// `push_group` refuses a sequence that does not advance, so a deque is
+    /// sorted — but it is not contiguous: a group the packager rejected, or one
+    /// the peer never sent, leaves a hole. Binary search is only correct here
+    /// because sorted is the property it needs and contiguous is not.
+    #[test]
+    fn a_gap_in_the_sequence_is_still_addressable_on_both_sides() {
+        let hub = LiveMediaHub::default();
+        hub.install_whole(
+            "space/orbit",
+            "film",
+            &stored_catalog(),
+            [0, 1, 2, 5, 6, 9].into_iter().map(stored_group),
+        )
+        .unwrap();
+
+        for present in [0, 1, 2, 5, 6, 9] {
+            assert!(
+                hub.hls_segment("space/orbit", "film", "film", present)
+                    .is_ok(),
+                "segment {present} was installed"
+            );
+        }
+        for absent in [3, 4, 7, 8, 10] {
+            assert!(
+                hub.hls_segment("space/orbit", "film", "film", absent)
+                    .is_err(),
+                "segment {absent} was never installed"
+            );
+        }
     }
 
     /// The MSE half of the same install, since both packagers run on one pass.
