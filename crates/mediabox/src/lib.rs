@@ -832,19 +832,23 @@ impl StoredPlan {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fixtures shared by this crate's tests and its consumers' tests.
+///
+/// Feature-gated rather than duplicated: the display coordinator's tests
+/// exercise the same containers this crate's do, and a private copy on
+/// each side is two fixtures that drift apart the first time one learns
+/// something.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit {
     use super::*;
-
-    use crate::display::CmafTrackPackager;
-    use mp4_atom::{
-        Ctts, CttsEntry, Stco, Stsc, StscEntry, Stss, Stsz, StszSamples, Stts, SttsEntry, Trak,
-    };
+    use mp4_atom::{Ctts, Stco, Stsc, StscEntry, Stss, Stsz, StszSamples, Stts, SttsEntry, Trak};
     use runtime::plane::live::media::{
         CatalogTrack, DEFAULT_MAX_GROUP_DURATION_MS, DEFAULT_MAX_LATENCY_MS,
     };
 
-    fn video_track() -> CatalogTrack {
+    pub const SAMPLES_PER_CHUNK: usize = 3;
+
+    pub fn video_track() -> CatalogTrack {
         CatalogTrack {
             track: "video-main".into(),
             kind: TrackKind::Video,
@@ -865,7 +869,7 @@ mod tests {
         }
     }
 
-    fn audio_track() -> CatalogTrack {
+    pub fn audio_track() -> CatalogTrack {
         CatalogTrack {
             track: "audio-main".into(),
             kind: TrackKind::Audio,
@@ -885,6 +889,119 @@ mod tests {
             hls_v3_rendition: None,
         }
     }
+
+    /// An `mdat` box around a payload.
+    pub fn mdat_box(payload: &[u8]) -> Vec<u8> {
+        boxed(b"mdat", payload)
+    }
+
+    /// An `avcC` box around a decoder configuration record.
+    pub fn avcc_box(config: &[u8]) -> Vec<u8> {
+        boxed(b"avcC", config)
+    }
+
+    /// A box of `kind` and `payload` bytes, as a container writes one.
+    pub fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let size = u32::try_from(payload.len() + 8).unwrap();
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A reader over an in-memory file, counting what it actually read.
+    pub fn file_reader(
+        bytes: Vec<u8>,
+        read_bytes: std::rc::Rc<std::cell::Cell<u64>>,
+    ) -> impl FnMut(u64, u32) -> Result<Vec<u8>, Failure> {
+        move |offset, size| {
+            let start = usize::try_from(offset).map_err(|_| Failure::Container)?;
+            let end = start
+                .checked_add(usize::try_from(size).map_err(|_| Failure::Container)?)
+                .ok_or(Failure::Container)?;
+            let slice = bytes.get(start..end.min(bytes.len())).unwrap_or_default();
+            read_bytes.set(read_bytes.get() + slice.len() as u64);
+            Ok(slice.to_vec())
+        }
+    }
+
+    pub fn ingest_policy() -> CatalogPolicy {
+        CatalogPolicy {
+            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+            target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+            jitter_hint_ms: 50,
+            rendition: "film".into(),
+        }
+    }
+
+    pub fn video_shape() -> TrackShape {
+        TrackShape {
+            kind: TrackKind::Video,
+            codec: "avc1.42c01e".into(),
+            timescale: 90_000,
+            decoder_config: data_encoding::HEXLOWER
+                .decode(b"0142c01effe100046742c01e01000268ce")
+                .unwrap(),
+            width: Some(1280),
+            height: Some(720),
+            sample_rate: None,
+            channels: None,
+        }
+    }
+
+    pub fn sampled_trak(sizes: Vec<u32>, stss: Option<Vec<u32>>, ctts: Option<Ctts>) -> Trak {
+        let sample_count = sizes.len();
+        let mut trak = Trak::default();
+        trak.mdia.mdhd.timescale = 90_000;
+        trak.mdia.minf.stbl.stts = Stts {
+            entries: vec![SttsEntry {
+                sample_count: u32::try_from(sizes.len()).unwrap(),
+                sample_delta: 90_000,
+            }],
+        };
+        trak.mdia.minf.stbl.stsz = Stsz {
+            samples: StszSamples::Different { sizes },
+        };
+        trak.mdia.minf.stbl.stsc = Stsc {
+            entries: vec![StscEntry {
+                first_chunk: 1,
+                samples_per_chunk: u32::try_from(SAMPLES_PER_CHUNK).unwrap(),
+                sample_description_index: 1,
+            }],
+        };
+        // One offset per chunk, derived so the boxes cannot disagree by
+        // accident — a fixture that contradicts itself tests the refusal
+        // instead of the walk.
+        let chunks = sample_count.div_ceil(SAMPLES_PER_CHUNK);
+        trak.mdia.minf.stbl.stco = Some(Stco {
+            entries: (0..chunks)
+                .map(|chunk| 1_000 + u32::try_from(chunk).unwrap() * 4_000)
+                .collect(),
+        });
+        trak.mdia.minf.stbl.stss = stss.map(|entries| Stss { entries });
+        trak.mdia.minf.stbl.ctts = ctts;
+        trak
+    }
+
+    /// The catalog those groups are packaged against, with the policy fields a
+    /// container does not carry.
+    pub fn demuxed_catalog() -> runtime::plane::live::media::Catalog {
+        runtime::plane::live::media::Catalog {
+            version: runtime::plane::live::media::CATALOG_VERSION,
+            jitter_hint_ms: 50,
+            tracks: vec![video_track()],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testkit::*;
+    use super::*;
+
+    use mp4_atom::{Ctts, CttsEntry, Stts, SttsEntry};
+    use runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS;
 
     /// A plan serves any one group without materialising the rest.
     ///
@@ -953,157 +1070,6 @@ mod tests {
 
         // A group past the end is absent, not an error dressed as one.
         assert!(plan.plan(4).is_none());
-    }
-
-    /// A whole file, read the way a stored upload is read, and served.
-    ///
-    /// Everything else here tests a piece against a fixture. This builds a real
-    /// container — `ftyp`, then an `mdat` holding the samples, then a `moov`
-    /// after it, which is where a camera or an editor puts one — reads it
-    /// through `read_catalog` and `groups` with nothing but a byte reader, and
-    /// carries the result into the real packagers.
-    ///
-    /// If ingest and serve ever disagree about a shape, this is what says so.
-    #[test]
-    fn a_whole_file_reads_from_its_bytes_and_serves() {
-        use mp4_atom::{Avc1, Avcc, Encode, FourCC, Ftyp, Mdhd, Moov, Mvhd, Stsd, Visual};
-
-        // Six access units, each a four-byte length and a two-byte IDR NAL.
-        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
-        let sample_count = 6usize;
-        let mdat_payload: Vec<u8> = unit
-            .iter()
-            .copied()
-            .cycle()
-            .take(unit.len() * sample_count)
-            .collect();
-
-        let mut file = Vec::new();
-        Ftyp {
-            major_brand: FourCC::new(b"iso6"),
-            minor_version: 1,
-            compatible_brands: vec![FourCC::new(b"iso6")],
-        }
-        .encode(&mut file)
-        .unwrap();
-        let mdat_at = file.len();
-        file.extend_from_slice(&mdat_box(&mdat_payload));
-        // Samples begin after the mdat's own eight-byte header.
-        let first_sample_at = u32::try_from(mdat_at + 8).unwrap();
-
-        let mut trak = sampled_trak(
-            vec![u32::try_from(unit.len()).unwrap(); sample_count],
-            Some(vec![1, 4]),
-            None,
-        );
-        // Point the sample table at where the bytes actually are, and give the
-        // track a codec so `tracks` can read a shape from it.
-        trak.mdia.minf.stbl.stco = Some(Stco {
-            entries: vec![first_sample_at, first_sample_at + 18],
-        });
-        trak.mdia.mdhd = Mdhd {
-            timescale: 90_000,
-            ..Default::default()
-        };
-        trak.mdia.minf.stbl.stsd = Stsd {
-            codecs: vec![Avc1 {
-                visual: Visual {
-                    data_reference_index: 1,
-                    width: 1280,
-                    height: 720,
-                    ..Default::default()
-                },
-                avcc: Avcc::decode(
-                    &mut avcc_box(
-                        &data_encoding::HEXLOWER
-                            .decode(b"0142c01effe100046742c01e01000268ce")
-                            .unwrap(),
-                    )
-                    .as_slice(),
-                )
-                .unwrap(),
-                ..Default::default()
-            }
-            .into()],
-            ..Default::default()
-        };
-        Moov {
-            mvhd: Mvhd {
-                timescale: 90_000,
-                ..Default::default()
-            },
-            trak: vec![trak],
-            ..Default::default()
-        }
-        .encode(&mut file)
-        .unwrap();
-
-        let total = u64::try_from(file.len()).unwrap();
-        let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
-        let bytes = file.clone();
-
-        let media = read_catalog(
-            total,
-            file_reader(bytes.clone(), counted.clone()),
-            &ingest_policy(),
-        )
-        .expect("a real container yields a catalog");
-        assert_eq!(media.catalog.tracks.len(), 1);
-        assert_eq!(media.catalog.tracks[0].codec, "avc1.42c01e");
-        assert_eq!(media.catalog.tracks[0].width, Some(1280));
-
-        let groups = media
-            .groups(2_000, file_reader(bytes, counted))
-            .expect("groups read from the same bytes");
-        assert_eq!(groups.len(), 2, "two key frames at this budget");
-        // The bytes really came out of the mdat, at the offsets the table gave.
-        assert_eq!(groups[0].frames[0].payload, unit.to_vec());
-
-        let hub = crate::display::LiveMediaHub::default();
-        hub.install_whole("space/orbit", "film", &media.catalog, groups)
-            .expect("what ingest read is what serve packages");
-        let playlist = hub
-            .hls_media_playlist("space/orbit", "film", "film", "..")
-            .unwrap();
-        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
-        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
-        assert!(hub.hls_segment("space/orbit", "film", "film", 0).is_ok());
-    }
-
-    /// An `mdat` box around a payload.
-    fn mdat_box(payload: &[u8]) -> Vec<u8> {
-        boxed(b"mdat", payload)
-    }
-
-    /// An `avcC` box around a decoder configuration record.
-    fn avcc_box(config: &[u8]) -> Vec<u8> {
-        boxed(b"avcC", config)
-    }
-
-    /// A box of `kind` and `payload` bytes, as a container writes one.
-    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let size = u32::try_from(payload.len() + 8).unwrap();
-        out.extend_from_slice(&size.to_be_bytes());
-        out.extend_from_slice(kind);
-        out.extend_from_slice(payload);
-        out
-    }
-
-    /// A reader over an in-memory file, counting what it actually read.
-    fn file_reader(
-        bytes: Vec<u8>,
-        read_bytes: std::rc::Rc<std::cell::Cell<u64>>,
-    ) -> impl FnMut(u64, u32) -> Result<Vec<u8>, Failure> {
-        move |offset, size| {
-            let start = usize::try_from(offset).map_err(|_| Failure::Container)?;
-            let end = start
-                .checked_add(usize::try_from(size).map_err(|_| Failure::Container)?)
-                .ok_or(Failure::Container)?;
-            let slice = bytes.get(start..end.min(bytes.len())).unwrap_or_default();
-            read_bytes.set(read_bytes.get() + slice.len() as u64);
-            Ok(slice.to_vec())
-        }
     }
 
     /// The `moov` is found after the `mdat`, and the `mdat` is never read.
@@ -1193,30 +1159,6 @@ mod tests {
         );
     }
 
-    fn ingest_policy() -> CatalogPolicy {
-        CatalogPolicy {
-            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
-            target_latency_ms: DEFAULT_MAX_LATENCY_MS,
-            jitter_hint_ms: 50,
-            rendition: "film".into(),
-        }
-    }
-
-    fn video_shape() -> TrackShape {
-        TrackShape {
-            kind: TrackKind::Video,
-            codec: "avc1.42c01e".into(),
-            timescale: 90_000,
-            decoder_config: data_encoding::HEXLOWER
-                .decode(b"0142c01effe100046742c01e01000268ce")
-                .unwrap(),
-            width: Some(1280),
-            height: Some(720),
-            sample_rate: None,
-            channels: None,
-        }
-    }
-
     /// A catalog is built from the file's own numbers plus this coordinator's
     /// policy, and the two stay separable.
     #[test]
@@ -1243,28 +1185,6 @@ mod tests {
         assert_eq!(track.codec, "avc1.42c01e");
         assert_eq!(track.timescale, 90_000);
         assert_eq!(track.width, Some(1280));
-    }
-
-    /// The catalog it produces is one the packagers accept.
-    #[test]
-    fn a_built_catalog_packages() {
-        let trak = sampled_trak(vec![6; 6], Some(vec![1, 4]), None);
-        let shape = video_shape();
-        let built = catalog(&[(trak.clone(), shape.clone())], &ingest_policy()).unwrap();
-
-        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
-        let groups = track_groups(&trak, &shape, &built.tracks[0].track, 2_000, |_, _| {
-            Ok(unit.to_vec())
-        })
-        .unwrap();
-
-        let hub = crate::display::LiveMediaHub::default();
-        hub.install_whole("space/orbit", "film", &built, groups)
-            .expect("a catalog derived at ingest packages at serve");
-        assert!(hub
-            .hls_media_playlist("space/orbit", "film", "film", "..")
-            .unwrap()
-            .contains("#EXT-X-ENDLIST"));
     }
 
     /// A file that cannot meet the baseline is refused at ingest.
@@ -1294,41 +1214,6 @@ mod tests {
     ///
     /// Two chunks of three samples each, at file offsets 1000 and 5000; every
     /// sample 90000 ticks long (one second at 90 kHz); samples 1 and 4 sync.
-    const SAMPLES_PER_CHUNK: usize = 3;
-
-    fn sampled_trak(sizes: Vec<u32>, stss: Option<Vec<u32>>, ctts: Option<Ctts>) -> Trak {
-        let sample_count = sizes.len();
-        let mut trak = Trak::default();
-        trak.mdia.mdhd.timescale = 90_000;
-        trak.mdia.minf.stbl.stts = Stts {
-            entries: vec![SttsEntry {
-                sample_count: u32::try_from(sizes.len()).unwrap(),
-                sample_delta: 90_000,
-            }],
-        };
-        trak.mdia.minf.stbl.stsz = Stsz {
-            samples: StszSamples::Different { sizes },
-        };
-        trak.mdia.minf.stbl.stsc = Stsc {
-            entries: vec![StscEntry {
-                first_chunk: 1,
-                samples_per_chunk: u32::try_from(SAMPLES_PER_CHUNK).unwrap(),
-                sample_description_index: 1,
-            }],
-        };
-        // One offset per chunk, derived so the boxes cannot disagree by
-        // accident — a fixture that contradicts itself tests the refusal
-        // instead of the walk.
-        let chunks = sample_count.div_ceil(SAMPLES_PER_CHUNK);
-        trak.mdia.minf.stbl.stco = Some(Stco {
-            entries: (0..chunks)
-                .map(|chunk| 1_000 + u32::try_from(chunk).unwrap() * 4_000)
-                .collect(),
-        });
-        trak.mdia.minf.stbl.stss = stss.map(|entries| Stss { entries });
-        trak.mdia.minf.stbl.ctts = ctts;
-        trak
-    }
 
     #[test]
     fn a_sample_table_walks_to_offsets_times_and_sync_flags() {
@@ -1524,96 +1409,6 @@ mod tests {
             Ok(vec![0, 0, 0, 2])
         });
         assert_eq!(result.unwrap_err(), Failure::Malformed);
-    }
-
-    /// The groups this produces are the groups the real packager takes.
-    ///
-    /// Asserting the shape by hand would only pin what this file believes.
-    /// Running them through `HlsCatalogPackager` pins what the consumer
-    /// accepts, which is the property that matters.
-    #[test]
-    fn the_groups_a_track_produces_package_into_real_segments() {
-        let trak = sampled_trak(vec![6; 6], Some(vec![1, 4]), None);
-        let shape = TrackShape {
-            kind: TrackKind::Video,
-            codec: "avc1.42c01e".into(),
-            timescale: 90_000,
-            decoder_config: Vec::new(),
-            width: Some(1280),
-            height: Some(720),
-            sample_rate: None,
-            channels: None,
-        };
-        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
-        let groups = track_groups(&trak, &shape, "video-main", 2_000, |_offset, _size| {
-            Ok(unit.to_vec())
-        })
-        .unwrap();
-
-        let hub = crate::display::LiveMediaHub::default();
-        hub.install_whole("space/orbit", "film", &demuxed_catalog(), groups)
-            .expect("demuxed groups install through the real packagers");
-        let playlist = hub
-            .hls_media_playlist("space/orbit", "film", "film", "..")
-            .unwrap();
-        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
-        assert!(hub.hls_segment("space/orbit", "film", "film", 0).is_ok());
-    }
-
-    /// The catalog those groups are packaged against, with the policy fields a
-    /// container does not carry.
-    fn demuxed_catalog() -> runtime::plane::live::media::Catalog {
-        runtime::plane::live::media::Catalog {
-            version: runtime::plane::live::media::CATALOG_VERSION,
-            jitter_hint_ms: 50,
-            tracks: vec![video_track()],
-        }
-    }
-
-    /// The reader agrees with the writer, on the writer's own output.
-    ///
-    /// This is the property worth having: `cmaf.rs` builds an initialization
-    /// segment from a catalog track, and reading it back must recover the facts
-    /// the container was given. A parser tested only against files somebody
-    /// else wrote can drift from the encoder in this same repo and nothing
-    /// says so.
-    #[test]
-    fn a_video_track_survives_the_round_trip_through_its_own_init_segment() {
-        let track = video_track();
-        let packager = CmafTrackPackager::new(&track).unwrap();
-        let shapes = track_shapes(packager.init_segment()).unwrap();
-
-        assert_eq!(shapes.len(), 1);
-        let shape = &shapes[0];
-        assert_eq!(shape.kind, TrackKind::Video);
-        assert_eq!(shape.codec, track.codec, "profile, compatibility and level");
-        assert_eq!(shape.timescale, track.timescale);
-        assert_eq!(shape.width, track.width);
-        assert_eq!(shape.height, track.height);
-        assert_eq!(
-            data_encoding::HEXLOWER.encode(&shape.decoder_config),
-            track.decoder_config_hex,
-            "exactly the bytes the catalog carried"
-        );
-    }
-
-    #[test]
-    fn an_audio_track_survives_the_round_trip_through_its_own_init_segment() {
-        let track = audio_track();
-        let packager = CmafTrackPackager::new(&track).unwrap();
-        let shapes = track_shapes(packager.init_segment()).unwrap();
-
-        assert_eq!(shapes.len(), 1);
-        let shape = &shapes[0];
-        assert_eq!(shape.kind, TrackKind::Audio);
-        assert_eq!(shape.codec, "mp4a.40.2");
-        assert_eq!(shape.timescale, track.timescale);
-        assert_eq!(shape.sample_rate, track.sample_rate);
-        assert_eq!(shape.channels, track.channels);
-        assert_eq!(
-            data_encoding::HEXLOWER.encode(&shape.decoder_config),
-            track.decoder_config_hex
-        );
     }
 
     /// Bytes that are not a container are refused, rather than read as an empty
