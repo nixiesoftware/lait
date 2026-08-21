@@ -553,7 +553,11 @@ impl LiveMediaHub {
         lock(&self.inner)
             .and_then(|state| {
                 let (_, presentation) = unique_presentation(&state, orbit, resource, transport)?;
+                // A live edge is ready when a segment has landed; a planned
+                // presentation is ready the moment it is installed, because
+                // every segment is buildable from its table on demand.
                 if transport == LiveTransport::Hls
+                    && presentation.plan.is_none()
                     && !presentation
                         .hls_segments
                         .get(resource)

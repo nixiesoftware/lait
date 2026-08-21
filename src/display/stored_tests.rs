@@ -161,3 +161,73 @@ fn an_audio_track_survives_the_round_trip_through_its_own_init_segment() {
         track.decoder_config_hex
     );
 }
+
+/// The serve-side join: a plan from a container's own `moov`, installed,
+/// ready, listed, and served segment by segment.
+///
+/// This is the chain `mint_live_ticket` drives for a stored origin, minus the
+/// transport around it: fetch the `moov` by walking box headers, plan from the
+/// bytes alone, install, and build the one asked-for segment from ranges the
+/// plan names. The container is the shared fixture — the same file the ingest
+/// seam writes to disk — so ingest, plan and serve are pinned to one shape.
+#[test]
+fn a_stored_origin_plans_installs_and_serves_on_demand() {
+    use mediabox::{box_header, CatalogPolicy, StoredPlan};
+
+    let file = whole_file();
+    let total = u64::try_from(file.len()).unwrap();
+    let read = |offset: u64, size: u32| -> Vec<u8> {
+        let start = usize::try_from(offset).unwrap();
+        let end = start + usize::try_from(size).unwrap();
+        file.get(start..end.min(file.len()))
+            .unwrap_or_default()
+            .to_vec()
+    };
+
+    // The coordinator's moov walk: headers only, then one bounded body read.
+    let mut at = 0u64;
+    let moov = loop {
+        assert!(at < total, "the fixture has a moov");
+        let header = read(at, 16);
+        let (size, kind, _) = box_header(&header, total, at).unwrap();
+        if &kind == b"moov" {
+            break read(at, u32::try_from(size).unwrap());
+        }
+        at += size;
+    };
+
+    // Planned from the moov alone: no further byte of the file is needed.
+    let resource = "ab".repeat(32);
+    let policy = CatalogPolicy {
+        max_group_duration_ms: 2_000,
+        target_latency_ms: 3_000,
+        jitter_hint_ms: 50,
+        rendition: resource.clone(),
+    };
+    let plan = StoredPlan::from_moov(&moov, &policy).expect("a plan from the moov alone");
+
+    let hub = LiveMediaHub::default();
+    hub.install_planned("space/orbit", &resource, plan).unwrap();
+
+    // Installed is ready: the mint's readiness probe must not re-install.
+    assert!(hub.has_resource("space/orbit", &resource, super::LiveTransport::Hls));
+
+    // The playlist lists every group and ends.
+    let playlist = hub
+        .hls_media_playlist("space/orbit", &resource, &resource, "..")
+        .unwrap();
+    assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+    assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
+
+    // One segment, built from exactly the ranges the plan names — the reads a
+    // coordinator would make against the content plane.
+    let (plan, segment) = hub.planned_segment("space/orbit", &resource, 0).unwrap();
+    let bytes: Vec<Vec<u8>> = segment
+        .ranges
+        .iter()
+        .map(|(offset, size)| read(*offset, *size))
+        .collect();
+    let ts = LiveMediaHub::package_planned(&plan, 0, &bytes).unwrap();
+    assert_eq!(ts.len() % 188, 0, "a real transport stream");
+    assert_eq!(ts.first(), Some(&0x47));
+}

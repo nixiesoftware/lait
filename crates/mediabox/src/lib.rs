@@ -463,7 +463,7 @@ pub fn find_moov(
     let mut at = 0u64;
     while at < total {
         let header = read(at, LARGE_BOX_HEADER_BYTES)?;
-        let (size, kind, header_len) = parse_box_header(&header, total, at)?;
+        let (size, kind, header_len) = box_header(&header, total, at)?;
         if &kind == b"moov" {
             let body = size
                 .checked_sub(u64::from(header_len))
@@ -487,7 +487,7 @@ pub fn find_moov(
 /// real size follows as 64 bits. Both are legal and both are refused if they
 /// would not advance — a box that does not move the cursor is how a malformed
 /// file becomes an infinite loop.
-fn parse_box_header(header: &[u8], total: u64, at: u64) -> Result<(u64, [u8; 4], u32), Failure> {
+pub fn box_header(header: &[u8], total: u64, at: u64) -> Result<(u64, [u8; 4], u32), Failure> {
     let short = header.get(..8).ok_or(Failure::Container)?;
     let (declared_bytes, kind_bytes) = short.split_at(4);
     let declared = u32::from_be_bytes(declared_bytes.try_into().map_err(|_| Failure::Container)?);
@@ -712,6 +712,40 @@ pub struct SegmentPlan {
 }
 
 impl StoredPlan {
+    /// Plan a stored file from its `moov` bytes alone.
+    ///
+    /// [`StoredPlan::read`] drives a synchronous reader, which suits an ingest
+    /// boundary holding a file. A coordinator's reads go over a control channel
+    /// and are async, so it fetches the `moov` itself — walking boxes with
+    /// [`box_header`] — and hands the bytes here. Everything after the fetch is
+    /// pure: the sample tables are in the `moov`, and no further byte of the
+    /// file is needed to plan all of it.
+    pub fn from_moov(moov: &[u8], policy: &CatalogPolicy) -> Result<Self, Failure> {
+        let tracks = tracks(moov)?;
+        let catalog = catalog(&tracks, policy)?;
+        let mut planned = Vec::new();
+        for (index, (trak, shape)) in tracks.iter().enumerate() {
+            let samples = samples(trak)?;
+            let groups = groups(&samples, shape.timescale, policy.max_group_duration_ms);
+            planned.push(PlannedTrack {
+                name: catalog
+                    .tracks
+                    .get(index)
+                    .ok_or(Failure::Malformed)?
+                    .track
+                    .clone(),
+                shape: shape.clone(),
+                samples,
+                groups,
+            });
+        }
+        Ok(Self {
+            catalog,
+            tracks: planned,
+            max_group_ms: policy.max_group_duration_ms,
+        })
+    }
+
     /// Plan a stored file: read its catalog, then walk each track's table once.
     pub fn read(
         total: u64,

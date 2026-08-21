@@ -515,11 +515,22 @@ impl DisplayCoordinator {
             tokio::time::timeout(LIVE_SOURCE_WAIT, ready)
                 .await
                 .context("live media source did not publish its catalog")?;
+        } else if transport == LiveTransport::Mse {
+            // A planned presentation serves HLS. Its MSE half — init and
+            // fragment pushes built from the plan — does not exist yet, and
+            // installing a presentation that cannot answer a socket would
+            // turn this named gap into a hang at the receiver.
+            return Err(anyhow!("stored media is not packaged for MSE yet"));
         } else if !self.live.has_resource(&orbit, &resource, transport) {
-            // A finite source is installed or it is not, and no amount of
-            // waiting turns one into the other — so this refuses now rather
-            // than spending the live budget to say the same thing later.
-            return Err(anyhow!("stored media is not packaged on this coordinator"));
+            // A finite source is installed from its own bytes, once. The
+            // resource *is* the content id — that is what the compiler writes
+            // for a stored origin — so nothing product-specific is consulted:
+            // the coordinator reads the container's table of contents through
+            // the content plane and plans every segment without touching the
+            // film.
+            self.install_stored(&resolved.home, &assignment, &orbit, &resource)
+                .await
+                .with_context(|| format!("stored media {resource} would not install"))?;
         }
         let lifetime = match transport {
             LiveTransport::Mse => MSE_TICKET_LIFETIME_MS,
@@ -653,6 +664,190 @@ impl DisplayCoordinator {
             return Err(anyhow!("media program was revised"));
         }
         Ok(())
+    }
+
+    /// Install a stored content as a planned presentation.
+    ///
+    /// The reads go over the daemon's own content channel with patience, so a
+    /// content this Station has the name of and not the bytes is fetched from
+    /// a peer by the same supply every other read uses. What is read here is
+    /// the box headers and the `moov` — the table of contents — never the
+    /// `mdat`; the film's bytes move later, one asked-for segment at a time.
+    async fn install_stored(
+        &self,
+        home: &std::path::Path,
+        assignment: &AssignmentRecord,
+        orbit: &str,
+        resource: &str,
+    ) -> Result<()> {
+        let route = crate::control::ControlRoute::Orbit {
+            address: crate::daemon::OrbitAddress {
+                space: mechanics::ids::SpaceId::parse(&assignment.space)
+                    .context("stored assignment names an unparseable Space")?,
+                orbit: crate::daemon::LocalOrbitId::parse(&assignment.orbit)
+                    .context("stored assignment names an unparseable Orbit")?,
+            },
+        };
+        let total = match crate::control::content_call(
+            home,
+            &crate::control::content_request(
+                route.clone(),
+                crate::control::ContentCall::Stat {
+                    content: resource.to_string(),
+                },
+            ),
+        )
+        .await
+        {
+            Ok((crate::control::ContentReply::ContentStatus { plaintext_len, .. }, _)) => {
+                plaintext_len
+            }
+            Ok((reply, _)) => return Err(anyhow!("stored content stat refused: {reply:?}")),
+            Err(error) => return Err(error).context("stat stored content"),
+        };
+
+        let moov = self.fetch_moov(home, &route, resource, total).await?;
+        let policy = mediabox::CatalogPolicy {
+            max_group_duration_ms: runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS,
+            target_latency_ms: runtime::plane::live::media::DEFAULT_MAX_LATENCY_MS,
+            jitter_hint_ms: 50,
+            // The rendition a ticket resolves against is the resource itself,
+            // which for a stored origin is the content id.
+            rendition: resource.to_string(),
+        };
+        let plan = mediabox::StoredPlan::from_moov(&moov, &policy)
+            .map_err(|error| anyhow!("stored content would not plan: {error}"))?;
+        self.live.install_planned(orbit, resource, plan)
+    }
+
+    /// Walk the container's top-level boxes and return the whole `moov`.
+    ///
+    /// The walk is [`mediabox::box_header`] over sixteen-byte reads, so a
+    /// `moov` written after a gigabyte of `mdat` — where a camera puts one —
+    /// costs a handful of header reads and one bounded body read.
+    async fn fetch_moov(
+        &self,
+        home: &std::path::Path,
+        route: &crate::control::ControlRoute,
+        resource: &str,
+        total: u64,
+    ) -> Result<Vec<u8>> {
+        const HEADER: u32 = 16;
+        /// A `moov` is a table of contents; bound it like one.
+        const MAX_MOOV: u64 = 8 * 1024 * 1024;
+
+        let mut at = 0u64;
+        while at < total {
+            let header = self
+                .read_stored(home, route, resource, at, u64::from(HEADER))
+                .await?;
+            let (size, kind, _) = mediabox::box_header(&header, total, at)
+                .map_err(|error| anyhow!("stored container refused: {error}"))?;
+            if &kind == b"moov" {
+                if size > MAX_MOOV {
+                    return Err(anyhow!("stored moov exceeds its bound"));
+                }
+                return self.read_stored(home, route, resource, at, size).await;
+            }
+            at = at
+                .checked_add(size)
+                .ok_or_else(|| anyhow!("stored container box overflows"))?;
+        }
+        Err(anyhow!("stored content has no moov"))
+    }
+
+    /// One bounded stored read, looped over the channel's range ceiling.
+    async fn read_stored(
+        &self,
+        home: &std::path::Path,
+        route: &crate::control::ControlRoute,
+        resource: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>> {
+        /// How long one stored range may spend fetching bytes a peer holds.
+        const STORED_READ_PATIENCE_MS: u32 = 5_000;
+        let ceiling =
+            u64::try_from(runtime::plane::freight::content::MAX_RANGE_BYTES).unwrap_or(u64::MAX);
+        let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or_default());
+        let mut at = offset;
+        let mut left = len;
+        while left > 0 {
+            let want = left.min(ceiling);
+            let (reply, bytes) = crate::control::content_call(
+                home,
+                &crate::control::content_request(
+                    route.clone(),
+                    crate::control::ContentCall::Read {
+                        content: resource.to_string(),
+                        offset: at,
+                        len: want,
+                        patience_ms: STORED_READ_PATIENCE_MS,
+                    },
+                ),
+            )
+            .await
+            .context("read stored content")?;
+            match reply {
+                crate::control::ContentReply::ContentStream { .. } if !bytes.is_empty() => {
+                    let landed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                    at = at.saturating_add(landed);
+                    left = left.saturating_sub(landed);
+                    out.extend_from_slice(&bytes);
+                }
+                crate::control::ContentReply::ContentStream { .. } => break,
+                other => return Err(anyhow!("stored read refused: {other:?}")),
+            }
+        }
+        Ok(out)
+    }
+
+    /// One HLS segment, from wherever this presentation keeps it.
+    ///
+    /// A live presentation holds its window materialised and answers from it.
+    /// A planned one holds a table: the segment's byte ranges are answered off
+    /// the hub lock, read here — fetching from a peer if this Station lacks
+    /// them — and packaged by a fresh muxer. The film is never resident as
+    /// segments; each one exists for the life of one response.
+    pub(crate) async fn hls_segment(
+        &self,
+        stream: &AuthorizedLiveStream,
+        sequence: u64,
+        now_unix_ms: u64,
+    ) -> Result<Vec<u8>> {
+        if let Ok(bytes) =
+            self.live
+                .hls_segment(&stream.orbit, &stream.resource, &stream.resource, sequence)
+        {
+            return Ok(bytes);
+        }
+        let (plan, segment) =
+            self.live
+                .planned_segment(&stream.orbit, &stream.resource, sequence)?;
+        let assignment = self
+            .active_assignment_for_device(&stream.ticket.device, now_unix_ms)?
+            .ok_or_else(|| anyhow!("stored assignment is gone"))?;
+        let resolved = self
+            .router
+            .resolve(&assignment.orbit)
+            .context("resolve stored display Orbit")?;
+        let route = crate::control::ControlRoute::Orbit {
+            address: resolved.address.clone(),
+        };
+        let mut bytes = Vec::with_capacity(segment.ranges.len());
+        for (offset, size) in &segment.ranges {
+            bytes.push(
+                self.read_stored(
+                    &resolved.home,
+                    &route,
+                    &stream.resource,
+                    *offset,
+                    u64::from(*size),
+                )
+                .await?,
+            );
+        }
+        super::LiveMediaHub::package_planned(&plan, sequence, &bytes)
     }
 
     fn device_playback_tier(&self, device: &DisplayDeviceId) -> Result<PlaybackTier> {
