@@ -14,7 +14,8 @@ use std::fmt;
 
 use mp4_atom::{Atom, Codec, Decode, Moov};
 use runtime::plane::live::media::{
-    Frame, FrameHeader, FrameKind, GroupHeader, ReceivedGroup, TrackKind,
+    Catalog, CatalogTrack, Frame, FrameHeader, FrameKind, GroupHeader, ReceivedGroup, TrackKind,
+    CATALOG_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,18 @@ pub enum Failure {
     CompositionOffsets,
     /// The sample table disagrees with itself.
     Malformed,
+    /// This container cannot produce a catalog the plane will accept.
+    ///
+    /// Usually the baseline: `Catalog::validate` requires an H.264 track beside
+    /// any video and an AAC track beside any audio, because that is what every
+    /// receiver decodes. The rule is asked rather than restated here — a second
+    /// copy of it would be a second thing to keep true — so this covers every
+    /// way a catalog can fail to be valid, not only that one.
+    ///
+    /// It is raised where a person is standing. Deriving the catalog later, at a
+    /// render or a ticket, surfaces the same refusal at a screen at three in the
+    /// morning.
+    Unpackageable,
 }
 
 impl fmt::Display for Failure {
@@ -48,6 +61,7 @@ impl fmt::Display for Failure {
                 write!(f, "composition offsets cannot be packaged by this plane")
             }
             Self::Malformed => write!(f, "the sample table disagrees with itself"),
+            Self::Unpackageable => write!(f, "no valid catalog can be built from this file"),
         }
     }
 }
@@ -405,6 +419,200 @@ fn presentation_micros(decode_time: u64, timescale: u32) -> Result<i64, Failure>
     i64::try_from(micros).map_err(|_| Failure::Malformed)
 }
 
+/// The largest `moov` this will read into memory.
+///
+/// A `moov` is a table of contents; eight megabytes of one is a film with
+/// millions of samples. Bounded because this runs against bytes somebody
+/// uploaded, and a declared size is not a promise.
+const MAX_MOOV_BYTES: u64 = 8 * 1024 * 1024;
+
+/// One top-level box header: a 32-bit size and a four-character kind, with a
+/// 64-bit size following when the 32-bit one is 1.
+const BOX_HEADER_BYTES: u32 = 8;
+const LARGE_BOX_HEADER_BYTES: u32 = 16;
+
+/// Find and read the `moov`, without ever materialising the `mdat`.
+///
+/// A file written for streaming puts `moov` first. A file written by a camera or
+/// an editor usually puts it last, after an `mdat` that is the whole film — so
+/// reading a container from the front and stopping at the first big box finds
+/// nothing on the common case. Walking the top-level boxes by their declared
+/// size reads sixteen bytes per box and skips every payload, which is the
+/// difference between reading a table of contents and reading a gigabyte.
+pub fn find_moov(
+    total: u64,
+    mut read: impl FnMut(u64, u32) -> Result<Vec<u8>, Failure>,
+) -> Result<Vec<u8>, Failure> {
+    let mut at = 0u64;
+    while at < total {
+        let header = read(at, LARGE_BOX_HEADER_BYTES)?;
+        let (size, kind, header_len) = parse_box_header(&header, total, at)?;
+        if &kind == b"moov" {
+            let body = size
+                .checked_sub(u64::from(header_len))
+                .ok_or(Failure::Container)?;
+            if size > MAX_MOOV_BYTES {
+                return Err(Failure::Container);
+            }
+            // The decoder wants the whole box, header included.
+            let whole = u32::try_from(size).map_err(|_| Failure::Container)?;
+            let _ = body;
+            return read(at, whole);
+        }
+        at = at.checked_add(size).ok_or(Failure::Container)?;
+    }
+    Err(Failure::Container)
+}
+
+/// `(size, kind, header_len)` for the box at `at`, or a refusal.
+///
+/// A size of zero means "to the end of the file" and a size of one means the
+/// real size follows as 64 bits. Both are legal and both are refused if they
+/// would not advance — a box that does not move the cursor is how a malformed
+/// file becomes an infinite loop.
+fn parse_box_header(header: &[u8], total: u64, at: u64) -> Result<(u64, [u8; 4], u32), Failure> {
+    let short = header.get(..8).ok_or(Failure::Container)?;
+    let (declared_bytes, kind_bytes) = short.split_at(4);
+    let declared = u32::from_be_bytes(declared_bytes.try_into().map_err(|_| Failure::Container)?);
+    let kind: [u8; 4] = kind_bytes.try_into().map_err(|_| Failure::Container)?;
+    let (size, header_len) = match declared {
+        // Zero means "to the end of the file": legal, and only for the last box.
+        0 => (
+            total.checked_sub(at).ok_or(Failure::Container)?,
+            BOX_HEADER_BYTES,
+        ),
+        // One means the real size follows as sixty-four bits.
+        1 => {
+            let large: [u8; 8] = header
+                .get(8..16)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(Failure::Container)?;
+            (u64::from_be_bytes(large), LARGE_BOX_HEADER_BYTES)
+        }
+        other => (u64::from(other), BOX_HEADER_BYTES),
+    };
+    if size < u64::from(header_len) || at.checked_add(size).is_none_or(|end| end > total) {
+        return Err(Failure::Container);
+    }
+    Ok((size, kind, header_len))
+}
+
+/// What a catalog needs that a container does not carry.
+///
+/// Bitrate and frame rate are derived from the file's own sample table below,
+/// because the file does state them. Everything here is a choice this
+/// coordinator makes: how long a group may run, what latency it advertises, and
+/// what the renditions are called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogPolicy {
+    pub max_group_duration_ms: u32,
+    pub target_latency_ms: u32,
+    pub jitter_hint_ms: u32,
+    /// The name a receiver's ticket resolves against.
+    pub rendition: String,
+}
+
+/// The mean bitrate a track's own samples imply.
+pub fn bitrate_bps(samples: &[Sample], timescale: u32) -> Option<u32> {
+    if samples.is_empty() || timescale == 0 {
+        return None;
+    }
+    let bytes: u64 = samples.iter().map(|sample| u64::from(sample.size)).sum();
+    let ticks: u64 = samples
+        .iter()
+        .map(|sample| u64::from(sample.duration))
+        .sum();
+    if ticks == 0 {
+        return None;
+    }
+    let bits = u128::from(bytes)
+        .saturating_mul(8)
+        .saturating_mul(u128::from(timescale));
+    u32::try_from(bits.checked_div(u128::from(ticks))?).ok()
+}
+
+/// The mean frame rate a track's own samples imply, in millihertz.
+pub fn frame_rate_milli(samples: &[Sample], timescale: u32) -> Option<u32> {
+    if samples.is_empty() || timescale == 0 {
+        return None;
+    }
+    let ticks: u64 = samples
+        .iter()
+        .map(|sample| u64::from(sample.duration))
+        .sum();
+    if ticks == 0 {
+        return None;
+    }
+    let count = u64::try_from(samples.len()).ok()?;
+    let rate = u128::from(count)
+        .saturating_mul(u128::from(timescale))
+        .saturating_mul(1_000)
+        .checked_div(u128::from(ticks))?;
+    u32::try_from(rate).ok().filter(|rate| *rate > 0)
+}
+
+/// Build a catalog from what the container said and what this coordinator chose.
+///
+/// The refusal that matters is [`Failure::Unpackageable`]. `Catalog::validate`
+/// requires an H.264 track beside any video and an AAC track beside any audio,
+/// so a file that cannot meet it has no valid catalog at all — and this is the
+/// only moment a person is present to be told. Deriving it later, at a render or
+/// a ticket, would surface the same refusal at a screen at three in the morning.
+pub fn catalog(
+    trak: &[(mp4_atom::Trak, TrackShape)],
+    policy: &CatalogPolicy,
+) -> Result<Catalog, Failure> {
+    let mut tracks = Vec::new();
+    for (index, (trak, shape)) in trak.iter().enumerate() {
+        let samples = samples(trak)?;
+        let video = shape.kind == TrackKind::Video;
+        tracks.push(CatalogTrack {
+            track: format!("{}-{index}", if video { "video" } else { "audio" }),
+            kind: shape.kind,
+            codec: shape.codec.clone(),
+            timescale: shape.timescale,
+            decoder_config_hex: data_encoding::HEXLOWER.encode(&shape.decoder_config),
+            max_group_duration_ms: policy.max_group_duration_ms,
+            target_latency_ms: policy.target_latency_ms,
+            bitrate_bps: bitrate_bps(&samples, shape.timescale).ok_or(Failure::Incomplete)?,
+            width: shape.width,
+            height: shape.height,
+            frame_rate_milli: if video {
+                Some(frame_rate_milli(&samples, shape.timescale).ok_or(Failure::Incomplete)?)
+            } else {
+                None
+            },
+            sample_rate: shape.sample_rate,
+            channels: shape.channels,
+            render_group: Some(policy.rendition.clone()),
+            cmaf_rendition: Some(policy.rendition.clone()),
+            // One HLS rendition per catalog: `hls_media_playlist` refuses a
+            // rendition that is not the ticket's resource, so a second one
+            // would be unreachable rather than an alternative.
+            hls_v3_rendition: if video {
+                Some(policy.rendition.clone())
+            } else {
+                None
+            },
+        });
+    }
+    if tracks.is_empty() {
+        return Err(Failure::Unpackageable);
+    }
+    let catalog = Catalog {
+        version: CATALOG_VERSION,
+        jitter_hint_ms: policy.jitter_hint_ms,
+        tracks,
+    };
+    // Encoding validates, and the rule is the catalog's own — asked rather than
+    // restated here, because a second copy of it would be a second thing to
+    // keep true.
+    catalog
+        .encode_canonical()
+        .map_err(|_| Failure::Unpackageable)?;
+    Ok(catalog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +665,215 @@ mod tests {
             cmaf_rendition: Some("film-audio".into()),
             hls_v3_rendition: None,
         }
+    }
+
+    /// A box of `kind` and `payload` bytes, as a container writes one.
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let size = u32::try_from(payload.len() + 8).unwrap();
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A reader over an in-memory file, counting what it actually read.
+    fn file_reader(
+        bytes: Vec<u8>,
+        read_bytes: std::rc::Rc<std::cell::Cell<u64>>,
+    ) -> impl FnMut(u64, u32) -> Result<Vec<u8>, Failure> {
+        move |offset, size| {
+            let start = usize::try_from(offset).map_err(|_| Failure::Container)?;
+            let end = start
+                .checked_add(usize::try_from(size).map_err(|_| Failure::Container)?)
+                .ok_or(Failure::Container)?;
+            let slice = bytes.get(start..end.min(bytes.len())).unwrap_or_default();
+            read_bytes.set(read_bytes.get() + slice.len() as u64);
+            Ok(slice.to_vec())
+        }
+    }
+
+    /// The `moov` is found after the `mdat`, and the `mdat` is never read.
+    ///
+    /// This is the common case, not the exotic one: a file written for
+    /// streaming puts `moov` first, and a file written by a camera or an editor
+    /// usually puts it last. Reading from the front and stopping at the first
+    /// large box finds nothing — and reading *through* the `mdat` to reach the
+    /// table of contents would pull the whole film across the content plane to
+    /// learn its codec.
+    #[test]
+    fn a_moov_after_a_huge_mdat_is_found_without_reading_the_mdat() {
+        let moov_payload = b"pretend-moov-body".to_vec();
+        let mut file = boxed(b"ftyp", b"iso6");
+        // A megabyte of "film" between the header and the table of contents.
+        file.extend_from_slice(&boxed(b"mdat", &vec![0x11; 1_000_000]));
+        let moov_at = file.len() as u64;
+        file.extend_from_slice(&boxed(b"moov", &moov_payload));
+        let total = file.len() as u64;
+
+        let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let found = find_moov(total, file_reader(file, counted.clone())).unwrap();
+
+        assert_eq!(&found[4..8], b"moov");
+        assert_eq!(&found[8..], &moov_payload[..]);
+        assert!(
+            counted.get() < 1_000,
+            "walked headers rather than the film, but read {} bytes",
+            counted.get()
+        );
+        assert!(moov_at > 1_000_000, "the moov really was past the mdat");
+    }
+
+    #[test]
+    fn a_moov_at_the_front_is_found_too() {
+        let mut file = boxed(b"ftyp", b"iso6");
+        file.extend_from_slice(&boxed(b"moov", b"body"));
+        file.extend_from_slice(&boxed(b"mdat", &vec![0x22; 4_096]));
+        let total = file.len() as u64;
+        let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let found = find_moov(total, file_reader(file, counted)).unwrap();
+        assert_eq!(&found[4..8], b"moov");
+    }
+
+    /// A container with no `moov` describes no track, and says so.
+    #[test]
+    fn a_container_without_a_moov_is_refused() {
+        let mut file = boxed(b"ftyp", b"iso6");
+        file.extend_from_slice(&boxed(b"mdat", &vec![0x33; 64]));
+        let total = file.len() as u64;
+        let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        assert_eq!(
+            find_moov(total, file_reader(file, counted)).unwrap_err(),
+            Failure::Container
+        );
+    }
+
+    /// A box that does not advance the cursor is refused rather than looped on.
+    ///
+    /// A declared size is not a promise — these bytes came from an upload. A
+    /// zero-length box would spin `find_moov` forever, and a size past the end
+    /// would have it read off the file.
+    #[test]
+    fn a_box_that_cannot_advance_is_refused_rather_than_looped_on() {
+        // A size of 4: smaller than its own header.
+        let mut stuck = Vec::new();
+        stuck.extend_from_slice(&4u32.to_be_bytes());
+        stuck.extend_from_slice(b"junk");
+        stuck.extend_from_slice(&[0; 8]);
+        let total = stuck.len() as u64;
+        let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        assert_eq!(
+            find_moov(total, file_reader(stuck, counted)).unwrap_err(),
+            Failure::Container
+        );
+
+        // A size past the end of the file.
+        let mut over = Vec::new();
+        over.extend_from_slice(&9_999u32.to_be_bytes());
+        over.extend_from_slice(b"mdat");
+        over.extend_from_slice(&[0; 8]);
+        let total = over.len() as u64;
+        let counted = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        assert_eq!(
+            find_moov(total, file_reader(over, counted)).unwrap_err(),
+            Failure::Container
+        );
+    }
+
+    fn ingest_policy() -> CatalogPolicy {
+        CatalogPolicy {
+            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+            target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+            jitter_hint_ms: 50,
+            rendition: "film".into(),
+        }
+    }
+
+    fn video_shape() -> TrackShape {
+        TrackShape {
+            kind: TrackKind::Video,
+            codec: "avc1.42c01e".into(),
+            timescale: 90_000,
+            decoder_config: data_encoding::HEXLOWER
+                .decode(b"0142c01effe100046742c01e01000268ce")
+                .unwrap(),
+            width: Some(1280),
+            height: Some(720),
+            sample_rate: None,
+            channels: None,
+        }
+    }
+
+    /// A catalog is built from the file's own numbers plus this coordinator's
+    /// policy, and the two stay separable.
+    #[test]
+    fn a_catalog_takes_its_rates_from_the_file_and_its_names_from_policy() {
+        // Twelve samples, 6 bytes each, one second apart at 90 kHz.
+        let trak = sampled_trak(vec![6; 12], Some(vec![1]), None);
+        let built = catalog(&[(trak, video_shape())], &ingest_policy()).unwrap();
+
+        assert_eq!(built.tracks.len(), 1);
+        let track = &built.tracks[0];
+        // 6 bytes per second is 48 bits per second.
+        assert_eq!(track.bitrate_bps, 48, "derived from the sample table");
+        assert_eq!(
+            track.frame_rate_milli,
+            Some(1_000),
+            "one sample per second is 1.000 Hz"
+        );
+        // Policy, not the file.
+        assert_eq!(track.cmaf_rendition.as_deref(), Some("film"));
+        assert_eq!(track.hls_v3_rendition.as_deref(), Some("film"));
+        assert_eq!(track.max_group_duration_ms, DEFAULT_MAX_GROUP_DURATION_MS);
+        assert_eq!(built.jitter_hint_ms, 50);
+        // The container, unchanged.
+        assert_eq!(track.codec, "avc1.42c01e");
+        assert_eq!(track.timescale, 90_000);
+        assert_eq!(track.width, Some(1280));
+    }
+
+    /// The catalog it produces is one the packagers accept.
+    #[test]
+    fn a_built_catalog_packages() {
+        let trak = sampled_trak(vec![6; 6], Some(vec![1, 4]), None);
+        let shape = video_shape();
+        let built = catalog(&[(trak.clone(), shape.clone())], &ingest_policy()).unwrap();
+
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let groups = track_groups(&trak, &shape, &built.tracks[0].track, 2_000, |_, _| {
+            Ok(unit.to_vec())
+        })
+        .unwrap();
+
+        let hub = crate::display::LiveMediaHub::default();
+        hub.install_whole("space/orbit", "film", &built, groups)
+            .expect("a catalog derived at ingest packages at serve");
+        assert!(hub
+            .hls_media_playlist("space/orbit", "film", "film", "..")
+            .unwrap()
+            .contains("#EXT-X-ENDLIST"));
+    }
+
+    /// A file that cannot meet the baseline is refused at ingest.
+    ///
+    /// The person who uploaded it is standing there. The same refusal derived
+    /// at a render would arrive at a screen instead.
+    #[test]
+    fn a_file_that_cannot_meet_the_baseline_is_refused_where_a_person_is() {
+        let trak = sampled_trak(vec![6; 3], Some(vec![1]), None);
+        let mut av1 = video_shape();
+        av1.codec = "av01.0.04M.08".into();
+        assert_eq!(
+            catalog(&[(trak, av1)], &ingest_policy()).unwrap_err(),
+            Failure::Unpackageable,
+            "any video needs an H.264 track beside it"
+        );
+
+        assert_eq!(
+            catalog(&[], &ingest_policy()).unwrap_err(),
+            Failure::Unpackageable,
+            "a container with no packageable track has no catalog"
+        );
     }
 
     /// A track whose sample table this test states outright, so the walk is

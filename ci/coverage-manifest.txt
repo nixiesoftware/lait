@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2536
-pr-platform    2066
-nightly        2564
+pr             2544
+pr-platform    2074
+nightly        2572
 mutants        106
 
 [gates]
@@ -565,6 +565,13 @@ lait display::compiler::tests::compilation_binds_assets_and_revision_to_the_assi
 lait display::compiler::tests::live_media_is_compiled_for_each_receiver_playback_tier
 lait display::compiler::tests::stored_media_degrades_on_a_frame_tier_receiver
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
+lait display::demux::tests::a_box_that_cannot_advance_is_refused_rather_than_looped_on
+lait display::demux::tests::a_built_catalog_packages
+lait display::demux::tests::a_catalog_takes_its_rates_from_the_file_and_its_names_from_policy
+lait display::demux::tests::a_container_without_a_moov_is_refused
+lait display::demux::tests::a_file_that_cannot_meet_the_baseline_is_refused_where_a_person_is
+lait display::demux::tests::a_moov_after_a_huge_mdat_is_found_without_reading_the_mdat
+lait display::demux::tests::a_moov_at_the_front_is_found_too
 lait display::demux::tests::a_sample_table_walks_to_offsets_times_and_sync_flags
 lait display::demux::tests::a_short_read_is_refused_rather_than_packaged
 lait display::demux::tests::a_table_that_disagrees_with_itself_is_refused
@@ -1028,6 +1035,7 @@ lait-issues-app document::tests::reports_body_local_diagnostics_without_exposing
 lait-issues-app document::tests::semantic_plain_text_is_escaped_and_discriminated
 lait-issues-app host::tests::a_peer_named_attachment_is_saved_beside_us_not_wherever_it_asked
 lait-issues-app host::tests::a_world_call_classifies_itself_for_head_policy
+lait-issues-app host::tests::an_attachment_is_named_by_its_extension_including_the_moving_kinds
 lait-issues-app host::tests::an_explicit_out_is_the_callers_own_choice_and_is_left_alone
 lait-issues-app host::tests::an_ordinary_name_still_saves_under_its_own_name
 lait-issues-app host::tests::decodes_a_local_file_attach_at_the_product_boundary
