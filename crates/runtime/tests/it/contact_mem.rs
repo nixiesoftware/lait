@@ -838,7 +838,10 @@ fn an_unknown_neighbor_is_unreachable_and_dormancy_refuses_contact() {
 #[test]
 fn a_station_reads_content_only_its_peer_holds() {
     let (_space, coords) = coordinates();
-    let net = comms::mem::MemNet::new();
+    // The only test on this network that wants a plane. Everything else here
+    // exercises Contact, and mounting three services per Station for them is
+    // threads and wall clock spent on nothing.
+    let net = comms::mem::MemNet::new().with_planes();
     let ta: Arc<dyn comms::Transport> =
         Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
     let tb: Arc<dyn comms::Transport> =

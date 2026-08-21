@@ -62,6 +62,8 @@ struct Inner {
     /// because a connection handed over whole and a connection wrapped in a
     /// framed stream are two different deliveries, and one consumes it.
     sessions: HashMap<PeerId, mpsc::UnboundedSender<IncomingConnection>>,
+    /// Whether [`MemNet::with_planes`] was asked for.
+    planes_enabled: bool,
     /// Per-plane session inboxes, for peers that took one.
     ///
     /// Without these `take_session_queue` answered `None` here, so a Station on
@@ -168,6 +170,20 @@ impl MemNet {
     /// A perfect network. Unchanged: every delivery lands, exactly once.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Serve per-plane session queues, so a Station on this network mounts its
+    /// Freight, Exec and Live services.
+    ///
+    /// Off by default, and that default is load-bearing rather than cautious.
+    /// A Station whose transport hands out no plane queue mounts no plane
+    /// service, which is what a test exercising only Contact wants: enabling
+    /// this everywhere put three services and their threads behind every
+    /// in-memory Station and moved the Linux test job from 4m45s to 7m37s,
+    /// which is enough to tip the suite's subprocess-timing tests over.
+    pub fn with_planes(self) -> Self {
+        self.with_inner(|inner| inner.planes_enabled = true);
+        self
     }
 
     /// A network that loses and doubles deliveries, from a seed.
@@ -875,7 +891,7 @@ impl Transport for MemTransport {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (self.id.clone(), alpn.to_vec());
-        if inner.lanes.contains_key(&key) {
+        if !inner.planes_enabled || inner.lanes.contains_key(&key) {
             return None;
         }
         let (tx, rx) = mpsc::channel(SESSION_LANE_DEPTH);
