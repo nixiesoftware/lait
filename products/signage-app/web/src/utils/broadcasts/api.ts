@@ -9,6 +9,7 @@
 
 import { rpc } from '../api/client';
 import { mintBodyId } from '../lait/ids';
+import { normalizeMedia } from '../lait/normalize';
 import type {
   DeletedReply,
   ProgramReply,
@@ -33,7 +34,10 @@ export async function fetchPrograms(): Promise<SignageProgram[]> {
 export async function fetchProgram(id: string): Promise<ProgramWithLibrary | null> {
   const reply = await rpc<ProgramReply>({ cmd: 'program_get', program: id });
   if (!reply.program) return null;
-  return { program: reply.program, media: reply.media };
+  return {
+    program: { ...reply.program, windows: reply.program.windows ?? [] },
+    media: (reply.media ?? []).map(normalizeMedia),
+  };
 }
 
 export async function saveProgram(program: SignageProgram): Promise<string> {
@@ -41,16 +45,20 @@ export async function saveProgram(program: SignageProgram): Promise<string> {
   return reply.program;
 }
 
-export async function createProgram(name: string): Promise<SignageProgram> {
-  const program: SignageProgram = {
+/**
+ * A fresh program exists only as a draft: the World refuses an empty
+ * `program_put` because a program with nothing to show is not a program.
+ * The editor holds the draft, and the first save with an item is the
+ * first put.
+ */
+export function draftProgram(name: string): SignageProgram {
+  return {
     id: mintBodyId(),
     name,
     cycle: 'loop',
     items: [],
     windows: [],
   };
-  await saveProgram(program);
-  return program;
 }
 
 export async function deleteProgram(id: string): Promise<void> {

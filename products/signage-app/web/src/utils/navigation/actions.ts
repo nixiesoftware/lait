@@ -2,10 +2,15 @@
  * Create-and-navigate actions, usable outside React components.
  */
 
-import { createProgram } from '../broadcasts/api';
+import { draftProgram } from '../broadcasts/api';
 import { createScreen } from '../screens/api';
 import { navigateToBroadcast, navigateToScreen } from './routes';
 import type { SignageProgram, SignageScreen } from '../lait/types';
+
+/** Where the editor finds a draft's name before its first put. */
+export function draftNameKey(programId: string): string {
+  return `draft-name:${programId}`;
+}
 
 interface NavigationActionOptions {
   onSuccess?: () => void;
@@ -28,7 +33,8 @@ export async function createAndNavigateToBroadcast(
 ): Promise<SignageProgram | null> {
   const { onSuccess, onError, router } = options;
   try {
-    const program = await createProgram(name ?? 'Untitled Broadcast');
+    const program = draftProgram(name ?? 'Untitled Broadcast');
+    sessionStorage.setItem(draftNameKey(program.id), program.name);
     go(navigateToBroadcast(program), router);
     onSuccess?.();
     return program;

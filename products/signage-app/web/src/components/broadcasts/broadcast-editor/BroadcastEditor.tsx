@@ -258,7 +258,9 @@ function BroadcastEditorContent({
     const media: SignageMedia = {
       id: mintBodyId(),
       name: intg.title,
-      source: { source: 'kind', kind: intg.id, settings: config?.settings ?? {} },
+      source: 'kind',
+      kind: intg.id,
+      settings: config?.settings ?? {},
       duration_ms: 60_000,
       width: null,
       height: null,

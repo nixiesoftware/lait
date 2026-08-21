@@ -91,7 +91,10 @@ export const ContentListPage: React.FC = () => {
         id: tempId,
         tempId,
         name: file.name.replace(/\.[^/.]+$/, ""),
-        source: { source: "stored", content: "", size: file.size, mime: file.type },
+        source: "stored",
+        content: "",
+        size: file.size,
+        mime: file.type,
         duration_ms: null,
         width: null,
         height: null,
@@ -208,15 +211,8 @@ export const ContentListPage: React.FC = () => {
     if (!item) return;
 
     try {
-      await saveMedia({
-        id: item.id,
-        name,
-        source: item.source,
-        duration_ms: item.duration_ms,
-        width: item.width,
-        height: item.height,
-        catalog: item.catalog,
-      });
+      const { isUploading: _isUploading, tempId: _tempId, ...media } = item;
+      await saveMedia({ ...media, name });
       if (selectedContent && selectedContent.id === id) {
         setSelectedContent({ ...selectedContent, name });
       }
@@ -239,7 +235,7 @@ export const ContentListPage: React.FC = () => {
     // Type filtering is client-side on the source tag; stored entries
     // split image/video by mime.
     if (sortingState.typeFilter) {
-      filtered = filtered.filter(item => sourceCategory(item.source) === sortingState.typeFilter);
+      filtered = filtered.filter(item => sourceCategory(item) === sortingState.typeFilter);
     }
 
     // Apply sorting
@@ -270,7 +266,7 @@ export const ContentListPage: React.FC = () => {
   const displayItems = [...uploading, ...sortedItems];
 
   const availableTypes = CATEGORY_ORDER.filter((c) =>
-    items.some((item) => sourceCategory(item.source) === c),
+    items.some((item) => sourceCategory(item) === c),
   );
 
   const getContextMenuItems = (content: ContentItemProps): ContextMenuItem[] => [

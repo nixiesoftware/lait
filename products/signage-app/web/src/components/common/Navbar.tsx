@@ -107,7 +107,7 @@ export default function Navbar() {
             name: c.name || "Untitled",
             type: "content" as const,
             route: `/content-list`,
-            meta: c.source.source,
+            meta: c.source,
           }));
       } catch {
         // Silently fail — still show page results

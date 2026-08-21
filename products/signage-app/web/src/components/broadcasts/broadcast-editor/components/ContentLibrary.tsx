@@ -64,7 +64,7 @@ export default function ContentLibrary({
   // added from the Apps panel, not from here.
   const filteredContent = useMemo(() => {
     const filtered = allContent.filter(media => {
-      if (media.source.source === 'kind') return false;
+      if (media.source === 'kind') return false;
       const kind = mediaKind(media);
       const matchesSearch = media.name.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesType = selectedType === "all" ||

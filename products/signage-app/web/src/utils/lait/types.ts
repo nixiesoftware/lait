@@ -45,22 +45,28 @@ export interface SignageProgram {
   windows: SignageWindow[];
 }
 
+/**
+ * Flattened onto the media object on the wire (`#[serde(flatten)]`): the
+ * discriminator is the `source` string and the variant's fields sit beside
+ * `id` and `name`, not nested under a key. Card colors are bare 6-hex.
+ */
 export type MediaSource =
   | { source: 'card'; title: string; body: string; background: string; foreground: string }
   | { source: 'stored'; content: string; size: number; mime: string }
   | { source: 'kind'; kind: string; settings: Record<string, string> }
   | { source: 'live'; resource: string };
 
-export interface SignageMedia {
+export interface MediaIdentity {
   id: string;
   name: string;
-  source: MediaSource;
   duration_ms: number | null;
   width: number | null;
   height: number | null;
   /** Derived at ingest; present only for Stored entries that packaged. */
   catalog?: string | null;
 }
+
+export type SignageMedia = MediaIdentity & MediaSource;
 
 export interface SignageConfig {
   id: string;
@@ -86,12 +92,11 @@ export interface Slot {
   over?: SlotOverride;
 }
 
-/** A window putting a different program on a screen. */
-export interface ProgramWindow {
-  id: string;
-  window: ScheduleWindow;
-  program: string;
-}
+/**
+ * A window putting a different program on a screen. The schedule window is
+ * flattened onto this object on the wire.
+ */
+export type ProgramWindow = { id: string; program: string } & ScheduleWindow;
 
 export interface SignageScreen {
   id: string;

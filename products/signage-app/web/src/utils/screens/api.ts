@@ -8,6 +8,7 @@
  */
 
 import { actor, rpc } from '../api/client';
+import { normalizeScreen } from '../lait/normalize';
 import { mintBodyId } from '../lait/ids';
 import type {
   PlaysReply,
@@ -20,12 +21,12 @@ import type {
 
 export async function fetchScreens(): Promise<SignageScreen[]> {
   const reply = await rpc<ScreensReply>({ cmd: 'screen_list' });
-  return reply.screens;
+  return reply.screens.map(normalizeScreen);
 }
 
 export async function fetchScreen(id: string): Promise<SignageScreen | null> {
   const reply = await rpc<ScreenReply>({ cmd: 'screen_get', screen: id });
-  return reply.screen;
+  return reply.screen ? normalizeScreen(reply.screen) : null;
 }
 
 export async function saveScreen(screen: SignageScreen): Promise<string> {
@@ -60,7 +61,10 @@ export async function fetchScreenPlays(
   id: string,
 ): Promise<{ screen: SignageScreen | null; group: SignageGroup | null }> {
   const reply = await rpc<PlaysReply>({ cmd: 'screen_plays', screen: id });
-  return { screen: reply.screen, group: reply.group ?? null };
+  return {
+    screen: reply.screen ? normalizeScreen(reply.screen) : null,
+    group: reply.group ?? null,
+  };
 }
 
 /** Set this screen's own standing choice — the ladder's Direct rung. */

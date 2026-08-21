@@ -43,17 +43,17 @@ export const ContentDetailsModal: React.FC<ContentDetailsModalProps> = ({
 
   // Stored bytes have no browsable URL yet — the download route is a
   // follow-up — so the preview is a placeholder, never an <img>/<video>.
-  const mediaPreview = content.source.source === "card" ? (
+  const mediaPreview = content.source === "card" ? (
     <div
       className="w-full h-full flex items-center justify-center p-4 text-center"
-      style={{ backgroundColor: content.source.background, color: content.source.foreground }}
+      style={{ backgroundColor: `#${content.background}`, color: `#${content.foreground}` }}
     >
-      <span className="text-lg font-semibold break-words">{content.source.title}</span>
+      <span className="text-lg font-semibold break-words">{content.title}</span>
     </div>
   ) : (
     <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500">
-      <SourceGlyph source={content.source} className="w-10 h-10" />
-      <span className="text-xs font-medium uppercase tracking-wide">{sourceLabel(content.source)}</span>
+      <SourceGlyph source={content} className="w-10 h-10" />
+      <span className="text-xs font-medium uppercase tracking-wide">{sourceLabel(content)}</span>
     </div>
   );
 
@@ -62,8 +62,8 @@ export const ContentDetailsModal: React.FC<ContentDetailsModalProps> = ({
       <div className="flex justify-between items-center py-1">
         <span className="text-sm lg:text-sm font-medium text-gray-700 dark:text-gray-300">Type</span>
         <span className="flex flex-row items-center gap-x-1 text-sm lg:text-sm text-gray-900 dark:text-white">
-          <SourceGlyph source={content.source} className="w-3 h-3 pt-0.5" />
-          {sourceLabel(content.source)}
+          <SourceGlyph source={content} className="w-3 h-3 pt-0.5" />
+          {sourceLabel(content)}
         </span>
       </div>
 
@@ -83,11 +83,11 @@ export const ContentDetailsModal: React.FC<ContentDetailsModalProps> = ({
         </div>
       )}
 
-      {content.source.source === "stored" && (
+      {content.source === "stored" && (
         <div className="flex justify-between items-center py-1">
           <span className="text-sm lg:text-sm font-medium text-gray-700 dark:text-gray-300">Size</span>
           <span className="text-sm lg:text-sm text-gray-900 dark:text-white">
-            {formatSize(content.source.size)}
+            {formatSize(content.size)}
           </span>
         </div>
       )}

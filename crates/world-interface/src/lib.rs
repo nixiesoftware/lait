@@ -118,12 +118,18 @@ impl Failure {
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self.kind {
+        let label = match self.kind {
             FailureKind::Invalid => "invalid client operation",
             FailureKind::Refusal => "client operation refused",
             FailureKind::Operation => "client operation failed",
             FailureKind::Interruption => "client operation interrupted",
-        })
+        };
+        match self.diagnostic() {
+            // The diagnostic is the World's own words; a label that hides
+            // them turns every distinct refusal into the same sentence.
+            Some(diagnostic) => write!(f, "{label}: {diagnostic}"),
+            None => f.write_str(label),
+        }
     }
 }
 

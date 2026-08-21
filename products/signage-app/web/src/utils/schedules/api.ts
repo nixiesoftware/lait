@@ -26,7 +26,7 @@ export async function addScheduleWindow(
 ): Promise<ProgramWindow> {
   const screen = await fetchScreen(screenId);
   if (!screen) throw new Error(`no screen matches "${screenId}"`);
-  const scheduled: ProgramWindow = { id: mintBodyId(), window, program: programId };
+  const scheduled: ProgramWindow = { id: mintBodyId(), program: programId, ...window };
   screen.schedule = [...screen.schedule, scheduled];
   await saveScreen(screen);
   return scheduled;

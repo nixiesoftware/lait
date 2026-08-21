@@ -76,17 +76,17 @@ export const BroadcastThumbnail: React.FC<BroadcastThumbnailProps> = ({
   }, [isHovered]);
 
   const renderTile = (media: SignageMedia) => {
-    if (media.source.source === 'card') {
+    if (media.source === 'card') {
       return (
         <div
           className="w-full h-full flex items-center justify-center px-2"
-          style={{ background: media.source.background, color: media.source.foreground }}
+          style={{ background: `#${media.background}`, color: `#${media.foreground}` }}
         >
-          <p className="text-sm font-medium truncate">{media.source.title}</p>
+          <p className="text-sm font-medium truncate">{media.title}</p>
         </div>
       );
     }
-    if (media.source.source === 'kind') {
+    if (media.source === 'kind') {
       return (
         <div className="w-full h-full bg-gradient-to-br from-purple-500 to-purple-700 flex flex-col items-center justify-center gap-1 text-white">
           <AppWindow className="w-6 h-6" />

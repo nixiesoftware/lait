@@ -33,7 +33,7 @@ export default function ContentPreview({
     );
   }
 
-  const source = content.source;
+  const source = content;
   const kind = mediaKind(content);
 
   const placeholderIcon = isImageContent(kind)
@@ -69,7 +69,7 @@ export default function ContentPreview({
           {source.source === 'card' ? (
             <div
               className="w-full h-full flex flex-col items-center justify-center px-8 text-center"
-              style={{ background: source.background, color: source.foreground }}
+              style={{ background: `#${source.background}`, color: `#${source.foreground}` }}
             >
               <p className="text-3xl font-semibold">{source.title}</p>
               {source.body && <p className="mt-3 text-lg opacity-80">{source.body}</p>}

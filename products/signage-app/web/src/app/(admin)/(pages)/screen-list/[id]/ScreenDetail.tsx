@@ -263,12 +263,12 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
   const handleEditWindow = (row: ProgramWindow) => {
     setEditingWindowId(row.id);
     setWfProgram(row.program);
-    setWfStart(fromCivil(row.window.start_local));
-    setWfDurationMin(String(row.window.duration_ms / 60000));
-    setWfRecurrence(row.window.recurrence);
-    setWfTimezone(row.window.timezone);
-    setWfPriority(String(row.window.priority));
-    setWfEnabled(row.window.enabled);
+    setWfStart(fromCivil(row.start_local));
+    setWfDurationMin(String(row.duration_ms / 60000));
+    setWfRecurrence(row.recurrence);
+    setWfTimezone(row.timezone);
+    setWfPriority(String(row.priority));
+    setWfEnabled(row.enabled);
     setWindowFormError("");
     setShowWindowForm(true);
   };
@@ -297,7 +297,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
       start_local: toCivil(wfStart),
       duration_ms: Math.round(durationMin * 60000),
       recurrence: wfRecurrence,
-      until_unix_ms: existing?.window.until_unix_ms ?? null,
+      until_unix_ms: existing?.until_unix_ms ?? null,
       priority,
       enabled: wfEnabled,
       timezone: wfTimezone.trim(),
@@ -308,8 +308,8 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
       if (editingWindowId) {
         await updateScheduleWindow(screenId, {
           id: editingWindowId,
-          window,
           program: wfProgram,
+          ...window,
         });
       } else {
         await addScheduleWindow(screenId, wfProgram, window);
@@ -668,27 +668,27 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                 {screen.schedule.map((row) => (
-                  <tr key={row.id} className={row.window.enabled ? "" : "opacity-50"}>
+                  <tr key={row.id} className={row.enabled ? "" : "opacity-50"}>
                     <td className="py-2 pr-3 font-medium dark:text-white">
                       {programNames.get(row.program) ?? "Unknown broadcast"}
                     </td>
                     <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {row.window.start_local.replace("T", " ")}
+                      {row.start_local.replace("T", " ")}
                     </td>
                     <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {formatDuration(row.window.duration_ms)}
+                      {formatDuration(row.duration_ms)}
                     </td>
                     <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.window.recurrence}
+                      {row.recurrence}
                     </td>
                     <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {row.window.timezone}
+                      {row.timezone}
                     </td>
                     <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.window.priority}
+                      {row.priority}
                     </td>
                     <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.window.enabled ? "Yes" : "No"}
+                      {row.enabled ? "Yes" : "No"}
                     </td>
                     <td className="py-2">
                       <div className="flex items-center gap-1 justify-end">

@@ -4,6 +4,7 @@ import BroadcastEditor from "@/components/broadcasts/broadcast-editor/BroadcastE
 import { BroadcastRow } from "@/components/broadcasts/types";
 import { useAdminLayout } from "@/context/AdminLayoutContext";
 import { fetchProgram, saveProgram } from "@/utils/broadcasts/api";
+import { draftNameKey } from "@/utils/navigation/actions";
 import { fetchLibrary } from "@/utils/content/api";
 import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
 
@@ -39,7 +40,23 @@ export default function BroadcastPage() {
       ]);
 
       if (!loaded) {
-        setError("Broadcast not found");
+        // A fresh broadcast is a draft the World has never seen: the engine
+        // refuses an empty program, so the first save with an item is the
+        // first put. The name rides over from the create action.
+        const draftName = sessionStorage.getItem(draftNameKey(broadcastId));
+        if (!draftName) {
+          setError("Broadcast not found");
+          return;
+        }
+        setProgram({
+          id: broadcastId,
+          name: draftName,
+          cycle: 'loop',
+          items: [],
+          windows: [],
+        });
+        setAllContent(catalog);
+        setOriginalRows([]);
         return;
       }
 
@@ -90,6 +107,10 @@ export default function BroadcastPage() {
   // The editor saves the document: the ordered items[] rides one put.
   const handleSave = async (rowsToSave: BroadcastRow[], newName?: string) => {
     if (!program) return;
+    if (rowsToSave.length === 0) {
+      setError("A broadcast needs at least one item before it can be saved");
+      return;
+    }
 
     const items = rowsToSave.map(r => r.item);
     const itemIds = new Set(items.map(it => it.id));
@@ -106,6 +127,7 @@ export default function BroadcastPage() {
     };
 
     await saveProgram(next);
+    sessionStorage.removeItem(draftNameKey(broadcastId));
     setProgram(next);
     setOriginalRows(rowsToSave);
   };

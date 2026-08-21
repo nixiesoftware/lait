@@ -62,16 +62,16 @@ export const ContentListItem: React.FC<ContentListItemProps> = ({
               <div className="w-full h-full flex items-center justify-center bg-gray-100 dark:bg-gray-800 animate-pulse">
                 <span className="text-[10px] font-medium text-gray-500 dark:text-gray-400">…</span>
               </div>
-            ) : content.source.source === "card" ? (
+            ) : content.source === "card" ? (
               <div
                 className="w-full h-full flex items-center justify-center"
-                style={{ backgroundColor: content.source.background, color: content.source.foreground }}
+                style={{ backgroundColor: `#${content.background}`, color: `#${content.foreground}` }}
               >
-                <SourceGlyph source={content.source} className="w-4 h-4" />
+                <SourceGlyph source={content} className="w-4 h-4" />
               </div>
             ) : (
               <div className="w-full h-full flex items-center justify-center bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500">
-                <SourceGlyph source={content.source} className="w-4 h-4" />
+                <SourceGlyph source={content} className="w-4 h-4" />
               </div>
             )}
           </div>
@@ -100,8 +100,8 @@ export const ContentListItem: React.FC<ContentListItemProps> = ({
       </td>
       <td className="pr-2 py-4 whitespace-nowrap text-xs max-md:text-xs text-gray-500 dark:text-gray-300">
         <span className="flex items-center gap-1">
-          <SourceGlyph source={content.source} className="w-3 h-3" />
-          {sourceLabel(content.source)}
+          <SourceGlyph source={content} className="w-3 h-3" />
+          {sourceLabel(content)}
         </span>
       </td>
       <td className="pr-2 py-4 whitespace-nowrap text-sm max-md:text-xs text-gray-500 dark:text-gray-300">

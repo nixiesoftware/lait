@@ -8,7 +8,7 @@ interface PreviewBackdropBlurProps {
 export default function PreviewBackdropBlur({ content }: PreviewBackdropBlurProps) {
   // No browser URL exists for stored bytes, so the backdrop is a gradient;
   // a card lends its own background color.
-  const cardBackground = content?.source.source === 'card' ? content.source.background : null;
+  const cardBackground = content?.source === 'card' ? `#${content.background}` : null;
 
   const style: React.CSSProperties = cardBackground
     ? {

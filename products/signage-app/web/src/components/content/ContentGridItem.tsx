@@ -37,17 +37,17 @@ export const ContentGridItem: React.FC<ContentGridItemProps> = ({ content, onCli
               <span className="text-sm font-medium">Uploading…</span>
               <span className="text-xs truncate max-w-[150px]">{content.name}</span>
             </div>
-          ) : content.source.source === "card" ? (
+          ) : content.source === "card" ? (
             <div
               className="w-full h-full rounded-sm flex items-center justify-center p-2 text-center"
-              style={{ backgroundColor: content.source.background, color: content.source.foreground }}
+              style={{ backgroundColor: `#${content.background}`, color: `#${content.foreground}` }}
             >
-              <span className="text-sm font-semibold break-words">{content.source.title}</span>
+              <span className="text-sm font-semibold break-words">{content.title}</span>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center gap-2 text-gray-400 dark:text-gray-500">
-              <SourceGlyph source={content.source} className="w-8 h-8" />
-              <span className="text-[10px] font-medium uppercase tracking-wide">{sourceLabel(content.source)}</span>
+              <SourceGlyph source={content} className="w-8 h-8" />
+              <span className="text-[10px] font-medium uppercase tracking-wide">{sourceLabel(content)}</span>
             </div>
           )}
         </div>
@@ -76,8 +76,8 @@ export const ContentGridItem: React.FC<ContentGridItemProps> = ({ content, onCli
           </div>
           <p className="text-[10px] sm:text-[8px] font-normal text-left truncate flex justify-between text-gray-500 dark:text-white">
             <span className="flex items-center gap-1">
-              <SourceGlyph source={content.source} className="size-3 sm:size-2" />
-              {sourceLabel(content.source)}
+              <SourceGlyph source={content} className="size-3 sm:size-2" />
+              {sourceLabel(content)}
             </span>
             <span>
               {content.width && content.height ? `${content.width}x${content.height}` : ""}

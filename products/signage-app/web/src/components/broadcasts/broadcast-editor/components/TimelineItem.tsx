@@ -95,7 +95,7 @@ const TimelineItem = React.memo(({
     return <AppWindow className="w-4 h-4" />;
   };
 
-  const source = row.media.source;
+  const source = row.media;
 
   return (
     <div
@@ -237,7 +237,7 @@ const TimelineItem = React.memo(({
         {source.source === 'card' ? (
           <div
             className="w-full h-full flex items-center justify-center px-2"
-            style={{ background: source.background, color: source.foreground }}
+            style={{ background: `#${source.background}`, color: `#${source.foreground}` }}
           >
             <span className="text-xs font-medium truncate">{source.title}</span>
           </div>

@@ -30,24 +30,24 @@ export function rowDurationSeconds(row: BroadcastRow): number {
  * otherwise.
  */
 export function mediaKind(media: SignageMedia): string {
-  switch (media.source.source) {
+  switch (media.source) {
     case 'stored':
-      return media.source.mime;
+      return media.mime;
     case 'kind':
-      return media.source.kind;
+      return media.kind;
     default:
-      return media.source.source;
+      return media.source;
   }
 }
 
 /** The short label a placeholder tile chips next to the name. */
 export function mediaChip(media: SignageMedia): string {
-  switch (media.source.source) {
+  switch (media.source) {
     case 'stored':
-      return media.source.mime.split('/')[1]?.toUpperCase() ?? media.source.mime.toUpperCase();
+      return media.mime.split('/')[1]?.toUpperCase() ?? media.mime.toUpperCase();
     case 'kind':
-      return media.source.kind.toUpperCase();
+      return media.kind.toUpperCase();
     default:
-      return media.source.source.toUpperCase();
+      return media.source.toUpperCase();
   }
 }

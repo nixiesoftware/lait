@@ -8,6 +8,7 @@
 
 import { LaitError, rpc, space } from '../api/client';
 import { mintBodyId } from '../lait/ids';
+import { normalizeMedia } from '../lait/normalize';
 import type {
   LibraryReply,
   MediaReply,
@@ -98,12 +99,10 @@ async function uploadOne(file: File): Promise<SignageMedia> {
   const media: SignageMedia = {
     id: mintBodyId(),
     name: file.name.replace(/\.[^/.]+$/, ''),
-    source: {
-      source: 'stored',
-      content: written.content,
-      size: written.size,
-      mime: file.type,
-    },
+    source: 'stored',
+    content: written.content,
+    size: written.size,
+    mime: file.type,
     duration_ms: null,
     width,
     height,
@@ -120,12 +119,12 @@ export async function uploadContent(files: File[]): Promise<SignageMedia[]> {
 
 export async function fetchLibrary(): Promise<SignageMedia[]> {
   const reply = await rpc<LibraryReply>({ cmd: 'media_list' });
-  return reply.media;
+  return reply.media.map(normalizeMedia);
 }
 
 export async function fetchMedia(id: string): Promise<SignageMedia | null> {
   const reply = await rpc<MediaReply>({ cmd: 'media_get', media: id });
-  return reply.media;
+  return reply.media ? normalizeMedia(reply.media) : null;
 }
 
 export async function saveMedia(media: SignageMedia): Promise<void> {

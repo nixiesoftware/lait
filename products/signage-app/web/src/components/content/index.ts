@@ -1,10 +1,10 @@
 import type { MediaSource, SignageMedia } from '@/utils/lait/types';
 
 /** A library entry as the content surfaces render it, plus upload-transient state. */
-export interface ContentItemProps extends SignageMedia {
+export type ContentItemProps = SignageMedia & {
   isUploading?: boolean;
   tempId?: string;
-}
+};
 
 export type SourceCategory = 'image' | 'video' | 'stored' | 'card' | 'kind' | 'live';
 
