@@ -694,6 +694,12 @@ async fn run_attachment_get(
     }))
 }
 
+/// The type an attachment is recorded under, from its name.
+///
+/// The extension and nothing else. This runs before a byte is read and its
+/// answer is product metadata, not a claim about the bytes — `serve::content`
+/// serves every attachment as `application/octet-stream` with `nosniff`
+/// regardless, so a wrong guess here misnames a row and cannot mis-render one.
 fn mime_for(name: &str) -> String {
     let extension = name
         .rsplit('.')
@@ -712,6 +718,19 @@ fn mime_for(name: &str) -> String {
         "json" => "application/json",
         "csv" => "text/csv",
         "zip" => "application/zip",
+        // Video and audio were absent entirely, so an `.mp4` attached as
+        // `application/octet-stream` — the system had no opinion about video at
+        // the one boundary that names a file. It is also the boundary where a
+        // catalog gets derived, and a row that cannot say it is a film is a
+        // poor place to start.
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -1026,5 +1045,29 @@ mod tests {
             json!({"action": "start", "run": hex_bytes(run.as_bytes())})
         )
         .is_err());
+    }
+    /// A film is recorded as a film.
+    ///
+    /// Video and audio were absent from this table entirely, so every `.mp4`
+    /// attached as `application/octet-stream`. It is the boundary that names a
+    /// file and the boundary where a catalog gets derived, and a row that cannot
+    /// say it is a film is a poor place to start.
+    #[test]
+    fn an_attachment_is_named_by_its_extension_including_the_moving_kinds() {
+        assert_eq!(mime_for("ribbon-cutting.mp4"), "video/mp4");
+        assert_eq!(
+            mime_for("CLIP.MOV"),
+            "video/quicktime",
+            "case is not meaning"
+        );
+        assert_eq!(mime_for("talk.m4a"), "audio/mp4");
+        assert_eq!(mime_for("lobby.webm"), "video/webm");
+        // The ones that were already right stay right.
+        assert_eq!(mime_for("plan.pdf"), "application/pdf");
+        assert_eq!(mime_for("shot.png"), "image/png");
+        // An unknown extension, and a name with none at all, both fall back
+        // rather than guessing.
+        assert_eq!(mime_for("archive.wat"), "application/octet-stream");
+        assert_eq!(mime_for("README"), "application/octet-stream");
     }
 }
