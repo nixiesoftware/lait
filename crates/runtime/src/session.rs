@@ -1477,17 +1477,6 @@ impl CoreInner {
         materialization
     }
 
-    fn cache_generation(
-        &mut self,
-        root: [u8; 32],
-        snapshot: Arc<replica::ReadSnapshot>,
-        parent: Option<[u8; 32]>,
-    ) -> crate::publication::MaterializationId {
-        let materialization = self.reserve_materialization();
-        self.cache_generation_at(root, snapshot, parent, materialization);
-        materialization
-    }
-
     fn cache_generation_at(
         &mut self,
         root: [u8; 32],
@@ -1760,8 +1749,25 @@ impl CoreInner {
         parent: Option<[u8; 32]>,
         changed: Option<&[BodyKey]>,
     ) {
+        let materialization = self.reserve_materialization();
+        self.publish_snapshot_at(snapshot, parent, changed, materialization);
+    }
+
+    /// Publish under a materialization the caller already reserved.
+    ///
+    /// A commit reserves its id at candidate time, because the id is baked
+    /// into the corpus and publication it builds off-lock; reads and other
+    /// commits reserve concurrently, so the id cannot be predicted at
+    /// publish time — only owned from the start.
+    fn publish_snapshot_at(
+        &mut self,
+        snapshot: Arc<replica::ReadSnapshot>,
+        parent: Option<[u8; 32]>,
+        changed: Option<&[BodyKey]>,
+        materialization: crate::publication::MaterializationId,
+    ) {
         let root = snapshot.root();
-        let materialization = self.cache_generation(root, snapshot.clone(), parent);
+        self.cache_generation_at(root, snapshot.clone(), parent, materialization);
         let prior = std::mem::take(&mut self.world_publications);
         if let Some(changed) = changed {
             for (world, publication) in prior {
@@ -3550,6 +3556,79 @@ impl crate::exec::ContentDelegate for AttemptContentDelegate<'_> {
     ) -> Result<Vec<u8>, crate::exec::Failure> {
         (self.read)(content, offset, len).map_err(|_| crate::exec::Failure::Handler)
     }
+}
+
+/// A perform-path failure paired with the durable class its Failed event
+/// records. The class rides with the failure because the value alone cannot
+/// say which kind of wrong this was: a `Rejected` covers a peer breaking the
+/// contract, the runtime failing to read its own truth, and a lost race alike.
+pub(crate) struct PerformFailure {
+    pub(crate) failure: Failure,
+    pub(crate) class: crate::exec::FailureClass,
+}
+
+impl PerformFailure {
+    fn backend(failure: Failure) -> Self {
+        Self {
+            failure,
+            class: crate::exec::FailureClass::Backend,
+        }
+    }
+}
+
+impl From<Failure> for PerformFailure {
+    fn from(failure: Failure) -> Self {
+        let class = match failure {
+            Failure::Rejected(_) => crate::exec::FailureClass::Protocol,
+            _ => crate::exec::FailureClass::Backend,
+        };
+        Self { failure, class }
+    }
+}
+
+impl From<Rejection> for PerformFailure {
+    fn from(rejection: Rejection) -> Self {
+        Failure::Rejected(rejection).into()
+    }
+}
+
+pub(crate) fn classify_dispatch(failure: crate::exec::DispatchFailure) -> PerformFailure {
+    use crate::exec::{DispatchFailure, Failure as Refusal, FailureClass};
+    let (failure, class) = match failure {
+        // A committed cancellation or an already-terminal Attempt beat this
+        // perform to the Run: a race lost to durable truth, not a contract.
+        DispatchFailure::Backend(Refusal::Cancelled) => (
+            Failure::Rejected(Rejection::InvalidRequest),
+            FailureClass::Fence,
+        ),
+        DispatchFailure::Terminal(_) => (
+            Failure::Rejected(Rejection::ContractViolation),
+            FailureClass::Fence,
+        ),
+        DispatchFailure::Backend(Refusal::Handler) => {
+            (Failure::CallbackPanicked, FailureClass::Handler)
+        }
+        DispatchFailure::Backend(Refusal::Wall) => {
+            (Failure::CallbackPanicked, FailureClass::Deadline)
+        }
+        DispatchFailure::Backend(Refusal::Os) => (Failure::CallbackPanicked, FailureClass::Backend),
+        // The Run this Session committed is not visible to its pinned
+        // reader: runtime state, never the handler's contract.
+        DispatchFailure::Run(_)
+        | DispatchFailure::Attempt(_)
+        | DispatchFailure::NotBegan(_)
+        | DispatchFailure::BodyRead(_) => (
+            Failure::Rejected(Rejection::ContractViolation),
+            FailureClass::Backend,
+        ),
+        DispatchFailure::Invalid(_)
+        | DispatchFailure::Selection(_)
+        | DispatchFailure::Backend(_) => (
+            Failure::Rejected(Rejection::ContractViolation),
+            FailureClass::Protocol,
+        ),
+    };
+    PerformFailure { failure, class }
 }
 
 fn read_failure(failure: crate::exec::ReadFailure) -> Failure {
@@ -5701,6 +5780,35 @@ pub struct Session {
     registry: crate::registry::Catalog,
 }
 
+#[cfg(test)]
+impl Session {
+    /// Reserve a materialization the way a cold read rebuild does: the
+    /// counter advances and nothing is published. Lets a test interleave the
+    /// concurrency a commit must survive.
+    pub(crate) fn reserve_cold_materialization(&self) {
+        let mut inner = self.core.lock();
+        let _ = inner.reserve_materialization();
+    }
+
+    /// The published snapshot's materialization and this World's installed
+    /// publication materialization. A commit must leave them equal.
+    pub(crate) fn materialization_pair(
+        &self,
+    ) -> (
+        crate::publication::MaterializationId,
+        Option<crate::publication::MaterializationId>,
+    ) {
+        let inner = self.core.lock();
+        (
+            inner.snapshot_materialization,
+            inner
+                .world_publications
+                .get(&self.world_id)
+                .map(|publication| publication.id.materialization),
+        )
+    }
+}
+
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -7030,7 +7138,7 @@ impl Session {
         let implementation_id = ambient.implementation;
         let mut replica = self.core.replica_lock();
         let (prior_publication, prior, candidate_materialization, build_governor, build_station) = {
-            let inner = self.core.lock();
+            let mut inner = self.core.lock();
             if inner.closed {
                 return Err(Failure::Interrupted);
             }
@@ -7042,7 +7150,7 @@ impl Session {
             (
                 inner.world_publications.get(&self.world_id).cloned(),
                 inner.snapshot.clone(),
-                inner.next_materialization,
+                inner.reserve_materialization(),
                 inner.read_memory.clone(),
                 inner.station_memory.station,
             )
@@ -7257,8 +7365,12 @@ impl Session {
             // target-World corpus.
             let mut inner = self.core.lock();
             let parent = prior.root();
-            inner.publish_snapshot(snapshot, Some(parent), Some(&receipt.bodies));
-            debug_assert_eq!(inner.snapshot_materialization, candidate_materialization);
+            inner.publish_snapshot_at(
+                snapshot,
+                Some(parent),
+                Some(&receipt.bodies),
+                candidate_materialization,
+            );
             inner.install_world_publication(self.world_id.clone(), publication);
             durable_change.cover_bodies(receipt.bodies.iter().cloned());
             self.core.note_exec();
@@ -7467,7 +7579,7 @@ impl Session {
                     build_governor,
                     build_station,
                 ) = {
-                    let inner = self.core.lock();
+                    let mut inner = self.core.lock();
                     if inner.closed {
                         return Err(crate::exec::WorkRefusal::Session(Failure::Interrupted));
                     }
@@ -7482,7 +7594,7 @@ impl Session {
                     (
                         inner.world_publications.get(&self.world_id).cloned(),
                         inner.snapshot.clone(),
-                        inner.next_materialization,
+                        inner.reserve_materialization(),
                         inner.read_memory.clone(),
                         inner.station_memory.station,
                     )
@@ -7686,8 +7798,12 @@ impl Session {
                     let committed_publication = publication.id;
                     let parent = prior.root();
                     let mut inner = self.core.lock();
-                    inner.publish_snapshot(snapshot, Some(parent), Some(&receipt.bodies));
-                    debug_assert_eq!(inner.snapshot_materialization, candidate_materialization);
+                    inner.publish_snapshot_at(
+                        snapshot,
+                        Some(parent),
+                        Some(&receipt.bodies),
+                        candidate_materialization,
+                    );
                     inner.install_world_publication(self.world_id.clone(), publication);
                     durable_change.cover_bodies(receipt.bodies.iter().cloned());
                     self.core.note_exec();
@@ -7800,11 +7916,8 @@ impl Session {
                             self.core.release_attempt(attempt);
                             report.steps.push(step);
                         }
-                        Err(failure) => {
-                            let class = match failure {
-                                Failure::Rejected(_) => crate::exec::FailureClass::Protocol,
-                                _ => crate::exec::FailureClass::Backend,
-                            };
+                        Err(refused) => {
+                            let PerformFailure { failure, class } = refused;
                             let _ = self.commit_perform_event(
                                 run,
                                 crate::exec::RunEventKind::Failed(crate::exec::Failed {
@@ -8056,11 +8169,11 @@ impl Session {
         read_content: Option<
             &dyn Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, Failure>,
         >,
-    ) -> Result<crate::exec::PerformStep, Failure> {
+    ) -> Result<crate::exec::PerformStep, PerformFailure> {
         let reader = {
             let inner = self.core.lock();
             if inner.closed {
-                return Err(Failure::Interrupted);
+                return Err(Failure::Interrupted.into());
             }
             SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
         };
@@ -8069,7 +8182,9 @@ impl Session {
         // were instantiated against is the one the handler reads.
         let (run_state, _, _) = crate::exec::read_committed_run(&reader, &self.world_id, run)
             .map_err(read_failure)?
-            .ok_or(Rejection::ContractViolation)?;
+            .ok_or_else(|| {
+                PerformFailure::backend(Failure::Rejected(Rejection::ContractViolation))
+            })?;
         let delegate = AttemptFindDelegate {
             session: self,
             pinned: crate::publication::PublicationId::new(
@@ -8089,15 +8204,7 @@ impl Session {
         let dispatcher = crate::exec::Dispatcher::new(package, crate::exec::InProcess::new());
         let mut completion = dispatcher
             .invoke(&reader, &self.world_id, run, attempt, &cancel, facets)
-            .map_err(|failure| match failure {
-                crate::exec::DispatchFailure::Backend(crate::exec::Failure::Cancelled) => {
-                    Failure::Rejected(Rejection::InvalidRequest)
-                }
-                crate::exec::DispatchFailure::Backend(crate::exec::Failure::Handler) => {
-                    Failure::CallbackPanicked
-                }
-                _ => Failure::Rejected(Rejection::ContractViolation),
-            })?;
+            .map_err(classify_dispatch)?;
         // Checkpoint bytes seal through the same host authority as outputs:
         // a Saved event can only name content the host actually holds.
         let staged_blobs: Vec<Vec<u8>> =
@@ -8131,14 +8238,20 @@ impl Session {
         }
         let (run_state, _, _) = crate::exec::read_committed_run(&reader, &self.world_id, run)
             .map_err(read_failure)?
-            .ok_or(Rejection::ContractViolation)?;
+            .ok_or_else(|| {
+                PerformFailure::backend(Failure::Rejected(Rejection::ContractViolation))
+            })?;
         let attempt_state = run_state
             .attempts
             .iter()
             .find(|candidate| candidate.id == attempt)
-            .ok_or(Rejection::ContractViolation)?;
+            .ok_or_else(|| {
+                PerformFailure::backend(Failure::Rejected(Rejection::ContractViolation))
+            })?;
         let [began] = attempt_state.began.as_slice() else {
-            return Err(Failure::Rejected(Rejection::ContractViolation));
+            return Err(PerformFailure::backend(Failure::Rejected(
+                Rejection::ContractViolation,
+            )));
         };
         let events = completion
             .events(run, attempt, vec![began.event])
@@ -8293,14 +8406,14 @@ impl Session {
         let _mutation = self.core.try_mutation_lane().map_err(commit_failure)?;
         let mut replica = self.core.replica_lock();
         let (prior_publication, prior, candidate_materialization, build_governor, build_station) = {
-            let inner = self.core.lock();
+            let mut inner = self.core.lock();
             if inner.closed {
                 return Err(Failure::Interrupted);
             }
             (
                 inner.world_publications.get(&self.world_id).cloned(),
                 inner.snapshot.clone(),
-                inner.next_materialization,
+                inner.reserve_materialization(),
                 inner.read_memory.clone(),
                 inner.station_memory.station,
             )
@@ -8457,7 +8570,12 @@ impl Session {
             let committed_publication = publication.id;
             let parent = prior.root();
             let mut inner = self.core.lock();
-            inner.publish_snapshot(snapshot, Some(parent), Some(&receipt.bodies));
+            inner.publish_snapshot_at(
+                snapshot,
+                Some(parent),
+                Some(&receipt.bodies),
+                candidate_materialization,
+            );
             inner.install_world_publication(self.world_id.clone(), publication);
             durable_change.cover_bodies(receipt.bodies.iter().cloned());
             self.core.note_exec();

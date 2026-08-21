@@ -1925,6 +1925,12 @@ impl Completion {
 pub enum Failure {
     Cancelled,
     Handler,
+    /// The Attempt's wall budget expired and the backend stopped the work.
+    /// Distinct from [`Failure::Handler`]: the handler did nothing wrong.
+    Wall,
+    /// The operating system refused process control — spawn, pipe, or wait.
+    /// Distinct from [`Failure::Handler`]: the handler never ran.
+    Os,
     InvalidContext,
     InvalidOutcome,
     InvalidCheckpoint,
@@ -2114,13 +2120,13 @@ impl Handler for Subprocess {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         Self::own_process_group(&mut command);
-        let mut child = command.spawn().map_err(|_| Failure::Handler)?;
-        let mut stdin = child.stdin.take().ok_or(Failure::Handler)?;
+        let mut child = command.spawn().map_err(|_| Failure::Os)?;
+        let mut stdin = child.stdin.take().ok_or(Failure::Os)?;
         let input = context.input_inline().to_vec();
         let feeder = std::thread::spawn(move || {
             let _ = stdin.write_all(&input);
         });
-        let mut stdout = child.stdout.take().ok_or(Failure::Handler)?;
+        let mut stdout = child.stdout.take().ok_or(Failure::Os)?;
         let ceiling = usize::try_from(context.limits().progress_bytes).unwrap_or(usize::MAX);
         let collector = std::thread::spawn(move || {
             let mut collected = Vec::new();
@@ -2152,7 +2158,7 @@ impl Handler for Subprocess {
                     let _ = child.wait();
                     let _ = feeder.join();
                     let _ = collector.join();
-                    return Err(Failure::Handler);
+                    return Err(Failure::Os);
                 }
             }
             if context.cancel_asked() {
@@ -2167,7 +2173,7 @@ impl Handler for Subprocess {
                 let _ = child.wait();
                 let _ = feeder.join();
                 let _ = collector.join();
-                return Err(Failure::Handler);
+                return Err(Failure::Wall);
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
