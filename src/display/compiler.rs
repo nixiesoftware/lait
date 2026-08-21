@@ -195,6 +195,9 @@ impl ProgramCompiler {
 #[derive(serde::Serialize)]
 struct LiveManifest<'a> {
     version: u16,
+    /// `live` or `stored`. Carried so the two namespaces cannot collide into
+    /// one `derive_asset_id`, and so the bytes say which plane resolves them.
+    origin: &'a str,
     resource: &'a str,
 }
 
@@ -204,37 +207,31 @@ fn media_scene(
     media: world_interface::display::RenderedMedia,
     playback_tier: PlaybackTier,
 ) -> Result<Option<(DisplayScene, DisplayAssetId, Vec<u8>, String)>> {
-    let (protocol, media_type) = if media.live {
-        match playback_tier {
-            PlaybackTier::MseLive => (
-                display_protocol::program::MediaProtocol::Mse,
-                DisplayAssetMediaType::MseManifest,
-            ),
-            PlaybackTier::NativeHls | PlaybackTier::NativeFull => (
-                display_protocol::program::MediaProtocol::Hls,
-                DisplayAssetMediaType::HlsManifest,
-            ),
-            PlaybackTier::Frame => return Ok(None),
-        }
-    } else {
-        match media.protocol {
-            world_interface::display::MediaProtocol::Mse => (
-                display_protocol::program::MediaProtocol::Mse,
-                DisplayAssetMediaType::MseManifest,
-            ),
-            world_interface::display::MediaProtocol::Hls => (
-                display_protocol::program::MediaProtocol::Hls,
-                DisplayAssetMediaType::HlsManifest,
-            ),
-            world_interface::display::MediaProtocol::Dash => (
-                display_protocol::program::MediaProtocol::Dash,
-                DisplayAssetMediaType::DashManifest,
-            ),
+    // The tier decides the transport for both origins. It used to be consulted
+    // only for live scenes, so a stored one reached a Frame-tier receiver as
+    // media it could not draw and was never told it could not draw — a screen
+    // holding its previous item while health reported the revision delivered.
+    let (protocol, media_type) = match playback_tier {
+        PlaybackTier::MseLive => (
+            display_protocol::program::MediaProtocol::Mse,
+            DisplayAssetMediaType::MseManifest,
+        ),
+        PlaybackTier::NativeHls | PlaybackTier::NativeFull => (
+            display_protocol::program::MediaProtocol::Hls,
+            DisplayAssetMediaType::HlsManifest,
+        ),
+        PlaybackTier::Frame => return Ok(None),
+    };
+    let live = media.origin.is_live();
+    let resource = match &media.origin {
+        world_interface::display::MediaOrigin::Live(rendition) => rendition.as_str().to_string(),
+        world_interface::display::MediaOrigin::Stored(content) => {
+            data_encoding::HEXLOWER.encode(content.as_bytes())
         }
     };
-    let resource = media.resource.as_str().to_string();
     let bytes = serde_json::to_vec(&LiveManifest {
         version: 1,
+        origin: if live { "live" } else { "stored" },
         resource: &resource,
     })
     .context("encode live display manifest")?;
@@ -262,7 +259,7 @@ fn media_scene(
         DisplayScene::Media {
             manifest,
             protocol,
-            live: media.live,
+            live,
         },
         asset_id,
         bytes,
@@ -491,9 +488,10 @@ mod tests {
                     id: "live-main".into(),
                     duration_ms: None,
                     scene: RenderedScene::Media(RenderedMedia {
-                        resource: DisplayResourceId::new("main").unwrap(),
+                        origin: world_interface::display::MediaOrigin::Live(
+                            DisplayResourceId::new("main").unwrap(),
+                        ),
                         protocol: SourceMediaProtocol::Hls,
-                        live: true,
                     }),
                     assessment: DisplayAssessment::Current,
                     spoken_summary: Some("Live main display".into()),
@@ -561,5 +559,165 @@ mod tests {
                 reason: BlankReason::Unsupported
             }
         ));
+    }
+
+    fn stored_projection(id: [u8; 32]) -> DisplayProjection {
+        DisplayProjection {
+            program: RenderedProgram {
+                items: vec![RenderedProgramItem {
+                    id: "library-film".into(),
+                    duration_ms: None,
+                    scene: RenderedScene::Media(RenderedMedia {
+                        origin: world_interface::display::MediaOrigin::Stored(
+                            replica::content::ContentRef { content_id: id },
+                        ),
+                        protocol: SourceMediaProtocol::Hls,
+                    }),
+                    assessment: DisplayAssessment::Current,
+                    spoken_summary: Some("Ribbon cutting".into()),
+                }],
+                cycle: world_interface::display::ProgramCycle::HoldLast,
+                refresh_after_ms: None,
+            },
+            assessment: DisplayAssessment::Current,
+            spoken_summary: None,
+        }
+    }
+
+    /// A stored scene is gated by the receiver's tier, exactly as a live one is.
+    ///
+    /// It used to be gated by neither: the tier was consulted only on the live
+    /// branch, so a Frame-tier receiver — which the reference receiver is — was
+    /// handed media it cannot draw and was never told it could not draw it. Not
+    /// a refusal, not a blank; a screen holding its previous item while health
+    /// reported the revision delivered.
+    #[test]
+    fn stored_media_degrades_on_a_frame_tier_receiver() {
+        let compiler = ProgramCompiler::new([9; 32]).unwrap();
+        let assignment = DisplayAssignmentId::parse("77".repeat(16)).unwrap();
+        let program = DisplayProgramId::parse("88".repeat(16)).unwrap();
+        let freshness = FreshnessPolicy {
+            stale_after_ms: 60_000,
+            on_stale: StaleAction::Blank,
+        };
+
+        let hls = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness.clone(),
+                stored_projection([0xAB; 32]),
+                None,
+                PlaybackTier::NativeHls,
+            )
+            .unwrap();
+        let frame = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness,
+                stored_projection([0xAB; 32]),
+                None,
+                PlaybackTier::Frame,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &hls.program.items[0].scene,
+            DisplayScene::Media { manifest, protocol: display_protocol::program::MediaProtocol::Hls, live: false }
+                if manifest.media_type == DisplayAssetMediaType::HlsManifest
+        ));
+        assert!(
+            matches!(
+                frame.program.items[0].scene,
+                DisplayScene::Blank {
+                    reason: BlankReason::Unsupported
+                }
+            ),
+            "a receiver that cannot play it is told so"
+        );
+    }
+
+    /// The two namespaces no longer collide into one asset id.
+    ///
+    /// `derive_asset_id` commits the media type, length and digest — and the
+    /// digest is over the manifest, which now carries the origin. Without that,
+    /// a rendition named as 64 hex characters and the content of the same name
+    /// derived the same id, and the second one to compile would have been
+    /// served the first one's bytes.
+    #[test]
+    fn a_stored_and_a_live_scene_of_the_same_name_are_different_assets() {
+        let compiler = ProgramCompiler::new([9; 32]).unwrap();
+        let assignment = DisplayAssignmentId::parse("77".repeat(16)).unwrap();
+        let program = DisplayProgramId::parse("88".repeat(16)).unwrap();
+        let freshness = FreshnessPolicy {
+            stale_after_ms: 60_000,
+            on_stale: StaleAction::Blank,
+        };
+        let name = "ab".repeat(32);
+
+        let stored = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness.clone(),
+                stored_projection([0xAB; 32]),
+                None,
+                PlaybackTier::NativeHls,
+            )
+            .unwrap();
+        let live_projection = DisplayProjection {
+            program: RenderedProgram {
+                items: vec![RenderedProgramItem {
+                    id: "library-film".into(),
+                    duration_ms: None,
+                    scene: RenderedScene::Media(RenderedMedia {
+                        origin: world_interface::display::MediaOrigin::Live(
+                            DisplayResourceId::new(name.clone()).unwrap(),
+                        ),
+                        protocol: SourceMediaProtocol::Hls,
+                    }),
+                    assessment: DisplayAssessment::Current,
+                    spoken_summary: Some("Ribbon cutting".into()),
+                }],
+                cycle: world_interface::display::ProgramCycle::HoldLast,
+                refresh_after_ms: None,
+            },
+            assessment: DisplayAssessment::Current,
+            spoken_summary: None,
+        };
+        let live = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness,
+                live_projection,
+                None,
+                PlaybackTier::NativeHls,
+            )
+            .unwrap();
+
+        let (
+            DisplayScene::Media {
+                manifest: stored_manifest,
+                ..
+            },
+            DisplayScene::Media {
+                manifest: live_manifest,
+                ..
+            },
+        ) = (&stored.program.items[0].scene, &live.program.items[0].scene)
+        else {
+            panic!("both compile to media");
+        };
+        assert_eq!(
+            stored.live_resource(&stored_manifest.id),
+            Some(name.as_str()),
+            "the stored resource is the content id in hex"
+        );
+        assert_ne!(
+            stored_manifest.id, live_manifest.id,
+            "one name, two planes, two assets"
+        );
     }
 }

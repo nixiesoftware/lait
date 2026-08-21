@@ -37,10 +37,6 @@ pub const MAX_MIME_CHARS: usize = 96;
 pub const MAX_GROUP_SCREENS: usize = 512;
 /// A ceiling on one stored file, so a library row cannot describe a petabyte.
 pub const MAX_MEDIA_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-/// Taken from the display contract rather than chosen, because an id this
-/// World accepts and a receiver cannot be told about is a program that blanks
-/// for a reason nobody can see.
-pub use world_interface::display::MAX_SURFACE_ID_BYTES as MAX_CONTENT_ID_BYTES;
 pub const MAX_CONFIG_SETTINGS: usize = 64;
 pub const MAX_SETTING_CHARS: usize = 1024;
 
@@ -506,6 +502,18 @@ impl MediaSource {
             Self::Card { .. } | Self::Kind { .. } | Self::Live { .. } => None,
         }
     }
+
+    /// The stored id as a substrate reference, decoded here because this is the
+    /// crate that decides the id's shape. `validate` checks shape only, so a
+    /// declaration and a render must not each invent their own decode.
+    pub fn content_ref(&self) -> Option<replica::content::ContentRef> {
+        let bytes = data_encoding::HEXLOWER
+            .decode(self.content()?.as_bytes())
+            .ok()?;
+        Some(replica::content::ContentRef {
+            content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+        })
+    }
 }
 
 /// One entry in the library.
@@ -630,16 +638,20 @@ fn valid_kind(name: &str) -> bool {
         })
 }
 
-/// A committed content id, as the upload route rendered it.
+/// A committed content id, as the upload route rendered it: exactly 32 bytes of
+/// lowercase hex.
 ///
-/// Checked for shape only. Whether the descriptor exists is the substrate's
-/// question and it refuses the declaration if it does not.
+/// Whether the descriptor *exists* is the substrate's question and it refuses
+/// the declaration if it does not. But the id's own shape is this World's, and
+/// it used to accept any lowercase token up to 96 bytes — so an entry could be
+/// written, validate, replicate, and then render as a blank forever, because
+/// nothing that could decode it ever saw it. Admitted and renderable are the
+/// same set now.
 fn valid_content_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_CONTENT_ID_BYTES
+    id.len() == 64
         && id
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 // ─── The fleet ──────────────────────────────────────────────────────────────
