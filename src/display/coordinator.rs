@@ -450,19 +450,22 @@ impl DisplayCoordinator {
             .iter()
             .find(|item| &item.id == current_item)
             .ok_or_else(|| anyhow!("live ticket item is not in the current program"))?;
-        let scene_transport = match &item.scene {
+        let (scene_transport, live) = match &item.scene {
             DisplayScene::Media {
                 manifest: scene_manifest,
                 protocol,
-                live: true,
-            } if &scene_manifest.id == manifest => match protocol {
-                display_protocol::program::MediaProtocol::Mse => LiveTransport::Mse,
-                display_protocol::program::MediaProtocol::Hls => LiveTransport::Hls,
-                display_protocol::program::MediaProtocol::Dash => {
-                    return Err(anyhow!("live DASH fanout is not supported"))
-                }
-            },
-            _ => return Err(anyhow!("manifest is not the current live media item")),
+                live,
+            } if &scene_manifest.id == manifest => (
+                match protocol {
+                    display_protocol::program::MediaProtocol::Mse => LiveTransport::Mse,
+                    display_protocol::program::MediaProtocol::Hls => LiveTransport::Hls,
+                    display_protocol::program::MediaProtocol::Dash => {
+                        return Err(anyhow!("DASH fanout is not supported"))
+                    }
+                },
+                *live,
+            ),
+            _ => return Err(anyhow!("manifest is not the current media item")),
         };
         if scene_transport != transport {
             return Err(anyhow!("live ticket transport does not match the program"));
@@ -497,18 +500,27 @@ impl DisplayCoordinator {
         if resolved.address.space.as_str() != assignment.space {
             return Err(anyhow!("live assignment Space changed"));
         }
-        self.live
-            .ensure_orbit(self.router.clone(), resolved.address)
-            .await?;
         let orbit = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
-        let ready = async {
-            while !self.live.has_resource(&orbit, &resource, transport) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        };
-        tokio::time::timeout(LIVE_SOURCE_WAIT, ready)
-            .await
-            .context("live media source did not publish its catalog")?;
+        if live {
+            // A live source is dialled on demand and takes a moment to announce
+            // its catalog, so waiting is the right thing to do.
+            self.live
+                .ensure_orbit(self.router.clone(), resolved.address)
+                .await?;
+            let ready = async {
+                while !self.live.has_resource(&orbit, &resource, transport) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            };
+            tokio::time::timeout(LIVE_SOURCE_WAIT, ready)
+                .await
+                .context("live media source did not publish its catalog")?;
+        } else if !self.live.has_resource(&orbit, &resource, transport) {
+            // A finite source is installed or it is not, and no amount of
+            // waiting turns one into the other — so this refuses now rather
+            // than spending the live budget to say the same thing later.
+            return Err(anyhow!("stored media is not packaged on this coordinator"));
+        }
         let lifetime = match transport {
             LiveTransport::Mse => MSE_TICKET_LIFETIME_MS,
             LiveTransport::Hls => HLS_TICKET_LIFETIME_MS,
@@ -625,17 +637,20 @@ impl DisplayCoordinator {
             .get(ticket.device.as_str())
             .cloned()
             .ok_or_else(|| anyhow!("live program is unavailable"))?;
+        // The origin was fixed when the ticket was minted; what this re-checks
+        // every request is that the program has not been revised out from under
+        // it. Requiring `live: true` here would refuse a stored ticket on its
+        // first segment for a reason that has nothing to do with the program.
         if compiled.program.revision != ticket.revision
             || !compiled.program.items.iter().any(|item| {
                 item.id == ticket.current_item
                     && matches!(
                         &item.scene,
-                        DisplayScene::Media { manifest, live: true, .. }
-                            if manifest.id == ticket.manifest
+                        DisplayScene::Media { manifest, .. } if manifest.id == ticket.manifest
                     )
             })
         {
-            return Err(anyhow!("live program was revised"));
+            return Err(anyhow!("media program was revised"));
         }
         Ok(())
     }
