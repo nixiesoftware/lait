@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2550
-pr-platform    2080
-nightly        2578
+pr             2553
+pr-platform    2083
+nightly        2581
 mutants        106
 
 [gates]
@@ -1992,7 +1992,9 @@ runtime dispatch_tests::a_checkpointed_attempt_resumes_across_restart_from_its_c
 runtime dispatch_tests::a_child_grant_outside_its_own_spec_declaration_is_refused
 runtime dispatch_tests::a_cited_run_outlives_its_citer_and_collects_only_after_it
 runtime dispatch_tests::a_collaborative_world_commits_and_reads_through_the_session
+runtime dispatch_tests::a_commit_survives_concurrent_materialization_reservations
 runtime dispatch_tests::a_denied_question_is_a_cancellation_not_a_silent_stall
+runtime dispatch_tests::a_dispatch_refusal_says_which_kind_of_wrong_it_was
 runtime dispatch_tests::a_fabricated_checkpoint_reference_never_becomes_a_durable_save
 runtime dispatch_tests::a_saved_checkpoint_is_sealed_bytes_or_it_does_not_exist
 runtime dispatch_tests::a_session_cannot_stop_the_station
@@ -2044,6 +2046,7 @@ runtime dispatch_tests::station_find_policy_can_only_tighten_a_query
 runtime dispatch_tests::subprocess_perform::a_cancelled_run_never_spawns_its_child
 runtime dispatch_tests::subprocess_perform::a_nonzero_exit_is_an_application_failure_not_a_dispatch_error
 runtime dispatch_tests::subprocess_perform::a_subprocess_transforms_committed_input_into_a_sealed_outcome
+runtime dispatch_tests::subprocess_perform::a_wall_expiry_is_a_deadline_not_a_handler_defect
 runtime dispatch_tests::subprocess_perform::a_wall_limited_child_is_killed_and_the_attempt_fails_honestly
 runtime dispatch_tests::test_world_submits_and_queries_through_dispatch
 runtime dispatch_tests::the_drain_interleaves_runs_instead_of_finishing_the_lowest_id_first
