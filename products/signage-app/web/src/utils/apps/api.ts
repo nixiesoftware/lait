@@ -1,0 +1,92 @@
+/**
+ * Integration configs. The World stores one `SignageConfig` per kind and
+ * refuses a second; settings are an untyped string map on purpose — what a
+ * kind's settings *mean* is this application's knowledge, kept in KINDS
+ * below the way Medusa's backend/integrations registry kept it, until the
+ * kind registry lands (SIGN-4).
+ */
+
+import { rpc } from '../api/client';
+import { mintBodyId } from '../lait/ids';
+import type {
+  ConfigReply,
+  ConfigSavedReply,
+  ConfigsReply,
+  SignageConfig,
+} from '../lait/types';
+
+export interface KindField {
+  name: string;
+  label: string;
+  kind: 'text' | 'number' | 'secret';
+  required: boolean;
+}
+
+export interface KindDefinition {
+  kind: string;
+  label: string;
+  description: string;
+  fields: KindField[];
+}
+
+/** The kinds this application can configure and render forms for. */
+export const KINDS: KindDefinition[] = [
+  {
+    kind: 'athan',
+    label: 'Athan',
+    description: 'Prayer times for a location, rendered as a schedule card.',
+    fields: [
+      { name: 'latitude', label: 'Latitude', kind: 'number', required: true },
+      { name: 'longitude', label: 'Longitude', kind: 'number', required: true },
+      { name: 'method', label: 'Calculation method', kind: 'text', required: false },
+      { name: 'timezone', label: 'Time zone', kind: 'text', required: false },
+    ],
+  },
+  {
+    kind: 'youtube',
+    label: 'YouTube',
+    description: 'A YouTube video by id.',
+    fields: [{ name: 'video_id', label: 'Video id', kind: 'text', required: true }],
+  },
+  {
+    kind: 'html_widget',
+    label: 'Web page',
+    description: 'Any web page by URL, shown full-screen.',
+    fields: [{ name: 'url', label: 'URL', kind: 'text', required: true }],
+  },
+];
+
+export async function fetchConfigs(): Promise<SignageConfig[]> {
+  const reply = await rpc<ConfigsReply>({ cmd: 'config_list' });
+  return reply.configs;
+}
+
+export async function fetchConfigByKind(kind: string): Promise<SignageConfig | null> {
+  const configs = await fetchConfigs();
+  return configs.find((config) => config.kind === kind) ?? null;
+}
+
+export async function fetchConfig(id: string): Promise<SignageConfig | null> {
+  const reply = await rpc<ConfigReply>({ cmd: 'config_get', config: id });
+  return reply.config;
+}
+
+export async function putConfig(
+  kind: string,
+  name: string,
+  settings: Record<string, string>,
+): Promise<string> {
+  const existing = await fetchConfigByKind(kind);
+  const config: SignageConfig = {
+    id: existing?.id ?? mintBodyId(),
+    kind,
+    name,
+    settings,
+  };
+  const reply = await rpc<ConfigSavedReply>({ cmd: 'config_put', config });
+  return reply.config;
+}
+
+export async function deleteConfig(id: string): Promise<void> {
+  await rpc({ cmd: 'config_delete', config: id }, { confirm: true });
+}
