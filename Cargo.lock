@@ -374,6 +374,7 @@ dependencies = [
  "lait-signage-app",
  "lait-workbench",
  "mechanics",
+ "mediabox",
  "replica",
  "schedule",
  "serde",

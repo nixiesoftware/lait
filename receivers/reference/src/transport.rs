@@ -20,6 +20,12 @@ impl Transport {
         Self { agent, origin }
     }
 
+    /// The pinned origin every request goes to, for composing the one URL
+    /// this receiver ever hands anything else: a ticketed playlist.
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
     pub fn get(
         &self,
         path: &str,

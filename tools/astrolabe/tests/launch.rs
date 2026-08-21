@@ -265,6 +265,21 @@ async fn wait_for_revision_change(
 /// The item is still checked — for being *present*, which is the part that
 /// would break if the receiver stopped tracking its position.
 async fn wait_for_health(client: &Client, device: &str, revision: &str) {
+    // The frame programs in this test stage one or two cards.
+    wait_for_health_staged(client, device, revision, 1..=2).await;
+}
+
+/// Health, with the staging the current program actually implies.
+///
+/// A frame program stages its cards; a media program stages a grant and no
+/// bytes at all — staging is a frame budget, and a film that staged nothing is
+/// the design working, not a receiver failing to load.
+async fn wait_for_health_staged(
+    client: &Client,
+    device: &str,
+    revision: &str,
+    staged: std::ops::RangeInclusive<u16>,
+) {
     let mut last = String::from("the coordinator was never reached");
     for _ in 0..200 {
         let display = client.display_status().await.expect("read receiver health");
@@ -279,10 +294,15 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str) {
             assert_eq!(health.playback, "displaying");
             assert_eq!(health.last_error, "none");
             assert!(
-                (1..=2).contains(&health.staged_items),
-                "receiver staged an unexpected number of Signage frames"
+                staged.contains(&health.staged_items),
+                "receiver staged {} items where {staged:?} were expected",
+                health.staged_items
             );
-            assert!(health.staged_bytes > 0);
+            assert_eq!(
+                health.staged_bytes > 0,
+                *staged.start() > 0,
+                "staged bytes must match staged items: a media grant is not bytes"
+            );
             assert!(health.pipeline_unobservable);
             return;
         }
@@ -382,6 +402,96 @@ async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("two assigned receivers never crossed a shared program boundary");
+}
+
+/// Wait for the receiver to present a media handoff, and return it.
+///
+/// The URL in `active.json` is the proof of the whole stored chain: the
+/// receiver minted a real ticket, which the coordinator honoured only after it
+/// walked the uploaded container's own bytes over the content plane, planned
+/// every segment, and installed the presentation. Nothing in this test fetched
+/// a byte of media by hand.
+async fn wait_for_media(path: &Path, assignment: &str, program: &str) -> (String, String) {
+    for _ in 0..200 {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if status["assignment"] == assignment
+                    && status["program"] == program
+                    && status["scene"]["kind"] == "media"
+                {
+                    if let (Some(revision), Some(url)) =
+                        (status["revision"].as_str(), status["scene"]["url"].as_str())
+                    {
+                        if !revision.is_empty() && !url.is_empty() {
+                            return (revision.to_owned(), url.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("assigned receiver never presented the stored film's ticket");
+}
+
+/// Upload a real container and author the film program that plays it.
+///
+/// The container is the demuxer's own fixture — the same bytes its unit tests
+/// read — so ingest, plan, serve and this end-to-end are pinned to one shape.
+async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let store = registered_store(client, space).await;
+    let film = mediabox::testkit::whole_file();
+    let route = lait::control::ControlRoute::Orbit {
+        address: lait::control::OrbitAddress::for_store(std::path::Path::new(&store), space_id),
+    };
+    let mut upload = lait::control::ContentUpload::open(
+        home,
+        route,
+        [0xC1; 16],
+        None,
+        u64::try_from(film.len()).expect("film length"),
+    )
+    .await
+    .expect("open the film upload");
+    upload.push(&film).await.expect("push the film");
+    let reply = upload.finish().await.expect("seal the film");
+    let lait::control::ContentReply::ContentWritten {
+        content,
+        plaintext_len,
+    } = reply
+    else {
+        panic!("the film upload was refused: {reply:?}");
+    };
+
+    let entry = signage::SignageMedia {
+        id: replica::body::BodyId::from_bytes([0xC2; 16]).render(),
+        name: "Premiere".into(),
+        source: signage::contract::MediaSource::Stored {
+            content,
+            size: plaintext_len,
+            mime: "video/mp4".into(),
+        },
+        duration_ms: None,
+        width: None,
+        height: None,
+        catalog: None,
+    };
+    let film_program = signage::SignageProgram {
+        id: replica::body::BodyId::from_bytes([0xC3; 16]).render(),
+        name: "Premiere night".into(),
+        cycle: signage::ProgramCycle::HoldLast,
+        items: vec![signage::SignageItem {
+            id: "film".into(),
+            media: entry.id.clone(),
+            duration_ms: Some(10_000),
+        }],
+        windows: Vec::new(),
+    };
+    let program_id = film_program.id.clone();
+    write_signage_media(client, space, entry).await;
+    write_signage_program(client, space, film_program).await;
+    program_id
 }
 
 async fn seed_signage_program(client: &Client, store: &Path) -> (String, String) {
@@ -885,9 +995,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         wait_for_health(&client, &device, &revision).await;
 
         // A second independently paired process joins the same requested
-        // positional group. Both reference receivers declare boundary-only
-        // sync, so the coordinator must degrade the whole group to one shared
-        // boundary cursor rather than pretend positional guarantees exist.
+        // positional group. Neither reference receiver declares positional
+        // sync — the native-HLS profile declares none at all — so the
+        // coordinator must degrade the whole group to one shared boundary
+        // cursor rather than pretend positional guarantees exist.
         let second_receiver_root = tempfile::tempdir().expect("second reference receiver root");
         let second_bootstrap_path = second_receiver_root.path().join("bootstrap.json");
         let second_state_path = second_receiver_root.path().join("state");
@@ -1033,6 +1144,60 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         wait_for_health(&client, &device, &revision).await;
         wait_for_health(&client, &second_device, &second_revision).await;
 
+        // A stored film, end to end: a real container uploaded to the content
+        // plane, a Stored library entry, a program that plays it, and the
+        // receiver presenting a ticketed playlist URL. The ticket is minted
+        // only after the coordinator walks the container's own bytes and
+        // installs the planned presentation, so this one assertion covers the
+        // whole serve-side chain.
+        let film_program = seed_stored_film(&client, identity.path(), &assignment.space).await;
+        client
+            .display_assignment_put(DisplayAssignmentInput {
+                device: device.clone(),
+                orbit: assignment.space.clone(),
+                world: signage::contract::PRODUCT_WORLD.into(),
+                surface: "signage.program".into(),
+                input: serde_json::json!({ "program": film_program }),
+                theme: lait::control::DisplayThemeSetting::Dark,
+                stale_after_ms: 60_000,
+                on_stale: lait::control::DisplayStaleActionSetting::Blank,
+                sync: None,
+                expires_at_unix_ms: None,
+            })
+            .await
+            .expect("assign the stored film in Astrolabe");
+        let film_status = client
+            .display_status()
+            .await
+            .expect("read the committed film assignment");
+        let film_assignment = film_status
+            .assignments
+            .iter()
+            .find(|row| row.device == device && row.revoked_at_unix_ms.is_none())
+            .expect("the receiver has one active film assignment");
+        let assignment_id = film_assignment.assignment.clone();
+        let receiver_program = film_assignment.program.clone();
+        let (film_revision, film_url) = wait_for_media(
+            &output_path.join("active.json"),
+            &assignment_id,
+            &receiver_program,
+        )
+        .await;
+        assert!(
+            film_url.starts_with(&displays.origin),
+            "the handoff URL {film_url} left the pinned origin {}",
+            displays.origin
+        );
+        assert!(
+            film_url.contains("/head/v1/live/"),
+            "the handoff URL {film_url} is not a ticketed playlist"
+        );
+        assert!(
+            film_url.ends_with("/master.m3u8"),
+            "the handoff URL {film_url} is not an HLS master playlist"
+        );
+        wait_for_health_staged(&client, &device, &film_revision, 0..=0).await;
+
         client.shutdown().await;
         drop(signals);
         drop(client);
@@ -1079,7 +1244,9 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             }),
             "restarted daemon lost the second synchronized Signage assignment"
         );
-        wait_for_health(&restarted, &device, &revision).await;
+        // The first device carries the film across the restart; its health
+        // reports the film revision and stages a grant, not bytes.
+        wait_for_health_staged(&restarted, &device, &film_revision, 0..=0).await;
         wait_for_health(&restarted, &second_device, &second_revision).await;
         restarted
             .display_device_revoke(device.clone())

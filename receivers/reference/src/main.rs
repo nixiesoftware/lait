@@ -140,12 +140,18 @@ fn capabilities(width: u32, height: u32, locale: String) -> ReceiverCapabilities
             captions: false,
             audio_description: false,
         },
+        // The native-HLS profile, with the coherence `validate_capabilities`
+        // demands of it: no positional sync, no rate-control claim, coarse
+        // health. The playback itself is an atomic handoff — the presenter
+        // writes the ticketed playlist URL and whatever consumes the output
+        // directory plays it — which is exactly the shape this receiver's
+        // frame presentation already has.
         playback: PlaybackCapabilities {
-            tier: PlaybackTier::Frame,
-            sync_class: SyncClass::Boundary,
+            tier: PlaybackTier::NativeHls,
+            sync_class: SyncClass::None,
             rate_control_probed: false,
-            latency_class: LatencyClass::Snapshot,
-            health_granularity: HealthGranularity::Full,
+            latency_class: LatencyClass::Broadcast,
+            health_granularity: HealthGranularity::Coarse,
         },
     }
 }
