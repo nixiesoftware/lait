@@ -122,6 +122,14 @@ struct Presentation {
     hls_renditions: Vec<HlsRenditionDescription>,
     hls_segments: BTreeMap<String, VecDeque<HlsSegment>>,
     retention: Retention,
+    /// For a planned presentation: the table a segment is built from on demand.
+    ///
+    /// `install_whole` materialises every segment, which is right for a clip
+    /// and wrong for a film — two hours at two-second groups is ~3,600 segments
+    /// held for the life of the presentation. A plan holds the *table* instead;
+    /// the playlist is rendered from it, and a segment's bytes are read and
+    /// packaged when that segment is asked for.
+    plan: Option<Arc<super::StoredPlan>>,
     updates: broadcast::Sender<LiveMediaPacket>,
 }
 
@@ -256,10 +264,101 @@ impl LiveMediaHub {
                 hls_segments,
                 // Every group is already in, so this is complete on arrival.
                 retention: Retention::Whole { complete: true },
+                plan: None,
                 updates,
             },
         );
         Ok(())
+    }
+
+    /// Install a planned presentation: the catalog and the table, no segments.
+    ///
+    /// The playlist is rendered from the plan and every segment is built when
+    /// it is asked for, so what this holds is proportional to the sample table
+    /// rather than to the film.
+    pub fn install_planned(
+        &self,
+        orbit: &str,
+        resource: &str,
+        plan: super::StoredPlan,
+    ) -> Result<()> {
+        let catalog = plan.catalog.clone();
+        let hls = HlsCatalogPackager::new(&catalog)
+            .map_err(|error| anyhow!("this catalog cannot be packaged: {error}"))?;
+        let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
+        let mut state = lock(&self.inner)?;
+        state.presentations.insert(
+            PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            },
+            Presentation {
+                cmaf_tracks: Vec::new(),
+                cmaf_fragments: BTreeMap::new(),
+                hls_renditions: hls.descriptions().to_vec(),
+                hls_segments: BTreeMap::new(),
+                retention: Retention::Whole { complete: true },
+                plan: Some(Arc::new(plan)),
+                updates,
+            },
+        );
+        Ok(())
+    }
+
+    /// Which bytes a planned segment needs, answered off the lock.
+    ///
+    /// Reading a film's bytes under the hub mutex would stall every other
+    /// presentation behind one range request, so the lock is held only long
+    /// enough to clone an `Arc` of the plan.
+    pub fn planned_segment(
+        &self,
+        orbit: &str,
+        resource: &str,
+        sequence: u64,
+    ) -> Result<(Arc<super::StoredPlan>, super::SegmentPlan)> {
+        let plan = {
+            let state = lock(&self.inner)?;
+            let (_, presentation) =
+                unique_presentation(&state, orbit, resource, LiveTransport::Hls)?;
+            presentation
+                .plan
+                .clone()
+                .ok_or_else(|| anyhow!("this presentation is not planned"))?
+        };
+        let index = usize::try_from(sequence).map_err(|_| anyhow!("segment sequence overflow"))?;
+        let segment = plan
+            .plan(index)
+            .ok_or_else(|| anyhow!("HLS segment is not in this presentation"))?;
+        Ok((plan, segment))
+    }
+
+    /// Build and mux one planned segment from bytes read against its plan.
+    ///
+    /// A fresh packager per segment is what makes random access possible: the
+    /// live packagers refuse a sequence that does not advance, and a fresh one
+    /// has no last sequence to advance past — group N is its first group.
+    pub fn package_planned(
+        plan: &super::StoredPlan,
+        sequence: u64,
+        bytes: &[Vec<u8>],
+    ) -> Result<Vec<u8>> {
+        let index = usize::try_from(sequence).map_err(|_| anyhow!("segment sequence overflow"))?;
+        let groups = plan
+            .build(index, bytes)
+            .map_err(|error| anyhow!("segment {sequence} would not build: {error}"))?;
+        let mut packager = HlsCatalogPackager::new(&plan.catalog)
+            .map_err(|error| anyhow!("this catalog cannot be packaged: {error}"))?;
+        let mut out = None;
+        for group in &groups {
+            if let Some(segment) = packager
+                .push_group(group)
+                .map_err(|error| anyhow!("segment {sequence} refused: {error}"))?
+            {
+                out = Some(segment.bytes);
+            }
+        }
+        out.ok_or_else(|| anyhow!("segment {sequence} produced no transport stream"))
     }
 
     pub fn mse_snapshot(&self, orbit: &str, resource: &str) -> Result<LiveMediaSnapshot> {
@@ -359,6 +458,29 @@ impl LiveMediaHub {
             .iter()
             .find(|candidate| candidate.rendition == rendition)
             .ok_or_else(|| anyhow!("HLS rendition is unavailable"))?;
+        if let Some(plan) = &presentation.plan {
+            // A planned presentation lists every group from its table; no
+            // segment has to exist for the playlist to be complete.
+            let count = plan.group_count();
+            let target_seconds = description
+                .target_duration_ms
+                .checked_add(999)
+                .and_then(|value| value.checked_div(1_000))
+                .unwrap_or(1)
+                .max(1);
+            let mut playlist = format!(
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_seconds}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n",
+            );
+            for sequence in 0..count {
+                let duration = plan.group_duration_ms(sequence).unwrap_or(1);
+                playlist.push_str(&format!(
+                    "#EXTINF:{:.3},\n{base}/segments/{sequence}.ts\n",
+                    f64::from(duration) / 1_000.0,
+                ));
+            }
+            playlist.push_str("#EXT-X-ENDLIST\n");
+            return Ok(playlist);
+        }
         let segments = presentation
             .hls_segments
             .get(rendition)
@@ -645,6 +767,7 @@ async fn install_catalog(
                 hls_renditions,
                 hls_segments: BTreeMap::new(),
                 retention: Retention::Rolling(RETAINED_SEGMENTS),
+                plan: None,
                 updates,
             },
         );
@@ -863,6 +986,182 @@ mod tests {
         }
     }
 
+    /// A planned presentation lists every segment and holds none of them.
+    ///
+    /// The film-scale property: what the hub keeps is the table, the playlist
+    /// is rendered from it, and one segment's bytes are read and packaged when
+    /// that segment is asked for — in any order, because a fresh packager per
+    /// segment has no last sequence to advance past.
+    #[test]
+    fn a_planned_presentation_serves_any_segment_without_holding_all_of_them() {
+        use crate::display::{CatalogPolicy, StoredPlan};
+
+        // Sixty one-second all-intra samples: a "film" with sixty groups at a
+        // one-second budget, which a rolling window could never list. The
+        // sample offset is derived from the built file rather than assumed —
+        // a fixture that guesses where its own bytes are tests the refusal
+        // path by accident, which is exactly how this test first failed.
+        let probe = demux_file(&demux_trak(vec![6; 60], 0));
+        let mdat_payload_at = u32::try_from(
+            probe
+                .windows(4)
+                .position(|window| window == b"mdat")
+                .expect("the file has an mdat")
+                + 4,
+        )
+        .unwrap();
+        let trak = demux_trak(vec![6; 60], mdat_payload_at);
+        let policy = CatalogPolicy {
+            max_group_duration_ms: 1_000,
+            target_latency_ms: 3_000,
+            jitter_hint_ms: 50,
+            rendition: "film".into(),
+        };
+        let file = demux_file(&trak);
+        let total = u64::try_from(file.len()).unwrap();
+        let reader = |offset: u64, size: u32| {
+            let start = usize::try_from(offset).unwrap();
+            let end = start + usize::try_from(size).unwrap();
+            Ok(file
+                .get(start..end.min(file.len()))
+                .unwrap_or_default()
+                .to_vec())
+        };
+        let plan = StoredPlan::read(total, reader, &policy).expect("a plan reads");
+        assert_eq!(plan.group_count(), 60);
+
+        let hub = LiveMediaHub::default();
+        hub.install_planned("space/orbit", "film", plan)
+            .expect("a plan installs");
+
+        // The playlist lists all sixty, ends, and no segment exists yet.
+        let playlist = hub
+            .hls_media_playlist("space/orbit", "film", "film", "..")
+            .unwrap();
+        assert_eq!(playlist.matches("#EXTINF:").count(), 60);
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
+
+        // Ask for segment 41 first — random access, no segment 0 built.
+        let (plan, segment) = hub.planned_segment("space/orbit", "film", 41).unwrap();
+        let bytes: Vec<Vec<u8>> = segment
+            .ranges
+            .iter()
+            .map(|(offset, size)| reader(*offset, *size).unwrap())
+            .collect();
+        let ts = LiveMediaHub::package_planned(&plan, 41, &bytes).unwrap();
+        assert_eq!(ts.len() % 188, 0, "a real transport stream");
+        assert_eq!(ts.first(), Some(&0x47));
+
+        // Then an earlier one: order does not matter to a fresh packager.
+        let (plan, segment) = hub.planned_segment("space/orbit", "film", 3).unwrap();
+        let bytes: Vec<Vec<u8>> = segment
+            .ranges
+            .iter()
+            .map(|(offset, size)| reader(*offset, *size).unwrap())
+            .collect();
+        assert!(LiveMediaHub::package_planned(&plan, 3, &bytes).is_ok());
+
+        // Past the end is absent, in the planned vocabulary.
+        assert!(hub.planned_segment("space/orbit", "film", 60).is_err());
+    }
+
+    /// The container the planned test reads: samples first, table after.
+    fn demux_file(trak: &mp4_atom::Trak) -> Vec<u8> {
+        use mp4_atom::{Encode, FourCC, Ftyp, Moov, Mvhd};
+        let sample_count = match &trak.mdia.minf.stbl.stsz.samples {
+            mp4_atom::StszSamples::Different { sizes } => sizes.len(),
+            mp4_atom::StszSamples::Identical { count, .. } => *count as usize,
+        };
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let mut file = Vec::new();
+        Ftyp {
+            major_brand: FourCC::new(b"iso6"),
+            minor_version: 1,
+            compatible_brands: vec![FourCC::new(b"iso6")],
+        }
+        .encode(&mut file)
+        .unwrap();
+        let mdat: Vec<u8> = unit
+            .iter()
+            .copied()
+            .cycle()
+            .take(unit.len() * sample_count)
+            .collect();
+        let mut boxed = Vec::new();
+        boxed.extend_from_slice(&u32::try_from(mdat.len() + 8).unwrap().to_be_bytes());
+        boxed.extend_from_slice(b"mdat");
+        boxed.extend_from_slice(&mdat);
+        file.extend_from_slice(&boxed);
+        Moov {
+            mvhd: Mvhd {
+                timescale: 90_000,
+                ..Default::default()
+            },
+            trak: vec![trak.clone()],
+            ..Default::default()
+        }
+        .encode(&mut file)
+        .unwrap();
+        file
+    }
+
+    /// An all-intra track whose chunk offsets point into `demux_file`'s mdat.
+    fn demux_trak(sizes: Vec<u32>, first_sample_at: u32) -> mp4_atom::Trak {
+        use mp4_atom::{
+            Avc1, Avcc, Decode, Mdhd, Stco, Stsc, StscEntry, Stsd, Stsz, StszSamples, Stts,
+            SttsEntry, Visual,
+        };
+        let count = sizes.len();
+        let mut trak = mp4_atom::Trak::default();
+        trak.mdia.mdhd = Mdhd {
+            timescale: 90_000,
+            ..Default::default()
+        };
+        trak.mdia.minf.stbl.stts = Stts {
+            entries: vec![SttsEntry {
+                sample_count: u32::try_from(count).unwrap(),
+                sample_delta: 90_000,
+            }],
+        };
+        trak.mdia.minf.stbl.stsz = Stsz {
+            samples: StszSamples::Different { sizes },
+        };
+        trak.mdia.minf.stbl.stsc = Stsc {
+            entries: vec![StscEntry {
+                first_chunk: 1,
+                samples_per_chunk: u32::try_from(count).unwrap(),
+                sample_description_index: 1,
+            }],
+        };
+        trak.mdia.minf.stbl.stco = Some(Stco {
+            entries: vec![first_sample_at],
+        });
+        // No stss: all-intra, every sample a legal group start.
+        let config = data_encoding::HEXLOWER
+            .decode(b"0142c01effe100046742c01e01000268ce")
+            .unwrap();
+        let mut avcc_box = Vec::new();
+        avcc_box.extend_from_slice(&u32::try_from(config.len() + 8).unwrap().to_be_bytes());
+        avcc_box.extend_from_slice(b"avcC");
+        avcc_box.extend_from_slice(&config);
+        trak.mdia.minf.stbl.stsd = Stsd {
+            codecs: vec![Avc1 {
+                visual: Visual {
+                    data_reference_index: 1,
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                },
+                avcc: Avcc::decode(&mut avcc_box.as_slice()).unwrap(),
+                ..Default::default()
+            }
+            .into()],
+            ..Default::default()
+        };
+        trak
+    }
+
     /// A finite source reaches a receiver through the same packagers a peer
     /// feeds, and the whole of it stays reachable.
     ///
@@ -988,6 +1287,7 @@ mod tests {
         let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
         Presentation {
             retention,
+            plan: None,
             cmaf_tracks: Vec::new(),
             cmaf_fragments: BTreeMap::new(),
             hls_renditions: vec![HlsRenditionDescription {

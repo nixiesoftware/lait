@@ -680,6 +680,158 @@ impl StoredMedia {
     }
 }
 
+/// A stored file's shape, held so any one group can be read without the rest.
+///
+/// The reason this exists rather than a list of finished segments: a two-hour
+/// film at two-second groups is about 3,600 of them, and materialising every
+/// one to serve the first is the same defect as holding a whole file in memory
+/// to answer a range request. What is held here is the *table*, which is small
+/// — a hundred thousand samples is a couple of megabytes — while the `mdat`
+/// stays where it is until somebody asks for a segment out of it.
+pub struct StoredPlan {
+    pub catalog: Catalog,
+    tracks: Vec<PlannedTrack>,
+    max_group_ms: u32,
+}
+
+struct PlannedTrack {
+    name: String,
+    shape: TrackShape,
+    samples: Vec<Sample>,
+    groups: Vec<std::ops::Range<usize>>,
+}
+
+/// The bytes one group needs, as ranges into the file.
+///
+/// Answered without touching the content plane so a caller can read them
+/// however it likes — and, in the coordinator's case, read them *off* the lock
+/// that guards the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentPlan {
+    pub ranges: Vec<(u64, u32)>,
+}
+
+impl StoredPlan {
+    /// Plan a stored file: read its catalog, then walk each track's table once.
+    pub fn read(
+        total: u64,
+        read: impl FnMut(u64, u32) -> Result<Vec<u8>, Failure>,
+        policy: &CatalogPolicy,
+    ) -> Result<Self, Failure> {
+        let media = read_catalog(total, read, policy)?;
+        let mut tracks = Vec::new();
+        for (index, (trak, shape)) in media.tracks.iter().enumerate() {
+            let samples = samples(trak)?;
+            let groups = groups(&samples, shape.timescale, policy.max_group_duration_ms);
+            tracks.push(PlannedTrack {
+                name: media
+                    .catalog
+                    .tracks
+                    .get(index)
+                    .ok_or(Failure::Malformed)?
+                    .track
+                    .clone(),
+                shape: shape.clone(),
+                samples,
+                groups,
+            });
+        }
+        Ok(Self {
+            catalog: media.catalog,
+            tracks,
+            max_group_ms: policy.max_group_duration_ms,
+        })
+    }
+
+    /// How many groups this file has. The playlist lists exactly this many.
+    pub fn group_count(&self) -> usize {
+        self.tracks
+            .first()
+            .map(|track| track.groups.len())
+            .unwrap_or(0)
+    }
+
+    /// One group's duration in milliseconds, for the playlist's `EXTINF`.
+    pub fn group_duration_ms(&self, sequence: usize) -> Option<u32> {
+        let track = self.tracks.first()?;
+        let range = track.groups.get(sequence)?;
+        let members = track.samples.get(range.clone())?;
+        let ticks: u64 = members.iter().map(|s| u64::from(s.duration)).sum();
+        ticks
+            .saturating_mul(1_000)
+            .checked_div(u64::from(track.shape.timescale))
+            .and_then(|value| u32::try_from(value).ok())
+    }
+
+    /// Which bytes group `sequence` needs, across every track.
+    pub fn plan(&self, sequence: usize) -> Option<SegmentPlan> {
+        let mut ranges = Vec::new();
+        for track in &self.tracks {
+            let range = track.groups.get(sequence)?;
+            for sample in track.samples.get(range.clone())? {
+                ranges.push((sample.offset, sample.size));
+            }
+        }
+        Some(SegmentPlan { ranges })
+    }
+
+    /// Build group `sequence` from bytes read against its own plan.
+    ///
+    /// `bytes` must be the plan's ranges in order. A caller that read something
+    /// else gets `Malformed` rather than a group built from the wrong samples —
+    /// which would package cleanly and play as noise.
+    pub fn build(&self, sequence: usize, bytes: &[Vec<u8>]) -> Result<Vec<ReceivedGroup>, Failure> {
+        let mut supplied = bytes.iter();
+        let mut out = Vec::new();
+        for track in &self.tracks {
+            let range = track.groups.get(sequence).ok_or(Failure::Malformed)?;
+            let members = track.samples.get(range.clone()).ok_or(Failure::Malformed)?;
+            let mut frames = Vec::with_capacity(members.len());
+            for sample in members {
+                let payload = supplied.next().ok_or(Failure::Malformed)?;
+                if payload.len() != usize::try_from(sample.size).map_err(|_| Failure::Malformed)? {
+                    return Err(Failure::Malformed);
+                }
+                frames.push(Frame {
+                    header: FrameHeader {
+                        timestamp: i64::try_from(sample.decode_time)
+                            .map_err(|_| Failure::Malformed)?,
+                        duration: Some(u64::from(sample.duration)),
+                        timescale: track.shape.timescale,
+                        kind: if sample.sync {
+                            FrameKind::Key
+                        } else {
+                            FrameKind::Delta
+                        },
+                        payload_len: sample.size,
+                    },
+                    payload: payload.clone(),
+                });
+            }
+            let first = members.first().ok_or(Failure::Malformed)?;
+            out.push(ReceivedGroup {
+                header: GroupHeader {
+                    subscription_id: STORED_SUBSCRIPTION,
+                    track: track.name.clone(),
+                    track_kind: track.shape.kind,
+                    group_sequence: u64::try_from(sequence).map_err(|_| Failure::Malformed)?,
+                    published_at_micros: presentation_micros(
+                        first.decode_time,
+                        track.shape.timescale,
+                    )?,
+                    timescale: track.shape.timescale,
+                    max_group_duration_ms: self.max_group_ms,
+                },
+                frames,
+            });
+        }
+        if supplied.next().is_some() {
+            return Err(Failure::Malformed);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +884,75 @@ mod tests {
             cmaf_rendition: Some("film-audio".into()),
             hls_v3_rendition: None,
         }
+    }
+
+    /// A plan serves any one group without materialising the rest.
+    ///
+    /// The property that makes a film servable: what is held is the table, and
+    /// a segment's bytes are read when that segment is asked for. The plan for
+    /// group N is answered without reading a byte of the mdat, and building
+    /// group N takes exactly the bytes its own plan named.
+    #[test]
+    fn a_plan_serves_one_group_without_materialising_the_rest() {
+        let trak = sampled_trak(vec![6; 12], Some(vec![1, 4, 7, 10]), None);
+        let plan_tracks = vec![(trak, video_shape())];
+        let media = StoredMedia {
+            catalog: demuxed_catalog(),
+            tracks: plan_tracks,
+        };
+        // Assemble the plan from already-read parts, the way `StoredPlan::read`
+        // does after `read_catalog`.
+        let plan = StoredPlan {
+            catalog: media.catalog.clone(),
+            tracks: media
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(index, (trak, shape))| {
+                    let samples = samples(trak).unwrap();
+                    let groups = groups(&samples, shape.timescale, 2_000);
+                    PlannedTrack {
+                        name: media.catalog.tracks[index].track.clone(),
+                        shape: shape.clone(),
+                        samples,
+                        groups,
+                    }
+                })
+                .collect(),
+            max_group_ms: 2_000,
+        };
+
+        assert_eq!(plan.group_count(), 4);
+        assert_eq!(
+            plan.group_duration_ms(0),
+            Some(3_000),
+            "three one-second samples"
+        );
+
+        // The plan names bytes; nothing has read any.
+        let segment = plan.plan(2).expect("group two exists");
+        assert_eq!(segment.ranges.len(), 3, "three samples in the group");
+
+        // Feed exactly those bytes back and get a group the packagers accept.
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let bytes: Vec<Vec<u8>> = segment.ranges.iter().map(|_| unit.to_vec()).collect();
+        let built = plan.build(2, &bytes).expect("built from its own plan");
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].header.group_sequence, 2);
+        assert_eq!(built[0].frames.len(), 3);
+        assert_eq!(built[0].frames[0].header.kind, FrameKind::Key);
+
+        // The wrong number of bytes is refused, not built into noise.
+        assert_eq!(
+            plan.build(2, &bytes[..2].to_vec()).unwrap_err(),
+            Failure::Malformed
+        );
+        let mut short = bytes.clone();
+        short[1] = vec![0, 0];
+        assert_eq!(plan.build(2, &short).unwrap_err(), Failure::Malformed);
+
+        // A group past the end is absent, not an error dressed as one.
+        assert!(plan.plan(4).is_none());
     }
 
     /// A whole file, read the way a stored upload is read, and served.
