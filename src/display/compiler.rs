@@ -23,7 +23,7 @@ pub struct CompiledProgram {
     /// again even if the underlying World has emitted no invalidation.
     pub refresh_after_ms: Option<u32>,
     assets: BTreeMap<DisplayAssetId, Vec<u8>>,
-    live_resources: BTreeMap<DisplayAssetId, String>,
+    media_resources: BTreeMap<DisplayAssetId, String>,
 }
 
 impl CompiledProgram {
@@ -41,8 +41,8 @@ impl CompiledProgram {
             .map(|(identifier, bytes)| (identifier, bytes.as_slice()))
     }
 
-    pub fn live_resource(&self, manifest: &DisplayAssetId) -> Option<&str> {
-        self.live_resources.get(manifest).map(String::as_str)
+    pub fn media_resource(&self, manifest: &DisplayAssetId) -> Option<&str> {
+        self.media_resources.get(manifest).map(String::as_str)
     }
 }
 
@@ -79,7 +79,7 @@ impl ProgramCompiler {
     ) -> Result<CompiledProgram> {
         let mut refresh_after_ms = projection.program.refresh_after_ms;
         let mut assets = BTreeMap::new();
-        let mut live_resources = BTreeMap::new();
+        let mut media_resources = BTreeMap::new();
         let mut items = Vec::with_capacity(projection.program.items.len());
         for item in projection.program.items {
             let id = derive_program_item_id(&self.identifier_key, assignment, &item.id)
@@ -119,7 +119,7 @@ impl ProgramCompiler {
                     match media_scene(&self.identifier_key, assignment, media, playback_tier)? {
                         Some((scene, asset_id, bytes, resource)) => {
                             assets.insert(asset_id.clone(), bytes);
-                            live_resources.insert(asset_id, resource);
+                            media_resources.insert(asset_id, resource);
                             scene
                         }
                         None => DisplayScene::Blank {
@@ -187,7 +187,7 @@ impl ProgramCompiler {
             program: wire,
             refresh_after_ms,
             assets,
-            live_resources,
+            media_resources,
         })
     }
 }
@@ -545,13 +545,13 @@ mod tests {
             &mse.program.items[0].scene,
             DisplayScene::Media { manifest, protocol: display_protocol::program::MediaProtocol::Mse, live: true }
                 if manifest.media_type == DisplayAssetMediaType::MseManifest
-                    && mse.live_resource(&manifest.id) == Some("main")
+                    && mse.media_resource(&manifest.id) == Some("main")
         ));
         assert!(matches!(
             &hls.program.items[0].scene,
             DisplayScene::Media { manifest, protocol: display_protocol::program::MediaProtocol::Hls, live: true }
                 if manifest.media_type == DisplayAssetMediaType::HlsManifest
-                    && hls.live_resource(&manifest.id) == Some("main")
+                    && hls.media_resource(&manifest.id) == Some("main")
         ));
         assert!(matches!(
             frame.program.items[0].scene,
@@ -711,7 +711,7 @@ mod tests {
             panic!("both compile to media");
         };
         assert_eq!(
-            stored.live_resource(&stored_manifest.id),
+            stored.media_resource(&stored_manifest.id),
             Some(name.as_str()),
             "the stored resource is the content id in hex"
         );
