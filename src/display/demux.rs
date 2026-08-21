@@ -13,7 +13,9 @@ use std::error::Error;
 use std::fmt;
 
 use mp4_atom::{Atom, Codec, Decode, Moov};
-use runtime::plane::live::media::TrackKind;
+use runtime::plane::live::media::{
+    Frame, FrameHeader, FrameKind, GroupHeader, ReceivedGroup, TrackKind,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -317,6 +319,92 @@ pub fn groups(
     out
 }
 
+/// Read one track's groups, pulling sample bytes through `read`.
+///
+/// `read` is a seam rather than a content handle, because the demuxer's job is
+/// to say *which* bytes and not to know where they live. That keeps it testable
+/// against an in-memory file and lets the same code sit over a `ContentCursor`
+/// without either knowing about the other.
+///
+/// The timestamps this produces are gapless by construction — each sample's
+/// decode time is the previous one's plus its duration — which is what
+/// `CmafTrackPackager::validate_group` requires and the reason the walk
+/// accumulates rather than reading a per-sample time from anywhere.
+pub fn track_groups(
+    trak: &mp4_atom::Trak,
+    shape: &TrackShape,
+    track: &str,
+    max_group_ms: u32,
+    mut read: impl FnMut(u64, u32) -> Result<Vec<u8>, Failure>,
+) -> Result<Vec<ReceivedGroup>, Failure> {
+    let samples = samples(trak)?;
+    let mut out = Vec::new();
+    for (sequence, range) in groups(&samples, shape.timescale, max_group_ms)
+        .into_iter()
+        .enumerate()
+    {
+        let members = samples.get(range).ok_or(Failure::Malformed)?;
+        let Some(first) = members.first() else {
+            continue;
+        };
+        let mut frames = Vec::with_capacity(members.len());
+        for sample in members {
+            let payload = read(sample.offset, sample.size)?;
+            if payload.len() != usize::try_from(sample.size).map_err(|_| Failure::Malformed)? {
+                return Err(Failure::Malformed);
+            }
+            frames.push(Frame {
+                header: FrameHeader {
+                    timestamp: i64::try_from(sample.decode_time).map_err(|_| Failure::Malformed)?,
+                    duration: Some(u64::from(sample.duration)),
+                    timescale: shape.timescale,
+                    kind: if sample.sync {
+                        FrameKind::Key
+                    } else {
+                        FrameKind::Delta
+                    },
+                    payload_len: sample.size,
+                },
+                payload,
+            });
+        }
+        out.push(ReceivedGroup {
+            header: GroupHeader {
+                subscription_id: STORED_SUBSCRIPTION,
+                track: track.to_string(),
+                track_kind: shape.kind,
+                group_sequence: u64::try_from(sequence).map_err(|_| Failure::Malformed)?,
+                // A file has no publish time. Its presentation time is the
+                // honest answer, and it is what a receiver's staleness
+                // arithmetic reads.
+                published_at_micros: presentation_micros(first.decode_time, shape.timescale)?,
+                timescale: shape.timescale,
+                max_group_duration_ms: max_group_ms,
+            },
+            frames,
+        });
+    }
+    Ok(out)
+}
+
+/// The subscription a stored group is attributed to.
+///
+/// A live group carries the id of the subscription that asked for it. Nothing
+/// asked for these, so they take the first media id rather than borrowing a
+/// number that means something else.
+const STORED_SUBSCRIPTION: u64 = 2;
+
+fn presentation_micros(decode_time: u64, timescale: u32) -> Result<i64, Failure> {
+    if timescale == 0 {
+        return Err(Failure::Incomplete);
+    }
+    let micros = u128::from(decode_time)
+        .saturating_mul(1_000_000)
+        .checked_div(u128::from(timescale))
+        .ok_or(Failure::Incomplete)?;
+    i64::try_from(micros).map_err(|_| Failure::Malformed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +618,126 @@ mod tests {
         let trak = sampled_trak(Vec::new(), Some(Vec::new()), None);
         assert!(samples(&trak).unwrap().is_empty());
         assert!(groups(&[], 90_000, 2_000).is_empty());
+    }
+
+    /// A track reads end to end into groups the packagers accept.
+    ///
+    /// The reader here is a plain in-memory file, which is the point of taking
+    /// one: the demuxer says which bytes and knows nothing about where they
+    /// live, so this runs with no Station, no content plane and no network.
+    #[test]
+    fn a_track_reads_into_groups_the_packagers_accept() {
+        let trak = sampled_trak(vec![6; 12], Some(vec![1, 4, 7, 10]), None);
+        let shape = TrackShape {
+            kind: TrackKind::Video,
+            codec: "avc1.42c01e".into(),
+            timescale: 90_000,
+            decoder_config: Vec::new(),
+            width: Some(1280),
+            height: Some(720),
+            sample_rate: None,
+            channels: None,
+        };
+        // One AVCC access unit: a four-byte length and a two-byte IDR NAL.
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let groups = track_groups(&trak, &shape, "video-main", 2_000, |_offset, size| {
+            assert_eq!(size, 6);
+            Ok(unit.to_vec())
+        })
+        .unwrap();
+
+        assert_eq!(groups.len(), 4, "one group per key frame at this budget");
+        assert_eq!(groups[0].header.group_sequence, 0);
+        assert_eq!(groups[3].header.group_sequence, 3);
+        assert_eq!(groups[0].header.track, "video-main");
+        assert_eq!(groups[0].header.timescale, 90_000);
+        assert_eq!(groups[0].header.published_at_micros, 0);
+        // Group two starts at sample four, three seconds in.
+        assert_eq!(groups[1].header.published_at_micros, 3_000_000);
+
+        for group in &groups {
+            assert_eq!(group.frames.len(), 3);
+            assert_eq!(
+                group.frames[0].header.kind,
+                FrameKind::Key,
+                "every group starts on a key frame, which both packagers require"
+            );
+            // Gapless within the group: each timestamp is the previous plus its
+            // duration, which is what `validate_group` checks.
+            for pair in group.frames.windows(2) {
+                let previous = &pair[0].header;
+                let next = &pair[1].header;
+                assert_eq!(
+                    next.timestamp,
+                    previous.timestamp + i64::try_from(previous.duration.unwrap()).unwrap()
+                );
+            }
+        }
+    }
+
+    /// A reader that returns the wrong number of bytes is a truncated file, and
+    /// it is caught here rather than becoming a group the packager accepts.
+    #[test]
+    fn a_short_read_is_refused_rather_than_packaged() {
+        let trak = sampled_trak(vec![6; 3], Some(vec![1]), None);
+        let shape = TrackShape {
+            kind: TrackKind::Video,
+            codec: "avc1.42c01e".into(),
+            timescale: 90_000,
+            decoder_config: Vec::new(),
+            width: Some(1280),
+            height: Some(720),
+            sample_rate: None,
+            channels: None,
+        };
+        let result = track_groups(&trak, &shape, "video-main", 2_000, |_offset, _size| {
+            Ok(vec![0, 0, 0, 2])
+        });
+        assert_eq!(result.unwrap_err(), Failure::Malformed);
+    }
+
+    /// The groups this produces are the groups the real packager takes.
+    ///
+    /// Asserting the shape by hand would only pin what this file believes.
+    /// Running them through `HlsCatalogPackager` pins what the consumer
+    /// accepts, which is the property that matters.
+    #[test]
+    fn the_groups_a_track_produces_package_into_real_segments() {
+        let trak = sampled_trak(vec![6; 6], Some(vec![1, 4]), None);
+        let shape = TrackShape {
+            kind: TrackKind::Video,
+            codec: "avc1.42c01e".into(),
+            timescale: 90_000,
+            decoder_config: Vec::new(),
+            width: Some(1280),
+            height: Some(720),
+            sample_rate: None,
+            channels: None,
+        };
+        let unit = [0u8, 0, 0, 2, 0x65, 0x88];
+        let groups = track_groups(&trak, &shape, "video-main", 2_000, |_offset, _size| {
+            Ok(unit.to_vec())
+        })
+        .unwrap();
+
+        let hub = crate::display::LiveMediaHub::default();
+        hub.install_whole("space/orbit", "film", &demuxed_catalog(), groups)
+            .expect("demuxed groups install through the real packagers");
+        let playlist = hub
+            .hls_media_playlist("space/orbit", "film", "film", "..")
+            .unwrap();
+        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
+        assert!(hub.hls_segment("space/orbit", "film", "film", 0).is_ok());
+    }
+
+    /// The catalog those groups are packaged against, with the policy fields a
+    /// container does not carry.
+    fn demuxed_catalog() -> runtime::plane::live::media::Catalog {
+        runtime::plane::live::media::Catalog {
+            version: runtime::plane::live::media::CATALOG_VERSION,
+            jitter_hint_ms: 50,
+            tracks: vec![video_track()],
+        }
     }
 
     /// The reader agrees with the writer, on the writer's own output.
