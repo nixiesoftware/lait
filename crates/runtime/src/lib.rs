@@ -94,9 +94,12 @@ pub mod world;
 #[cfg(test)]
 extern crate self as runtime;
 
+/// Exported without the cursor: outside this crate a read goes through
+/// [`Station::content_acquire`], which owns the supply.
+pub use content_cursor::Gap;
 pub use lifecycle::Failure as Error;
 pub use lifecycle::{
-    Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
+    Acquired, Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
     RemovalConfirmation, Runtime, Station, StorageReading,
 };
 pub use session::{

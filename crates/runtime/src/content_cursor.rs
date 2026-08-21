@@ -1,6 +1,6 @@
 #![allow(
     dead_code,
-    reason = "the reader lands ahead of the Fetcher adapter that will supply it"
+    reason = "seek and readiness land ahead of the stored-media source"
 )]
 //! A seekable, verified, demand-paged reader over one content.
 //!
@@ -92,6 +92,13 @@ pub enum Gap {
     /// and "nobody has it" are different facts, and only one of them is about
     /// the content.
     Unasked,
+}
+
+impl Gap {
+    /// Whether work is already underway, so looking again may answer.
+    pub const fn is_pending(self) -> bool {
+        matches!(self, Self::Fetching)
+    }
 }
 
 /// The result of one step.

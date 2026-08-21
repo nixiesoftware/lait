@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2512
+pr             2513
 pr-platform    2043
-nightly        2540
+nightly        2541
 mutants        106
 
 [gates]
@@ -19,7 +19,7 @@ orbital-formats              241
 core-fabric-foundations      56
 core-plane-shapes            89
 orbital-faults               38
-orbital-contact-real         5
+orbital-contact-real         6
 orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
@@ -2480,6 +2480,7 @@ runtime::it contact_fixtures::unknown_tags_and_trailing_bytes_are_rejected
 runtime::it contact_fixtures::wrong_state_and_unknown_tag_abort
 runtime::it contact_iroh::a_real_iroh_contact_converges_two_stations
 runtime::it contact_mem::a_beacon_drives_fully_automatic_convergence
+runtime::it contact_mem::a_station_reads_content_only_its_peer_holds
 runtime::it contact_mem::an_unknown_neighbor_is_unreachable_and_dormancy_refuses_contact
 runtime::it contact_mem::remote_extraction_does_not_block_prior_reads_and_local_retry_orders_after_contact
 runtime::it contact_mem::two_stations_converge_through_the_public_contact_api
