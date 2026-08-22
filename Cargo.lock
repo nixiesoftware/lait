@@ -330,6 +330,7 @@ dependencies = [
  "data-encoding",
  "flate2",
  "fs2",
+ "interprocess",
  "jiff",
  "lait",
  "lait-signage",

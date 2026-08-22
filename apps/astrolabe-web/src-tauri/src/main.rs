@@ -1768,6 +1768,14 @@ mod tests {
 }
 
 fn main() {
+    // Before any window exists: a later launch hands its arguments — a
+    // `lait:` link among them — to the running client and ends here. On a
+    // claim that errs, api::start's backstop still guards the state root.
+    match api::claim_single_instance() {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => eprintln!("astrolabe: {error}"),
+    }
     tauri::Builder::default()
         .append_invoke_initialization_script(PLATFORM_INIT)
         .setup(|app| {
@@ -1786,6 +1794,17 @@ fn main() {
                 if exited {
                     handle.exit(0);
                 }
+            });
+            let summoner = app.handle().clone();
+            api::on_second_launch(move || {
+                let handle = summoner.clone();
+                let _ = handle.clone().run_on_main_thread(move || {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                });
             });
             install_tray(app.handle())?;
             #[cfg(target_os = "macos")]

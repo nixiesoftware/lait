@@ -1255,6 +1255,55 @@ static BOOT: Mutex<()> = Mutex::new(());
 /// rather than the mutex, because waking must not be able to block on the lock
 /// the pump is holding while it drains.
 static WOKEN: OnceLock<Sender<()>> = OnceLock::new();
+static INSTANCE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SUMMON: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Claim the single instance, before any window exists.
+///
+/// `false` means a client is already running and now holds this launch's
+/// arguments — the caller has nothing left to do but end, windowless. `true`
+/// makes this process the client: later launches arrive on the instance
+/// channel, a `lait:` link among their arguments is dispatched as
+/// [`ActionRequest::OpenLink`], and the host's [`on_second_launch`] hook is
+/// called either way.
+pub fn claim_single_instance() -> Result<bool, String> {
+    match crate::single_instance::claim(std::env::args()).map_err(|error| format!("{error:#}"))? {
+        crate::single_instance::Claim::Primary { guard, channel } => {
+            // Forgotten, not stored: held for the life of the process.
+            std::mem::forget(guard);
+            INSTANCE_HELD.store(true, std::sync::atomic::Ordering::Release);
+            drain_second_launches(channel);
+            Ok(true)
+        }
+        crate::single_instance::Claim::Forwarded => Ok(false),
+    }
+}
+
+/// How the host raises the client when a later launch hands itself over.
+pub fn on_second_launch(raise: impl Fn() + Send + Sync + 'static) {
+    let _ = SUMMON.set(Box::new(raise));
+}
+
+fn drain_second_launches(channel: crate::single_instance::Channel) {
+    std::thread::spawn(move || {
+        for message in channel.messages() {
+            // A click can race a cold start by the length of a boot; an
+            // action dispatched before the core exists is dropped, not held.
+            for _ in 0..300 {
+                if CORE.get().is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if let Some(link) = crate::link::Link::from_args(message.lines().map(str::to_owned)) {
+                dispatch(ActionRequest::OpenLink { url: link.to_url() });
+            }
+            if let Some(summon) = SUMMON.get() {
+                summon();
+            }
+        }
+    });
+}
 
 /// Start the core, or attach to the one that is already running.
 ///
@@ -1289,14 +1338,20 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
         return attach_to(core, &state_root, &sidecar);
     }
 
-    match crate::single_instance::acquire().map_err(|error| format!("{error:#}"))? {
-        // Forgotten, not stored: held for the life of the process, and the
-        // kernel releases it however that ends.
-        crate::single_instance::Outcome::Held(guard) => std::mem::forget(guard),
-        crate::single_instance::Outcome::AlreadyRunning => {
-            return Err(
-                "another Astrolabe is already running on this machine; use its window".into(),
-            );
+    // The backstop for a host that never called [`claim_single_instance`].
+    if !INSTANCE_HELD.load(std::sync::atomic::Ordering::Acquire) {
+        match crate::single_instance::acquire().map_err(|error| format!("{error:#}"))? {
+            // Forgotten, not stored: held for the life of the process, and
+            // the kernel releases it however that ends.
+            crate::single_instance::Outcome::Held(guard) => {
+                std::mem::forget(guard);
+                INSTANCE_HELD.store(true, std::sync::atomic::Ordering::Release);
+            }
+            crate::single_instance::Outcome::AlreadyRunning => {
+                return Err(
+                    "another Astrolabe is already running on this machine; use its window".into(),
+                );
+            }
         }
     }
 
