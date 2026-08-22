@@ -1,3 +1,11 @@
+/// DEPRECATED — this interface is not the Astrolabe client any more.
+///
+/// Tauri (`apps/astrolabe-web`) is canonical and is the only one that is
+/// built, tested or shipped. The Rust bridge this file's stack depends on has
+/// been removed from `tools/astrolabe`, so the generated code under
+/// `lib/src/bridge/` no longer corresponds to anything that regenerates. See
+/// `apps/astrolabe/DEPRECATED.md`.
+///
 /// `astrolabe.exe` — the local client through which a person reaches the
 /// Worlds their device serves.
 ///

@@ -1,3 +1,12 @@
+/// DEPRECATED — the Rust half of this bridge no longer exists.
+///
+/// `flutter_rust_bridge`, the generated `frb_generated.rs`, and every `#[frb]`
+/// annotation were removed from `tools/astrolabe` when Tauri became the
+/// canonical interface. The generated Dart under `../bridge/` is frozen at the
+/// boundary as it stood that day and will drift further with every change to
+/// `api/mod.rs`, with nothing left to regenerate it. See
+/// `apps/astrolabe/DEPRECATED.md`.
+///
 /// The only file in this application that touches the bridge.
 ///
 /// Revision 7 of the Plan reintroduced a boundary between the model and the

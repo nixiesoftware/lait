@@ -42,6 +42,41 @@ struct WebClientView {
     notices: Vec<WebNotice>,
     failures: Vec<WebFailure>,
     in_flight: Vec<String>,
+    image: Option<WebImage>,
+    update: Option<WebUpdate>,
+}
+
+/// The one thing a person is ever asked about this client's own updating:
+/// when to restart. Tagged, because the three cases are answered differently
+/// and a surface that flattened them would have to reconstruct which it had.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebUpdate {
+    RestartRequested {
+        version: String,
+        urgency: &'static str,
+    },
+    Waiting {
+        version: String,
+        holding: Vec<String>,
+    },
+    Attention {
+        why: String,
+    },
+    Forced {
+        version: String,
+        holding: Vec<String>,
+    },
+}
+
+/// The staged image this client spawns from, and whether the source was
+/// rebuilt since — the fact behind the roll-forward affordance.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebImage {
+    fingerprint: String,
+    staged_at_ms: u64,
+    source_changed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -192,6 +227,10 @@ struct WebWorldUpdate {
     available: Option<String>,
     behind: bool,
     unmet: Option<Vec<String>>,
+    operation: Option<String>,
+    phase: Option<String>,
+    progress: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -240,6 +279,9 @@ struct WebDevice {
     pid: Option<u32>,
     can_force_stop: bool,
     last_error: Option<String>,
+    /// Hash of the image this device actually runs; compare against the
+    /// view's `image.fingerprint` to spot a node on older code.
+    image_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -461,6 +503,8 @@ impl From<ClientView> for WebClientView {
             failures,
             in_flight,
             mcp,
+            image,
+            update,
         } = view;
         Self {
             loading: loading,
@@ -500,11 +544,30 @@ impl From<ClientView> for WebClientView {
                                 })
                                 .collect()
                         }),
-                        update: row.update.map(|update| WebWorldUpdate {
-                            serving: update.serving,
-                            available: update.available,
-                            behind: update.behind,
-                            unmet: update.unmet,
+                        update: row.update.map(|update| {
+                            // Destructured whole for the same reason ClientView
+                            // is: this row grew fields once and the browser
+                            // quietly drew a view without them.
+                            let api::WorldUpdateRow {
+                                serving,
+                                available,
+                                behind,
+                                unmet,
+                                operation,
+                                phase,
+                                progress,
+                                message,
+                            } = update;
+                            WebWorldUpdate {
+                                serving,
+                                available,
+                                behind,
+                                unmet,
+                                operation,
+                                phase,
+                                progress,
+                                message,
+                            }
                         }),
                     })
                     .collect()
@@ -613,6 +676,7 @@ impl From<ClientView> for WebClientView {
                     pid: device.pid,
                     can_force_stop: device.can_force_stop,
                     last_error: device.last_error,
+                    image_fingerprint: device.image_fingerprint,
                 })
                 .collect(),
             storage: storage
@@ -811,6 +875,30 @@ impl From<ClientView> for WebClientView {
                 })
                 .collect(),
             in_flight: in_flight,
+            image: image.map(|image| WebImage {
+                fingerprint: image.fingerprint,
+                staged_at_ms: image.staged_at_ms,
+                source_changed: image.source_changed,
+            }),
+            update: update.map(|update| match update {
+                api::UpdateRow::RestartRequested { version, urgency } => {
+                    WebUpdate::RestartRequested {
+                        version,
+                        urgency: match urgency {
+                            api::UpdateUrgency::Quiet => "quiet",
+                            api::UpdateUrgency::Insistent => "insistent",
+                            api::UpdateUrgency::Urgent => "urgent",
+                        },
+                    }
+                }
+                api::UpdateRow::Waiting { version, holding } => {
+                    WebUpdate::Waiting { version, holding }
+                }
+                api::UpdateRow::Attention { why } => WebUpdate::Attention { why },
+                api::UpdateRow::Forced { version, holding } => {
+                    WebUpdate::Forced { version, holding }
+                }
+            }),
         }
     }
 }
@@ -856,9 +944,20 @@ fn display_sync_mode_name(mode: api::DisplaySyncMode) -> &'static str {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// `rename_all` renames only the variants; the fields of struct variants keep
+// their Rust names without `rename_all_fields`. The page sends camelCase for
+// both, and the mismatch fails *nowhere* — the invoke rejects, the surface
+// records a dispatch failure, and the action never reaches the core. The
+// deserialization tests below hold this seam still.
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum WebAction {
     Refresh,
+    /// Restage from the rebuilt source and bring everything back on the new
+    /// image — the inner-loop roll-forward.
+    Reload,
+    OpenLink {
+        url: String,
+    },
     Open {
         world: String,
         entry_path: String,
@@ -1087,6 +1186,8 @@ impl From<WebAction> for ActionRequest {
     fn from(action: WebAction) -> Self {
         match action {
             WebAction::Refresh => Self::Refresh,
+            WebAction::Reload => Self::Reload,
+            WebAction::OpenLink { url } => Self::OpenLink { url },
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
             WebAction::StartDevice { id } => Self::StartDevice { id },
@@ -1205,6 +1306,21 @@ impl From<WebAction> for ActionRequest {
             WebAction::LeavePresentation => Self::LeavePresentation,
         }
     }
+}
+
+/// Take the restart a staged release is waiting for.
+///
+/// A host capability rather than an `ActionRequest`, because the core cannot
+/// do it: ending and relaunching this process is the host's own act, and the
+/// core would have to ask the host anyway. It is also not an *update* —
+/// nothing is applied here. Applying happens in the window this opens, at a
+/// moment no client is alive: the stub's launch window on Windows and Linux,
+/// the daemon's own act on macOS. All this does is reach that moment.
+///
+/// Never returns on success.
+#[tauri::command]
+fn restart_for_update(app: tauri::AppHandle) {
+    app.restart();
 }
 
 /// Big Picture takes the display, not the work area — and gives it back on
@@ -1497,6 +1613,35 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page speaks camelCase for variants *and* fields. `rename_all`
+    /// covers only the variants, so the field half rests on
+    /// `rename_all_fields` — and losing it fails nowhere at build time: the
+    /// invoke rejects, the surface records "Dispatch open failed", and LAUNCH
+    /// reads as a control that does nothing. These are the exact payloads the
+    /// page sends.
+    #[test]
+    fn the_actions_the_page_sends_deserialize_whole() {
+        let payloads = [
+            r#"{"type":"reload"}"#,
+            r#"{"type":"openLink","url":"lait://world/issues"}"#,
+            r#"{"type":"open","world":"issues","entryPath":"/"}"#,
+            r#"{"type":"updateWorld","world":"issues"}"#,
+            r#"{"type":"removeDevice","id":"dev","deleteData":true}"#,
+            r#"{"type":"installMcp","client":"claude","scope":null,"name":"lait","agent":null,"noAgent":false,"project":".","world":null,"preview":true}"#,
+            r#"{"type":"displayAssignmentPut","device":"d","orbit":"o","world":"w","surface":"s","inputJson":"{}","theme":"dark","staleAfterMs":1000,"onStale":"blank","syncGroup":null,"syncMode":"positional","staticDelayMs":0,"expiresAtUnixMs":null}"#,
+        ];
+        for payload in payloads {
+            if let Err(error) = serde_json::from_str::<WebAction>(payload) {
+                panic!("the page's own payload was refused: {error}\n  {payload}");
+            }
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .append_invoke_initialization_script(PLATFORM_INIT)
@@ -1509,6 +1654,12 @@ fn main() {
             install_tray(app.handle())?;
             #[cfg(target_os = "macos")]
             install_menu(app.handle())?;
+            // The launch-argument half: Windows and Linux hand a registered
+            // scheme's URL to a fresh process this way, and so does a first
+            // launch on macOS.
+            if let Some(link) = astrolabe::link::Link::from_args(std::env::args()) {
+                open_link(&link.to_url());
+            }
             Ok(())
         })
         // Closing the primary window is not stopping: it hides to the tray so
@@ -1527,9 +1678,28 @@ fn main() {
             client_dispatch,
             world_artwork,
             set_fullscreen,
+            restart_for_update,
             summon_owned_window,
             summon_world_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("run Astrolabe Web desktop host");
+        .build(tauri::generate_context!())
+        .expect("build Astrolabe Web desktop host")
+        // A `lait:` link arrives two ways and both are the OS handing this
+        // process a URL: as a launch argument, and — while already running,
+        // which is the macOS path — as an open event.
+        .run(|_app, event| {
+            if let tauri::RunEvent::Opened { urls } = event {
+                for url in urls {
+                    open_link(url.as_str());
+                }
+            }
+        });
+}
+
+/// Hand one `lait:` URL to the core, which decides what it names and whether
+/// this build can act on it. Refusals surface in the view like any other.
+fn open_link(url: &str) {
+    let _ = api::dispatch(ActionRequest::OpenLink {
+        url: url.to_owned(),
+    });
 }

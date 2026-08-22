@@ -19,6 +19,98 @@ pub struct Rebuild {
     pub evidence: [u8; 32],
 }
 
+/// What a ledger migration did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerMigration {
+    /// False when the ledger was already current and nothing was written.
+    pub migrated: bool,
+    pub effects: u64,
+    /// Where the outgoing ledger was kept, when one was replaced.
+    pub previous: Option<std::path::PathBuf>,
+}
+
+/// The ledger a migration keeps the outgoing generation at.
+const PREVIOUS_LEDGER_DIR: &str = "authority.previous";
+/// Where a migration builds before it swaps. Beside the ledger, so the swap is
+/// a rename within one directory.
+const STAGING_LEDGER_DIR: &str = "authority.staged";
+
+/// Migrate an authority ledger written by a prior journal generation into the
+/// current one, leaving the Replica beside it untouched.
+///
+/// The journal refuses to upgrade at open by design, so the upgrade happens
+/// here: the prior store is read through the migration reader, rebuilt and
+/// verified at a staging path, and only then swapped in. The outgoing ledger
+/// is kept rather than deleted, and a rebuilt ledger that will not open is
+/// rolled back.
+///
+/// Distinct from [`rebuild_prior`], which rebuilds every component into a new
+/// generation. A Replica already at a readable format needs no rebuild, and
+/// rebuilding it would be a second representation of data that is already
+/// current.
+pub fn migrate_prior_ledger(home: &Path) -> Result<LedgerMigration> {
+    let space = match discover_space(home) {
+        SpaceStore::One(space) => space,
+        SpaceStore::Absent => return Err(anyhow!("no orbital Space in this home")),
+        SpaceStore::Several => {
+            return Err(anyhow!(
+                "this home holds more than one orbital Space; a migration has no way to pick one"
+            ))
+        }
+    };
+    let orbit = orbital_store_root(home).join(space.as_str());
+    let ledger = orbit.join("authority");
+
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(orbit.join("lock"))
+        .context("open Orbit lock")?;
+    lock.try_lock_exclusive()
+        .map_err(|_| anyhow!("Orbit is active; stop the daemon before migrating"))?;
+
+    if mechanics::space::Authority::open(&ledger).is_ok() {
+        return Ok(LedgerMigration {
+            migrated: false,
+            effects: 0,
+            previous: None,
+        });
+    }
+
+    let staged = orbit.join(STAGING_LEDGER_DIR);
+    let previous = orbit.join(PREVIOUS_LEDGER_DIR);
+    if previous.exists() {
+        return Err(anyhow!(
+            "{} already holds a kept ledger; move it aside before migrating again",
+            previous.display()
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&staged);
+    std::fs::create_dir_all(&staged).context("create the staging ledger root")?;
+
+    let verification = mechanics::space::generation::build_prior(&ledger, &staged)
+        .map_err(|error| anyhow!("rebuild the prior ledger: {error}"))?;
+
+    std::fs::rename(&ledger, &previous).context("keep the outgoing ledger")?;
+    if let Err(error) = std::fs::rename(&staged, &ledger) {
+        let _ = std::fs::rename(&previous, &ledger);
+        return Err(anyhow!("install the rebuilt ledger: {error}"));
+    }
+    if let Err(error) = mechanics::space::Authority::open(&ledger) {
+        let _ = std::fs::rename(&ledger, &staged);
+        let _ = std::fs::rename(&previous, &ledger);
+        return Err(anyhow!("the rebuilt ledger does not open: {error}"));
+    }
+
+    Ok(LedgerMigration {
+        migrated: true,
+        effects: verification.effects(),
+        previous: Some(previous),
+    })
+}
+
 /// Rebuild the implicit prior journal representation as an explicit current
 /// generation and atomically select it. This is intentionally a local
 /// representation operation: it authors no Space authority effect and changes

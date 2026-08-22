@@ -111,6 +111,18 @@ pub enum Intent {
         /// What happened, in the words the feed used.
         why: String,
     },
+    /// This build is below the published floor and must move.
+    ///
+    /// The only case that restarts without being asked. Declared work is
+    /// drained first and shown while it drains — the floor overrides the
+    /// *question*, never the work — and the restart is taken once `holding`
+    /// is empty.
+    Forced {
+        /// The version that becomes live on restart.
+        version: String,
+        /// What is still draining. Empty means take the restart now.
+        holding: Vec<String>,
+    },
 }
 
 /// The whole decision, as a pure function of what is known.
@@ -138,6 +150,14 @@ pub fn intent(standing: Option<&Standing>, now: u64, in_flight: &[String]) -> In
         Standing::Refused { why } | Standing::Stale { why } => {
             Intent::Attention { why: why.clone() }
         }
+        Standing::Staged {
+            version,
+            below_floor: true,
+            ..
+        } => Intent::Forced {
+            version: version.clone(),
+            holding: in_flight.to_vec(),
+        },
         Standing::Staged { version, .. } => {
             let waited = standing.staged_for(now).unwrap_or_default();
             if !in_flight.is_empty() {
@@ -170,6 +190,7 @@ mod tests {
         Standing::Staged {
             version: "0.9.0".into(),
             at: STAGED_AT,
+            below_floor: false,
         }
     }
 
@@ -280,6 +301,42 @@ mod tests {
         ) else {
             panic!("a long wait overrode declared work");
         };
+    }
+
+    /// A build below the floor must move, and moving is not a question. It
+    /// still drains: the floor overrides the *asking*, never the work, and
+    /// what it waits for stays visible while it waits.
+    #[test]
+    fn below_the_floor_the_restart_is_taken_rather_than_asked_for() {
+        let forced = Standing::Staged {
+            version: "0.9.0".into(),
+            at: STAGED_AT,
+            below_floor: true,
+        };
+
+        // Nothing in flight: take it now, at any age — the escalation does not
+        // apply to a restart nobody is being asked about.
+        for day in [0, 90] {
+            let Intent::Forced { version, holding } = intent(Some(&forced), now_after(day), &[])
+            else {
+                panic!("a build below the floor asked instead of moving");
+            };
+            assert_eq!(version, "0.9.0");
+            assert!(
+                holding.is_empty(),
+                "nothing was in flight, so nothing holds"
+            );
+        }
+
+        // Work in flight is drained and named, not discarded.
+        let Intent::Forced { holding, .. } = intent(
+            Some(&forced),
+            now_after(0),
+            &["an unsent comment".to_string()],
+        ) else {
+            panic!("the floor discarded declared work");
+        };
+        assert_eq!(holding, vec!["an unsent comment".to_string()]);
     }
 
     /// A clock that has gone backwards must not produce a negative age and a

@@ -200,6 +200,19 @@ pub struct App {
     /// Set when a signal says this model can no longer be derived from what it
     /// has seen. Cleared only by taking a fresh snapshot.
     stale: Option<StaleReason>,
+    /// The background half said no snapshot is ever coming. Ends "loading"
+    /// without pretending anything was read: a window over a system that is
+    /// not there draws what is compiled in, plus the failure that says why.
+    unstartable: bool,
+    /// The staged image this client spawns from, when one was staged. Carries
+    /// whether the source was rebuilt since — the fact behind the
+    /// roll-forward affordance.
+    image: Option<crate::client::ImageStanding>,
+    /// What this machine last learned about its own release channel. Held as
+    /// the *fact* the daemon recorded, never as the decision drawn from it:
+    /// the decision depends on what is in flight at the moment it is asked,
+    /// and `client::update::intent` is where that is computed.
+    update_standing: Option<lait::update::watch::Standing>,
     /// The most recent failures, newest first, bounded. Errors are state a
     /// surface draws, not something logged and lost.
     failures: VecDeque<Failure>,
@@ -263,6 +276,9 @@ impl App {
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::Snapshot(snapshot) => self.absorb(*snapshot),
+            Update::Unstartable => self.unstartable = true,
+            Update::Image(image) => self.image = image,
+            Update::UpdateStanding(standing) => self.update_standing = standing,
             Update::Library(entries) => self.absorb_library(entries),
             Update::WorldStandings(standings) => self.absorb_world_standings(standings),
             Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
@@ -614,10 +630,22 @@ impl App {
         self.stale.as_ref()
     }
 
+    /// The staged image this client spawns from, when one was staged.
+    pub fn image(&self) -> Option<&crate::client::ImageStanding> {
+        self.image.as_ref()
+    }
+
+    /// What this machine last learned about its own release channel.
+    pub fn update_standing(&self) -> Option<&lait::update::watch::Standing> {
+        self.update_standing.as_ref()
+    }
+
     /// Nothing has been read yet. Distinct from "read, and there was nothing" —
     /// the two look identical on screen unless a surface is told them apart.
+    /// And distinct again from "nothing is ever coming": a start that failed
+    /// ends loading rather than impersonating a slow one.
     pub fn is_loading(&self) -> bool {
-        self.snapshot.is_none()
+        self.snapshot.is_none() && !self.unstartable
     }
 
     /// Any device whose figures are known to be out of date.
@@ -735,6 +763,7 @@ mod tests {
             capabilities: Capabilities::default(),
             devices,
             connections: Vec::new(),
+            image: None,
         }
     }
 
@@ -768,6 +797,46 @@ mod tests {
         assert!(!app.is_loading(), "an answered read still reads as loading");
         assert!(app.devices().is_empty());
         assert!(app.stale().is_none());
+    }
+
+    /// A start that failed is not a slow start. The background half says no
+    /// snapshot is ever coming, and loading ends — with the failure standing
+    /// beside whatever is compiled in — instead of a skeleton that waits
+    /// forever on a system that is not there.
+    #[test]
+    fn a_start_that_failed_stops_reading_as_loading() {
+        let mut app = App::new();
+        assert!(app.is_loading());
+
+        app.apply(Update::Unstartable);
+        assert!(
+            !app.is_loading(),
+            "a system that will never answer still reads as loading"
+        );
+        // Nothing was read, and the model does not pretend otherwise.
+        assert_eq!(app.stale(), Some(&StaleReason::NeverLoaded));
+    }
+
+    /// The image standing is a pushed fact like any other: present when
+    /// sampled, replaced whole, and `None` for a launch that never staged —
+    /// which the model keeps distinct from "current".
+    #[test]
+    fn the_image_standing_is_replaced_whole_by_each_sample() {
+        let mut app = App::new();
+        assert!(app.image().is_none());
+
+        app.apply(Update::Image(Some(crate::client::ImageStanding {
+            fingerprint: "abc123".into(),
+            staged_at_ms: 5,
+            source_changed: true,
+        })));
+        assert!(app.image().is_some_and(|image| image.source_changed));
+
+        app.apply(Update::Image(None));
+        assert!(
+            app.image().is_none(),
+            "a launch that never staged still claims an image"
+        );
     }
 
     /// An ordinary event does not blank the model. A surface that cleared on

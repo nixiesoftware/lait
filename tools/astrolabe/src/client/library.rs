@@ -181,7 +181,11 @@ pub struct LaunchTicket {
 /// The install list itself, free of [`Client`] so a test can read it without
 /// constructing one. What `get_library` returns IS this — delegation, not a
 /// second copy that could drift.
-fn installed() -> Vec<LibraryEntry> {
+///
+/// `pub(crate)` because the runtime also reads it on the one path that has no
+/// client to ask: a supervisor that failed to start still owes the window the
+/// compiled-in list, which needs no process behind it to be true.
+pub(crate) fn installed() -> Vec<LibraryEntry> {
     let packages = lait::composition::bundled_client_packages();
     let hosted = lait::composition::bundled_packages();
     packages
@@ -198,6 +202,20 @@ fn installed() -> Vec<LibraryEntry> {
                 .map(|(_, version)| version),
         })
         .collect()
+}
+
+/// The World id behind one mount, when this build installs it.
+///
+/// The mount and the id are deliberately different strings for different jobs:
+/// the mount is the stable key a surface and a URL carry, the id is the
+/// reverse-domain name the daemon scopes update consent by. A surface holds
+/// only the mount, so this is where one becomes the other — the composition is
+/// the one place both are compiled in together. An unknown mount answers with
+/// nothing rather than letting a mount travel onward dressed as an id.
+pub fn world_id_for_mount(mount: &str) -> Option<String> {
+    lait::composition::bundled_client_packages()
+        .package_for_mount(mount)
+        .map(|package| package.world().as_str().to_owned())
 }
 
 impl Client {
@@ -268,6 +286,23 @@ mod tests {
             assert!(!entry.world_mount.is_empty());
             assert!(!entry.world.is_empty());
         }
+    }
+
+    /// Update consent on the daemon is scoped by World id, but a surface holds
+    /// only the mount. The resolver is the seam between the two names: every
+    /// installed mount answers with the id its own row carries, and an unknown
+    /// mount answers with nothing rather than travelling onward as an id.
+    #[test]
+    fn a_mount_resolves_to_the_world_id_updates_are_scoped_by() {
+        for entry in installed() {
+            assert_eq!(
+                world_id_for_mount(&entry.world_mount).as_deref(),
+                Some(entry.world.as_str()),
+                "the mount '{}' did not resolve to its own World id",
+                entry.world_mount
+            );
+        }
+        assert_eq!(world_id_for_mount("no-such-mount"), None);
     }
 
     /// A World that declares no entry path stays unopenable rather than

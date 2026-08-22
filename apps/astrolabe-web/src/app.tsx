@@ -11,7 +11,9 @@ import {
   loadingClientView,
   setFullscreen,
   summonOwnedWindow,
+  restartForUpdate,
   summonWorldSettings,
+  updateInProgress,
   watchMenu,
   worldArtwork,
   type ClientAction,
@@ -19,6 +21,7 @@ import {
   type ClientView,
   type LibraryWorld,
   type OwnedWindowSurface,
+  type UpdateIntent,
   type WorldArtwork,
   type WorldPerson,
 } from "./client";
@@ -109,7 +112,7 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
         refreshing={refreshing} onRefresh={() => void dispatch({ type: "refresh" })} />
       <div className="client-body">
         <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} dark={dark} />
-        <OperationalBar view={view} onSummonWindow={summonOwnedWindow} />
+        <OperationalBar view={view} onSummonWindow={summonOwnedWindow} dispatch={dispatch} />
       </div>
     </section>
   </main>;
@@ -307,9 +310,22 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
   const running = !opening && serving.length > 0;
   const stoppable = serving.find((head) => head.owned);
   const stopping = stoppable !== undefined && view.inFlight.includes(actionKey.stopHead(stoppable.id));
-  const updating = view.inFlight.includes(actionKey.updateWorld(world.worldMount));
   const update = world.update;
+  // Consent returns in one IPC turn; the fetch and migration run on the
+  // daemon afterwards. The control stays pending through both, or a person
+  // watches "UPDATE" flash and reads the update as done before it started.
+  const updating = view.inFlight.includes(actionKey.updateWorld(world.worldMount))
+    || updateInProgress(update);
   const state = lifecycle(view, world);
+  // What became of the last update, when it did not simply land: a bundle
+  // this build cannot run, or a refused operation. Said in place — a person
+  // who pressed UPDATE and got silence learns to distrust the control.
+  const updateNote = update === null ? null
+    : update.unmet !== null && update.unmet.length > 0
+      ? `The newest bundle${update.available === null ? "" : ` (${update.available})`} cannot run on this build: ${update.unmet.join("; ")}`
+      : update.phase === "refused"
+        ? `The last update was refused: ${update.message ?? "no reason was recorded"}`
+        : null;
   return <section className="world-detail">
     <WorldHero world={world} />
     <div className="world-action-band">
@@ -341,7 +357,11 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
         })}>⚙</Button>
       </span>
     </div>
-    <div className="world-detail-content"><PeopleGlance people={world.people} /></div>
+    <div className="world-detail-content">
+      {updating && update?.progress != null && <p className="update-note">{update.progress}</p>}
+      {!updating && updateNote !== null && <p className="update-note">{updateNote}</p>}
+      <PeopleGlance people={world.people} />
+    </div>
   </section>;
 }
 
@@ -415,15 +435,22 @@ function EmptyLibrary() { return <section className="empty-library"><h1>Library<
  * not a notification stack. What is true sits left of the rule; what can be
  * done sits right of it.
  */
-function OperationalBar({ view, onSummonWindow }: { view: ClientView; onSummonWindow(surface: OwnedWindowSurface): void }) {
+function OperationalBar({ view, onSummonWindow, dispatch }: { view: ClientView; onSummonWindow(surface: OwnedWindowSurface): void; dispatch(action: ClientAction): Promise<void> }) {
   const status = identityStatus(view);
   const activity = activityLine(view);
   const spaces = view.host?.orbitCount ?? view.orbits.length;
+  const rolling = view.inFlight.includes(actionKey.reload);
   return <footer className="operational-bar" aria-live={view.inFlight.length > 0 || view.failures.length > 0 ? "polite" : "off"}>
     <span className={`identity-status tone-${status.tone}`}>
       {view.loading ? <span className="spinner tiny" /> : <span className="status-icon">⌁</span>}{status.label}
     </span><span className="bar-divider" />
-    <span className="activity">{activity}</span><span>{view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
+    <span className="activity">{activity}</span>
+    <UpdateAffordance update={view.update} />
+    {rolling ? <span className="roll-forward rolling"><span className="spinner tiny" /> Rolling forward…</span>
+      : view.image?.sourceChanged === true && <span className="tip" title="A newer build is on disk — restart everything onto it">
+        <Button className="roll-forward" aria-label="Roll forward onto the new build"
+          onPress={() => void dispatch({ type: "reload" })}>⟳ Roll forward</Button></span>}
+    <span>{view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
     <span className="bar-spaces">{spaces} {spaces === 1 ? "Space" : "Spaces"}</span>
     {view.host !== null && <code className="bar-version">v{view.host.version}</code>}
     <span className="bar-divider" />
@@ -432,6 +459,53 @@ function OperationalBar({ view, onSummonWindow }: { view: ClientView; onSummonWi
     <span className="tip" title="Open the address book">
       <Button className="bar-icon" aria-label="Address book" onPress={() => void onSummonWindow("book")}>◉</Button></span>
   </footer>;
+}
+
+/**
+ * This client's own updating, which is never a choice about whether to take
+ * one (CLIENT-47). The client is evergreen: staging is silent and continuous,
+ * and a release applies at the next natural boundary. The only machine that
+ * needs asking is the one that never reaches a boundary — a session left open
+ * for days — so this is a request to restart, escalating with how long the
+ * release has waited, and nothing at all in the ordinary case.
+ *
+ * `attention` is deliberately not an update: a signature that did not verify
+ * or a pointer that went backwards means somebody should look, and folding
+ * either into silence is exactly the quiet an attack buys.
+ */
+function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
+  // The floor is the one case that moves on its own: once declared work has
+  // drained there is nothing to ask, so the restart is taken. Until then it
+  // says what it is waiting for rather than going quiet.
+  useEffect(() => {
+    if (update?.kind === "forced" && update.holding.length === 0) {
+      void restartForUpdate();
+    }
+  }, [update]);
+
+  if (update === null) return null;
+  if (update.kind === "forced") {
+    return <span className="tip" title={`${update.version} is required; this build is below the published floor`}>
+      <span className="update-forced" role="status">
+        <span className="spinner tiny" />
+        {update.holding.length === 0
+          ? "Restarting to update…"
+          : `Update required — finishing ${update.holding.length === 1 ? "1 task" : `${update.holding.length} tasks`}`}
+      </span></span>;
+  }
+  if (update.kind === "attention") {
+    return <span className="tip" title={update.why}>
+      <span className="update-attention" role="status">⚠ Update needs attention</span></span>;
+  }
+  if (update.kind === "waiting") {
+    return <span className="tip" title={`${update.version} is ready; waiting for ${update.holding.join(", ")}`}>
+      <span className="update-waiting" role="status">
+        <span className="spinner tiny" /> Update waits for {update.holding.length === 1 ? "1 task" : `${update.holding.length} tasks`}
+      </span></span>;
+  }
+  return <span className="tip" title={`${update.version} is staged and applies when this client restarts`}>
+    <Button className={`update-restart urgency-${update.urgency}`} aria-label={`Restart to update to ${update.version}`}
+      onPress={() => void restartForUpdate()}>↻ Restart to update</Button></span>;
 }
 
 function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" {

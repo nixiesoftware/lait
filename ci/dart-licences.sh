@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
+# DEPRECATED — audits the deprecated Flutter client's Dart closure.
+#
+# Tauri is the canonical interface, and its dependency closure is npm's,
+# covered elsewhere. Nothing ships from `apps/astrolabe` any more, so there is
+# no Dart closure in a released artifact for this to report on. Kept, unwired,
+# only against the Flutter client ever being revived — and it cannot run today
+# regardless, because that project's pinned `lit-ui` commit no longer resolves.
+# See `apps/astrolabe/DEPRECATED.md`.
+#
 # The second dependency closure.
 #
-# `cargo deny` proves the Rust closure carries no copyleft. Revision 7 of the
-# Astrolabe Plan added a Dart one, and an audit that covers only the first is an
+# `cargo deny` proves the Rust closure carries no copyleft. The Flutter
+# interface added a Dart one, and an audit that covers only the first is an
 # audit reporting on a closure it has not read.
 #
 # This resolves the app's package closure, finds each package's licence in the

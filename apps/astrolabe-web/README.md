@@ -65,6 +65,14 @@ To run the desktop host (after its Rust dependencies have built):
 npm run tauri dev
 ```
 
+The dev command first stages the `lait` sidecar beside the host binary
+(`scripts/stage-sidecar.mjs`, wired through `beforeDevCommand`). The host
+resolves its sidecar strictly beside its own executable — never from `PATH` —
+and in dev that place is src-tauri's own target directory, which nothing else
+populates. Without the staged binary the host cannot start the identity
+daemon, and the window reports "start the supervisor" against an unstartable
+core.
+
 `?platform=macos` and `?platform=windows` preview the Flutter client's existing
 caption variants. Production does not infer that choice from a user agent: the
 desktop shell supplies it and the kiosk/browser entry point uses the generic

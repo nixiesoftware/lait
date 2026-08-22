@@ -67,6 +67,14 @@ pub enum Action {
     UpdateWorld {
         world: String,
     },
+    /// Act on a `lait:` link the OS delivered.
+    OpenLink {
+        url: String,
+    },
+    /// Restage from the rebuilt source and bring everything back on the new
+    /// image: owned devices and heads through the supervisor, then the
+    /// identity daemon. The inner-loop gesture — `cargo build`, then this.
+    Reload,
     /// Become a screen. Pressing the control *is* the consent; nothing is
     /// chosen yet and nothing needs to be.
     EnterPresentation,
@@ -238,6 +246,8 @@ impl Action {
             Self::Refresh => "refresh".into(),
             Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
+            Self::OpenLink { url } => format!("link.open:{url}"),
+            Self::Reload => "image.reload".into(),
             Self::StartDevice(id) => format!("device.start:{id}"),
             Self::StopDevice(id) => format!("device.stop:{id}"),
             Self::RestartDevice(id) => format!("device.restart:{id}"),
@@ -322,6 +332,8 @@ impl Action {
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
+            Self::OpenLink { url } => format!("open {url}"),
+            Self::Reload => "roll forward onto the rebuilt image".into(),
             Self::StartDevice(id) => format!("start {id}"),
             Self::StopDevice(id) => format!("stop {id}"),
             Self::RestartDevice(id) => format!("restart {id}"),
@@ -401,6 +413,19 @@ impl Action {
 /// Something that happened, on its way to the model.
 pub enum Update {
     Snapshot(Box<WorkbenchSnapshot>),
+    /// The background half could not start, and no snapshot is ever coming.
+    /// Distinct from a slow first read — waiting is the wrong thing to draw
+    /// for a system that is not there, and "loading forever" is how this
+    /// failure used to render.
+    Unstartable,
+    /// The staged image this client spawns from, sampled on the host tick.
+    /// `None` is a launch that never staged — which is not "current".
+    Image(Option<crate::client::ImageStanding>),
+    /// What this machine last learned about its own release channel, written
+    /// by the daemon's resident watcher and read from disk like the World
+    /// standings beside it. `None` is a machine that has never completed a
+    /// check — which is not "up to date", and draws nothing at all.
+    UpdateStanding(Option<lait::update::watch::Standing>),
     Library(Vec<LibraryEntry>),
     /// What the daemon has learned about each World's channel, keyed by World
     /// id. Separate from `Library` because the two are different kinds of
@@ -583,7 +608,7 @@ struct Worker {
 }
 
 /// Unix seconds, for the clocks the correspondence crate takes as arguments.
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
@@ -639,6 +664,16 @@ async fn serve(
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
         Err(error) => {
+            // The window still owes the person what is true without a process
+            // behind it: the compiled-in Library, and the end of "loading" —
+            // a system that is not there must not be drawn as one still
+            // arriving. The failure itself rides beside them.
+            send(
+                &updates,
+                wake.as_ref(),
+                Update::Library(crate::client::library::installed()),
+            );
+            send(&updates, wake.as_ref(), Update::Unstartable);
             send(
                 &updates,
                 wake.as_ref(),
@@ -852,6 +887,18 @@ impl Worker {
         self.send(Update::WorldStandings(
             crate::client::library::world_standings(self.client.identity_dir().as_deref()),
         ));
+        // Whether the source was rebuilt since staging — one stat, so the
+        // roll-forward affordance appears the moment a build lands rather
+        // than on F5.
+        self.send(Update::Image(self.client.image_standing()));
+        // This client's own release standing (CLIENT-47). A file the daemon
+        // writes whether or not a window is open, for the same reason the
+        // World standings are files: there is no event to have missed.
+        self.send(Update::UpdateStanding(
+            self.client
+                .identity_dir()
+                .and_then(|identity| lait::update::watch::standing(&identity)),
+        ));
         if let Ok(context) = self.client.host_context().await {
             self.send(Update::Context(Box::new(context)));
         }
@@ -935,11 +982,35 @@ impl Worker {
             // per-Space migration happen later on the daemon's admitted lane;
             // the UI gets its operation coordinate before any of that work.
             Action::UpdateWorld { world } => {
-                let job = client.world_update(world).await?;
+                // The surface names a World by its mount — the Library row's
+                // stable key — but the daemon scopes update consent by World
+                // id, and a mount sent as an id is refused far from here as
+                // "invalid World id".
+                let world_id =
+                    crate::client::library::world_id_for_mount(world).ok_or_else(|| {
+                        ClientError::refused(format!("no installed World is mounted at '{world}'"))
+                    })?;
+                let job = client.world_update(&world_id).await?;
                 Ok(Outcome::Said(format!(
                     "update accepted ({})",
                     job.operation_hex()
                 )))
+            }
+            Action::Reload => {
+                // The bench half first: the supervisor stops what it owns,
+                // restages from the rebuilt source, and brings the same set
+                // back on the new image.
+                let report = client.supervisor().reload_in_place().await?;
+                // Then the identity daemon, which is not supervisor-owned and
+                // would otherwise keep serving old code — see
+                // `Client::roll_identity_daemon` for why telling it is needed.
+                client.roll_identity_daemon().await?;
+                let fingerprint = report
+                    .image
+                    .map(|image| image.fingerprint)
+                    .unwrap_or_default();
+                let short = &fingerprint[..fingerprint.len().min(12)];
+                Ok(Outcome::Said(format!("rolled forward onto {short}")))
             }
             Action::OpenWorld { world, entry_path } => {
                 let launch = client.open_world(world, entry_path).await?;
@@ -949,6 +1020,37 @@ impl Worker {
                 // and a browser opened at a ticket that was never minted is not.
                 crate::browser::open(&launch.url)?;
                 Ok(Outcome::Launched(launch))
+            }
+            Action::OpenLink { url } => {
+                match crate::link::Link::parse(url)? {
+                    crate::link::Link::World { mount } => {
+                        // The mount is the link's whole address; the entry path
+                        // is the World's own statement about itself and is
+                        // never taken from the link.
+                        let entry = crate::client::library::installed()
+                            .into_iter()
+                            .find(|row| row.world_mount == mount)
+                            .ok_or_else(|| {
+                                ClientError::refused(format!(
+                                    "no World is installed at '{mount}'"
+                                ))
+                            })?;
+                        let entry_path = entry.entry_path.ok_or_else(|| {
+                            ClientError::refused(format!(
+                                "'{mount}' declares no entry path, so there is nowhere to open it"
+                            ))
+                        })?;
+                        let launch = client.open_world(&mount, &entry_path).await?;
+                        crate::browser::open(&launch.url)?;
+                        Ok(Outcome::Launched(launch))
+                    }
+                    // Entering a Space is the destination's act — the head's
+                    // front page carries it — and this client has no path to
+                    // it. Said with the ticket intact rather than dropped.
+                    crate::link::Link::Invite { ticket } => Err(ClientError::refused(format!(
+                        "this invite must be entered from a Space's own front page; its ticket is {ticket}"
+                    ))),
+                }
             }
             Action::StartDevice(id) => {
                 client.supervisor().start_device(id).await?;
@@ -1443,6 +1545,7 @@ mod tests {
             capabilities: Capabilities::default(),
             devices: Vec::new(),
             connections: Vec::new(),
+            image: None,
         }
     }
 

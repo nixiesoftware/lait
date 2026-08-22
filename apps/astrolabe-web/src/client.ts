@@ -31,6 +31,18 @@ export interface WorldUpdate {
   available: string | null;
   behind: boolean;
   unmet: string[] | null;
+  /** The durable native update operation, when consent has been recorded. */
+  operation: string | null;
+  /** accepted | fetching | migrating | waiting are live; verified | refused are done. */
+  phase: string | null;
+  progress: string | null;
+  message: string | null;
+}
+
+/** Whether a recorded update operation is still doing work. */
+export function updateInProgress(update: WorldUpdate | null): boolean {
+  return update !== null && update.phase !== null
+    && update.phase !== "verified" && update.phase !== "refused";
 }
 
 export interface Head {
@@ -62,6 +74,8 @@ export interface Failure {
 export interface Device {
   id: string; label: string; state: string; owned: boolean; degraded: string | null;
   home: string; pid: number | null; canForceStop: boolean; lastError: string | null;
+  /** Hash of the image this device actually runs; compare with view.image. */
+  imageFingerprint: string | null;
 }
 
 export interface Storage { orbit: string; name: string | null; bytesOnDisk: number | null; objectCount: number | null; lastVerifiedMs: number | null; missing: "notPlaced" | "unreachable" | null; }
@@ -202,10 +216,50 @@ export interface ClientView {
   failures: Failure[];
   /** Core action keys, not UI-local flags. */
   inFlight: string[];
+  /** The staged image this client spawns from; null when nothing was staged. */
+  image: ImageStanding | null;
+  /**
+   * The one thing a person is ever asked about this client's own updating:
+   * when to restart. `null` is the ordinary evergreen state — and also a
+   * machine that has never completed a check, which is not "up to date".
+   */
+  update: UpdateIntent | null;
+}
+
+/**
+ * Never a question about whether to take an update. Staging is silent and
+ * continuous; applying happens at a moment no client is alive. This is the
+ * request to reach that moment, or news that is not an update at all.
+ */
+export type UpdateIntent =
+  /** Staged and waiting for a restart this machine will not take on its own. */
+  | { kind: "restartRequested"; version: string; urgency: UpdateUrgency }
+  /** Ready, and something is holding the restart — being waited for, not ignored. */
+  | { kind: "waiting"; version: string; holding: string[] }
+  /** A signature that did not verify, or a pointer that went backwards. */
+  | { kind: "attention"; why: string }
+  /**
+   * Below the published floor: this build must move. The only case that
+   * restarts without asking — `holding` is what is still draining, and an
+   * empty list means take the restart now.
+   */
+  | { kind: "forced"; version: string; holding: string[] };
+
+/** How hard to ask, by how long the release has waited since staging. */
+export type UpdateUrgency = "quiet" | "insistent" | "urgent";
+
+/** The staged image, and whether the source was rebuilt since staging. */
+export interface ImageStanding {
+  fingerprint: string;
+  stagedAtMs: number;
+  /** A roll-forward would change what runs. */
+  sourceChanged: boolean;
 }
 
 export type ClientAction =
   | { type: "refresh" }
+  | { type: "reload" }
+  | { type: "openLink"; url: string }
   | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
@@ -233,6 +287,7 @@ export type ClientAction =
 
 export const actionKey = {
   refresh: "refresh",
+  reload: "image.reload",
   open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
   startDevice: (id: string) => `device.start:${id}`,
@@ -283,6 +338,8 @@ export const actionKey = {
 export function keyFor(action: ClientAction): string {
   switch (action.type) {
     case "refresh": return actionKey.refresh;
+    case "reload": return actionKey.reload;
+    case "openLink": return `link.open:${action.url}`;
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
@@ -499,6 +556,8 @@ export const loadingClientView: ClientView = {
   notices: [],
   failures: [],
   inFlight: [],
+  image: null,
+  update: null,
 };
 
 /**
@@ -526,6 +585,22 @@ export function watchMenu(listener: (id: string) => void): () => void {
  */
 export function hostOwnsFullscreen(): boolean {
   return isTauri();
+}
+
+/**
+ * Take the restart a staged release is waiting for.
+ *
+ * Nothing is applied here and nothing is downloaded — the release is already
+ * on disk. This ends the process so the swap can happen in the window where
+ * no client is alive. A host capability, because only the host can end and
+ * relaunch itself; outside the desktop host there is nothing to restart, and
+ * this does nothing rather than pretending.
+ *
+ * Does not return on success.
+ */
+export async function restartForUpdate(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("restart_for_update");
 }
 
 /**
@@ -900,6 +975,8 @@ export const fixtureClientView: ClientView = {
   inFlight: [],
   failures: [],
   notices: [],
+  image: null,
+  update: null,
 };
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

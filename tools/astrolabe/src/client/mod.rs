@@ -47,6 +47,10 @@ struct Inner {
     /// The identity home this client is bound to. Every plane resolves through
     /// it, so a client can never straddle two identities by accident.
     identity: Option<PathBuf>,
+    /// Whether this launch hosts an identity daemon at all. A standalone
+    /// launch (`skip_sidecar`) deliberately has none, and a roll-forward must
+    /// not stand one up that the launch chose not to have.
+    hosted: bool,
 }
 
 impl Client {
@@ -57,12 +61,28 @@ impl Client {
     /// holding its stream would have a window in which events vanish.
     pub async fn start(config: Config) -> ClientResult<(Self, Signals)> {
         let selection = selection_for(config.identity.as_deref());
+        // The supervisor first: starting it spawns nothing, and it is what
+        // stages the image everything else runs from. The daemon below is
+        // then spawned from the *staged* copy, so no long-lived process holds
+        // the sidecar file a rebuild wants to replace.
+        let (supervisor, signals) = Supervisor::start(SupervisorConfig {
+            state_root: config.state_root,
+            executable: config.executable.clone(),
+            observation_interval: config.observation_interval,
+            staging: config.staging,
+        })
+        .await
+        .map_err(ClientError::from)?;
         // The sidecar is what makes this a hosted identity. Skipping it is a
         // deliberate standalone launch: the daemon-backed planes will report
         // unreachable, but the window comes up at once instead of waiting on a
         // daemon that is not meant to be there.
         if !config.skip_sidecar {
-            lait::host_client::ensure_lait_daemon_with_executable(&selection, &config.executable)
+            let daemon_image = supervisor
+                .image()
+                .map(|image| PathBuf::from(image.staged_path))
+                .unwrap_or(config.executable);
+            lait::host_client::ensure_lait_daemon_with_executable(&selection, &daemon_image)
                 .await
                 .map_err(|error| {
                     let message = format!("start or attach to the identity daemon: {error:#}");
@@ -76,19 +96,12 @@ impl Client {
                     }
                 })?;
         }
-        let (supervisor, signals) = Supervisor::start(SupervisorConfig {
-            state_root: config.state_root,
-            executable: config.executable,
-            observation_interval: config.observation_interval,
-            staging: config.staging,
-        })
-        .await
-        .map_err(ClientError::from)?;
         Ok((
             Self {
                 inner: Arc::new(Inner {
                     supervisor,
                     identity: config.identity,
+                    hosted: !config.skip_sidecar,
                 }),
             },
             signals,
@@ -104,6 +117,9 @@ impl Client {
             inner: Arc::new(Inner {
                 supervisor,
                 identity,
+                // A wrapped supervisor has no daemon of this client's making,
+                // and a roll-forward must not invent one.
+                hosted: false,
             }),
         }
     }
@@ -148,6 +164,86 @@ impl Client {
     pub async fn shutdown(&self) {
         self.inner.supervisor.shutdown().await;
     }
+
+    /// The image everything here spawns from, and whether its source has been
+    /// rebuilt since it was staged.
+    ///
+    /// The comparison is the source file's mtime against the staging moment —
+    /// a stat, not a hash, because this runs on the once-a-second host tick
+    /// and the answer it feeds is "offer a roll-forward", not "prove the
+    /// bytes differ". The roll itself re-fingerprints; a same-bytes touch
+    /// costs one restage and nothing else.
+    ///
+    /// `None` when nothing was ever staged, which is not "current" — it is a
+    /// launch with no image to be behind.
+    pub fn image_standing(&self) -> Option<ImageStanding> {
+        let image = self.inner.supervisor.image()?;
+        let source_changed = std::fs::metadata(&image.source_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|modified| {
+                u64::try_from(modified.as_millis()).unwrap_or(u64::MAX) > image.staged_at_ms
+            });
+        Some(ImageStanding {
+            fingerprint: image.fingerprint,
+            staged_at_ms: image.staged_at_ms,
+            source_changed,
+        })
+    }
+
+    /// Restart the identity daemon onto the currently staged image.
+    ///
+    /// The daemon is not supervisor-owned, and a same-version rebuild looks
+    /// compatible to the attach probe — so after a rebuild it would keep
+    /// serving old code indefinitely unless told. Telling is two steps: ask
+    /// it to stop on its own terms (`HostRestart` stops once the reply is on
+    /// the wire), then stand a fresh one up from the staged copy.
+    ///
+    /// A standalone launch has no daemon on purpose, and rolling forward must
+    /// not stand one up: nothing happens and that is the correct nothing.
+    pub async fn roll_identity_daemon(&self) -> ClientResult<()> {
+        if !self.inner.hosted {
+            return Ok(());
+        }
+        let selection = selection_for(self.inner.identity.as_deref());
+        if let Ok(daemon) = self.daemon() {
+            // A daemon that was not up cannot be asked to stop, and does not
+            // need to be — the ensure below stands the fresh one up either way.
+            let _ = daemon
+                .request(
+                    lait::control::ControlRoute::Daemon,
+                    &lait::control::Request::HostRestart,
+                    None,
+                )
+                .await;
+        }
+        let image = self
+            .inner
+            .supervisor
+            .image()
+            .map(|image| PathBuf::from(image.staged_path))
+            .ok_or_else(|| {
+                ClientError::refused("nothing is staged, so there is no image to roll onto")
+            })?;
+        lait::host_client::ensure_lait_daemon_with_executable(&selection, &image)
+            .await
+            .map_err(|error| {
+                ClientError::unreachable(format!("restart the identity daemon: {error:#}"))
+            })
+    }
+}
+
+/// The staged image this client spawns from, as a fact a surface can draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageStanding {
+    /// Content hash of the staged bytes. Two processes reporting the same
+    /// fingerprint run the same code, whatever their paths say.
+    pub fingerprint: String,
+    pub staged_at_ms: u64,
+    /// The source was rebuilt after this image was staged: a roll-forward
+    /// would change what runs.
+    pub source_changed: bool,
 }
 
 fn selection_for(identity: Option<&std::path::Path>) -> lait::config::Selection {
@@ -190,11 +286,23 @@ pub struct Config {
 
 impl Config {
     pub fn new(state_root: PathBuf, executable: PathBuf) -> Self {
+        // A development build spawns from a staged copy under the managed
+        // root, so a rebuild never contends with a process holding the image
+        // — the tax `lait_workbench::staging` exists to remove. A packaged
+        // client has no build to contend with, and spawning the installed
+        // executable in place keeps one fewer path to explain.
+        let staging = if cfg!(debug_assertions) {
+            lait_workbench::Staging::Staged {
+                root: state_root.join("images"),
+            }
+        } else {
+            lait_workbench::Staging::Direct
+        };
         Self {
             state_root,
             executable,
             observation_interval: lait_workbench::OBSERVATION_INTERVAL,
-            staging: lait_workbench::Staging::Direct,
+            staging,
             identity: None,
             skip_sidecar: false,
             correspondence_demo: false,

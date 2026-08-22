@@ -67,6 +67,15 @@ pub enum Standing {
     Staged {
         /// The version that will be live after the next launch.
         version: String,
+        /// This build is below the release's published compatibility floor.
+        ///
+        /// The one case that restarts on its own: a build below the floor must
+        /// move, so the restart is taken after declared work drains rather
+        /// than asked for. Absent on a store written before this was recorded,
+        /// which reads as "not below the floor" — the side that asks rather
+        /// than the side that acts.
+        #[serde(default)]
+        below_floor: bool,
         /// When it was staged, unix seconds.
         ///
         /// Recorded because the only question a person is ever asked on this
@@ -170,6 +179,38 @@ pub fn live_bundle() -> Option<PathBuf> {
     live_bundle_of(&std::env::current_exe().ok()?)
 }
 
+/// Where a bundle installation keeps `staged/`, `previous/` and the stage
+/// manifest. Beside the identity, because a `.app` has no install root to put
+/// them in and must not grow one inside its signed seal.
+#[cfg(target_os = "macos")]
+const BUNDLE_STAGING_DIR: &str = "client-update";
+
+/// Where this installation stages client releases, whichever shape it has.
+///
+/// A stub-managed installation stages inside its own root. A macOS bundle has
+/// no root — the person put the application where they wanted it — so it
+/// stages beside the identity and the two bundles are exchanged.
+///
+/// `None` is neither shape: a developer's build tree or a standalone `lait`,
+/// where staging has nowhere to go and inventing one would drop a client tree
+/// beside somebody's `target/`.
+pub fn staging_root_of(executable: &Path, identity: &Path) -> Option<PathBuf> {
+    if let Some(root) = install_root_of(executable) {
+        return Some(root);
+    }
+    #[cfg(target_os = "macos")]
+    if live_bundle_of(executable).is_some() {
+        return Some(identity.join(BUNDLE_STAGING_DIR));
+    }
+    let _ = identity;
+    None
+}
+
+/// [`staging_root_of`] for the running binary.
+pub fn staging_root(identity: &Path) -> Option<PathBuf> {
+    staging_root_of(&std::env::current_exe().ok()?, identity)
+}
+
 /// Now, in unix seconds.
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -248,13 +289,14 @@ where
             // escalation would never escalate.
             let at = previous
                 .and_then(|standing| match standing {
-                    Standing::Staged { version, at } if version == staged => Some(at),
+                    Standing::Staged { version, at, .. } if version == staged => Some(at),
                     _ => None,
                 })
                 .unwrap_or_else(now);
             return Standing::Staged {
                 version: staged,
                 at,
+                below_floor: below_floor(&resolved, current),
             };
         }
     }
@@ -263,6 +305,7 @@ where
         Ok(staged) => Standing::Staged {
             version: staged.version,
             at: now(),
+            below_floor: below_floor(&resolved, current),
         },
         Err(error) => {
             // The release exists and this machine could not take it. That is
@@ -274,6 +317,17 @@ where
             }
         }
     }
+}
+
+/// Whether this build is below the release's published compatibility floor.
+///
+/// A floor above the release naming it cannot ship and is ignored when
+/// observed anyway, so an unsatisfiable one never forces a restart.
+fn below_floor(resolved: &feed::Resolved, current: &semver::Version) -> bool {
+    resolved
+        .floor
+        .as_ref()
+        .is_some_and(|floor| floor <= &resolved.version && current < floor)
 }
 
 /// Check every World this build hosts, and stage any head published for this
@@ -551,6 +605,7 @@ mod tests {
         let staged = Standing::Staged {
             version: "0.9.0".into(),
             at: 1_700_000_000,
+            below_floor: false,
         };
         record(identity.path(), &staged);
         assert_eq!(standing(identity.path()), Some(staged));
@@ -622,13 +677,15 @@ mod tests {
             Some(Standing::Staged {
                 version: "0.9.0".into(),
                 at: long_ago,
+                below_floor: false,
             }),
         );
         assert_eq!(
             standing,
             Standing::Staged {
                 version: "0.9.0".into(),
-                at: long_ago
+                at: long_ago,
+                below_floor: false,
             },
             "re-observing the same staged release reset its clock"
         );
@@ -640,6 +697,59 @@ mod tests {
     }
 
     /// The application is found by asking where this daemon runs from, not by
+    /// Both installation shapes reach a staging root, and nothing else does.
+    ///
+    /// The stub layout was once the only shape recognized, so a macOS bundle
+    /// answered `None` and its daemon never started the watcher — every
+    /// component of the apply path correct, and unreachable. This asserts the
+    /// composition rather than the parts.
+    #[test]
+    fn every_installed_shape_has_somewhere_to_stage_and_a_build_tree_does_not() {
+        let root = tempfile::tempdir().expect("a scratch dir");
+        let identity = root.path().join("identity");
+
+        // A stub-managed installation stages inside its own root.
+        let install = root.path().join("Programs").join("Astrolabe");
+        std::fs::create_dir_all(install.join(tree::LIVE_DIR)).expect("the live tree");
+        let stub = install.join(if cfg!(windows) {
+            "astrolabe-stub.exe"
+        } else {
+            "astrolabe-stub"
+        });
+        std::fs::write(&stub, b"the stub").expect("stage the stub");
+        assert_eq!(
+            staging_root_of(&install.join(tree::LIVE_DIR).join("lait"), &identity),
+            Some(install),
+            "a stub-managed installation did not find its own root"
+        );
+
+        // A developer's build is neither shape and must stage nowhere.
+        assert_eq!(
+            staging_root_of(
+                &root.path().join("target").join("debug").join("lait"),
+                &identity
+            ),
+            None,
+            "a build tree was treated as an installation"
+        );
+
+        // A macOS bundle has no root of its own and stages beside the identity.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            staging_root_of(
+                &root
+                    .path()
+                    .join("Astrolabe.app")
+                    .join("Contents")
+                    .join("MacOS")
+                    .join("lait"),
+                &identity,
+            ),
+            Some(identity.join(BUNDLE_STAGING_DIR)),
+            "a bundle installation had nowhere to stage, so it would never update"
+        );
+    }
+
     /// assuming `/Applications`: the person put the bundle where they wanted
     /// it, and a rule that guessed would update a copy nobody launches.
     #[cfg(target_os = "macos")]

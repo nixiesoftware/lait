@@ -12,6 +12,12 @@ pub struct WorkbenchSnapshot {
     pub capabilities: Capabilities,
     pub devices: Vec<DeviceSnapshot>,
     pub connections: Vec<ConnectionSnapshot>,
+    /// The image this supervisor is currently spawning from. What a device's
+    /// own [`DeviceSnapshot::image`] is compared against to say "this node is
+    /// running older code than the bench would start today". `None` when
+    /// nothing was ever staged — a bare supervisor in a test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageFacts>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

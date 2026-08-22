@@ -1082,16 +1082,28 @@ impl Daemon {
         outcome
     }
 
-    /// Start the continuous staging watcher, when this daemon runs inside a
-    /// stub-managed installation.
+    /// Start the continuous staging watcher, when this daemon runs inside an
+    /// installation of either shape — a stub-managed tree, or a macOS bundle
+    /// staging beside the identity.
     ///
     /// `None` everywhere else — a developer's build tree and a standalone
     /// `lait` have nowhere to stage to, and inventing a root would drop a
     /// client tree beside somebody's `target/`. The watcher stops with the
     /// endpoint, on the same signal every other service here uses.
     fn spawn_staging(&self) -> Option<tokio::task::JoinHandle<()>> {
-        let root = crate::update::watch::install_root()?;
         let identity = self.router.catalog().identity().to_path_buf();
+        let root = crate::update::watch::staging_root(&identity)?;
+        if let Err(error) = std::fs::create_dir_all(&root) {
+            // Said, not skipped: an unwritable staging path is a fact about
+            // this machine, and silence here is a client that never updates
+            // and never explains why.
+            tracing::warn!(
+                %error,
+                root = %root.display(),
+                "the staging root could not be created; this installation will not update"
+            );
+            return None;
+        }
         let stop = self.endpoint.subscribe_stop();
         Some(tokio::spawn(crate::update::watch::serve(
             identity, root, stop,

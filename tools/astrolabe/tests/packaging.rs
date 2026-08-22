@@ -650,6 +650,62 @@ fn the_client_and_its_sidecar_agree_about_the_layout() {
     );
 }
 
+/// The bundler's configuration is what makes the installed layout true, and
+/// three of its fields are load-bearing in ways nothing else would catch.
+///
+/// The test above proves the two *functions* agree about the layout. This
+/// proves the *bundle* produces it — which is a different claim, and the one
+/// that broke when the client moved to Tauri: the bundler names the main
+/// binary after `productName` unless told otherwise, so `Astrolabe` would
+/// have shipped where `update::custody_of` looks for `astrolabe`. On macOS a
+/// case-insensitive filesystem hides that; on Linux it does not, and either
+/// way the symptom is a sidecar that believes it may replace itself.
+///
+/// Read from the config rather than from a built bundle so it runs anywhere,
+/// including where no webview toolchain exists.
+#[test]
+fn the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs() {
+    let path = repo_root().join("apps/astrolabe-web/src-tauri/tauri.conf.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let config: serde_json::Value = serde_json::from_str(&text).expect("tauri.conf.json parses");
+
+    // 1. The entry binary's name, which `update::custody_of` looks for and
+    //    `update::tree::entry_for` names in every tree.
+    assert_eq!(
+        config["mainBinaryName"].as_str(),
+        Some("astrolabe"),
+        "the bundle would ship a binary that custody_of cannot recognise"
+    );
+
+    // 2. The sidecar rides inside, so the pair ships together (CLIENT-12) and
+    //    `sidecar::beside` finds it in the installed bundle.
+    let external = config["bundle"]["externalBin"]
+        .as_array()
+        .expect("externalBin is declared");
+    assert!(
+        external
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|entry| entry.ends_with("lait")),
+        "no lait sidecar is bundled, so the installed client has no daemon to start: {external:?}"
+    );
+
+    // 3. The terms travel with the copy. PolyForm makes carrying them an
+    //    obligation on whoever distributes one, and `make-tree.sh` refuses a
+    //    tree without them — so an omission here fails a release rather than
+    //    shipping quietly, but only if it is declared at all.
+    let resources = &config["bundle"]["resources"];
+    for required in ["LICENSE", "THIRD-PARTY-NOTICES.md"] {
+        assert!(
+            resources
+                .as_object()
+                .is_some_and(|map| map.values().any(|dest| dest.as_str() == Some(required))),
+            "the bundle does not carry {required}"
+        );
+    }
+}
+
 // --- The terms --------------------------------------------------------------
 //
 // PolyForm's Notices section makes carrying the terms an obligation on whoever

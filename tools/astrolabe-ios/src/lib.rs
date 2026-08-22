@@ -1,10 +1,12 @@
 //! The Swift boundary of the native iOS client.
 //!
-//! One model, two shells: the Rust core owns client state, and this crate is
-//! the second generated bridge over it — UniFFI to Swift, as
-//! flutter_rust_bridge is to Dart on desktop. The generated Swift is checked
-//! in beside the application and CI fails on drift; exactly one Swift file may
-//! call through it.
+//! One model, two shells: the Rust core owns client state, and this crate is a
+//! generated bridge over it — UniFFI to Swift. It is the only generated
+//! boundary left; the desktop one (flutter_rust_bridge to Dart) went with the
+//! deprecated Flutter client, and Tauri's host links the core directly and
+//! destructures its view exhaustively instead. The generated Swift is checked
+//! in beside the application and exactly one Swift file may call through it.
+//! (`build-core.sh` says CI fails on drift; that check is still unwired.)
 //!
 //! The view below is the interface design's shape rendered honestly at this
 //! build's capability: the bundled World list is compile-time truth — the

@@ -10,19 +10,29 @@
 # prerelease) live in `lait-feed`, which refuses to seal the pointer; this
 # script only sequences uploads.
 #
-# Usage:
-#   ci/publish-feed.sh --version 0.8.0-test.1 --channel test \
-#     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed \
-#     [--floor 0.7.0] [--astrolabe 0.1.0]
+# **The feed is how the client is distributed.** Installed machines follow a
+# signed channel pointer on the dist host; nothing they do involves a git
+# forge. This is the publish half of that, and `packaging/build-astrolabe.sh`
+# is the build half — it emits exactly the names read below.
 #
+# Usage (the path to use):
+#   packaging/build-astrolabe.sh --version 0.9.0 --out target/distrib \
+#     --identity "Developer ID Application: … (TEAMID)" --notarize <profile>
+#   ci/publish-feed.sh --version 0.9.0 --channel test \
+#     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed \
+#     [--floor 0.7.0] [--astrolabe 0.9.0]
+#
+# DEPRECATED path:
 #   ci/publish-feed.sh --from-release v0.8.0-test.1 --channel test \
 #     --seed ~/.lait-feed-signing.seed [--floor 0.7.0]
 #
-# `--from-release` is the seamless path: it downloads the tag's CI-built
-# artifacts from the GitHub release (the lait archives, and the Astrolabe
-# installer when the Build Astrolabe installer workflow has attached it),
-# derives the versions, and publishes exactly as the explicit form does. The
-# release is the build origin; the feed is what installed machines read.
+# `--from-release` downloads a tag's artifacts from a GitHub release. It is
+# kept for republishing an already-released tag, and it is not how anything is
+# shipped now: the workflow that attached Astrolabe installers to releases
+# built the deprecated Flutter client and is itself unwired
+# (`apps/astrolabe/DEPRECATED.md`), so on any recent tag this path finds lait
+# archives and no client, and refuses unless you pass --lait-only. Build
+# locally and pass --artifacts-dir instead.
 #
 # Requires: gcloud (authenticated with write access to the bucket), curl, gh
 # (for --from-release), and a built `lait-feed` (cargo build -p lait-feed).
