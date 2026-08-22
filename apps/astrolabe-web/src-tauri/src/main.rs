@@ -1687,8 +1687,11 @@ fn main() {
         // A `lait:` link arrives two ways and both are the OS handing this
         // process a URL: as a launch argument, and — while already running,
         // which is the macOS path — as an open event.
-        .run(|_app, event| {
-            if let tauri::RunEvent::Opened { urls } = event {
+        .run(|_app, _event| {
+            // `RunEvent::Opened` exists only on macOS and iOS; on the stub
+            // platforms a link arrives as a launch argument instead.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
                 for url in urls {
                     open_link(url.as_str());
                 }
