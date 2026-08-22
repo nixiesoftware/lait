@@ -287,11 +287,17 @@ impl DisplayProjection {
                         Failure::new("rendered display assets exceed their bound")
                     })?;
                 }
-                RenderedScene::Media(_) => {
+                RenderedScene::Media(media) => {
                     if !descriptor.outputs.contains(&DisplayOutputKind::Media) {
                         return Err(Failure::new(
                             "rendered display media violates its surface contract",
                         ));
+                    }
+                    // Dash reaches no receiver and mints no ticket, so a World
+                    // naming it renders nothing and is told here rather than
+                    // producing a program every receiver refuses whole.
+                    if media.protocol == MediaProtocol::Dash {
+                        return Err(Failure::new("rendered display media names no transport"));
                     }
                 }
                 RenderedScene::Blank(_) => {}
@@ -383,9 +389,33 @@ pub enum FrameMediaType {
 
 #[derive(Debug, Clone)]
 pub struct RenderedMedia {
-    pub resource: DisplayResourceId,
     pub protocol: MediaProtocol,
-    pub live: bool,
+    pub origin: MediaOrigin,
+}
+
+/// Where a media scene's bytes come from, and what names them.
+///
+/// The name lives inside the origin because the two are different namespaces
+/// with no overlap: a live rendition is an operator-chosen label the
+/// coordinator's live plane is carrying, and stored content is a committed
+/// [`ContentRef`]. They used to share one [`DisplayResourceId`] with a sibling
+/// `live: bool` to tell them apart, which nothing checked — so a World could
+/// return `live: true` naming a content id, `derive_asset_id` gave a stored and
+/// a live manifest of the same name the same id, and the compiler consulted the
+/// receiver's tier on one branch only.
+#[derive(Debug, Clone)]
+pub enum MediaOrigin {
+    /// A rendition on the coordinator's live plane.
+    Live(DisplayResourceId),
+    /// Bytes committed to the content plane.
+    Stored(replica::content::ContentRef),
+}
+
+impl MediaOrigin {
+    /// Whether the coordinator resolves this against a live presentation.
+    pub const fn is_live(&self) -> bool {
+        matches!(self, Self::Live(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

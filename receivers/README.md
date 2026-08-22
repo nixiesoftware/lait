@@ -19,7 +19,10 @@ stage opaque frame assets or assignment-bound live grants, advance with
 monotonic time, report bounded health, and render native
 trust/source/delivery/refusal states. webOS, Tizen, and Web-PKI Android TV
 builds consume the coordinator's bounded CMAF stream through MSE. Roku and tvOS
-consume its real HLS-v3 MPEG-TS edge through their native video stacks. A
+consume its real HLS-v3 MPEG-TS edge through their native video stacks. The
+reference receiver declares the native-HLS profile and plays by atomic handoff:
+its `active.json` carries the ticketed playlist URL — live or stored — and
+whatever consumes the output directory plays it. A
 receiver cannot name a World, Space, surface, operation, acting identity,
 filesystem path, external media URL, or product route.
 

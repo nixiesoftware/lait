@@ -26,9 +26,28 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex};
 
 use super::{
-    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId,
-    RecvFlow, SendFlow, Stream, Topic, Transport,
+    Alpn, ConnectionQueue, GossipEvent, GossipReceiver, GossipSender, Incoming, IncomingConnection,
+    PeerId, RecvFlow, SendFlow, Stream, Topic, Transport,
 };
+
+/// Depth of one plane's session queue, matching the daemon hub's own.
+const SESSION_LANE_DEPTH: usize = 16;
+
+/// Where an inbound session connection is delivered: a plane that took its own
+/// queue, or the undivided door everyone else still shares.
+enum Door {
+    Lane(mpsc::Sender<IncomingConnection>),
+    Undivided(mpsc::UnboundedSender<IncomingConnection>),
+}
+
+impl Door {
+    async fn deliver(&self, incoming: IncomingConnection) -> Result<()> {
+        match self {
+            Self::Lane(tx) => tx.send(incoming).await.map_err(|_| anyhow!("peer is gone")),
+            Self::Undivided(tx) => tx.send(incoming).map_err(|_| anyhow!("peer is gone")),
+        }
+    }
+}
 
 /// The shared switchboard every in-memory peer is wired to. Cloneable; all clones
 /// share one registry, so peers created from it can reach each other.
@@ -43,6 +62,15 @@ struct Inner {
     /// because a connection handed over whole and a connection wrapped in a
     /// framed stream are two different deliveries, and one consumes it.
     sessions: HashMap<PeerId, mpsc::UnboundedSender<IncomingConnection>>,
+    /// Whether [`MemNet::with_planes`] was asked for.
+    planes_enabled: bool,
+    /// Per-plane session inboxes, for peers that took one.
+    ///
+    /// Without these `take_session_queue` answered `None` here, so a Station on
+    /// this network mounted no Freight, Exec or Live service at all — every
+    /// plane-level seam between two real Stations was untestable except over
+    /// iroh, which is how an unreachable fetch supply shipped.
+    lanes: HashMap<(PeerId, Vec<u8>), mpsc::Sender<IncomingConnection>>,
     /// One broadcast bus per gossip topic.
     topics: HashMap<Topic, broadcast::Sender<TopicMsg>>,
     /// Delivery policy. `None` is a perfect network and costs nothing —
@@ -142,6 +170,20 @@ impl MemNet {
     /// A perfect network. Unchanged: every delivery lands, exactly once.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Serve per-plane session queues, so a Station on this network mounts its
+    /// Freight, Exec and Live services.
+    ///
+    /// Off by default, and that default is load-bearing rather than cautious.
+    /// A Station whose transport hands out no plane queue mounts no plane
+    /// service, which is what a test exercising only Contact wants: enabling
+    /// this everywhere put three services and their threads behind every
+    /// in-memory Station and moved the Linux test job from 4m45s to 7m37s,
+    /// which is enough to tip the suite's subprocess-timing tests over.
+    pub fn with_planes(self) -> Self {
+        self.with_inner(|inner| inner.planes_enabled = true);
+        self
     }
 
     /// A network that loses and doubles deliveries, from a seed.
@@ -795,15 +837,22 @@ impl Transport for MemTransport {
         peer: PeerId,
         alpn: Alpn,
     ) -> Result<Box<dyn super::Connection>> {
-        let inbox = self
-            .net
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .sessions
-            .get(&peer)
-            .cloned()
-            .ok_or_else(|| anyhow!("no such peer on the in-memory network"))?;
+        // Resolved to exactly one door before the pair is minted, so the two
+        // deliveries below cannot disagree about where they went.
+        let door = {
+            let inner = self
+                .net
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner
+                .lanes
+                .get(&(peer.clone(), alpn.to_vec()))
+                .cloned()
+                .map(Door::Lane)
+                .or_else(|| inner.sessions.get(&peer).cloned().map(Door::Undivided))
+        }
+        .ok_or_else(|| anyhow!("no such peer on the in-memory network"))?;
         let verdict = self.net.admit(&self.id, &peer);
         let (mine, theirs) = connection_pair(self.id.clone(), peer.clone(), alpn);
         if verdict == Verdict::Blocked {
@@ -811,32 +860,43 @@ impl Transport for MemTransport {
             // is what a lost connection attempt looks like from this side.
             return Ok(Box::new(mine));
         }
-        inbox
-            .send(IncomingConnection {
-                from: self.id.clone(),
-                alpn: alpn.to_vec(),
-                connection: Box::new(theirs),
-                opening: Vec::new(),
-            })
-            .map_err(|_| anyhow!("peer is gone"))?;
+        let deliver = |connection: Box<dyn super::Connection>| IncomingConnection {
+            from: self.id.clone(),
+            alpn: alpn.to_vec(),
+            connection,
+            opening: Vec::new(),
+        };
+        door.deliver(deliver(Box::new(theirs))).await?;
         if verdict == Verdict::Twice {
             // A second, independent connection carrying the same opening — what
             // a dialer that retried a request the accepter had already received
             // produces. An accepter that is not idempotent about openings fails
             // here rather than against a real peer.
             let (_extra_mine, extra_theirs) = connection_pair(self.id.clone(), peer, alpn);
-            let _ = inbox.send(IncomingConnection {
-                from: self.id.clone(),
-                alpn: alpn.to_vec(),
-                connection: Box::new(extra_theirs),
-                opening: Vec::new(),
-            });
+            let _ = door.deliver(deliver(Box::new(extra_theirs))).await;
         }
         Ok(Box::new(mine))
     }
 
     async fn accept_connection(&self) -> Option<IncomingConnection> {
         self.incoming_sessions.lock().await.recv().await
+    }
+
+    /// Handed over once per ALPN, like the daemon's own scoped view: a second
+    /// taker gets `None` rather than a second handle on the same connections.
+    fn take_session_queue(&self, alpn: Alpn) -> Option<ConnectionQueue> {
+        let mut inner = self
+            .net
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (self.id.clone(), alpn.to_vec());
+        if !inner.planes_enabled || inner.lanes.contains_key(&key) {
+            return None;
+        }
+        let (tx, rx) = mpsc::channel(SESSION_LANE_DEPTH);
+        inner.lanes.insert(key, tx);
+        Some(rx)
     }
 
     fn advertised_addrs(&self) -> Vec<SocketAddr> {

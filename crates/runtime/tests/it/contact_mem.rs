@@ -249,8 +249,18 @@ impl World for KvWorld {
         let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
         let (key, value) = text.split_once('=').ok_or(Rejection::InvalidRequest)?;
         let body = self.body(key);
+        // `value = content:<64 hex>` declares that content on this Body, the way
+        // a real World's attach does. Without a declaration a committed
+        // descriptor names nothing, so it is unreachable and never ships.
+        let declared = value
+            .strip_prefix("content:")
+            .and_then(|hex| data_encoding::HEXLOWER.decode(hex.as_bytes()).ok())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+            .map(|content_id| replica::content::ContentRef { content_id });
         Ok(Effect {
-            content_refs: Vec::new(),
+            content_refs: declared
+                .map(|content| vec![(body.clone(), vec![content])])
+                .unwrap_or_default(),
             exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
@@ -816,5 +826,110 @@ fn an_unknown_neighbor_is_unreachable_and_dormancy_refuses_contact() {
         Err(runtime::plane::contact::Failure::Unreachable(_))
     ));
     let _ = station_b.vacate().unwrap();
+    let _ = std::fs::remove_dir_all(&root_b);
+}
+
+/// B reads bytes only A holds, and this test never dials, mounts a supply, or
+/// names a chunk.
+///
+/// It also pins the candidate predicate. Convergence is what teaches B the
+/// descriptor, and a successful Contact clears `pending` — so a fetch keyed on
+/// `NeighborRegistry::eligible` would find nobody at exactly this moment.
+#[test]
+fn a_station_reads_content_only_its_peer_holds() {
+    let (_space, coords) = coordinates();
+    // The only test on this network that wants a plane. Everything else here
+    // exercises Contact, and mounting three services per Station for them is
+    // threads and wall clock spent on nothing.
+    let net = comms::mem::MemNet::new().with_planes();
+    let ta: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
+    let tb: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
+
+    let root_a = temp_root("acquire-a");
+    let root_b = temp_root("acquire-b");
+    let rt_a = runtime_at(&root_a);
+    let rt_b = runtime_at(&root_b);
+
+    let gossip = || {
+        Some(GossipOptions {
+            bootstrap: vec![],
+            advertise: vec![runtime::beacon::RouteHint {
+                scheme: 1,
+                bytes: b"127.0.0.1:1".to_vec(),
+            }],
+            beacon_interval: Duration::from_millis(100),
+        })
+    };
+    let station_a = activate_with(&rt_a, &coords, ta, STATION_A_SEED, gossip());
+    let station_b = activate_with(&rt_b, &coords, tb, STATION_B_SEED, gossip());
+
+    // Two chunks and a tail, so the read crosses a boundary rather than
+    // fitting in whatever happened to land first.
+    let corpus: Vec<u8> = (0..(2 * replica::content::CHUNK_PLAINTEXT_LEN as usize + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let writer = Runtime::identity_from_seed(&WRITER_SEED);
+    let mut operation = [0u8; 16];
+    getrandom::fill(&mut operation).unwrap();
+    let content = station_a
+        .content_write(&writer, operation, &mut std::io::Cursor::new(&corpus[..]))
+        .expect("A seals and commits its own bytes");
+
+    // Declared from a Body, because an undeclared descriptor names nothing and
+    // an unreachable descriptor is not shipped.
+    submit_kv(
+        &station_a,
+        &WRITER_SEED,
+        &format!(
+            "film=content:{}",
+            data_encoding::HEXLOWER.encode(content.as_bytes())
+        ),
+    );
+
+    // A's descriptor reaching B is ordinary convergence: nothing here feeds a
+    // frame or incorporates by hand.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if station_b.content_stat(&writer, &content).is_ok() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B never learned the descriptor, so nothing below is under test"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let held = station_b
+        .content_stat(&writer, &content)
+        .expect("the descriptor is here");
+    assert_eq!(
+        held.resident_chunks, 0,
+        "B must start with the name and none of the bytes"
+    );
+
+    match station_b
+        .content_acquire(
+            &writer,
+            &content,
+            0,
+            corpus.len() as u64,
+            Duration::from_secs(30),
+        )
+        .expect("the read is authorized")
+    {
+        runtime::Acquired::Whole(bytes) => {
+            assert_eq!(bytes, corpus, "A's bytes, read through B's own supply");
+        }
+        runtime::Acquired::Short { bytes, gap } => {
+            panic!("stopped after {} bytes at {gap:?}", bytes.len());
+        }
+    }
+
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
+    let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
 }

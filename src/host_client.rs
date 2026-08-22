@@ -913,6 +913,10 @@ async fn content_read(
                     content: content.to_string(),
                     offset,
                     len: content_range_bytes(),
+                    // An agent saving an attachment is a person waiting at a
+                    // terminal, so this goes and gets what the Station lacks
+                    // rather than refusing a file the Space plainly holds.
+                    patience_ms: SAVE_PATIENCE_MS,
                 },
             ),
         )
@@ -950,6 +954,14 @@ async fn content_read(
         .map_err(|e| fail(format!("could not write {}: {e}", destination.display())))?;
     Ok(serde_json::json!({ "size": offset }))
 }
+
+/// How long one saved range may spend fetching what this Station lacks.
+///
+/// Longer than the browser surface allows itself, because nothing is holding a
+/// connection open here: an agent saving a file is a command that either
+/// produces the file or says why, and a few seconds of transfer is the ordinary
+/// case rather than a stall.
+const SAVE_PATIENCE_MS: u32 = 5_000;
 
 /// The read window one content frame carries, as a wire-sized integer.
 fn content_range_bytes() -> u64 {

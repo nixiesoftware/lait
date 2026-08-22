@@ -263,15 +263,21 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     assert_eq!(members.len(), 2, "founder + admitted joiner: {members:?}");
 
     // The admitted joiner reads the founder's previously-opaque sealed issue.
-    let resp = issue_req(
-        &client,
-        &joiner_home,
-        issues_app::IssuesRequest::IssueView {
-            reff: issue_ref.clone(),
-        },
-    );
-    let IssueResponse::Issue(view) = resp else {
-        panic!("expected Issue, got {resp:?}");
+    // Polled: admission and replication converge on their own clocks.
+    let view = poll_until(Duration::from_secs(20), || {
+        match issue_req(
+            &client,
+            &joiner_home,
+            issues_app::IssuesRequest::IssueView {
+                reff: issue_ref.clone(),
+            },
+        ) {
+            IssueResponse::Issue(view) => Some(view),
+            _ => None,
+        }
+    });
+    let Some(view) = view else {
+        panic!("the sealed issue never converged to the joiner");
     };
     assert_eq!(view.title, "Secret plan");
     assert_eq!(

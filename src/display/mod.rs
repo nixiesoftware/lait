@@ -9,6 +9,8 @@ mod compiler;
 mod coordinator;
 mod hls;
 mod http;
+#[cfg(test)]
+mod stored_tests;
 
 pub use http::serve_display_on;
 /// The two the daemon needs to tell "the port is taken" from "our service
@@ -30,6 +32,10 @@ pub use coordinator::{DisplayCoordinator, SurfaceRender};
 pub use hls::{Failure as HlsFailure, HlsCatalogPackager, HlsRenditionDescription, HlsSegment};
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
 pub use live::{LiveMediaHub, LiveMediaPacket, LiveMediaSnapshot, LiveMediaTrack, LiveTransport};
+pub use mediabox::{
+    read_catalog, track_shapes, CatalogPolicy, Failure as DemuxFailure, SegmentPlan, StoredMedia,
+    StoredPlan, TrackShape,
+};
 pub use pairing::{
     AuthorizationRefusal, AuthorizedDevice, DisplayPairingService, PendingPairingView,
 };

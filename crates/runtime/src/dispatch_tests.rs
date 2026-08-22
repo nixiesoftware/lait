@@ -1431,7 +1431,7 @@ fn handler_failure_is_not_an_automatic_retry() {
     assert!(report.steps.iter().any(|step| matches!(
         step,
         crate::exec::PerformStep::Failed {
-            class: crate::exec::FailureClass::Backend,
+            class: crate::exec::FailureClass::Handler,
             ..
         }
     )));
@@ -6360,6 +6360,96 @@ fn an_answer_committed_after_started_is_invisible_to_the_pinned_attempt() {
 // boundary, never a sandbox; the threat model's line holds: capability is
 // added, trust is not.
 
+/// Each dispatch refusal carries the class its Failed event records:
+/// environment, lost races, handler defects, and contract breaks each say
+/// their own kind, and none of them borrows Protocol's name.
+#[test]
+fn a_dispatch_refusal_says_which_kind_of_wrong_it_was() {
+    use crate::exec::{DispatchFailure, Failure, FailureClass};
+    let class = |failure| crate::session::classify_dispatch(failure).class;
+    let run = crate::exec::RunId::from_bytes([0x51; 16]);
+    let attempt = crate::exec::AttemptId::from_bytes([0x52; 16]);
+    assert_eq!(
+        class(DispatchFailure::Backend(Failure::Wall)),
+        FailureClass::Deadline
+    );
+    assert_eq!(
+        class(DispatchFailure::Backend(Failure::Os)),
+        FailureClass::Backend
+    );
+    assert_eq!(
+        class(DispatchFailure::Backend(Failure::Handler)),
+        FailureClass::Handler
+    );
+    assert_eq!(
+        class(DispatchFailure::Backend(Failure::Cancelled)),
+        FailureClass::Fence
+    );
+    assert_eq!(
+        class(DispatchFailure::Terminal(attempt)),
+        FailureClass::Fence
+    );
+    assert_eq!(class(DispatchFailure::Run(run)), FailureClass::Backend);
+    assert_eq!(
+        class(DispatchFailure::Attempt(attempt)),
+        FailureClass::Backend
+    );
+    assert_eq!(
+        class(DispatchFailure::NotBegan(attempt)),
+        FailureClass::Backend
+    );
+    assert_eq!(
+        class(DispatchFailure::Backend(Failure::InvalidOutcome)),
+        FailureClass::Protocol
+    );
+}
+
+/// A commit owns its materialization from candidate time. Cold reads reserve
+/// materializations concurrently, and no interleaving may leave the installed
+/// publication and the published snapshot naming different ones — that
+/// mismatch reads as spurious conflicts until an unrelated commit heals it.
+#[test]
+fn a_commit_survives_concurrent_materialization_reservations() {
+    let world = Arc::new(ExecAtomicWorld::new());
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let racing = station.dock(&world_id, &identity).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hammer = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                racing.reserve_cold_materialization();
+            }
+        })
+    };
+    for seed in 0..24u8 {
+        let request = crate::action::RequestId::from_bytes([0x60 + seed; 16]);
+        let action = identity
+            .sign_action(
+                &session,
+                request,
+                Intent {
+                    schema: SchemaId::parse("agent.request").unwrap(),
+                    schema_version: 1,
+                    payload: vec![seed],
+                },
+            )
+            .unwrap();
+        session.submit(action).unwrap();
+        let (snapshot, publication) = session.materialization_pair();
+        assert_eq!(
+            Some(snapshot),
+            publication,
+            "the commit installed a publication for a different materialization"
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    hammer.join().unwrap();
+}
+
 #[cfg(unix)]
 mod subprocess_perform {
     use super::*;
@@ -6595,10 +6685,14 @@ mod subprocess_perform {
         let report = session
             .perform(&package, |_| panic!("inline output stages no content"))
             .unwrap();
-        assert!(report.steps.iter().any(|step| matches!(
-            step,
-            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
-        )));
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+            )),
+            "the child never returned; the pass recorded {:?}",
+            report.steps
+        );
         let crate::exec::WorkReply::State(state) = session
             .work(
                 crate::exec::WorkRequest::Inspect {
@@ -6629,10 +6723,14 @@ mod subprocess_perform {
         let run = start_run(&session, &station, &world_id, &identity, 0xE3, b"doomed");
         let package = subprocess_package(&build, "/bin/sh", &["-c", "exit 3"]);
         let report = session.perform(&package, |_| panic!("no content")).unwrap();
-        assert!(report.steps.iter().any(|step| matches!(
-            step,
-            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
-        )));
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+            )),
+            "the child never returned; the pass recorded {:?}",
+            report.steps
+        );
         let crate::exec::WorkReply::State(state) = session
             .work(
                 crate::exec::WorkRequest::Inspect {
@@ -6667,10 +6765,45 @@ mod subprocess_perform {
             began.elapsed() < std::time::Duration::from_secs(10),
             "the kill happens at the wall, not at the child's leisure"
         );
-        assert!(report.steps.iter().any(|step| matches!(
-            step,
-            crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
-        )));
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
+            )),
+            "the wall did not fail the run; the pass recorded {:?}",
+            report.steps
+        );
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+    }
+
+    /// A child still running when the wall budget expires is stopped and the
+    /// Attempt records a Deadline. The handler did nothing wrong, and the
+    /// class must not say it did.
+    #[test]
+    fn a_wall_expiry_is_a_deadline_not_a_handler_defect() {
+        let (station, world_id, build) = transform_station(200);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE9, b"slow");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let report = session
+            .perform(&package, |_| panic!("a stopped child stages no content"))
+            .unwrap();
+        assert!(
+            report.steps.iter().any(|step| matches!(
+                step,
+                crate::exec::PerformStep::Failed {
+                    run: failed,
+                    class: crate::exec::FailureClass::Deadline,
+                    ..
+                } if *failed == run
+            )),
+            "the wall expiry was not classed Deadline; the pass recorded {:?}",
+            report.steps
+        );
         assert!(!report
             .steps
             .iter()

@@ -1076,6 +1076,7 @@ mod tests {
             duration_ms: None,
             width: None,
             height: None,
+            catalog: None,
         }
     }
 

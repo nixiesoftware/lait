@@ -7,6 +7,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+
+/// A ticket response is four small fields; a kilobyte is generous.
+const MAX_TICKET_RESPONSE_BYTES: usize = 1024;
 use display_protocol::auth::{
     authenticate_request, sha256, RequestContext, RequestMethod, RequestRoute,
     AUTHORIZATION_SCHEME, HEADER_ASSET, HEADER_ASSIGNMENT, HEADER_BODY_SHA256, HEADER_CHALLENGE,
@@ -553,8 +556,9 @@ impl ReferenceReceiver {
                     return Ok(());
                 }
                 let staged = self.stage_program(session, &program)?;
+                let media = self.stage_media(session, &program)?;
                 let previous = runtime.take();
-                let mut next = Runtime::new(program, staged);
+                let mut next = Runtime::new(program, staged, media);
                 present_runtime(&mut next, &mut self.presenter)?;
                 if let Some(previous) = previous {
                     cleanup_retired(previous.staged(), next.staged());
@@ -586,6 +590,31 @@ impl ReferenceReceiver {
         }
     }
 
+    /// Mint one ticketed URL per media item in the program.
+    ///
+    /// At adoption rather than at presentation, because this is when a session
+    /// is in hand — recovery re-presents with no network at all. A ticket that
+    /// cannot be minted fails the adoption, which is the same recover-and-retry
+    /// path a frame that cannot be staged takes.
+    fn stage_media(
+        &self,
+        session: &mut Session,
+        program: &DisplayProgram,
+    ) -> Result<BTreeMap<DisplayAssetId, String>> {
+        let mut media = BTreeMap::new();
+        for item in &program.items {
+            let DisplayScene::Media { manifest, .. } = &item.scene else {
+                continue;
+            };
+            if media.contains_key(&manifest.id) {
+                continue;
+            }
+            let url = self.live_ticket(session, program, &item.id, &manifest.id)?;
+            media.insert(manifest.id.clone(), url);
+        }
+        Ok(media)
+    }
+
     fn stage_program(
         &self,
         session: &mut Session,
@@ -597,8 +626,18 @@ impl ReferenceReceiver {
             let asset = match &item.scene {
                 DisplayScene::Frame { asset } => asset,
                 DisplayScene::Blank { .. } => continue,
-                DisplayScene::Media { .. } => {
-                    bail!("reference frame receiver does not support media programs")
+                // Media stages a grant, never bytes: the ticket is requested
+                // when the item is presented, so a program staged hours ahead
+                // does not hold a ticket that expires before it plays.
+                DisplayScene::Media {
+                    manifest, protocol, ..
+                } => {
+                    if *protocol != display_protocol::program::MediaProtocol::Hls
+                        || manifest.media_type != DisplayAssetMediaType::HlsManifest
+                    {
+                        bail!("this receiver plays native HLS and nothing else");
+                    }
+                    continue;
                 }
             };
             if staged.contains_key(&asset.id) {
@@ -718,6 +757,55 @@ impl ReferenceReceiver {
         clippy::too_many_arguments,
         reason = "the arguments are the closed authenticated HTTP request shape"
     )]
+
+    /// Exchange the current media item for its ticketed playlist URL.
+    ///
+    /// Requested at presentation time rather than at staging, because a ticket
+    /// is a time-bounded grant and a program can be staged long before it
+    /// plays. The URL is absolute — the presenter's whole job is handing it to
+    /// something that plays it, and a relative path would hand over homework.
+    pub fn live_ticket(
+        &self,
+        session: &mut Session,
+        program: &DisplayProgram,
+        item: &DisplayProgramItemId,
+        manifest: &DisplayAssetId,
+    ) -> Result<String> {
+        let body = serde_json::to_vec(&display_protocol::receiver::LiveTicketRequest {
+            transport: display_protocol::program::MediaProtocol::Hls,
+        })
+        .context("encode live ticket request")?;
+        let fields = AuthorizedFields {
+            assignment: Some(&program.assignment),
+            program: Some(&program.program),
+            revision: Some(&program.revision),
+            current_item: Some(item),
+            elapsed_ms: Some(0),
+            wait_ms: None,
+            asset: Some(manifest),
+        };
+        let response = self.authorized(
+            session,
+            RequestMethod::Post,
+            RequestRoute::LiveTicket,
+            "/head/v1/live/tickets",
+            &body,
+            fields,
+            MAX_TICKET_RESPONSE_BYTES,
+        )?;
+        let ticket: display_protocol::receiver::LiveTicketResponse =
+            serde_json::from_slice(&response.body).context("decode live ticket")?;
+        if ticket.transport != display_protocol::program::MediaProtocol::Hls {
+            bail!("the coordinator granted a transport this receiver did not ask for");
+        }
+        // The endpoint is a coordinator-relative path by contract; anything
+        // else is refused rather than resolved.
+        if !ticket.endpoint.starts_with("/head/v1/live/") {
+            bail!("live ticket endpoint is not coordinator-relative");
+        }
+        Ok(format!("{}{}", self.transport.origin(), ticket.endpoint))
+    }
+
     fn authorized(
         &self,
         session: &mut Session,

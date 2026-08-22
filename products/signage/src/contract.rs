@@ -24,7 +24,7 @@ pub const MAX_PROGRAM_HORIZON_MS: u64 = 86_400_000;
 
 /// The media library: what a stored file is, in the product's terms.
 pub const MEDIA_SCHEMA: &str = "signage.media";
-pub const MEDIA_SCHEMA_VERSION: u32 = 2;
+pub const MEDIA_SCHEMA_VERSION: u32 = 3;
 /// One screen's fleet intent. Never its grant, and never its device lifecycle.
 pub const SCREEN_SCHEMA: &str = "signage.screen";
 pub const SCREEN_SCHEMA_VERSION: u32 = 2;
@@ -37,10 +37,6 @@ pub const MAX_MIME_CHARS: usize = 96;
 pub const MAX_GROUP_SCREENS: usize = 512;
 /// A ceiling on one stored file, so a library row cannot describe a petabyte.
 pub const MAX_MEDIA_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-/// Taken from the display contract rather than chosen, because an id this
-/// World accepts and a receiver cannot be told about is a program that blanks
-/// for a reason nobody can see.
-pub use world_interface::display::MAX_SURFACE_ID_BYTES as MAX_CONTENT_ID_BYTES;
 pub const MAX_CONFIG_SETTINGS: usize = 64;
 pub const MAX_SETTING_CHARS: usize = 1024;
 
@@ -506,6 +502,18 @@ impl MediaSource {
             Self::Card { .. } | Self::Kind { .. } | Self::Live { .. } => None,
         }
     }
+
+    /// The stored id as a substrate reference, decoded here because this is the
+    /// crate that decides the id's shape. `validate` checks shape only, so a
+    /// declaration and a render must not each invent their own decode.
+    pub fn content_ref(&self) -> Option<replica::content::ContentRef> {
+        let bytes = data_encoding::HEXLOWER
+            .decode(self.content()?.as_bytes())
+            .ok()?;
+        Some(replica::content::ContentRef {
+            content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+        })
+    }
 }
 
 /// One entry in the library.
@@ -522,6 +530,22 @@ pub struct SignageMedia {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The catalog a stored entry serves under, derived at ingest.
+    ///
+    /// Canonical catalog JSON, exactly as the live plane's own
+    /// `Catalog::encode_canonical` writes it. Derived once, where the person
+    /// who uploaded the file is present to be told if it cannot be — a file
+    /// that cannot meet the plane's baseline has no valid catalog, and that
+    /// refusal at a render instead would reach a screen at three in the
+    /// morning. The World validates the bytes decode canonically and asserts
+    /// nothing else about them: what a catalog *means* is the plane's rule,
+    /// asked rather than restated here.
+    ///
+    /// Only a `Stored` entry may carry one. A live rendition's catalog is
+    /// announced by whatever is encoding; a card and a kind have no bytes to
+    /// describe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
 }
 
 impl SignageMedia {
@@ -533,6 +557,24 @@ impl SignageMedia {
             && self
                 .duration_ms
                 .is_none_or(|d| (MIN_ITEM_DURATION_MS..=MAX_ITEM_DURATION_MS).contains(&d))
+            && self.valid_catalog()
+    }
+
+    /// A catalog is canonical or absent, and only bytes can carry one.
+    ///
+    /// The decode is the whole check. `Catalog::decode_canonical` re-encodes
+    /// and compares, so a record cannot hold a catalog the packagers would
+    /// refuse — and this World never learns what a catalog means, only that
+    /// the plane accepts it.
+    fn valid_catalog(&self) -> bool {
+        match &self.catalog {
+            None => true,
+            Some(catalog) => {
+                matches!(self.source, MediaSource::Stored { .. })
+                    && runtime::plane::live::media::Catalog::decode_canonical(catalog.as_bytes())
+                        .is_ok()
+            }
+        }
     }
 
     pub fn body_key(&self) -> Option<BodyKey> {
@@ -630,16 +672,20 @@ fn valid_kind(name: &str) -> bool {
         })
 }
 
-/// A committed content id, as the upload route rendered it.
+/// A committed content id, as the upload route rendered it: exactly 32 bytes of
+/// lowercase hex.
 ///
-/// Checked for shape only. Whether the descriptor exists is the substrate's
-/// question and it refuses the declaration if it does not.
+/// Whether the descriptor *exists* is the substrate's question and it refuses
+/// the declaration if it does not. But the id's own shape is this World's, and
+/// it used to accept any lowercase token up to 96 bytes — so an entry could be
+/// written, validate, replicate, and then render as a blank forever, because
+/// nothing that could decode it ever saw it. Admitted and renderable are the
+/// same set now.
 fn valid_content_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_CONTENT_ID_BYTES
+    id.len() == 64
         && id
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 // ─── The fleet ──────────────────────────────────────────────────────────────
@@ -1085,6 +1131,104 @@ fn scoped(name: &str, on: Resource) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn media(source: MediaSource, catalog: Option<String>) -> SignageMedia {
+        SignageMedia {
+            id: BodyId::from_bytes([9; 16]).render(),
+            name: "Ribbon cutting".into(),
+            source,
+            duration_ms: None,
+            width: None,
+            height: None,
+            catalog,
+        }
+    }
+
+    fn stored_source() -> MediaSource {
+        MediaSource::Stored {
+            content: "ab".repeat(32),
+            size: 4_096,
+            mime: "video/mp4".into(),
+        }
+    }
+
+    /// A canonical catalog, produced by the plane's own encoder so this test
+    /// cannot pin a shape the plane would refuse.
+    fn canonical_catalog() -> String {
+        use runtime::plane::live::media::{
+            Catalog, CatalogTrack, TrackKind, CATALOG_VERSION, DEFAULT_MAX_GROUP_DURATION_MS,
+            DEFAULT_MAX_LATENCY_MS,
+        };
+        let catalog = Catalog {
+            version: CATALOG_VERSION,
+            jitter_hint_ms: 50,
+            tracks: vec![CatalogTrack {
+                track: "video-0".into(),
+                kind: TrackKind::Video,
+                codec: "avc1.42c01e".into(),
+                timescale: 90_000,
+                decoder_config_hex: "0142c01effe100046742c01e01000268ce".into(),
+                max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+                target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+                bitrate_bps: 2_000_000,
+                width: Some(1_280),
+                height: Some(720),
+                frame_rate_milli: Some(30_000),
+                sample_rate: None,
+                channels: None,
+                render_group: Some("film".into()),
+                cmaf_rendition: Some("film".into()),
+                hls_v3_rendition: Some("film".into()),
+            }],
+        };
+        String::from_utf8(catalog.encode_canonical().expect("a valid catalog encodes")).unwrap()
+    }
+
+    /// A catalog is canonical or absent, and only bytes can carry one.
+    ///
+    /// The World never learns what a catalog means — the decode is the whole
+    /// check, and it is the plane's own. What this pins is the boundary: a
+    /// record cannot hold a catalog the packagers would refuse, and an entry
+    /// with nothing to describe cannot hold one at all.
+    #[test]
+    fn a_catalog_is_canonical_or_absent_and_only_bytes_carry_one() {
+        assert!(media(stored_source(), None).validate(), "absent is fine");
+        assert!(
+            media(stored_source(), Some(canonical_catalog())).validate(),
+            "the plane's own encoding is accepted"
+        );
+        assert!(
+            !media(stored_source(), Some("{}".into())).validate(),
+            "bytes the plane refuses do not become a record"
+        );
+        assert!(
+            !media(stored_source(), Some(format!("{} ", canonical_catalog()))).validate(),
+            "canonical means canonical — a trailing byte is a different document"
+        );
+        assert!(
+            !media(
+                MediaSource::Live {
+                    resource: "lobby-cam".into()
+                },
+                Some(canonical_catalog())
+            )
+            .validate(),
+            "a live rendition's catalog is announced by its encoder, not stored"
+        );
+        assert!(
+            !media(
+                MediaSource::Card {
+                    title: "Welcome".into(),
+                    body: String::new(),
+                    background: "102030".into(),
+                    foreground: "f0f0f0".into(),
+                },
+                Some(canonical_catalog())
+            )
+            .validate(),
+            "a card has no bytes to describe"
+        );
+    }
 
     fn program() -> SignageProgram {
         SignageProgram {

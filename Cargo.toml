@@ -3,6 +3,7 @@ members = [
     "crates/display-protocol",
     "crates/journal",
     "crates/mechanics",
+    "crates/mediabox",
     "crates/fabric",
     "crates/addressbook",
     "crates/comms",
@@ -145,6 +146,7 @@ runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
 world-interface = { path = "crates/world-interface" }
 display-protocol = { path = "crates/display-protocol" }
+mediabox = { path = "crates/mediabox" }
 # The network adapter — how independently held replicas exchange their material.
 # `iroh` is intentionally absent from THIS manifest: the app composes the seam
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor
@@ -316,6 +318,7 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
+mediabox = { path = "crates/mediabox", features = ["testkit"] }
 tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }

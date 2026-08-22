@@ -1070,12 +1070,14 @@ async fn hls_segment(
     let Some(stream) = hls_authorization(&state, &ticket) else {
         return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
     };
-    match state.coordinator.live_hub().hls_segment(
-        &stream.orbit,
-        &stream.resource,
-        &stream.resource,
-        sequence,
-    ) {
+    // The coordinator answers from wherever this presentation keeps its
+    // segments: a live window holds them materialised, a planned one builds
+    // the asked-for segment from the content plane and nothing else.
+    match state
+        .coordinator
+        .hls_segment(&stream, sequence, now())
+        .await
+    {
         Ok(segment) => media_response("video/mp2t", segment),
         Err(_) => public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest),
     }
