@@ -105,7 +105,8 @@ export interface DisplayHealth { revision: string; currentItem: string; elapsedM
 export interface DisplayReceiver { device: string; label: string; platform: string; build: string; issuedAtUnixMs: number; revokedAtUnixMs: number | null; health: DisplayHealth | null; }
 export interface DisplayAssignment { assignment: string; device: string; orbit: string; space: string; program: string; world: string; surface: string; controller: string; theme: DisplayTheme; syncGroup: string | null; syncMode: DisplaySyncMode | null; staticDelayMs: number; expiresAtUnixMs: number | null; revokedAtUnixMs: number | null; }
 export interface DisplayPairing { pairing: string; confirmationPhrase: string[]; certificateSha256: string; platform: string; build: string; createdAtUnixMs: number; expiresAtUnixMs: number; }
-export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; }
+export interface IdentifierCustody { slots: string[]; portable: boolean; }
+export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
 
 /**
@@ -282,6 +283,7 @@ export type ClientAction =
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
   | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
+  | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
   | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
   | { type: "openInvitation"; message: string }
@@ -324,6 +326,7 @@ export const actionKey = {
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
+  displayIdentifierAdmitPassphrase: "display.identifier.admit",
   sendMessage: (to: string) => `correspondence.send:${to}`,
   collectMail: "correspondence.collect",
   // Spelled to match `Action::key` in tools/astrolabe/src/runtime.rs. A key that
@@ -379,6 +382,7 @@ export function keyFor(action: ClientAction): string {
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
+    case "displayIdentifierAdmitPassphrase": return actionKey.displayIdentifierAdmitPassphrase;
     case "sendMessage": return actionKey.sendMessage(action.to);
     case "shareReach": return actionKey.shareReach;
     case "addCorrespondent": return actionKey.addCorrespondent;
@@ -932,6 +936,7 @@ export const fixtureClientView: ClientView = {
       createdAtUnixMs: 1_755_000_000_000,
       expiresAtUnixMs: 1_755_000_600_000,
     }],
+    identifierCustody: { slots: ["windows-dpapi"], portable: false },
   },
   devices: [],
   storage: [],

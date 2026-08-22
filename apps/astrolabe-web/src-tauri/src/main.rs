@@ -408,6 +408,17 @@ struct WebDisplayFacts {
     devices: Vec<WebDisplayReceiver>,
     assignments: Vec<WebDisplayAssignment>,
     pending_pairings: Vec<WebDisplayPairing>,
+    /// `None` from a daemon that predates the custody split — not reported,
+    /// as distinct from reported-as-none.
+    identifier_custody: Option<WebIdentifierCustody>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebIdentifierCustody {
+    /// Kinds of unlock path, never material.
+    slots: Vec<String>,
+    portable: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -662,6 +673,12 @@ impl From<ClientView> for WebClientView {
                         expires_at_unix_ms: pairing.expires_at_unix_ms,
                     })
                     .collect(),
+                identifier_custody: display.identifier_custody.map(|custody| {
+                    WebIdentifierCustody {
+                        slots: custody.slots,
+                        portable: custody.portable,
+                    }
+                }),
             }),
             heads: heads
                 .into_iter()
@@ -1098,6 +1115,9 @@ enum WebAction {
     DisplayDeviceRevoke {
         device: String,
     },
+    DisplayIdentifierAdmitPassphrase {
+        passphrase: String,
+    },
     SendMessage {
         to: String,
         body: String,
@@ -1307,6 +1327,9 @@ impl From<WebAction> for ActionRequest {
                 Self::DisplayAssignmentRevoke { assignment }
             }
             WebAction::DisplayDeviceRevoke { device } => Self::DisplayDeviceRevoke { device },
+            WebAction::DisplayIdentifierAdmitPassphrase { passphrase } => {
+                Self::DisplayIdentifierAdmitPassphrase { passphrase }
+            }
             WebAction::SendMessage { to, body } => Self::SendMessage { to, body },
             WebAction::CollectMail => Self::CollectMail,
             WebAction::BlockSender { person } => Self::BlockSender { person },
@@ -1728,6 +1751,7 @@ mod tests {
         let payloads = [
             r#"{"type":"reload"}"#,
             r#"{"type":"exit","goOffline":true}"#,
+            r#"{"type":"displayIdentifierAdmitPassphrase","passphrase":"a dozen letters"}"#,
             r#"{"type":"openLink","url":"lait://world/issues"}"#,
             r#"{"type":"open","world":"issues","entryPath":"/"}"#,
             r#"{"type":"updateWorld","world":"issues"}"#,
