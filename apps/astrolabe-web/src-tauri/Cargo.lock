@@ -240,6 +240,7 @@ dependencies = [
  "correspondence",
  "data-encoding",
  "fs2",
+ "interprocess",
  "lait",
  "lait-workbench",
  "mechanics",
