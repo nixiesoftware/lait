@@ -1490,6 +1490,13 @@ impl Worker {
             }
             Action::Exit(request) => {
                 let report = crate::lifecycle::exit(client.supervisor(), *request).await;
+                // The identity daemon is not supervisor-owned, so the policy
+                // above cannot reach it — and going offline with it running
+                // would report a device stopped while its Spaces kept
+                // converging.
+                if *request == crate::lifecycle::ExitRequest::GoOffline {
+                    client.stop_identity_daemon().await;
+                }
                 Ok(Outcome::Exited(Box::new(report)))
             }
         }

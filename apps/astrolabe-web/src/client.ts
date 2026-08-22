@@ -229,6 +229,8 @@ export interface ClientView {
    * machine that has never completed a check, which is not "up to date".
    */
   update: UpdateIntent | null;
+  /** An exit was carried out; the desktop host ends the process on this cue. */
+  exited: boolean;
 }
 
 /**
@@ -264,6 +266,7 @@ export interface ImageStanding {
 export type ClientAction =
   | { type: "refresh" }
   | { type: "reload" }
+  | { type: "exit"; goOffline: boolean }
   | { type: "openLink"; url: string }
   | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
@@ -293,6 +296,7 @@ export type ClientAction =
 export const actionKey = {
   refresh: "refresh",
   reload: "image.reload",
+  exit: "exit",
   open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
   startDevice: (id: string) => `device.start:${id}`,
@@ -344,6 +348,7 @@ export function keyFor(action: ClientAction): string {
   switch (action.type) {
     case "refresh": return actionKey.refresh;
     case "reload": return actionKey.reload;
+    case "exit": return actionKey.exit;
     case "openLink": return `link.open:${action.url}`;
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
@@ -563,6 +568,7 @@ export const loadingClientView: ClientView = {
   inFlight: [],
   image: null,
   update: null,
+  exited: false,
 };
 
 /**
@@ -985,6 +991,7 @@ export const fixtureClientView: ClientView = {
   notices: [],
   image: null,
   update: null,
+  exited: false,
 };
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

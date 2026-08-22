@@ -44,6 +44,9 @@ struct WebClientView {
     in_flight: Vec<String>,
     image: Option<WebImage>,
     update: Option<WebUpdate>,
+    /// The exit this client asked for has been carried out; the host ends
+    /// the process on seeing it (the page never draws it).
+    exited: bool,
 }
 
 /// The one thing a person is ever asked about this client's own updating:
@@ -511,6 +514,7 @@ impl From<ClientView> for WebClientView {
             mcp,
             image,
             update,
+            exited,
         } = view;
         Self {
             loading: loading,
@@ -904,6 +908,7 @@ impl From<ClientView> for WebClientView {
                 staged_at_ms: image.staged_at_ms,
                 source_changed: image.source_changed,
             }),
+            exited,
             update: update.map(|update| match update {
                 api::UpdateRow::RestartRequested { version, urgency } => {
                     WebUpdate::RestartRequested {
@@ -976,6 +981,10 @@ fn display_sync_mode_name(mode: api::DisplaySyncMode) -> &'static str {
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum WebAction {
     Refresh,
+    /// End the client; goOffline stops what it owns first. Tray-dispatched.
+    Exit {
+        go_offline: bool,
+    },
     /// Restage from the rebuilt source and bring everything back on the new
     /// image — the inner-loop roll-forward.
     Reload,
@@ -1210,6 +1219,7 @@ impl From<WebAction> for ActionRequest {
     fn from(action: WebAction) -> Self {
         match action {
             WebAction::Refresh => Self::Refresh,
+            WebAction::Exit { go_offline } => Self::Exit { go_offline },
             WebAction::Reload => Self::Reload,
             WebAction::OpenLink { url } => Self::OpenLink { url },
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
@@ -1562,9 +1572,18 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::TrayIconBuilder;
 
+    // Two exits, because they answer different questions and a single Quit
+    // answers one of them by accident (`lifecycle::ExitRequest`): staying
+    // online closes the client and leaves this device serving its Spaces;
+    // going offline stops what this client owns — devices and the identity
+    // daemon — and says what it stopped before the process ends.
     let open = MenuItem::with_id(app, "open", "Open Astrolabe", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Astrolabe", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let stay = MenuItem::with_id(app, "exit-stay", "Close and stay online", true, None::<&str>)?;
+    let offline = MenuItem::with_id(app, "exit-offline", "Go offline and exit", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[&open, &PredefinedMenuItem::separator(app)?, &stay, &offline],
+    )?;
 
     let mut tray = TrayIconBuilder::with_id("astrolabe")
         .menu(&menu)
@@ -1578,9 +1597,16 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     let _ = window.set_focus();
                 }
             }
-            // Quitting is not closing: this is the item that stops the client
-            // and everything it supervises.
-            "quit" => app.exit(0),
+            // Quitting is asked of the core, not taken here: the exit runs as
+            // an action, the report of what stopped crosses as a notice, and
+            // the process ends on the view's `exited` cue — so "go offline"
+            // cannot end the shell before the stopping has actually happened.
+            "exit-stay" => {
+                let _ = api::dispatch(ActionRequest::Exit { go_offline: false });
+            }
+            "exit-offline" => {
+                let _ = api::dispatch(ActionRequest::Exit { go_offline: true });
+            }
             _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
@@ -1680,6 +1706,7 @@ mod tests {
     fn the_actions_the_page_sends_deserialize_whole() {
         let payloads = [
             r#"{"type":"reload"}"#,
+            r#"{"type":"exit","goOffline":true}"#,
             r#"{"type":"openLink","url":"lait://world/issues"}"#,
             r#"{"type":"open","world":"issues","entryPath":"/"}"#,
             r#"{"type":"updateWorld","world":"issues"}"#,
@@ -1702,7 +1729,13 @@ fn main() {
             api::start(None, None).map_err(std::io::Error::other)?;
             let handle = app.handle().clone();
             api::subscribe(move |view| {
+                // The exit report has been carried out and said; ending the
+                // process is the shell's half, taken on the model's cue.
+                let exited = view.exited;
                 let _ = handle.emit(CLIENT_VIEW_EVENT, WebClientView::from(view));
+                if exited {
+                    handle.exit(0);
+                }
             });
             install_tray(app.handle())?;
             #[cfg(target_os = "macos")]

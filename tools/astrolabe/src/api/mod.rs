@@ -103,6 +103,11 @@ pub struct ClientView {
     /// state — nothing to say — and covers a machine that has never
     /// completed a check, which is not "up to date".
     pub update: Option<UpdateRow>,
+    /// An exit was requested and carried out: the shell's cue to end the
+    /// process. The report itself already crossed as a notice; this is only
+    /// the fact that closing may now happen, kept as a flag because the shell
+    /// needs nothing else from it.
+    pub exited: bool,
 }
 
 /// What to put in front of a person about this client's own update.
@@ -813,6 +818,15 @@ pub enum ActionRequest {
     /// image — owned devices and heads through the supervisor, then the
     /// identity daemon. The inner-loop gesture: `cargo build`, then this.
     Reload,
+    /// End the client, having answered the one question quitting asks: does
+    /// this device stay online? `go_offline` stops what this client owns —
+    /// its devices and its identity daemon — before the shell closes; staying
+    /// online closes only the window's process and leaves the device serving.
+    /// The report of what stopped and what was left crosses as a notice, and
+    /// [`ClientView::exited`] is the shell's cue that closing may happen.
+    Exit {
+        go_offline: bool,
+    },
     /// Act on a `lait:` link the operating system delivered — at launch as an
     /// argument, or while running as an open-URL event.
     OpenLink {
@@ -1045,6 +1059,11 @@ impl ActionRequest {
             Self::Refresh => Action::Refresh,
             Self::UpdateWorld { world } => Action::UpdateWorld { world },
             Self::Reload => Action::Reload,
+            Self::Exit { go_offline } => Action::Exit(if go_offline {
+                crate::lifecycle::ExitRequest::GoOffline
+            } else {
+                crate::lifecycle::ExitRequest::StayOnline
+            }),
             Self::OpenLink { url } => Action::OpenLink { url },
             Self::Open { world, entry_path } => Action::OpenWorld { world, entry_path },
             Self::StartDevice { id } => Action::StartDevice(id),
@@ -1572,6 +1591,7 @@ fn empty() -> ClientView {
         mcp: None,
         image: None,
         update: None,
+        exited: false,
     }
 }
 
@@ -2042,6 +2062,7 @@ fn project(app: &App) -> ClientView {
                 Some(UpdateRow::Forced { version, holding })
             }
         },
+        exited: app.exit().is_some(),
     }
 }
 
