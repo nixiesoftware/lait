@@ -162,6 +162,21 @@ function withDispatchFailure(view: ClientView, what: string, error: unknown, act
 }
 
 function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedWindowSurface; view: ClientView; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
+  const refreshing = view.inFlight.includes(actionKey.refresh);
+  // The owned windows carry no menu, and Book and Chat draw no refresh
+  // control — F5 is the one way to ask for a re-read, with the same refusal
+  // as the main window's: a re-read already in flight is a key that does
+  // nothing, not one that queues a second read.
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.key === "F5") {
+        event.preventDefault();
+        if (!refreshing) void dispatch({ type: "refresh" });
+      }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [dispatch, refreshing]);
   const close = () => { void closeOwnedWindow(); };
   return <main className="page owned-window" data-theme={dark ? "dark" : "light"}>
     {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
