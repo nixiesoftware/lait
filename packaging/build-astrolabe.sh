@@ -61,6 +61,14 @@ case "$TARGET" in *-windows-*) EXE=".exe" ;; *) EXE="" ;; esac
 LIVE_DIR="current"
 [ -n "$TARGET" ] || { echo "build-astrolabe: rustc did not report a host triple" >&2; exit 1; }
 
+# The installed pair carries its own C runtime on Windows: the stub-managed
+# layout ships no msvcp/vcruntime DLLs (the old Flutter bundle staged them),
+# and a clean machine must not die in the loader over one. Scoped to this
+# vehicle — cargo-dist keeps its own posture for the bare lait release.
+case "$TARGET" in
+  *-windows-*) export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" ;;
+esac
+
 # The bundle carries the release version, not whatever the checked-in config
 # last said. Overridden on the command line rather than by rewriting the file,
 # so a build never leaves the tree dirty.
@@ -148,11 +156,43 @@ case "$TARGET" in
     bash "$REPO/packaging/make-tree.sh" --stage "$STAGE/$LIVE_DIR" \
       --version "$VERSION" --target "$TARGET" --out "$OUT"
 
-    echo "build-astrolabe: the installer for $TARGET is not built here." >&2
-    echo "  The stub layout is assembled at $STAGE and the update tree is in" >&2
-    echo "  $OUT. Windows takes that stage through packaging/windows/astrolabe.nsi" >&2
-    echo "  and Linux through packaging/linux/make-tarball.sh; neither is" >&2
-    echo "  exercised on this host, so neither is claimed to work." >&2
+    case "$TARGET" in
+      *-windows-*)
+        # WebView2 is the one runtime the pair does not carry; the installer
+        # runs Microsoft's bootstrapper on a machine without it. Staged here
+        # from Microsoft's permalink, best-effort: without it the installer
+        # still builds, and a bare machine is told where to get WebView2
+        # instead of being handed it.
+        curl -fsSL "https://go.microsoft.com/fwlink/p/?LinkId=2124703" \
+          -o "$STAGE/$LIVE_DIR/MicrosoftEdgeWebview2Setup.exe" \
+          || echo "build-astrolabe: WARNING — WebView2 bootstrapper not staged; the installer will point instead of provide" >&2
+
+        MAKENSIS="$(command -v makensis || true)"
+        # Tauri's CLI caches its own NSIS; use it when none is on PATH.
+        if [ -z "$MAKENSIS" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+          MAKENSIS="$(find "$LOCALAPPDATA/tauri" -name makensis.exe 2>/dev/null | head -1 || true)"
+        fi
+        if [ -n "$MAKENSIS" ]; then
+          # VIProductVersion needs a numeric x.y.z; a prerelease passes its base.
+          NUMERIC="${VERSION%%-*}"
+          "$MAKENSIS" -DVERSION="$VERSION" -DVERSION_NUMERIC="$NUMERIC" \
+            -DSTAGE="$(cygpath -w "$STAGE/$LIVE_DIR" 2>/dev/null || echo "$STAGE/$LIVE_DIR")" \
+            -DSTUB="$(cygpath -w "$REPO/target/release/astrolabe-stub.exe" 2>/dev/null || echo "$REPO/target/release/astrolabe-stub.exe")" \
+            -DOUTDIR="$(cygpath -w "$OUT" 2>/dev/null || echo "$OUT")" \
+            "$REPO/packaging/windows/astrolabe.nsi"
+          (cd "$OUT" && sha256sum "astrolabe-$VERSION-setup.exe" > "astrolabe-$VERSION-setup.exe.sha256")
+        else
+          echo "build-astrolabe: no makensis found; the stage at $STAGE is ready for" >&2
+          echo "  packaging/windows/astrolabe.nsi but no installer was produced." >&2
+          exit 1
+        fi
+        ;;
+      *)
+        bash "$REPO/packaging/linux/make-tarball.sh" --bundle "$STAGE/$LIVE_DIR" \
+          --stub "$REPO/target/release/astrolabe-stub" \
+          --version "$VERSION" --target "$TARGET" --out "$OUT"
+        ;;
+    esac
     ;;
 esac
 

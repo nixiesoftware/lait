@@ -125,18 +125,13 @@ fn every_shell_artifact_points_at_the_stub_and_never_into_a_release() {
     }
 }
 
-/// Nothing from a retired stack survives in the installer.
-///
-/// This list used to include Flutter and Dart, under revision 6, whose whole
-/// point was that the client was a single self-contained executable. **Revision
-/// 7 put the interface on Flutter over a Rust core**, so those two moved from
-/// forbidden to required and the assertion below them inverted — see
-/// [`the_installer_carries_the_whole_flutter_bundle`]. What remains here is the
-/// genuinely dead: the browser shells this design never went back to.
+/// Nothing from a retired stack survives in the installer. The list has
+/// inverted twice as interfaces came and went; today the Tauri host is the
+/// client and the Flutter payload is the corpse.
 #[test]
 fn the_installer_carries_nothing_from_the_retired_stacks() {
     let script = directives().to_ascii_lowercase();
-    for corpse in ["webview2", "tauri", "warpui", "egui"] {
+    for corpse in ["flutter", "dartjni", "icudtl", "msvcp140", "warpui", "egui"] {
         assert!(
             !script.contains(corpse),
             "the installer references '{corpse}', which no longer exists in this design"
@@ -144,51 +139,46 @@ fn the_installer_carries_nothing_from_the_retired_stacks() {
     }
 }
 
-/// The inverse of the test above, and the reason it had to change.
-///
-/// `astrolabe.exe` is a 92 KB runner. Installing it alone — which is exactly
-/// what this script did for the whole of revision 7's first half — produces a
-/// machine where the client cannot reach its first frame: no engine, no AOT
-/// image, no ICU table. The failure arrives in the loader, before anything this
-/// project wrote gets to run, which is the least diagnosable place it could.
+/// WebView2 is the one runtime the pair does not carry: the host draws
+/// through the system's Evergreen install, updated on the OS's schedule —
+/// which is the evergreen design's whole point on Windows. A machine without
+/// it must be given Microsoft's own bootstrapper, not a loader dialog.
 #[test]
-fn the_installer_carries_the_whole_flutter_bundle() {
+fn the_installer_ensures_webview2() {
     let script = directives();
     for required in [
-        // The engine, and the Rust core reached across the bridge.
-        r#"File "${STAGE}\flutter_windows.dll""#,
-        r#"File "${STAGE}\astrolabe.dll""#,
-        // The undecorated window and the tray icon are plugins, not framework.
-        r#"File "${STAGE}\*_plugin.dll""#,
-        // `data\` is resolved by path relative to the executable, so it has to
-        // arrive under that name and no other — beside the runner, inside the
-        // release.
-        r#"SetOutPath "$INSTDIR\current\data""#,
-        r#"File /r "${STAGE}\data\*.*""#,
+        // The presence check, against Evergreen's registration.
+        r#"EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"#,
+        // The bootstrapper, staged by build-astrolabe.sh and never installed.
+        r#"MicrosoftEdgeWebview2Setup.exe"#,
     ] {
         assert!(
             script.contains(required),
-            "the installer omits {required}, so the client cannot start"
+            "the installer omits {required}; a machine without WebView2 gets a loader dialog"
         );
     }
 }
 
-/// The C runtime ships beside the client.
+/// The pair carries its own C runtime.
 ///
-/// `astrolabe.exe` imports MSVCP140.dll and VCRUNTIME140*.dll. A development
-/// machine has them because Visual Studio installed them, which is precisely
-/// why leaving them out is invisible until somebody installs on a clean
-/// machine — the one test nothing in CI substitutes for.
+/// The Flutter bundle staged msvcp/vcruntime DLLs app-locally; the Tauri pair
+/// is built `+crt-static` by build-astrolabe.sh instead, so the installer
+/// ships no runtime DLLs and a clean machine has nothing to be missing. Both
+/// halves are pinned: the flag where the build sets it, and the absence of
+/// any DLL enumeration that would quietly resurrect the old posture.
 #[test]
 fn the_installer_carries_the_c_runtime() {
+    let build = std::fs::read_to_string(repo_root().join("packaging/build-astrolabe.sh"))
+        .expect("build-astrolabe.sh");
+    assert!(
+        build.contains("crt-static"),
+        "the Windows pair is not built with a static C runtime, and nothing ships one"
+    );
     let script = directives();
-    for required in [
-        r#"File "${STAGE}\msvcp140*.dll""#,
-        r#"File "${STAGE}\vcruntime140*.dll""#,
-    ] {
+    for corpse in [r#"msvcp140"#, r#"vcruntime140"#, r#"concrt140"#] {
         assert!(
-            script.contains(required),
-            "the installer omits {required}; a clean machine cannot start the client"
+            !script.to_ascii_lowercase().contains(corpse),
+            "the installer enumerates {corpse}, which a static-CRT pair must not ship"
         );
     }
 }
@@ -234,12 +224,9 @@ fn uninstalling_removes_the_program_and_never_the_persons_data() {
     // Recursive removal is allowed for the release trees, by name, and
     // nowhere else.
     //
-    // Under revision 6 this test forbade `RMDir /r` outright, which was right
-    // for an installer that placed two files. Revision 7's bundle nests
-    // `data\flutter_assets\<package>\...`; the staged-swap layout adds three
-    // trees whose contents are whatever the *update path* put there, and after
-    // the first update are not what any installer shipped. So the rule is a
-    // bound rather than a ban, and the bound is stated per directory.
+    // The release trees hold whatever the *update path* put there — after the
+    // first update, not what any installer shipped — so the rule is a bound
+    // rather than a ban, and the bound is stated per directory.
     // `$INSTDIR` itself still comes off with plain `RMDir`, which refuses a
     // non-empty directory: an unknown file left behind fails the uninstall
     // visibly instead of being swept away with everything around it.
@@ -537,7 +524,7 @@ fn linux_directives() -> String {
 #[test]
 fn the_linux_bundle_refuses_a_missing_or_mismatched_pair() {
     let script = linux_directives();
-    for required in ["astrolabe", "lait", "libastrolabe.so", "data", "lib"] {
+    for required in ["astrolabe", "lait"] {
         assert!(
             script.contains(required),
             "the Linux package never checks for {required}"
@@ -549,14 +536,14 @@ fn the_linux_bundle_refuses_a_missing_or_mismatched_pair() {
     );
 }
 
-/// Flutter documents the whole bundle directory as its Linux distribution
-/// unit. Copying selected files would silently drop a future engine artifact.
+/// The whole stage travels: copying selected files would silently drop
+/// whatever a future release adds beside the pair.
 #[test]
-fn the_linux_package_carries_the_whole_flutter_bundle_and_notices() {
+fn the_linux_package_carries_the_pair_and_notices() {
     let script = linux_directives();
     assert!(
         script.contains(r#"cp -a "$BUNDLE/." "$STAGED/current/""#),
-        "the Linux package enumerates a partial Flutter bundle"
+        "the Linux package copies selected files instead of the whole stage"
     );
     // The stub takes the root name, and the release sits beneath it — the
     // same shape as Windows, for the same reason: a path outside the install

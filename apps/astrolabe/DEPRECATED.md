@@ -49,11 +49,12 @@ is proven end to end: `.app`, `.dmg`, and the `astrolabe-tree-…` artifact that
 
 Two things this file still records that the new path has not re-proved:
 
-- **Windows.** `packaging/windows/astrolabe.nsi` installs `astrolabe.exe` as
-  the *update stub* with the real client beside it. Tauri's NSIS target has no
-  such shape, and reconciling them is a decision, not a port.
-  `build-astrolabe.sh` refuses on Windows rather than emitting something
-  unpublishable.
+- **Windows.** ~~Reconciling Tauri's NSIS target with the stub layout is a
+  decision, not a port.~~ Decided: the evergreen design forbids Tauri's
+  install-to-update model (an update must never force a restart), so the stub
+  layout is the only installed shape, Tauri's bundler installers never ship,
+  and `astrolabe.nsi` — first install only — was ported to carry the Tauri
+  pair. `build-astrolabe.sh` builds it.
 - **CI-side release building.** The quarantined workflow holds the Developer ID
   signing and notarization arrangement (its five repository secrets) and the
   SLSA provenance attestation. `build-astrolabe.sh` takes `--identity` and
