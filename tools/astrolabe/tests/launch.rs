@@ -925,7 +925,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     let selection = lait::config::Selection::for_identity(identity.path());
     let daemon = lait::daemon::Client::for_selection(&selection).expect("the identity daemon");
     assert!(
-        matches!(daemon.probe().await, lait::control::Probe::Healthy),
+        matches!(daemon.probe().await, lait::control::Probe::Healthy { .. }),
         "client startup returned before its identity daemon answered"
     );
     let displays = client

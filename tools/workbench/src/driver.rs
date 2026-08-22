@@ -124,7 +124,7 @@ impl DaemonDriver for LaitDriver {
             }
         };
         match client.probe().await {
-            lait::control::Probe::Healthy => DaemonProbe::Healthy,
+            lait::control::Probe::Healthy { .. } => DaemonProbe::Healthy,
             lait::control::Probe::Absent => DaemonProbe::Absent,
             lait::control::Probe::Foreign { why, replaceable } => {
                 DaemonProbe::Foreign { why, replaceable }

@@ -40,7 +40,7 @@ fn wait_healthy(client: &Client, budget: Duration) {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     runtime.block_on(async {
         let deadline = tokio::time::Instant::now() + budget;
-        while !matches!(client.probe().await, Probe::Healthy) {
+        while !matches!(client.probe().await, Probe::Healthy { .. }) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "Lait daemon did not become ready at {}",

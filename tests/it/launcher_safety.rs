@@ -259,7 +259,7 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     runtime.block_on(async {
         let client = lait::daemon::Client::at(daemon_home.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        while !matches!(client.probe().await, lait::control::Probe::Healthy) {
+        while !matches!(client.probe().await, lait::control::Probe::Healthy { .. }) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "Lait daemon did not become ready"

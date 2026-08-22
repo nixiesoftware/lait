@@ -214,7 +214,7 @@ impl Placement {
         blocking: Arc<Semaphore>,
     ) -> Result<Self> {
         let mode = match control::probe(&resolved.home).await {
-            control::Probe::Healthy => PlacementMode::Attached,
+            control::Probe::Healthy { .. } => PlacementMode::Attached,
             control::Probe::Foreign { why, replaceable } => {
                 return Err(crate::control::ForeignDaemon {
                     home: resolved.home.clone(),
@@ -232,7 +232,7 @@ impl Placement {
                         // winner; otherwise preserve our own startup diagnosis.
                         for _ in 0..20 {
                             match control::probe(&resolved.home).await {
-                                control::Probe::Healthy => {
+                                control::Probe::Healthy { .. } => {
                                     return Self::observe(
                                         resolved,
                                         PlacementMode::Attached,

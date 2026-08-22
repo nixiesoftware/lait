@@ -248,7 +248,17 @@ pub async fn ensure_lait_daemon_with_executable(
     let client = crate::daemon::Client::for_selection(selection)?;
     let daemon_home = client.home();
     match client.probe().await {
-        control::Probe::Healthy => return Ok(()),
+        control::Probe::Healthy { build } => match build {
+            // The managed half of the pair rule: a daemon spawned from the
+            // very file this caller manages must not be behind that file —
+            // after an applied update the old process still answers,
+            // path-matched and retired. Scoped to the managed path so a dev
+            // build never evicts a daemon it does not own.
+            Some(theirs) if sidecar_supersedes(executable, &theirs) => {
+                replace_foreign_daemon(&client).await?
+            }
+            _ => return Ok(()),
+        },
         // A daemon behind this build is one nothing here can talk to, ever.
         // Take over from it and carry on to the spawn below.
         control::Probe::Foreign {
@@ -274,7 +284,7 @@ pub async fn ensure_lait_daemon_with_executable(
         .context("spawn Lait daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if matches!(client.probe().await, control::Probe::Healthy) {
+        if matches!(client.probe().await, control::Probe::Healthy { .. }) {
             // Ours to start, ours to reap. Dropping the handle here instead
             // would leave the daemon's eventual exit uncollected, and a head
             // that outlives its daemon would keep the corpse listed for its own
@@ -299,7 +309,7 @@ pub async fn ensure_lait_daemon_with_executable(
             // spawn (bind failure, held lock) still fails in about a second rather
             // than the full 20 this check exists to avoid.
             for _ in 0..12 {
-                if matches!(client.probe().await, control::Probe::Healthy) {
+                if matches!(client.probe().await, control::Probe::Healthy { .. }) {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -331,6 +341,32 @@ pub async fn ensure_lait_daemon_with_executable(
 /// when the peer is behind us. Stopping one that is ahead would be a downgrade
 /// at best and an unreadable store at worst; there the handshake's own answer
 /// (upgrade this build) is the only honest one.
+/// Whether the sidecar file at `executable` outranks the daemon `theirs`
+/// spawned from that same path: an applied update (`version_ahead_of`) or a
+/// rebuild in place (`supersedes`). A daemon from any other path is not this
+/// caller's to judge.
+///
+/// The expected version is this lait tree's own — the pair rule makes the
+/// file beside the client the same tree, and running it to ask would be a
+/// second daemon.
+fn sidecar_supersedes(executable: &Path, theirs: &control::BuildFingerprint) -> bool {
+    if theirs.exe != executable.display().to_string() {
+        return false;
+    }
+    let built = std::fs::metadata(executable)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let expected = control::BuildFingerprint {
+        version: env!("LAIT_VERSION_SEMVER").to_string(),
+        exe: theirs.exe.clone(),
+        built,
+    };
+    expected.supersedes(theirs) || expected.version_ahead_of(theirs)
+}
+
 async fn replace_foreign_daemon(client: &crate::daemon::Client) -> Result<()> {
     let home = client.home().to_path_buf();
     // Read the pid before asking it to go: a daemon that honours `stop` takes
@@ -1157,5 +1193,47 @@ mod tests {
             },
         )));
         assert_eq!(resolution.name_for_actor("act_ada"), None);
+    }
+
+    /// The eviction is scoped to the file this caller manages. A daemon from
+    /// any other path is never its to judge — the dev build that would
+    /// otherwise stop a production daemon the moment the workspace version is
+    /// bumped past the installed release.
+    #[test]
+    fn only_the_managed_sidecar_path_licenses_an_eviction() {
+        let scratch = tempfile::tempdir().expect("a scratch dir");
+        let sidecar = scratch.path().join("lait.exe");
+        std::fs::write(&sidecar, b"the sidecar file").expect("the sidecar");
+        let managed = sidecar.display().to_string();
+        let theirs = |version: &str, exe: &str, built: u64| control::BuildFingerprint {
+            version: version.into(),
+            exe: exe.into(),
+            built,
+        };
+
+        // The update case: the daemon at the managed path is a release behind.
+        assert!(sidecar_supersedes(
+            &sidecar,
+            &theirs("0.0.1", &managed, u64::MAX)
+        ));
+        // The rebuild case: same version, but the file at its path is newer.
+        assert!(sidecar_supersedes(
+            &sidecar,
+            &theirs(env!("LAIT_VERSION_SEMVER"), &managed, 0)
+        ));
+        // A release behind at a DIFFERENT path is not this caller's daemon.
+        assert!(!sidecar_supersedes(
+            &sidecar,
+            &theirs("0.0.1", "/somewhere/else/lait", 0)
+        ));
+        // Ahead, or unparseable, never evicts.
+        assert!(!sidecar_supersedes(
+            &sidecar,
+            &theirs("999.0.0", &managed, u64::MAX)
+        ));
+        assert!(!sidecar_supersedes(
+            &sidecar,
+            &theirs("not-a-version", &managed, u64::MAX)
+        ));
     }
 }

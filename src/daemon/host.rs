@@ -1950,7 +1950,7 @@ mod tests {
         let completion = tokio::spawn(runner.run());
         let client = Client::at(daemon_home.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while !matches!(client.probe().await, control::Probe::Healthy) {
+        while !matches!(client.probe().await, control::Probe::Healthy { .. }) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "host endpoint did not become ready"
@@ -2058,7 +2058,7 @@ mod tests {
         let completion = tokio::spawn(runner.run());
         let client = Client::at(daemon_home);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while !matches!(client.probe().await, control::Probe::Healthy) {
+        while !matches!(client.probe().await, control::Probe::Healthy { .. }) {
             assert!(tokio::time::Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

@@ -3068,8 +3068,9 @@ pub struct StatusInfo {
 /// spawns a doomed second daemon over a held lock and waits out the full timeout.
 #[derive(Debug)]
 pub enum Probe {
-    /// Answered, and we understood the answer.
-    Healthy,
+    /// Answered, and we understood the answer. Carries the daemon's own
+    /// fingerprint when it offered one, for callers with a stricter stake.
+    Healthy { build: Option<BuildFingerprint> },
     /// Nothing is listening: no daemon for this home. Safe to spawn.
     Absent,
     /// Something is listening, but we can't talk to it — a daemon from a
@@ -3242,23 +3243,21 @@ async fn probe_inner(home: &Path) -> Probe {
                         .get("build")
                         .and_then(|b| serde_json::from_value::<BuildFingerprint>(b.clone()).ok())
                     {
-                        Some(theirs)
-                            if ours.supersedes(&theirs) || ours.version_ahead_of(&theirs) =>
-                        {
-                            Probe::Foreign {
-                                why: format!(
-                                    "it is an older build of lait ({} from {}) than the one you \
-                                     ran ({} from {}) — stopping it so this build can serve",
-                                    theirs.version, theirs.exe, ours.version, ours.exe
-                                ),
-                                replaceable: true,
-                            }
-                        }
+                        Some(theirs) if ours.supersedes(&theirs) => Probe::Foreign {
+                            why: format!(
+                                "it is an older build of lait ({} from {}) than the one you \
+                                 ran ({} from {}) — stopping it so this build can serve",
+                                theirs.version, theirs.exe, ours.version, ours.exe
+                            ),
+                            replaceable: true,
+                        },
                         // Same build, a newer one, or one that does not say:
                         // reuse it. Talking works, and evicting a daemon we are
                         // not ahead of is how two binaries run in turn come to
-                        // kill each other's on every start.
-                        _ => Probe::Healthy,
+                        // kill each other's on every start. A caller that
+                        // manages the daemon's own executable judges further
+                        // with the fingerprint carried here.
+                        build => Probe::Healthy { build },
                     }
                 }
                 Err(e) => Probe::Foreign {
