@@ -30,9 +30,11 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The shell's production Rust: `src/**`. The product crates themselves and the
-/// engine crates are not in scope — a product may name itself, and the engine
-/// crates are already product-free by construction.
+/// The production Rust that hosts Worlds without being one: the shell
+/// (`src/**`) and the clients above it (`tools/astrolabe`,
+/// `tools/astrolabe-ios`, `tools/feed`). The product crates themselves and
+/// the engine crates are not in scope — a product may name itself, and the
+/// engine crates are already product-free by construction.
 fn shell_sources() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -48,7 +50,14 @@ fn shell_sources() -> Vec<PathBuf> {
         }
     }
     let mut out = Vec::new();
-    walk(&workspace_root().join("src"), &mut out);
+    for scope in [
+        "src",
+        "tools/astrolabe/src",
+        "tools/astrolabe-ios/src",
+        "tools/feed/src",
+    ] {
+        walk(&workspace_root().join(scope), &mut out);
+    }
     out.sort();
     out
 }
