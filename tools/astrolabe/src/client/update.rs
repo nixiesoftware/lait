@@ -41,7 +41,6 @@ use lait::update::watch::Standing;
 /// inventing different evidence.
 const INSISTENT_AFTER: Duration = Duration::from_secs(4 * 24 * 60 * 60);
 const URGENT_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const QUIET_UNTIL: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 
 /// How hard to ask. Ordered, so a surface can compare without matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -339,7 +338,7 @@ mod tests {
         }
         // Ordered, so a surface may compare rather than match.
         assert!(Urgency::Quiet < Urgency::Insistent && Urgency::Insistent < Urgency::Urgent);
-        assert!(QUIET_UNTIL < INSISTENT_AFTER && INSISTENT_AFTER < URGENT_AFTER);
+        assert!(INSISTENT_AFTER < URGENT_AFTER);
     }
 
     /// Declared work holds the restart, and the answer says so rather than

@@ -1005,12 +1005,15 @@ impl Worker {
                 // would otherwise keep serving old code — see
                 // `Client::roll_identity_daemon` for why telling it is needed.
                 client.roll_identity_daemon().await?;
-                let fingerprint = report
-                    .image
-                    .map(|image| image.fingerprint)
-                    .unwrap_or_default();
-                let short = &fingerprint[..fingerprint.len().min(12)];
-                Ok(Outcome::Said(format!("rolled forward onto {short}")))
+                Ok(Outcome::Said(match report.image {
+                    Some(image) => format!(
+                        "rolled forward onto {}",
+                        &image.fingerprint[..image.fingerprint.len().min(12)]
+                    ),
+                    // Direct staging restarts in place and fingerprints
+                    // nothing; "onto <nothing>" would read as a defect.
+                    None => "rolled forward".into(),
+                }))
             }
             Action::OpenWorld { world, entry_path } => {
                 let launch = client.open_world(world, entry_path).await?;
