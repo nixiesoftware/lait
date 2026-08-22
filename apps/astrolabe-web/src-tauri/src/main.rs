@@ -250,6 +250,12 @@ struct WebHead {
     origin: Option<String>,
     owned: bool,
     orbit: Option<String>,
+    /// The one World this head serves; `None` (a pre-pin head) matches no row.
+    world: Option<String>,
+    /// `running`, `exited` or `unknown`. Presence is not liveness: exited
+    /// heads stay listed so a person can see the thing they opened died.
+    state: String,
+    state_detail: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -656,12 +662,30 @@ impl From<ClientView> for WebClientView {
             }),
             heads: heads
                 .into_iter()
-                .map(|head| WebHead {
-                    id: head.id,
-                    kind: head.kind,
-                    origin: head.origin,
-                    owned: head.owned,
-                    orbit: head.orbit,
+                .map(|head| {
+                    // Destructured whole for the same reason ClientView is:
+                    // this row grew `world` and `state` once and the browser
+                    // quietly kept painting presence as liveness without them.
+                    let api::HeadRow {
+                        id,
+                        kind,
+                        orbit,
+                        world,
+                        origin,
+                        owned,
+                        state,
+                        state_detail,
+                    } = head;
+                    WebHead {
+                        id,
+                        kind,
+                        origin,
+                        owned,
+                        orbit,
+                        world,
+                        state,
+                        state_detail,
+                    }
                 })
                 .collect(),
             devices: devices

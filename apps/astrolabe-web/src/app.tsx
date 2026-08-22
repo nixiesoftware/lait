@@ -19,6 +19,7 @@ import {
   type ClientAction,
   type ClientTransport,
   type ClientView,
+  type Head,
   type LibraryWorld,
   type OwnedWindowSurface,
   type UpdateIntent,
@@ -245,7 +246,12 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
   if (view.library.length === 0) return <EmptyLibrary />;
   // A launching World sits with the running: the act is already under way,
   // and the rail should not file it under the ordinary rows mid-transition.
-  const running = view.library.filter((world) => isOpening(view, world) || isRunning(view));
+  // Per World, by the head's own state — a global "any head exists" check is
+  // how opening Issues once filed Signage under RUNNING.
+  const running = view.library.filter((world) => {
+    const state = lifecycle(view, world);
+    return state === "Launching" || state === "Running";
+  });
   const ready = view.library.filter((world) => !running.includes(world) && world.opensAt !== null);
   const unavailable = view.library.filter((world) => !running.includes(world) && world.opensAt === null);
   return <section className="library">
@@ -306,8 +312,9 @@ function WorldMark({ world }: { world: LibraryWorld }) {
 function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world: LibraryWorld; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
   const entryPath = world.opensAt;
   const opening = isOpening(view, world);
-  const serving = view.heads.filter((head) => head.orbit === null);
-  const running = !opening && serving.length > 0;
+  const serving = servingWorld(view, world.worldMount);
+  const live = serving.filter((head) => head.state === "running");
+  const running = !opening && live.length > 0;
   const stoppable = serving.find((head) => head.owned);
   const stopping = stoppable !== undefined && view.inFlight.includes(actionKey.stopHead(stoppable.id));
   const update = world.update;
@@ -340,7 +347,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
             : `Update to ${update.available} — this device is serving ${update.serving ?? "the built-in version"}`}>
           <Button className="update-control" aria-label={`Update ${world.displayName}`}
             onPress={() => void dispatch({ type: "updateWorld", world: world.worldMount })}>↻ <span>UPDATE</span></Button></span>
-        : state === "Ready" ? <span className="tip" title="Start this World and hand it to my browser">
+        : state === "Ready" || state === "Stopped" ? <span className="tip" title={state === "Stopped" ? "This World's head exited — start it again" : "Start this World and hand it to my browser"}>
           <Button className="launch-control" aria-label="Launch World" onPress={() => {
             if (world.opensAt !== null) void dispatch({ type: "open", world: world.worldMount, entryPath: world.opensAt });
           }}>▶ <span>LAUNCH</span></Button></span>
@@ -352,7 +359,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
           worldMount: world.worldMount,
           entryPath: world.opensAt,
           version: world.version,
-          activeOrigin: serving[0]?.origin ?? null,
+          activeOrigin: (live[0] ?? serving[0])?.origin ?? null,
           dark,
         })}>⚙</Button>
       </span>
@@ -508,15 +515,30 @@ function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
       onPress={() => void restartForUpdate(update.version)}>↻ Restart to update</Button></span>;
 }
 
-function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" {
+/// The heads serving exactly this World. A head with `world: null` predates
+/// the pin and deliberately matches no row: a surface cannot say a definite
+/// thing about it, and saying an indefinite thing is the defect the field
+/// closes. Opening Issues must never paint Signage as Running.
+export function servingWorld(view: ClientView, mount: string): Head[] {
+  return view.heads.filter((head) => head.orbit === null && head.world === mount);
+}
+/// Read from the head's own state, never from the fact that a row exists.
+/// Exited heads stay listed so a person can see the thing they opened died,
+/// so counting rows paints a crashed World as Running.
+export function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" | "Stopped" | "Unknown" {
   if (isOpening(view, world)) return "Launching";
   if (world.opensAt === null) return "Unavailable";
-  return isRunning(view) ? "Running" : "Ready";
+  const heads = servingWorld(view, world.worldMount);
+  if (heads.length === 0) return "Ready";
+  if (heads.some((head) => head.state === "running")) return "Running";
+  // `unknown` outranks `exited`: a head nobody could poll may still be
+  // serving, and "Stopped" would be the same confident guess the other way.
+  if (heads.some((head) => head.state === "unknown")) return "Unknown";
+  return "Stopped";
 }
 function isOpening(view: ClientView, world: LibraryWorld): boolean {
   return world.opensAt !== null && view.inFlight.includes(actionKey.open(world.worldMount));
 }
-function isRunning(view: ClientView): boolean { return view.heads.some((head) => head.orbit === null); }
 function accentColor(world: LibraryWorld): string {
   return world.accent === null ? "var(--surface-500)" : `#${world.accent.toString(16).padStart(6, "0")}`;
 }

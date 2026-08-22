@@ -51,6 +51,11 @@ export interface Head {
   origin: string | null;
   owned: boolean;
   orbit: string | null;
+  /** The one World this head serves; null (a pre-pin head) matches no row. */
+  world: string | null;
+  /** "running", "exited" or "unknown" — presence is not liveness. */
+  state: string;
+  stateDetail: string | null;
 }
 
 export interface HostFacts {
@@ -696,7 +701,7 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
         case "open":
           complete(key, (current) => ({
             ...current,
-            heads: current.heads.some((head) => head.orbit === null)
+            heads: current.heads.some((head) => head.orbit === null && head.world === action.world)
               ? current.heads
               : [...current.heads, {
                   id: "identity:fixture",
@@ -704,6 +709,9 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
                   origin: "http://127.0.0.1:52713/",
                   owned: true,
                   orbit: null,
+                  world: action.world,
+                  state: "running",
+                  stateDetail: null,
                 }],
             notices: [{ said: "World is ready in your browser.", launched: action.entryPath }, ...current.notices],
           }));
