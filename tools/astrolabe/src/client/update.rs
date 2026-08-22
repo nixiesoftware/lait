@@ -32,6 +32,7 @@
 //! check has no standing at all — which is a fourth thing, and not zero.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use lait::update::watch::Standing;
@@ -127,15 +128,17 @@ pub enum Intent {
 
 /// The whole decision, as a pure function of what is known.
 ///
-/// `now`, `in_flight` and `relaunched_for` are arguments rather than ambient
-/// reads so the policy is testable across every axis without a clock or a
-/// running client — which is the point of it being separate from the surface
-/// that draws it. `relaunched_for` is the version a relaunch already
-/// answered for this process ([`RELAUNCHED_ENV`]), read once at the boundary.
+/// `now`, `in_flight`, `running_version`, and `relaunched_for` are arguments
+/// rather than ambient reads so the policy is testable across every axis
+/// without a clock or a running client — which is the point of it being
+/// separate from the surface that draws it. `relaunched_for` is the version a
+/// relaunch already answered for this process ([`RELAUNCHED_ENV`]), read once
+/// at the boundary.
 pub fn intent(
     standing: Option<&Standing>,
     now: u64,
     in_flight: &[String],
+    running_version: Option<&str>,
     relaunched_for: Option<&str>,
 ) -> Intent {
     let Some(standing) = standing else {
@@ -156,6 +159,14 @@ pub fn intent(
         // "no update" is the silence the attack buys.
         Standing::Refused { why } | Standing::Stale { why } => {
             Intent::Attention { why: why.clone() }
+        }
+        // The macOS daemon can exchange the bundle while this process is
+        // alive, so its durable standing remains Staged until the new bundle
+        // actually launches. Once that version is this process, the standing
+        // has served its purpose; restarting again would loop on a successful
+        // apply while waiting for the next daemon sample.
+        Standing::Staged { version, .. } if running_version == Some(version.as_str()) => {
+            Intent::Nothing
         }
         // The same release came back from its own window: asking again would
         // boot-loop, so the loop is cut here, by naming the failure.
@@ -206,6 +217,21 @@ pub fn intent(
 pub const RELAUNCH_REQUEST: &str = "relaunch.requested";
 /// Carries the requested version into the launch that answers it.
 pub const RELAUNCHED_ENV: &str = "ASTROLABE_RELAUNCHED";
+
+static RUNNING_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Identify the version of the desktop bundle hosting this core.
+///
+/// Tauri owns the distribution version and can override it at build time, so
+/// the core cannot infer it from its own Cargo package version. The host calls
+/// this once before starting the runtime.
+pub fn identify_running_version(version: String) {
+    let _ = RUNNING_VERSION.set(version);
+}
+
+pub(crate) fn running_version() -> Option<&'static str> {
+    RUNNING_VERSION.get().map(String::as_str)
+}
 
 /// The stub that owns this executable's relaunch, when there is one.
 ///
@@ -265,7 +291,7 @@ mod tests {
 
     #[test]
     fn a_machine_that_has_never_checked_says_nothing_rather_than_up_to_date() {
-        assert_eq!(intent(None, now_after(0), &[], None), Intent::Nothing);
+        assert_eq!(intent(None, now_after(0), &[], None, None), Intent::Nothing);
     }
 
     #[test]
@@ -282,7 +308,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                intent(Some(&standing), now_after(0), &[], None),
+                intent(Some(&standing), now_after(0), &[], None, None),
                 Intent::Nothing,
                 "{standing:?} drew something a person had to read"
             );
@@ -301,7 +327,8 @@ mod tests {
                 why: "feed answered with a stale pointer: older than believed".into(),
             },
         ] {
-            let Intent::Attention { why } = intent(Some(&standing), now_after(0), &[], None) else {
+            let Intent::Attention { why } = intent(Some(&standing), now_after(0), &[], None, None)
+            else {
                 panic!("{standing:?} was not surfaced");
             };
             assert!(!why.is_empty());
@@ -324,7 +351,7 @@ mod tests {
             (30, Urgency::Urgent),
         ] {
             let Intent::RestartRequested { urgency, version } =
-                intent(Some(&staged), now_after(days), &[], None)
+                intent(Some(&staged), now_after(days), &[], None, None)
             else {
                 panic!("a staged release did not ask for a restart at {days} days");
             };
@@ -346,6 +373,7 @@ mod tests {
             now_after(9),
             &["an unsent comment".to_string()],
             None,
+            None,
         ) else {
             panic!("in-flight work did not hold the restart");
         };
@@ -364,6 +392,7 @@ mod tests {
             Some(&staged),
             now_after(90),
             &["an unsent comment".to_string()],
+            None,
             None,
         ) else {
             panic!("a long wait overrode declared work");
@@ -385,7 +414,7 @@ mod tests {
         // apply to a restart nobody is being asked about.
         for day in [0, 90] {
             let Intent::Forced { version, holding } =
-                intent(Some(&forced), now_after(day), &[], None)
+                intent(Some(&forced), now_after(day), &[], None, None)
             else {
                 panic!("a build below the floor asked instead of moving");
             };
@@ -401,6 +430,7 @@ mod tests {
             Some(&forced),
             now_after(0),
             &["an unsent comment".to_string()],
+            None,
             None,
         ) else {
             panic!("the floor discarded declared work");
@@ -420,7 +450,8 @@ mod tests {
             below_floor: true,
         };
 
-        let Intent::Attention { why } = intent(Some(&forced), now_after(0), &[], Some("0.9.0"))
+        let Intent::Attention { why } =
+            intent(Some(&forced), now_after(0), &[], None, Some("0.9.0"))
         else {
             panic!("a fruitless relaunch was asked for again, which is the boot loop");
         };
@@ -430,11 +461,30 @@ mod tests {
         );
 
         let Intent::Forced { version, .. } =
-            intent(Some(&forced), now_after(0), &[], Some("0.8.0"))
+            intent(Some(&forced), now_after(0), &[], None, Some("0.8.0"))
         else {
             panic!("a relaunch for an older release blocked a newer one's window");
         };
         assert_eq!(version, "0.9.0");
+    }
+
+    /// The staged record deliberately survives a successful macOS bundle
+    /// exchange so the old process still takes its restart. The new process
+    /// identifies itself as that staged release and must not take another.
+    #[test]
+    fn the_applied_version_does_not_restart_again_on_stale_staged_standing() {
+        for below_floor in [false, true] {
+            let staged = Standing::Staged {
+                version: "0.9.0".into(),
+                at: STAGED_AT,
+                below_floor,
+            };
+            assert_eq!(
+                intent(Some(&staged), now_after(30), &[], Some("0.9.0"), None),
+                Intent::Nothing,
+                "the applied release looped with below_floor={below_floor}"
+            );
+        }
     }
 
     /// The stub seam, from the client's side: the entry inside `current/`
@@ -475,7 +525,8 @@ mod tests {
     #[test]
     fn a_clock_behind_the_staging_time_is_quiet_rather_than_urgent() {
         let staged = staged();
-        let Intent::RestartRequested { urgency, .. } = intent(Some(&staged), 0, &[], None) else {
+        let Intent::RestartRequested { urgency, .. } = intent(Some(&staged), 0, &[], None, None)
+        else {
             panic!("a staged release did not ask for a restart");
         };
         assert_eq!(urgency, Urgency::Quiet);

@@ -595,7 +595,9 @@ pub fn launch_answering(
 /// Consuming is what bounds the relaunch loop — one relaunch per written
 /// request — so a request that cannot be *removed* must answer `None`:
 /// honouring an unremovable file would relaunch forever.
-pub fn take_relaunch_request(root: &Path) -> Option<String> {
+/// Requiring the installation claim prevents a secondary stub from stealing
+/// the primary stub's request while that primary is waiting on its client.
+pub fn take_relaunch_request(root: &Path, _claim: &Claim) -> Option<String> {
     let path = root.join(RELAUNCH_REQUEST);
     let version = fs::read_to_string(&path).ok()?;
     fs::remove_file(&path).ok()?;

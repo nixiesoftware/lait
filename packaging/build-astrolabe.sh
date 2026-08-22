@@ -55,11 +55,24 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
 TARGET="$(rustc -vV | sed -n 's/^host: //p')"
-case "$TARGET" in *-windows-*) EXE=".exe" ;; *) EXE="" ;; esac
 # The stub's live tree, spelled once. Must agree with `update::tree::LIVE_DIR`
 # and the stub's own constant.
 LIVE_DIR="current"
 [ -n "$TARGET" ] || { echo "build-astrolabe: rustc did not report a host triple" >&2; exit 1; }
+
+# The feed has one stable artifact name for each supported client platform.
+# Refuse any other host before doing an expensive build: emitting a tree under
+# an unrecognised triple would create bytes no installed client can discover.
+case "$TARGET" in
+  aarch64-apple-darwin|x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu) ;;
+  *)
+    echo "build-astrolabe: unsupported client target '$TARGET'" >&2
+    echo "  Feed targets: aarch64-apple-darwin, x86_64-pc-windows-msvc," >&2
+    echo "  x86_64-unknown-linux-gnu" >&2
+    exit 1
+    ;;
+esac
+case "$TARGET" in *-windows-*) EXE=".exe" ;; *) EXE="" ;; esac
 
 # The installed pair carries its own C runtime on Windows: the stub-managed
 # layout ships no msvcp/vcruntime DLLs (the old Flutter bundle staged them),
@@ -111,10 +124,16 @@ echo "build-astrolabe: pair verified — bundled sidecar reports $reported"
 
 case "$TARGET" in
   *-apple-*)
+    TREE_APP="$APP"
     if [ -n "$IDENTITY" ]; then
-      ARGS=(--app "$APP" --version "$VERSION" --identity "$IDENTITY" --out "$OUT")
+      SIGNED_WORK="$(mktemp -d)"
+      trap 'rm -rf "$SIGNED_WORK"' EXIT
+      SIGNED_APP="$SIGNED_WORK/Astrolabe.app"
+      ARGS=(--app "$APP" --version "$VERSION" --identity "$IDENTITY" --out "$OUT"
+        --signed-app-out "$SIGNED_APP")
       [ -n "$NOTARIZE" ] && ARGS+=(--notarize "$NOTARIZE")
       bash "$REPO/packaging/macos/make-dmg.sh" "${ARGS[@]}"
+      TREE_APP="$SIGNED_APP"
     else
       # Tauri's own dmg, renamed to the feed's spelling. Unsigned: Gatekeeper
       # refuses it on any machine but this one.
@@ -126,7 +145,7 @@ case "$TARGET" in
       echo "  Gatekeeper refuses an unsigned bundle. Do not publish this to the feed;" >&2
       echo "  pass --identity (and --notarize) for a releasable disk image." >&2
     fi
-    bash "$REPO/packaging/make-tree.sh" --stage "$APP" \
+    bash "$REPO/packaging/make-tree.sh" --stage "$TREE_APP" \
       --version "$VERSION" --target "$TARGET" --out "$OUT"
     ;;
   *)

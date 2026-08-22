@@ -11,6 +11,8 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const CLIENT_VIEW_EVENT: &str = "astrolabe://client-view";
 const MENU_EVENT: &str = "astrolabe://menu";
+const EXIT_STAY_ID: &str = "exit-stay";
+const EXIT_OFFLINE_ID: &str = "exit-offline";
 
 // A browser preview must not infer desktop identity from its user agent. The
 // host owns this fact and installs it before the document's application code
@@ -991,7 +993,11 @@ fn display_sync_mode_name(mode: api::DisplaySyncMode) -> &'static str {
 // both, and the mismatch fails *nowhere* — the invoke rejects, the surface
 // records a dispatch failure, and the action never reaches the core. The
 // deserialization tests below hold this seam still.
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum WebAction {
     Refresh,
     /// End the client; goOffline stops what it owns first. Tray-dispatched.
@@ -1624,8 +1630,20 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     // The two answers of `lifecycle::ExitRequest`, never one generic Quit.
     let open = MenuItem::with_id(app, "open", "Open Astrolabe", true, None::<&str>)?;
-    let stay = MenuItem::with_id(app, "exit-stay", "Close and stay online", true, None::<&str>)?;
-    let offline = MenuItem::with_id(app, "exit-offline", "Go offline and exit", true, None::<&str>)?;
+    let stay = MenuItem::with_id(
+        app,
+        EXIT_STAY_ID,
+        "Close and stay online",
+        true,
+        None::<&str>,
+    )?;
+    let offline = MenuItem::with_id(
+        app,
+        EXIT_OFFLINE_ID,
+        "Go offline and exit",
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(
         app,
         &[&open, &PredefinedMenuItem::separator(app)?, &stay, &offline],
@@ -1645,12 +1663,7 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             // The process ends on the view's `exited` cue, never here: the
             // shell must not close before the stopping has happened.
-            "exit-stay" => {
-                let _ = api::dispatch(ActionRequest::Exit { go_offline: false });
-            }
-            "exit-offline" => {
-                let _ = api::dispatch(ActionRequest::Exit { go_offline: true });
-            }
+            id if dispatch_menu_exit(id) => {}
             _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
@@ -1658,6 +1671,22 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     tray.build(app)?;
     Ok(())
+}
+
+fn menu_exit_policy(id: &str) -> Option<bool> {
+    match id {
+        EXIT_STAY_ID => Some(false),
+        EXIT_OFFLINE_ID => Some(true),
+        _ => None,
+    }
+}
+
+fn dispatch_menu_exit(id: &str) -> bool {
+    let Some(go_offline) = menu_exit_policy(id) else {
+        return false;
+    };
+    let _ = api::dispatch(ActionRequest::Exit { go_offline });
+    true
 }
 
 /// The application menu, where the operating system keeps one of its own.
@@ -1669,6 +1698,12 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
+    // macOS's predefined Quit exits immediately inside the native menu
+    // implementation, bypassing the client's asynchronous lifecycle policy.
+    // These are ordinary menu events, and the two labels make the policy an
+    // explicit choice just as the tray does on every platform.
+    let stay = MenuItemBuilder::with_id(EXIT_STAY_ID, "Close and stay online").build(app)?;
+    let offline = MenuItemBuilder::with_id(EXIT_OFFLINE_ID, "Go offline and exit").build(app)?;
     let application = SubmenuBuilder::new(app, "Astrolabe")
         .about(None)
         .separator()
@@ -1678,7 +1713,8 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         .hide_others()
         .show_all()
         .separator()
-        .quit()
+        .item(&stay)
+        .item(&offline)
         .build()?;
 
     // ⌘R is what a Mac reaches for; F5 still works in the page itself.
@@ -1731,6 +1767,7 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         "chat" => {
             let _ = summon_surface(app, OwnedWindowSurface::Chat);
         }
+        id if dispatch_menu_exit(id) => {}
         _ => {}
     });
     Ok(())
@@ -1765,6 +1802,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn every_menu_exit_is_one_of_the_two_explicit_lifecycle_policies() {
+        assert_eq!(menu_exit_policy(EXIT_STAY_ID), Some(false));
+        assert_eq!(menu_exit_policy(EXIT_OFFLINE_ID), Some(true));
+        assert_eq!(menu_exit_policy("quit"), None);
+
+        // The native predefined item performs its own immediate exit. It must
+        // not return to the macOS application menu, where it would bypass the
+        // policy mapping above.
+        let source = include_str!("main.rs");
+        let predefined_quit = [".qu", "it()"].concat();
+        assert!(
+            !source.contains(&predefined_quit),
+            "the macOS menu contains a one-step native Quit"
+        );
+    }
 }
 
 fn main() {
@@ -1779,6 +1833,9 @@ fn main() {
     tauri::Builder::default()
         .append_invoke_initialization_script(PLATFORM_INIT)
         .setup(|app| {
+            astrolabe::client::update::identify_running_version(
+                app.package_info().version.to_string(),
+            );
             api::start(None, None).map_err(std::io::Error::other)?;
             // Window creation hops to the main thread; every platform makes
             // windows there.

@@ -411,6 +411,12 @@ fn dmg_directives() -> String {
         .join("\n")
 }
 
+fn client_build_script() -> String {
+    let path = repo_root().join("packaging/build-astrolabe.sh");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
 /// The pair ships together, macOS spelling: `sidecar::resolve` looks beside
 /// the executable, and `Contents/MacOS` is beside. A bundle missing either
 /// half — or carrying a sidecar that does not run — must be refused as a
@@ -418,7 +424,7 @@ fn dmg_directives() -> String {
 #[test]
 fn the_dmg_refuses_a_bundle_missing_either_half_of_the_pair() {
     let script = dmg_directives();
-    for binary in ["astrolabe", "lait", "libastrolabe.dylib"] {
+    for binary in ["astrolabe", "lait"] {
         assert!(
             script.contains(binary),
             "the packaging never checks for {binary}"
@@ -446,12 +452,60 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
         !script.contains("--deep"),
         "--deep signs every nesting level sight unseen; enumerate the payload instead"
     );
-    for signed in [
-        r#"sign "$STAGED/Contents/MacOS/libastrolabe.dylib""#,
-        r#"sign "$STAGED/Contents/MacOS/lait""#,
-    ] {
+    for signed in [r#"sign "$STAGED/Contents/MacOS/lait""#, r#"sign "$STAGED""#] {
         assert!(script.contains(signed), "not signed explicitly: {signed}");
     }
+    assert!(
+        !script.contains("libastrolabe.dylib")
+            && !script.contains("apps/astrolabe/macos/Runner/Release.entitlements"),
+        "the Tauri packager still depends on the retired Flutter payload"
+    );
+}
+
+/// A signed installer paired with an unsigned update tree would install once
+/// and then replace itself with a bundle Gatekeeper cannot verify. The DMG
+/// packager therefore exports its sealed staging app, and the tree consumes
+/// that output rather than the raw Tauri build directory.
+#[test]
+fn the_macos_update_tree_is_built_from_the_app_sealed_for_the_dmg() {
+    let dmg = dmg_directives();
+    assert!(
+        dmg.contains(r#"cp -R "$STAGED" "$SIGNED_APP_OUT""#),
+        "the sealed DMG payload cannot be exported for the update tree"
+    );
+
+    let build = client_build_script();
+    assert!(
+        build.contains(r#"--signed-app-out "$SIGNED_APP""#),
+        "the release build does not retain the app sealed by make-dmg"
+    );
+    assert!(
+        build.contains(r#"TREE_APP="$SIGNED_APP""#)
+            && build.contains(r#"make-tree.sh" --stage "$TREE_APP""#),
+        "the macOS update tree is still packed from the unsigned build output"
+    );
+}
+
+/// The feed's artifact keys are a closed platform vocabulary. Building on an
+/// extra Rust host must fail before producing a target-named tree that no
+/// manifest entry or installed client can ever select.
+#[test]
+fn the_client_builder_accepts_exactly_the_feed_supported_targets() {
+    let build = client_build_script();
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+    ] {
+        assert!(
+            build.contains(target),
+            "the builder cannot emit the feed's {target} artifact"
+        );
+    }
+    assert!(
+        build.contains("unsupported client target '$TARGET'") && build.contains("exit 1"),
+        "hosts outside the feed matrix are allowed to emit undiscoverable artifacts"
+    );
 }
 
 /// A signature from an "Apple Development" certificate succeeds locally and
@@ -748,9 +802,7 @@ fn the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed() {
     };
 
     // The bundle seal: the last `sign`, the one that takes `$STAGED` itself.
-    let seal = at(
-        r#"sign --entitlements "$REPO/apps/astrolabe/macos/Runner/Release.entitlements" "$STAGED""#,
-    );
+    let seal = at(r#"sign "$STAGED""#);
 
     assert!(
         at("Contents/Resources/LICENSE") < seal,

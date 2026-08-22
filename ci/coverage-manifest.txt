@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2577
-pr-platform    2107
-nightly        2605
+pr             2583
+pr-platform    2113
+nightly        2611
 mutants        106
 
 [gates]
@@ -135,6 +135,7 @@ astrolabe client::update::tests::below_the_floor_the_restart_is_taken_rather_tha
 astrolabe client::update::tests::declared_work_in_flight_holds_the_request_and_names_what_is_holding_it
 astrolabe client::update::tests::only_the_installed_shape_has_a_managing_stub
 astrolabe client::update::tests::staging_is_silent_and_so_is_a_channel_that_could_not_be_asked
+astrolabe client::update::tests::the_applied_version_does_not_restart_again_on_stale_staged_standing
 astrolabe client::update::tests::the_request_gets_more_insistent_the_longer_a_release_has_waited
 astrolabe lifecycle::tests::a_stopped_external_device_is_not_reported_as_left_running
 astrolabe lifecycle::tests::an_external_daemon_survives_either_exit
@@ -188,6 +189,7 @@ astrolabe sidecar::tests::something_that_is_not_a_version_is_unreadable_rather_t
 astrolabe sidecar::tests::the_sidecar_is_resolved_beside_the_running_executable
 astrolabe single_instance::tests::a_second_acquire_is_told_somebody_else_holds_it
 astrolabe single_instance::tests::a_second_launch_hands_its_arguments_to_the_first
+astrolabe single_instance::tests::instance_artifacts_are_stable_within_a_user_and_distinct_between_users
 astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
@@ -209,12 +211,14 @@ astrolabe-stub tests::stale_scratch_is_swept_when_the_installation_is_claimed
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::launch a_relaunch_request_reaches_the_apply_window_under_one_stub
 astrolabe::launch a_request_with_nothing_staged_relaunches_once_and_is_consumed
+astrolabe::launch a_secondary_stub_cannot_consume_the_primary_relaunch_request
 astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
 astrolabe::packaging every_platform_stages_the_terms_where_the_update_tree_will_find_them
 astrolabe::packaging every_shell_artifact_points_at_the_stub_and_never_into_a_release
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
 astrolabe::packaging the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs
 astrolabe::packaging the_client_and_its_sidecar_agree_about_the_layout
+astrolabe::packaging the_client_builder_accepts_exactly_the_feed_supported_targets
 astrolabe::packaging the_dmg_refuses_a_bundle_missing_either_half_of_the_pair
 astrolabe::packaging the_dmg_refuses_a_non_distribution_signing_identity
 astrolabe::packaging the_dmg_ships_the_notices_inside_the_bundle
@@ -234,6 +238,7 @@ astrolabe::packaging the_linux_bundle_refuses_a_missing_or_mismatched_pair
 astrolabe::packaging the_linux_package_carries_the_pair_and_notices
 astrolabe::packaging the_linux_package_names_its_target_and_refuses_unresolved_libraries
 astrolabe::packaging the_linux_package_ships_the_licence
+astrolabe::packaging the_macos_update_tree_is_built_from_the_app_sealed_for_the_dmg
 astrolabe::packaging the_notices_say_they_are_generated_and_name_what_generates_them
 astrolabe::packaging uninstalling_removes_the_program_and_never_the_persons_data
 comms iroh::tests::framing_golden_bytes
@@ -1199,6 +1204,7 @@ lait-workbench supervisor::tests::an_unproven_external_daemon_is_never_stopped
 lait-workbench supervisor::tests::background_observation_does_not_outlive_its_supervisor
 lait-workbench supervisor::tests::connection_history_records_only_transitions
 lait-workbench supervisor::tests::data_outside_the_managed_root_is_refused_rather_than_deleted
+lait-workbench supervisor::tests::detach_stops_heads_and_observing_but_leaves_owned_daemons_running
 lait-workbench supervisor::tests::device_definitions_survive_a_supervisor_restart
 lait-workbench supervisor::tests::device_ids_cannot_escape_the_managed_root
 lait-workbench supervisor::tests::event_history_is_bounded_and_reports_a_dropped_cursor

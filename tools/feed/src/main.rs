@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 /// that platform's installed base on the previous version with no error
 /// anywhere.
 /// The targets a release tree is built for. Fewer than lait's own matrix:
-/// a tree carries the Flutter client, which ships where the client ships.
+/// a tree carries the Tauri client, which ships where the client ships.
 const TREE_TARGETS: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",

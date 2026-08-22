@@ -39,8 +39,12 @@ fn main() {
 
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
-    // A stale request is answered by this very launch.
-    let _ = astrolabe_stub::take_relaunch_request(&root);
+    // A stale request is answered by this very launch, but only the stub that
+    // owns the installation may consume it. A secondary launch must leave the
+    // primary's apply-window request untouched.
+    if let Some(claim) = &claim {
+        let _ = astrolabe_stub::take_relaunch_request(&root, claim);
+    }
     let mut answering: Option<String> = None;
     loop {
         // The outcome has already been said (stderr and stub.log) by apply();
@@ -59,11 +63,13 @@ fn main() {
 
         match child.wait() {
             Ok(status) => {
-                answering = astrolabe_stub::take_relaunch_request(&root);
+                let Some(claim) = &claim else {
+                    std::process::exit(status.code().unwrap_or(0));
+                };
+                answering = astrolabe_stub::take_relaunch_request(&root, claim);
                 if answering.is_some() {
                     continue;
                 }
-                drop(claim);
                 std::process::exit(status.code().unwrap_or(0));
             }
             Err(error) => {

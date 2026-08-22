@@ -24,11 +24,12 @@
 #     --version <x.y.z> \
 #     --identity "Developer ID Application: <name> (<TEAMID>)" \
 #     --out <dir> \
+#     [--signed-app-out <path/to/Astrolabe.app>] \
 #     [--notarize <notarytool-keychain-profile>]
 #
-# where --app is the Release bundle `flutter build macos --release` produced
-# (apps/astrolabe/build/macos/Build/Products/Release/astrolabe.app), with the
-# lait sidecar and libastrolabe.dylib already staged inside by rust_build.sh.
+# where --app is the Release bundle `tauri build` produced
+# (apps/astrolabe-web/src-tauri/target/release/bundle/macos/Astrolabe.app),
+# with the lait sidecar already staged beside the Tauri host.
 #
 # Produces <out>/astrolabe-<version>.dmg and its .sha256 sidecar, mirroring
 # the Windows job's astrolabe-<version>-setup.exe pair.
@@ -40,13 +41,14 @@
 
 set -euo pipefail
 
-APP="" VERSION="" IDENTITY="" OUT="" NOTARIZE_PROFILE=""
+APP="" VERSION="" IDENTITY="" OUT="" NOTARIZE_PROFILE="" SIGNED_APP_OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --app)      APP="$2"; shift 2 ;;
     --version)  VERSION="$2"; shift 2 ;;
     --identity) IDENTITY="$2"; shift 2 ;;
     --out)      OUT="$2"; shift 2 ;;
+    --signed-app-out) SIGNED_APP_OUT="$2"; shift 2 ;;
     --notarize) NOTARIZE_PROFILE="$2"; shift 2 ;;
     *) echo "make-dmg: unknown argument $1" >&2; exit 1 ;;
   esac
@@ -70,7 +72,7 @@ mkdir -p "$OUT"
 #
 # Signing rewrites every Mach-O in the bundle. Doing that to the build output
 # would make "rebuild, then package" and "package twice" produce different
-# bytes, and an incremental Flutter build over a distribution-signed bundle is
+# bytes, and an incremental Tauri build over a distribution-signed bundle is
 # exactly the kind of half-state nobody can reason about later.
 STAGED="$WORK/astrolabe.app"
 cp -R "$APP" "$STAGED"
@@ -82,7 +84,7 @@ cp -R "$APP" "$STAGED"
 # executable, and `Contents/MacOS` is the macOS spelling of "beside" — and the
 # sidecar must actually run. A bundle that fails either is not a packaging
 # input, it is a broken build.
-for binary in astrolabe lait libastrolabe.dylib; do
+for binary in astrolabe lait; do
   [ -f "$STAGED/Contents/MacOS/$binary" ] || {
     echo "make-dmg: $binary is missing from Contents/MacOS — not a release bundle" >&2
     exit 1
@@ -110,28 +112,35 @@ cp "$REPO/LICENSE" "$STAGED/Contents/Resources/LICENSE"
 # reading.
 #
 # `--options runtime` (the hardened runtime) is on every executable because
-# notarization requires it on every executable, not just the app. It costs
-# nothing here: no JIT in a Flutter release build, and library validation is
-# satisfied because every dylib the app loads is signed by this same identity
-# a few lines up.
+# notarization requires it on every executable, not just the app. The Tauri
+# bundle has one nested executable, `lait`; signing the bundle signs its main
+# `astrolabe` executable and seals the already-signed sidecar.
 sign() {
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$@"
 }
 
-for framework in "$STAGED"/Contents/Frameworks/*.framework; do
-  sign "$framework"
-done
-sign "$STAGED/Contents/MacOS/libastrolabe.dylib"
 sign "$STAGED/Contents/MacOS/lait"
-# The app itself carries the entitlements. The sidecar deliberately does not:
-# the entitlements file exists to document the sandbox decision (it is off),
-# and network client/server are sandbox grants that mean nothing without it.
-sign --entitlements "$REPO/apps/astrolabe/macos/Runner/Release.entitlements" "$STAGED"
+# The app itself deliberately claims no exceptional entitlements. Tauri does
+# not sandbox this bundle, and the retired Flutter Runner's entitlement file
+# describes a different executable and must never be reused here.
+sign "$STAGED"
 
 # Prove the seal before shipping it. `--strict` is the assessment Gatekeeper
 # actually runs; a signature that verifies loosely and fails strictly is a
 # failure that would otherwise first appear on someone else's machine.
 codesign --verify --strict --verbose=1 "$STAGED"
+
+# The update tree must carry these signed bytes too. The caller supplies a
+# disposable destination because this script's own work directory is removed
+# on exit; exporting the sealed app keeps the DMG and the tree on one payload.
+if [ -n "$SIGNED_APP_OUT" ]; then
+  [ ! -e "$SIGNED_APP_OUT" ] || {
+    echo "make-dmg: signed app output already exists: $SIGNED_APP_OUT" >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$SIGNED_APP_OUT")"
+  cp -R "$STAGED" "$SIGNED_APP_OUT"
+fi
 
 # --- The disk image ----------------------------------------------------------
 #

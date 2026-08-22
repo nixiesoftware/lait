@@ -375,13 +375,13 @@ impl Supervisor {
         *lock_recovering(&self.inner.observer) = Some(observer);
     }
 
-    /// Stop observing, then stop every daemon this supervisor owns.
+    /// Stop observing and stop every head this supervisor owns.
     ///
-    /// In that order: a sampler still running while daemons come down races
+    /// In that order: a sampler still running while owned heads come down races
     /// each stop and publishes lifecycle events for transitions that are
-    /// already accounted for. Externally discovered daemons are left running,
-    /// as they are on every other path.
-    pub async fn shutdown(&self) {
+    /// already accounted for. This is the client-detach half of shutdown: it
+    /// deliberately leaves every daemon running.
+    pub async fn detach(&self) {
         let observer = lock_recovering(&self.inner.observer).take();
         if let Some(observer) = observer {
             observer.abort();
@@ -393,6 +393,14 @@ impl Supervisor {
         for id in heads {
             let _ = self.stop_head(&id).await;
         }
+    }
+
+    /// Detach the client, then stop every daemon this supervisor owns.
+    ///
+    /// Externally discovered daemons are left running, as they are on every
+    /// other path.
+    pub async fn shutdown(&self) {
+        self.detach().await;
         self.stop_all_owned().await;
     }
 
@@ -2269,6 +2277,43 @@ mod tests {
             lock_recovering(&supervisor.inner.observer).is_none(),
             "sampler survived shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn detach_stops_heads_and_observing_but_leaves_owned_daemons_running() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive.clone(), directory.path());
+        supervisor.observe_in_background(Duration::from_millis(5));
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("add device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+        lock_recovering(&supervisor.inner.heads).insert(
+            "issues".into(),
+            crate::heads::dead_head_for_test("issues".into()),
+        );
+
+        supervisor.detach().await;
+
+        assert!(
+            alive.load(Ordering::SeqCst),
+            "detach stopped an owned daemon"
+        );
+        assert!(
+            supervisor.list_heads().is_empty(),
+            "owned head survived detach"
+        );
+        assert!(
+            lock_recovering(&supervisor.inner.observer).is_none(),
+            "sampler survived detach"
+        );
+
+        supervisor.shutdown().await;
     }
 
     /// The sampler holds a weak reference, so it cannot keep its own supervisor

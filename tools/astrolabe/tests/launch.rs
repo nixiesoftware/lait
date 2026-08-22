@@ -1969,6 +1969,64 @@ fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
     );
 }
 
+/// A second shell/protocol launch may start while the primary stub is waiting
+/// on its client, but it does not own the installation. It must not consume
+/// the request that tells the primary to open the apply window — neither at
+/// secondary startup nor after the secondary client exits.
+#[test]
+fn a_secondary_stub_cannot_consume_the_primary_relaunch_request() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    let gate = root.join("relaunch.gate");
+    let request = root.join(astrolabe::client::update::RELAUNCH_REQUEST);
+    let mut primary = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
+        .env("CHAIN_PROBE_RELAUNCH_GATE", &gate)
+        .env("CHAIN_PROBE_REQUEST", &request)
+        .env("CHAIN_PROBE_REQUEST_BODY", "0.0.9")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the primary stub starts");
+    assert_eq!(wait_for_announcement(root).trim(), "0.0.1");
+
+    std::fs::write(&request, "0.0.9").expect("the primary's relaunch request");
+    let secondary = Command::new(root.join(installed_stub_name()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the secondary stub runs");
+    assert!(secondary.success(), "the secondary launch failed");
+    assert_eq!(
+        std::fs::read_to_string(&request).expect("the request survived the secondary"),
+        "0.0.9",
+        "a claimless secondary consumed the primary's relaunch request"
+    );
+
+    std::fs::write(&gate, b"go").expect("the primary client exits");
+    assert!(
+        primary.wait().expect("the primary stub exits").success(),
+        "the primary did not answer its own relaunch request"
+    );
+    assert!(
+        !request.exists(),
+        "the owning primary did not consume the request"
+    );
+}
+
 /// A request with nothing staged is still answered — the person asked to
 /// restart, and turning that into a quit would be the launcher refusing to
 /// launch — but answered exactly once: consuming the request is what bounds

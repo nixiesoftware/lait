@@ -2083,6 +2083,7 @@ fn project(app: &App) -> ClientView {
             app.update_standing(),
             crate::runtime::now_secs(),
             &app.in_flight_keys(),
+            crate::client::update::running_version(),
             std::env::var(crate::client::update::RELAUNCHED_ENV)
                 .ok()
                 .as_deref(),

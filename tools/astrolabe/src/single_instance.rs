@@ -1,4 +1,4 @@
-//! One Astrolabe per machine, per identity.
+//! One Astrolabe per OS user, per identity.
 //!
 //! Acquired in the runner *before* the interface starts, so a second launch
 //! signals the first and exits rather than racing it. Racing is not theoretical
@@ -39,9 +39,9 @@ pub fn acquire() -> Result<Outcome> {
 
 /// The base name every artifact of the guard derives from — the Windows
 /// mutex, the Unix lock file, the channel. Fixed and process-independent: the
-/// whole point is for two unrelated launches to collide on it, and the Unix
-/// lock file's spelling must never move, or a client from before the rename
-/// and one from after stop excluding each other exactly across an upgrade.
+/// whole point is for two unrelated launches by the same user to collide on
+/// it. Its user-scoped spelling must not move after shipping, or clients on
+/// either side of an upgrade stop excluding each other.
 const INSTANCE: &str = "lait-astrolabe";
 
 /// What a launch is, once the guard has spoken.
@@ -124,13 +124,37 @@ fn claim_named(instance: &str, args: impl IntoIterator<Item = String>) -> Result
     }
 }
 
-/// Per user, matching the mutex's per-session scope — two people on one
-/// machine each get their own channel.
-fn channel_name(instance: &str) -> String {
-    let user = std::env::var("USERNAME")
+fn scoped_name(instance: &str, artifact: &str, user: &str) -> String {
+    format!("{instance}-{artifact}-{user}")
+}
+
+#[cfg(windows)]
+fn user_scope() -> String {
+    std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "unknown".into());
-    format!("{instance}-instance-{user}")
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(unix)]
+fn user_scope() -> String {
+    // SAFETY: `geteuid` has no preconditions and returns the effective uid of
+    // this process. Unlike `$USER`, it cannot be changed to collide with a
+    // different login's instance artifacts.
+    unsafe { libc::geteuid() }.to_string()
+}
+
+/// Per user, matching the guard's scope — two people on one machine each get
+/// their own channel.
+fn channel_name(instance: &str) -> String {
+    scoped_name(instance, "instance", &user_scope())
+}
+
+#[cfg(not(windows))]
+fn lock_path(instance: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{}.lock",
+        scoped_name(instance, "guard", &user_scope())
+    ))
 }
 
 /// Windows names a pipe; elsewhere the channel is a socket file, unlinked
@@ -255,9 +279,7 @@ mod imp {
     /// matters: the OS releases it when the process dies, so a crash cannot
     /// leave a stale guard.
     pub fn acquire_named(instance: &str) -> Result<Outcome> {
-        // The historic spelling: a client from before this name was derived
-        // and one from after must still exclude each other.
-        let path = std::env::temp_dir().join(format!("{instance}.lock"));
+        let path = super::lock_path(instance);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -340,5 +362,16 @@ mod tests {
             .expect("the drain thread")
             .expect("a message arrived");
         assert_eq!(message, "astrolabe.exe\nlait://world/issues");
+    }
+
+    #[test]
+    fn instance_artifacts_are_stable_within_a_user_and_distinct_between_users() {
+        let alice = scoped_name(INSTANCE, "guard", "1000");
+        assert_eq!(alice, scoped_name(INSTANCE, "guard", "1000"));
+        assert_ne!(alice, scoped_name(INSTANCE, "guard", "1001"));
+        assert_ne!(
+            scoped_name(INSTANCE, "instance", "1000"),
+            scoped_name(INSTANCE, "instance", "1001")
+        );
     }
 }

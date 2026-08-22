@@ -243,6 +243,7 @@ dependencies = [
  "interprocess",
  "lait",
  "lait-workbench",
+ "libc",
  "mechanics",
  "serde",
  "serde_json",
