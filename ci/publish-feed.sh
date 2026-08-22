@@ -132,11 +132,33 @@ fi
 }
 
 # The primary documented path: build-astrolabe.sh dropped installers into the
-# artifacts dir, so read the client version off them exactly as the release
-# path does — following the two documented commands must not skip the client
-# and then fail verification on it. An explicit --astrolabe still wins.
+# artifacts dir, and the pair rule makes their version $VERSION — so pin to
+# it rather than trusting a listing over a directory nothing ever cleans,
+# where `head -1` would happily publish LAST release's client. An installer
+# for another version is refused by name, not skipped. An explicit
+# --astrolabe still wins; --from-release keeps listing-detection because old
+# tags predate the pair rule and legitimately carry another client version.
 if [ -z "$ASTROLABE" ] && [ -z "$FROM_RELEASE" ]; then
-  detect_astrolabe "$ARTIFACTS"
+  if [ -n "$LAIT_ONLY" ]; then
+    detect_astrolabe "$ARTIFACTS"
+  elif [ -f "$ARTIFACTS/astrolabe-$VERSION-setup.exe" ] \
+    || [ -f "$ARTIFACTS/astrolabe-$VERSION.dmg" ] \
+    || [ -f "$ARTIFACTS/astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz" ]; then
+    ASTROLABE="$VERSION"
+    echo "publish-feed: including installer(s) for astrolabe $ASTROLABE"
+  else
+    stale="$(cd "$ARTIFACTS" && \
+      ls astrolabe-*-setup.exe astrolabe-*.dmg astrolabe-*.tar.gz 2>/dev/null \
+      | grep -v '^astrolabe-tree-' | head -1 || true)"
+    if [ -n "$stale" ]; then
+      echo "publish-feed: $ARTIFACTS holds $stale but no installer for $VERSION." >&2
+      echo "  A stale artifacts dir is how last release's client ships under this" >&2
+      echo "  release's manifest. Rebuild with build-astrolabe.sh --version $VERSION," >&2
+      echo "  clean the directory, or pass --astrolabe to name the version you mean." >&2
+      exit 1
+    fi
+    detect_astrolabe "$ARTIFACTS"
+  fi
 elif [ -n "$ASTROLABE" ] && [ -n "$LAIT_ONLY" ]; then
   echo "publish-feed: --astrolabe and --lait-only contradict each other" >&2
   exit 1
@@ -187,11 +209,16 @@ gcloud storage cp --cache-control="$IMMUTABLE" \
 #    the pointer moves. An upload that "succeeded" but does not serve is
 #    exactly the failure this ordering exists to keep out of the feed.
 #    The list mirrors what step 3 uploaded, never the directory's contents: a
-#    local file that was deliberately not published must not fail the publish.
+#    local file that was deliberately not published — another version's
+#    installer in a reused directory included — must not fail the publish.
 VERIFY="manifest.json $(cd "$ARTIFACTS" && ls lait-*.zip lait-*.tar.gz 2>/dev/null || true)"
 if [ -n "$ASTROLABE" ]; then
+  for uploaded in "astrolabe-$ASTROLABE-setup.exe" "astrolabe-$ASTROLABE.dmg" \
+    "astrolabe-$ASTROLABE-x86_64-unknown-linux-gnu.tar.gz"; do
+    [ -f "$ARTIFACTS/$uploaded" ] && VERIFY="$VERIFY $uploaded"
+  done
   VERIFY="$VERIFY $(cd "$ARTIFACTS" && \
-    ls astrolabe-*-setup.exe astrolabe-*.dmg astrolabe-*.tar.gz 2>/dev/null || true)"
+    ls astrolabe-tree-"$ASTROLABE"-*.tar.gz 2>/dev/null || true)"
 fi
 for object in $VERIFY; do
   curl -fsSLo /dev/null "$BASE_URL/releases/$VERSION/$object" \
