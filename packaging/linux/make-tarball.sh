@@ -2,10 +2,8 @@
 #
 # Astrolabe — relocatable Linux desktop bundle.
 #
-# Flutter's Linux release is a directory, not one executable: the runner,
-# engine and plugin libraries, AOT image, ICU data and assets must travel as a
-# unit. This script refuses an incomplete unit, adds the Rust core + lait pair
-# and notices that the build staged, then seals the whole directory as one
+# The Tauri host and lait travel as a pair beside their terms. This script
+# refuses an incomplete stage, then seals it under the stub as one
 # target-named tarball.
 #
 # This first Linux vehicle is deliberately a relocatable archive rather than a
@@ -16,7 +14,7 @@
 #
 # Usage:
 #   packaging/linux/make-tarball.sh \
-#     --bundle apps/astrolabe/build/linux/x64/release/bundle \
+#     --bundle <stage>/current \
 #     --version 0.8.0 \
 #     --target x86_64-unknown-linux-gnu \
 #     --out dist
@@ -56,7 +54,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
-for required in astrolabe lait libastrolabe.so data lib; do
+for required in astrolabe lait; do
   [ -e "$BUNDLE/$required" ] || {
     echo "make-tarball: bundle is missing $required" >&2
     exit 1
@@ -87,7 +85,7 @@ echo "make-tarball: pair confirmed: $reported"
 
 # Presence is not enough for a native bundle. Refuse any library the build host
 # cannot resolve before the archive reaches a clean machine with less context.
-for native in astrolabe lait libastrolabe.so; do
+for native in astrolabe lait; do
   missing="$(ldd "$BUNDLE/$native" 2>&1 | grep 'not found' || true)"
   [ -z "$missing" ] || {
     echo "make-tarball: unresolved libraries for $native:" >&2
@@ -107,8 +105,7 @@ mkdir "$STAGED"
 #   astrolabe        the stub. The path a launcher, a .desktop file or a
 #                    person's shell alias points at, and the one file an
 #                    update never moves.
-#   current/         the release: the astrolabe+lait pair, flat, plus the
-#                    engine payload Flutter resolves relative to the runner.
+#   current/         the release: the astrolabe+lait pair, flat, with terms.
 #   previous/        kept bootable for rollback; staged/ waits for a launch.
 #
 # The stub takes the *name* `astrolabe` for the same reason it does on
@@ -118,8 +115,6 @@ mkdir "$STAGED"
 # `sidecar::resolve` looks and `update::custody_of` is its inverse.
 mkdir "$STAGED/current"
 
-# The directory is Flutter's unit of distribution. Enumerating today's engine
-# files would make tomorrow's newly required file the one an old script drops.
 cp -a "$BUNDLE/." "$STAGED/current/"
 cp "$REPO/THIRD-PARTY-NOTICES.md" "$STAGED/current/THIRD-PARTY-NOTICES.md"
 cp "$REPO/LICENSE" "$STAGED/current/LICENSE"

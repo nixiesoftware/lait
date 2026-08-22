@@ -176,7 +176,9 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: apps/astrolabe-web/src-tauri
+          workspaces: |
+            .
+            apps/astrolabe-web/src-tauri
 
       # What tauri links against on Linux. Pinned to the 4.1 series because
       # tauri 2 does not build against 4.0.
@@ -197,6 +199,18 @@ jobs:
       - name: Build the frontend the host embeds
         run: npm ci && npm run build
         working-directory: apps/astrolabe-web
+
+      # `bundle.externalBin` makes tauri-build refuse any compile — check
+      # included — until a sidecar sits at `binaries/lait-<triple>`, so the
+      # gate needs the real pair staged, not just the frontend. A debug build:
+      # this job's question is "does the host compile", and the release pair
+      # is `packaging/build-astrolabe.sh`'s to build and assert.
+      - name: Stage the lait sidecar the bundler requires
+        run: |
+          cargo build --bin lait --locked
+          mkdir -p apps/astrolabe-web/src-tauri/binaries
+          cp target/debug/lait \
+            "apps/astrolabe-web/src-tauri/binaries/lait-$(rustc -vV | sed -n 's/^host: //p')"
 
       - name: Check
         run: cargo check --all-targets

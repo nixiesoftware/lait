@@ -1,11 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Astrolabe",
+  "mainBinaryName": "astrolabe",
   "version": "0.1.0",
   "identifier": "dev.lait.astrolabe",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run stage-sidecar && npm run dev",
+    "beforeBuildCommand": "npm run stage-sidecar -- --bundle && npm run build",
     "devUrl": "http://127.0.0.1:5180",
     "frontendDist": "../dist"
   },
@@ -28,7 +29,13 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "appimage"],
+    "externalBin": ["binaries/lait"],
+    "resources": {
+      "../../../LICENSE": "LICENSE",
+      "../../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

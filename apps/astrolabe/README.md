@@ -1,4 +1,13 @@
-# astrolabe
+# astrolabe — DEPRECATED
+
+> **This client is deprecated and unwired. Tauri
+> ([`apps/astrolabe-web`](../astrolabe-web)) is the canonical and only live
+> Astrolabe interface.** Nothing builds, tests, or ships this project, its Rust
+> bridge has been removed from `tools/astrolabe`, and it cannot currently
+> resolve its own dependencies. Read
+> [`DEPRECATED.md`](DEPRECATED.md) before touching anything here — the
+> generated code under `lib/src/bridge/` is a snapshot of a boundary that has
+> since moved.
 
 The Dart interface over the Rust core in [`tools/astrolabe`](../../tools/astrolabe).
 Everything below `lib/src/core/client.dart` is Rust: process supervision,

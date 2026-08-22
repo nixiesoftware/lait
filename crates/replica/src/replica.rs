@@ -1055,10 +1055,27 @@ struct StoreMeta {
     manifest_root: Option<Object>,
 }
 
-/// The immediately prior indexed-catalog format. Version 3 adds only the
-/// generation journal root, so a version-2 store is a lossless input: it opens
-/// by recording its current committed state as the first complete generation
-/// baseline while writing version 3 metadata.
+/// The generation-journal format, version 3: [`StoreMeta`] without the two
+/// receipt aggregates and the ownership root, each of which is derivable or
+/// empty. A lossless input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorGenerationStoreMeta {
+    format_version: u8,
+    space: Option<SpaceId>,
+    frontier: ReplicaFrontier,
+    quota: QuotaConfig,
+    body_index_root: Option<IndexRef>,
+    manifest_body_root: Option<IndexRef>,
+    content_index_root: Option<IndexRef>,
+    receipt_index_root: Option<IndexRef>,
+    generation_index_root: Option<IndexRef>,
+    manifest_root: Option<Object>,
+}
+
+/// The indexed-catalog format, version 2 — one generation behind
+/// [`PriorGenerationStoreMeta`]. It carries no generation journal root, so a
+/// version-2 store opens by recording its current committed state as the first
+/// complete generation baseline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PriorIndexedStoreMeta {
     format_version: u8,
@@ -1074,7 +1091,23 @@ struct PriorIndexedStoreMeta {
 
 /// The store meta's encoded generation.
 const STORE_META_FORMAT_VERSION: u8 = 8;
+/// The generation immediately behind [`STORE_META_FORMAT_VERSION`].
+const PRIOR_GENERATION_STORE_META_FORMAT_VERSION: u8 = 3;
+/// The oldest generation still read here.
 const READABLE_STORE_META_FORMAT_VERSION: u8 = 2;
+
+/// The version a store's metadata claims. First field of every generation, so
+/// it reads even when the rest does not — which is what lets a refusal name
+/// both figures.
+fn claimed_store_meta_version(bytes: &[u8]) -> Option<u8> {
+    #[derive(Deserialize)]
+    struct Claim {
+        format_version: u8,
+    }
+    postcard::take_from_bytes::<Claim>(bytes)
+        .ok()
+        .map(|(claim, _)| claim.format_version)
+}
 
 fn decode_store_meta(bytes: &[u8]) -> Result<(StoreMeta, bool), Failure> {
     if let Ok(meta) = postcard::from_bytes::<StoreMeta>(bytes) {
@@ -1082,15 +1115,57 @@ fn decode_store_meta(bytes: &[u8]) -> Result<(StoreMeta, bool), Failure> {
             return Ok((meta, true));
         }
     }
-    let prior: PriorIndexedStoreMeta = postcard::from_bytes(bytes).map_err(|error| {
-        integrity_cause(
-            Defect::Encoding,
-            "decode prior indexed store metadata",
-            error,
-        )
-    })?;
+    if let Ok(prior) = postcard::from_bytes::<PriorGenerationStoreMeta>(bytes) {
+        if prior.format_version == PRIOR_GENERATION_STORE_META_FORMAT_VERSION {
+            return Ok((
+                StoreMeta {
+                    format_version: STORE_META_FORMAT_VERSION,
+                    space: prior.space,
+                    frontier: prior.frontier,
+                    quota: prior.quota,
+                    body_index_root: prior.body_index_root,
+                    manifest_body_root: prior.manifest_body_root,
+                    content_index_root: prior.content_index_root,
+                    receipt_index_root: prior.receipt_index_root,
+                    receipt_count: prior.receipt_index_root.map_or(0, |root| root.count),
+                    receipt_material_bytes: 0,
+                    generation_index_root: prior.generation_index_root,
+                    ownership_index_root: None,
+                    manifest_root: prior.manifest_root,
+                },
+                false,
+            ));
+        }
+    }
+    let prior: PriorIndexedStoreMeta =
+        postcard::from_bytes(bytes).map_err(|error| match claimed_store_meta_version(bytes) {
+            Some(found) => Failure::IntegrityCause {
+                defect: Defect::Encoding,
+                operation: "decode store metadata",
+                reason: format!(
+                    "this store's metadata is version {found}; this build writes \
+                     {STORE_META_FORMAT_VERSION} and reads \
+                     {READABLE_STORE_META_FORMAT_VERSION}..={STORE_META_FORMAT_VERSION}. \
+                     The data is not damaged — this build cannot interpret it."
+                ),
+            },
+            None => integrity_cause(
+                Defect::Encoding,
+                "decode prior indexed store metadata",
+                error,
+            ),
+        })?;
     if prior.format_version != READABLE_STORE_META_FORMAT_VERSION {
-        return Err(Failure::Integrity(Defect::Encoding));
+        return Err(Failure::IntegrityCause {
+            defect: Defect::Encoding,
+            operation: "decode store metadata",
+            reason: format!(
+                "this store's metadata is version {}; this build writes \
+                 {STORE_META_FORMAT_VERSION} and reads \
+                 {READABLE_STORE_META_FORMAT_VERSION}..={STORE_META_FORMAT_VERSION}.",
+                prior.format_version
+            ),
+        });
     }
     Ok((
         StoreMeta {
@@ -10780,6 +10855,76 @@ mod generation_format_tests {
         assert_eq!(current.frontier, prior.frontier);
         assert_eq!(current.quota, prior.quota);
         assert!(current.generation_index_root.is_none());
+    }
+
+    /// The generation immediately behind the current one must open, and must
+    /// keep the generation root that distinguishes it from version 2.
+    #[test]
+    fn the_previous_generation_opens_and_keeps_its_generation_root() {
+        let root = IndexRef {
+            hash: [7u8; 32],
+            count: 4,
+        };
+        let prior = PriorGenerationStoreMeta {
+            format_version: PRIOR_GENERATION_STORE_META_FORMAT_VERSION,
+            space: None,
+            frontier: ReplicaFrontier::EMPTY,
+            quota: QuotaConfig::default(),
+            body_index_root: None,
+            manifest_body_root: None,
+            content_index_root: None,
+            receipt_index_root: Some(root),
+            generation_index_root: Some(root),
+            manifest_root: None,
+        };
+        let bytes = postcard::to_stdvec(&prior).expect("v3 meta");
+        let (current, receipt_ledger_complete) =
+            decode_store_meta(&bytes).expect("the previous generation remains readable");
+
+        assert!(!receipt_ledger_complete);
+        assert_eq!(current.format_version, STORE_META_FORMAT_VERSION);
+        assert_eq!(current.generation_index_root, Some(root));
+        assert_eq!(current.receipt_count, root.count);
+        assert!(current.ownership_index_root.is_none());
+    }
+
+    /// A version this build cannot read is refused by naming both figures.
+    /// Reporting it as damage sends somebody looking for a defect that is not
+    /// there.
+    #[test]
+    fn an_unreadable_version_names_itself_and_what_this_build_reads() {
+        let mut prior = PriorGenerationStoreMeta {
+            format_version: STORE_META_FORMAT_VERSION + 1,
+            space: None,
+            frontier: ReplicaFrontier::EMPTY,
+            quota: QuotaConfig::default(),
+            body_index_root: None,
+            manifest_body_root: None,
+            content_index_root: None,
+            receipt_index_root: None,
+            generation_index_root: None,
+            manifest_root: None,
+        };
+        let bytes = postcard::to_stdvec(&prior).expect("meta");
+        let Err(failure) = decode_store_meta(&bytes) else {
+            panic!("a version from the future was accepted");
+        };
+        let said = format!("{failure:?}");
+        assert!(
+            said.contains(&(STORE_META_FORMAT_VERSION + 1).to_string())
+                && said.contains(&STORE_META_FORMAT_VERSION.to_string()),
+            "the refusal named neither figure: {said}"
+        );
+
+        prior.format_version = 1;
+        let bytes = postcard::to_stdvec(&prior).expect("meta");
+        let Err(failure) = decode_store_meta(&bytes) else {
+            panic!("a version below the readable floor was accepted");
+        };
+        assert!(
+            format!("{failure:?}").contains(&READABLE_STORE_META_FORMAT_VERSION.to_string()),
+            "the refusal did not say what this build reads"
+        );
     }
 }
 

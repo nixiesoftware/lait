@@ -11,14 +11,19 @@ import {
   loadingClientView,
   setFullscreen,
   summonOwnedWindow,
+  restartForUpdate,
+  opensWorldsInOwnWindows,
   summonWorldSettings,
+  updateInProgress,
   watchMenu,
   worldArtwork,
   type ClientAction,
   type ClientTransport,
   type ClientView,
+  type Head,
   type LibraryWorld,
   type OwnedWindowSurface,
+  type UpdateIntent,
   type WorldArtwork,
   type WorldPerson,
 } from "./client";
@@ -109,7 +114,7 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
         refreshing={refreshing} onRefresh={() => void dispatch({ type: "refresh" })} />
       <div className="client-body">
         <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} dark={dark} />
-        <OperationalBar view={view} onSummonWindow={summonOwnedWindow} />
+        <OperationalBar view={view} onSummonWindow={summonOwnedWindow} dispatch={dispatch} />
       </div>
     </section>
   </main>;
@@ -158,6 +163,19 @@ function withDispatchFailure(view: ClientView, what: string, error: unknown, act
 }
 
 function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedWindowSurface; view: ClientView; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
+  const refreshing = view.inFlight.includes(actionKey.refresh);
+  // No menu here, and Book and Chat draw no refresh control — F5 is the one
+  // way to ask for a re-read, with the main window's in-flight refusal.
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.key === "F5") {
+        event.preventDefault();
+        if (!refreshing) void dispatch({ type: "refresh" });
+      }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [dispatch, refreshing]);
   const close = () => { void closeOwnedWindow(); };
   return <main className="page owned-window" data-theme={dark ? "dark" : "light"}>
     {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
@@ -240,9 +258,11 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
 }) {
   if (view.library === null) return <LoadingLibrary />;
   if (view.library.length === 0) return <EmptyLibrary />;
-  // A launching World sits with the running: the act is already under way,
-  // and the rail should not file it under the ordinary rows mid-transition.
-  const running = view.library.filter((world) => isOpening(view, world) || isRunning(view));
+  // A launching World sits with the running: the act is already under way.
+  const running = view.library.filter((world) => {
+    const state = lifecycle(view, world);
+    return state === "Launching" || state === "Running";
+  });
   const ready = view.library.filter((world) => !running.includes(world) && world.opensAt !== null);
   const unavailable = view.library.filter((world) => !running.includes(world) && world.opensAt === null);
   return <section className="library">
@@ -303,13 +323,27 @@ function WorldMark({ world }: { world: LibraryWorld }) {
 function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world: LibraryWorld; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
   const entryPath = world.opensAt;
   const opening = isOpening(view, world);
-  const serving = view.heads.filter((head) => head.orbit === null);
-  const running = !opening && serving.length > 0;
+  const serving = servingWorld(view, world.worldMount);
+  const live = serving.filter((head) => head.state === "running");
+  const running = !opening && live.length > 0;
   const stoppable = serving.find((head) => head.owned);
   const stopping = stoppable !== undefined && view.inFlight.includes(actionKey.stopHead(stoppable.id));
-  const updating = view.inFlight.includes(actionKey.updateWorld(world.worldMount));
   const update = world.update;
+  // Consent returns in one IPC turn; the fetch and migration run on the
+  // daemon afterwards. The control stays pending through both, or a person
+  // watches "UPDATE" flash and reads the update as done before it started.
+  const updating = view.inFlight.includes(actionKey.updateWorld(world.worldMount))
+    || updateInProgress(update);
   const state = lifecycle(view, world);
+  // What became of the last update, when it did not simply land: a bundle
+  // this build cannot run, or a refused operation. Said in place — a person
+  // who pressed UPDATE and got silence learns to distrust the control.
+  const updateNote = update === null ? null
+    : update.unmet !== null && update.unmet.length > 0
+      ? `The newest bundle${update.available === null ? "" : ` (${update.available})`} cannot run on this build: ${update.unmet.join("; ")}`
+      : update.phase === "refused"
+        ? `The last update was refused: ${update.message ?? "no reason was recorded"}`
+        : null;
   return <section className="world-detail">
     <WorldHero world={world} />
     <div className="world-action-band">
@@ -324,7 +358,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
             : `Update to ${update.available} — this device is serving ${update.serving ?? "the built-in version"}`}>
           <Button className="update-control" aria-label={`Update ${world.displayName}`}
             onPress={() => void dispatch({ type: "updateWorld", world: world.worldMount })}>↻ <span>UPDATE</span></Button></span>
-        : state === "Ready" ? <span className="tip" title="Start this World and hand it to my browser">
+        : state === "Ready" || state === "Stopped" ? <span className="tip" title={state === "Stopped" ? "This World's head exited — start it again" : (opensWorldsInOwnWindows() ? "Start this World in its own window" : "Start this World and hand it to my browser")}>
           <Button className="launch-control" aria-label="Launch World" onPress={() => {
             if (world.opensAt !== null) void dispatch({ type: "open", world: world.worldMount, entryPath: world.opensAt });
           }}>▶ <span>LAUNCH</span></Button></span>
@@ -336,12 +370,16 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
           worldMount: world.worldMount,
           entryPath: world.opensAt,
           version: world.version,
-          activeOrigin: serving[0]?.origin ?? null,
+          activeOrigin: (live[0] ?? serving[0])?.origin ?? null,
           dark,
         })}>⚙</Button>
       </span>
     </div>
-    <div className="world-detail-content"><PeopleGlance people={world.people} /></div>
+    <div className="world-detail-content">
+      {updating && update?.progress != null && <p className="update-note">{update.progress}</p>}
+      {!updating && updateNote !== null && <p className="update-note">{updateNote}</p>}
+      <PeopleGlance people={world.people} />
+    </div>
   </section>;
 }
 
@@ -415,15 +453,22 @@ function EmptyLibrary() { return <section className="empty-library"><h1>Library<
  * not a notification stack. What is true sits left of the rule; what can be
  * done sits right of it.
  */
-function OperationalBar({ view, onSummonWindow }: { view: ClientView; onSummonWindow(surface: OwnedWindowSurface): void }) {
+function OperationalBar({ view, onSummonWindow, dispatch }: { view: ClientView; onSummonWindow(surface: OwnedWindowSurface): void; dispatch(action: ClientAction): Promise<void> }) {
   const status = identityStatus(view);
   const activity = activityLine(view);
   const spaces = view.host?.orbitCount ?? view.orbits.length;
+  const rolling = view.inFlight.includes(actionKey.reload);
   return <footer className="operational-bar" aria-live={view.inFlight.length > 0 || view.failures.length > 0 ? "polite" : "off"}>
     <span className={`identity-status tone-${status.tone}`}>
       {view.loading ? <span className="spinner tiny" /> : <span className="status-icon">⌁</span>}{status.label}
     </span><span className="bar-divider" />
-    <span className="activity">{activity}</span><span>{view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
+    <span className="activity">{activity}</span>
+    <UpdateAffordance update={view.update} />
+    {rolling ? <span className="roll-forward rolling"><span className="spinner tiny" /> Rolling forward…</span>
+      : view.image?.sourceChanged === true && <span className="tip" title="A newer build is on disk — restart everything onto it">
+        <Button className="roll-forward" aria-label="Roll forward onto the new build"
+          onPress={() => void dispatch({ type: "reload" })}>⟳ Roll forward</Button></span>}
+    <span>{view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
     <span className="bar-spaces">{spaces} {spaces === 1 ? "Space" : "Spaces"}</span>
     {view.host !== null && <code className="bar-version">v{view.host.version}</code>}
     <span className="bar-divider" />
@@ -434,15 +479,73 @@ function OperationalBar({ view, onSummonWindow }: { view: ClientView; onSummonWi
   </footer>;
 }
 
-function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" {
+/**
+ * This client's own updating, which is never a choice about whether to take
+ * one (CLIENT-47). The client is evergreen: staging is silent and continuous,
+ * and a release applies at the next natural boundary. The only machine that
+ * needs asking is the one that never reaches a boundary — a session left open
+ * for days — so this is a request to restart, escalating with how long the
+ * release has waited, and nothing at all in the ordinary case.
+ *
+ * `attention` is deliberately not an update: a signature that did not verify
+ * or a pointer that went backwards means somebody should look, and folding
+ * either into silence is exactly the quiet an attack buys.
+ */
+function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
+  // The floor is the one case that moves on its own: once declared work has
+  // drained there is nothing to ask, so the restart is taken. Until then it
+  // says what it is waiting for rather than going quiet.
+  useEffect(() => {
+    if (update?.kind === "forced" && update.holding.length === 0) {
+      void restartForUpdate(update.version);
+    }
+  }, [update]);
+
+  if (update === null) return null;
+  if (update.kind === "forced") {
+    return <span className="tip" title={`${update.version} is required; this build is below the published floor`}>
+      <span className="update-forced" role="status">
+        <span className="spinner tiny" />
+        {update.holding.length === 0
+          ? "Restarting to update…"
+          : `Update required — finishing ${update.holding.length === 1 ? "1 task" : `${update.holding.length} tasks`}`}
+      </span></span>;
+  }
+  if (update.kind === "attention") {
+    return <span className="tip" title={update.why}>
+      <span className="update-attention" role="status">⚠ Update needs attention</span></span>;
+  }
+  if (update.kind === "waiting") {
+    return <span className="tip" title={`${update.version} is ready; waiting for ${update.holding.join(", ")}`}>
+      <span className="update-waiting" role="status">
+        <span className="spinner tiny" /> Update waits for {update.holding.length === 1 ? "1 task" : `${update.holding.length} tasks`}
+      </span></span>;
+  }
+  return <span className="tip" title={`${update.version} is staged and applies when this client restarts`}>
+    <Button className={`update-restart urgency-${update.urgency}`} aria-label={`Restart to update to ${update.version}`}
+      onPress={() => void restartForUpdate(update.version)}>↻ Restart to update</Button></span>;
+}
+
+/// A head with `world: null` predates the pin and deliberately matches no row.
+export function servingWorld(view: ClientView, mount: string): Head[] {
+  return view.heads.filter((head) => head.orbit === null && head.world === mount);
+}
+/// Read from the head's own state: exited heads stay listed, so presence is
+/// not liveness.
+export function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" | "Stopped" | "Unknown" {
   if (isOpening(view, world)) return "Launching";
   if (world.opensAt === null) return "Unavailable";
-  return isRunning(view) ? "Running" : "Ready";
+  const heads = servingWorld(view, world.worldMount);
+  if (heads.length === 0) return "Ready";
+  if (heads.some((head) => head.state === "running")) return "Running";
+  // `unknown` outranks `exited`: a head nobody could poll may still be
+  // serving, and "Stopped" would be the same confident guess the other way.
+  if (heads.some((head) => head.state === "unknown")) return "Unknown";
+  return "Stopped";
 }
 function isOpening(view: ClientView, world: LibraryWorld): boolean {
   return world.opensAt !== null && view.inFlight.includes(actionKey.open(world.worldMount));
 }
-function isRunning(view: ClientView): boolean { return view.heads.some((head) => head.orbit === null); }
 function accentColor(world: LibraryWorld): string {
   return world.accent === null ? "var(--surface-500)" : `#${world.accent.toString(16).padStart(6, "0")}`;
 }

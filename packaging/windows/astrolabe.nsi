@@ -6,23 +6,17 @@
 ; exercises.
 ;
 ; ---------------------------------------------------------------------------
-; What changed, and why the file list went away
+; The payload is the pair
 ;
-; Revision 7 of the Plan put the interface on Flutter over a Rust core. This
-; script previously installed three files and said so in a comment that ended
-; "no Flutter runtime, no flutter_windows.dll, no data/ payload, no bridge
-; cdylib. None of those exist in this design any more." Every one of them
-; exists now, and installing the old three produced a 92 KB runner stub with no
-; engine, no Dart and no ICU — an install that cannot reach its first frame.
+; The client is the Tauri host: one executable drawing through the system
+; WebView2, with `lait.exe` beside it. Both are built with a static C runtime
+; (`build-astrolabe.sh` sets `+crt-static` for exactly this vehicle), so no
+; msvcp/vcruntime DLLs travel and a clean machine cannot die in the loader.
+; The one runtime dependency is WebView2 itself, ensured below.
 ;
-; The payload is still enumerated rather than copied wholesale, because what an
-; installer places is the thing worth reading. The one exception is
-; `data\flutter_assets\`, which nests a tree per package and has no hand-kept
-; form that would survive a dependency shipping a font.
-;
-; The names below are what `flutter build windows --release` produces. If that
-; set changes, this file is where it is noticed — which is the intent. The
-; check that it stayed true lives in `tools/astrolabe/tests/packaging.rs`.
+; The payload is enumerated rather than copied wholesale, because what an
+; installer places is the thing worth reading. The check that it stayed true
+; lives in `tools/astrolabe/tests/packaging.rs`.
 ;
 ; ---------------------------------------------------------------------------
 ; The layout, and why the launcher does not move
@@ -47,19 +41,17 @@
 ; `sidecar::resolve` looks — relative to the running executable — and
 ; `update::custody_of` is its inverse. The stub is never between them.
 ;
-; Build:
-;   flutter build windows --release            (in apps/astrolabe)
+; Build: `packaging/build-astrolabe.sh` assembles the stage and runs
 ;   makensis -DVERSION=<x.y.z> -DSTAGE=<dir> -DSTUB=<file> \
 ;     packaging\windows\astrolabe.nsi
-;
-; where STAGE is the release bundle —
-;   apps\astrolabe\build\windows\x64\runner\Release
-; with THIRD-PARTY-NOTICES.md and LICENSE copied in beside it — both are
-; compiled in, and LICENSE is also read for the licence page, so a stage
-; missing either fails the makensis run rather than shipping without them.
+; where STAGE holds the pair flat beside THIRD-PARTY-NOTICES.md and LICENSE —
+; both are compiled in, and LICENSE is also read for the licence page, so a
+; stage missing either fails the makensis run rather than shipping without
+; them.
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
+!include "LogicLib.nsh"
 
 !ifndef VERSION
   !error "VERSION must be passed: makensis -DVERSION=x.y.z"
@@ -71,7 +63,7 @@
   !define VERSION_NUMERIC "${VERSION}"
 !endif
 !ifndef STAGE
-  !error "STAGE must be passed: the Flutter release bundle directory"
+  !error "STAGE must be passed: the directory holding the pair and the terms"
 !endif
 !ifndef STUB
   !error "STUB must be passed: the built astrolabe-stub executable"
@@ -151,44 +143,31 @@ Section "Astrolabe" SecMain
   File "${STAGE}\THIRD-PARTY-NOTICES.md"
   File "${STAGE}\LICENSE"
 
-  ; --- What the interface is made of ----------------------------------------
-  ;
-  ; `astrolabe.exe` is a 92 KB runner. Everything it actually is lives in these:
-  ; the Rust core it calls across the bridge, the Flutter engine that draws, and
-  ; the plugin DLLs behind the undecorated window and the tray icon.
-  File "${STAGE}\astrolabe.dll"
-  File "${STAGE}\flutter_windows.dll"
-  File "${STAGE}\dartjni.dll"
-  ; Flutter writes this manifest only when the bundle has native assets to
-  ; describe. It existed in the developer build that originally proved this
-  ; script, but Flutter 3.41 correctly omitted it from the tagged CI bundle.
-  ; Carry it when present; its absence is not an incomplete application.
-  File /nonfatal "${STAGE}\native_assets.json"
-  File "${STAGE}\*_plugin.dll"
-
-  ; The Visual C++ runtime, staged into the bundle by CMake's
-  ; `InstallRequiredSystemLibraries`. astrolabe.exe imports MSVCP140.dll and
-  ; VCRUNTIME140*.dll; a development machine has them because Visual Studio
-  ; installed them, which is exactly why their absence is invisible right up
-  ; until a clean machine, where the app dies in the loader with a dialog naming
-  ; a DLL rather than this program. App-local rather than chaining the
-  ; redistributable, because a per-user install that needs no elevation should
-  ; not acquire a reason to ask for it.
-  File "${STAGE}\msvcp140*.dll"
-  File "${STAGE}\vcruntime140*.dll"
-  File "${STAGE}\concrt140.dll"
-
-  ; --- The payload the engine reads by path ---------------------------------
-  ;
-  ; `data\` must keep that name and that position: the engine resolves
-  ; `data\icudtl.dat` and `data\flutter_assets\` relative to the executable, so
-  ; an install that flattened or renamed them fails inside the loader rather
-  ; than anywhere a person could act on. Recursive because `flutter_assets`
-  ; nests per-package asset trees, which cannot be enumerated by hand and would
-  ; go stale the first time a dependency shipped a font.
-  SetOutPath "$INSTDIR\current\data"
-  File /r "${STAGE}\data\*.*"
   SetOutPath "$INSTDIR"
+
+  ; --- WebView2 -------------------------------------------------------------
+  ;
+  ; The one runtime the pair does not carry: the host draws through the
+  ; system's Evergreen WebView2, updated by the OS on the OS's schedule —
+  ; which is the point. Windows 11 ships it; a machine without it gets
+  ; Microsoft's own bootstrapper, staged by `build-astrolabe.sh`, run
+  ; un-silenced so its elevation prompt is its own and this install stays
+  ; unelevated.
+  ClearErrors
+  ReadRegStr $0 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  ${If} ${Errors}
+    ClearErrors
+    ReadRegStr $0 HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  ${EndIf}
+  ${If} ${Errors}
+    InitPluginsDir
+    File /nonfatal "/oname=$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" "${STAGE}\MicrosoftEdgeWebview2Setup.exe"
+    ${If} ${FileExists} "$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe"
+      ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe"'
+    ${Else}
+      MessageBox MB_OK "Astrolabe draws through Microsoft WebView2, which this machine does not have. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ and launch Astrolabe again."
+    ${EndIf}
+  ${EndIf}
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 

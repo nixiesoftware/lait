@@ -10,19 +10,30 @@
 # prerelease) live in `lait-feed`, which refuses to seal the pointer; this
 # script only sequences uploads.
 #
-# Usage:
-#   ci/publish-feed.sh --version 0.8.0-test.1 --channel test \
-#     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed \
-#     [--floor 0.7.0] [--astrolabe 0.1.0]
+# **The feed is how the client is distributed.** Installed machines follow a
+# signed channel pointer on the dist host; nothing they do involves a git
+# forge. This is the publish half of that, and `packaging/build-astrolabe.sh`
+# is the build half — it emits exactly the names read below.
 #
+# Usage (the path to use):
+#   packaging/build-astrolabe.sh --version 0.9.0 --out target/distrib \
+#     --identity "Developer ID Application: … (TEAMID)" --notarize <profile>
+#   ci/publish-feed.sh --version 0.9.0 --channel test \
+#     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed \
+#     [--floor 0.7.0] [--astrolabe 0.9.0]   (--astrolabe is read off the
+#     installers in --artifacts-dir when omitted; --lait-only skips the client)
+#
+# DEPRECATED path:
 #   ci/publish-feed.sh --from-release v0.8.0-test.1 --channel test \
 #     --seed ~/.lait-feed-signing.seed [--floor 0.7.0]
 #
-# `--from-release` is the seamless path: it downloads the tag's CI-built
-# artifacts from the GitHub release (the lait archives, and the Astrolabe
-# installer when the Build Astrolabe installer workflow has attached it),
-# derives the versions, and publishes exactly as the explicit form does. The
-# release is the build origin; the feed is what installed machines read.
+# `--from-release` downloads a tag's artifacts from a GitHub release. It is
+# kept for republishing an already-released tag, and it is not how anything is
+# shipped now: the workflow that attached Astrolabe installers to releases
+# built the deprecated Flutter client and is itself unwired
+# (`apps/astrolabe/DEPRECATED.md`), so on any recent tag this path finds lait
+# archives and no client, and refuses unless you pass --lait-only. Build
+# locally and pass --artifacts-dir instead.
 #
 # Requires: gcloud (authenticated with write access to the bucket), curl, gh
 # (for --from-release), and a built `lait-feed` (cargo build -p lait-feed).
@@ -55,20 +66,21 @@ FEED_TOOL="${FEED_TOOL:-cargo run -q -p lait-feed --}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-if [ -n "$FROM_RELEASE" ]; then
-  VERSION="${FROM_RELEASE#v}"
-  ARTIFACTS="$WORK/release-assets"
-  mkdir -p "$ARTIFACTS"
-  gh release download "$FROM_RELEASE" -D "$ARTIFACTS" \
-    -p 'lait-*.zip' -p 'lait-*.tar.gz' -p 'astrolabe-*-setup.exe' \
-    -p 'astrolabe-tree-*.tar.gz' \
-    -p 'astrolabe-*.dmg' -p 'astrolabe-*.tar.gz'
-  # The installers name their own bundle version; read it off an asset rather
-  # than assuming — an absent installer publishes a lait-only release, loudly.
-  # Every platform artifact carries the same version by construction (one gate
-  # resolves the tag all jobs build), so any one may name it.
+# The installers name their own bundle version; read it off an asset rather
+# than assuming — an absent installer publishes a lait-only release, loudly,
+# and only when --lait-only says so. Every platform artifact carries the same
+# version by construction (one gate resolves the tag all jobs build), so any
+# one may name it. Trees are excluded: a tree is not an installer, and the
+# tarball glob would otherwise read a version out of `astrolabe-tree-…`.
+detect_astrolabe() { # $1 = where the artifacts came from, for the refusal
+  if [ -n "$LAIT_ONLY" ]; then
+    echo "publish-feed: publishing lait only, as asked; any client artifacts in $1 stay unpublished" >&2
+    return
+  fi
+  local installer
   installer="$(cd "$ARTIFACTS" && \
-    ls astrolabe-*-setup.exe astrolabe-*.dmg astrolabe-*.tar.gz 2>/dev/null | head -1 || true)"
+    ls astrolabe-*-setup.exe astrolabe-*.dmg astrolabe-*.tar.gz 2>/dev/null \
+    | grep -v '^astrolabe-tree-' | head -1 || true)"
   if [ -n "$installer" ]; then
     ASTROLABE="${installer#astrolabe-}"
     case "$ASTROLABE" in
@@ -79,16 +91,25 @@ if [ -n "$FROM_RELEASE" ]; then
       *) echo "publish-feed: unrecognized Astrolabe artifact $installer" >&2; exit 1 ;;
     esac
     echo "publish-feed: including installer(s) for astrolabe $ASTROLABE"
-  elif [ -n "$LAIT_ONLY" ]; then
-    echo "publish-feed: no astrolabe installer on $FROM_RELEASE; publishing lait only, as asked" >&2
   else
-    echo "publish-feed: $FROM_RELEASE carries no astrolabe installer." >&2
+    echo "publish-feed: $1 carries no astrolabe installer." >&2
     echo "  A release that ships the engine and not the client is a real thing to want —" >&2
     echo "  lait is installed on its own by several paths — but it is not a thing to do by" >&2
     echo "  ACCIDENT, which is what a note on stderr and a publish anyway amounts to." >&2
     echo "  Pass --lait-only to say you meant it." >&2
     exit 1
   fi
+}
+
+if [ -n "$FROM_RELEASE" ]; then
+  VERSION="${FROM_RELEASE#v}"
+  ARTIFACTS="$WORK/release-assets"
+  mkdir -p "$ARTIFACTS"
+  gh release download "$FROM_RELEASE" -D "$ARTIFACTS" \
+    -p 'lait-*.zip' -p 'lait-*.tar.gz' -p 'astrolabe-*-setup.exe' \
+    -p 'astrolabe-tree-*.tar.gz' \
+    -p 'astrolabe-*.dmg' -p 'astrolabe-*.tar.gz'
+  detect_astrolabe "$FROM_RELEASE"
 
   # The stable pointer never moves at a release GitHub still calls a prerelease.
   # The release page is the record of whether every declared bundle actually
@@ -109,6 +130,39 @@ fi
   echo "publish-feed: --channel and --seed, plus either --from-release or --version + --artifacts-dir, are required" >&2
   exit 1
 }
+
+# The primary documented path: build-astrolabe.sh dropped installers into the
+# artifacts dir, and the pair rule makes their version $VERSION — so pin to
+# it rather than trusting a listing over a directory nothing ever cleans,
+# where `head -1` would happily publish LAST release's client. An installer
+# for another version is refused by name, not skipped. An explicit
+# --astrolabe still wins; --from-release keeps listing-detection because old
+# tags predate the pair rule and legitimately carry another client version.
+if [ -z "$ASTROLABE" ] && [ -z "$FROM_RELEASE" ]; then
+  if [ -n "$LAIT_ONLY" ]; then
+    detect_astrolabe "$ARTIFACTS"
+  elif [ -f "$ARTIFACTS/astrolabe-$VERSION-setup.exe" ] \
+    || [ -f "$ARTIFACTS/astrolabe-$VERSION.dmg" ] \
+    || [ -f "$ARTIFACTS/astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz" ]; then
+    ASTROLABE="$VERSION"
+    echo "publish-feed: including installer(s) for astrolabe $ASTROLABE"
+  else
+    stale="$(cd "$ARTIFACTS" && \
+      ls astrolabe-*-setup.exe astrolabe-*.dmg astrolabe-*.tar.gz 2>/dev/null \
+      | grep -v '^astrolabe-tree-' | head -1 || true)"
+    if [ -n "$stale" ]; then
+      echo "publish-feed: $ARTIFACTS holds $stale but no installer for $VERSION." >&2
+      echo "  A stale artifacts dir is how last release's client ships under this" >&2
+      echo "  release's manifest. Rebuild with build-astrolabe.sh --version $VERSION," >&2
+      echo "  clean the directory, or pass --astrolabe to name the version you mean." >&2
+      exit 1
+    fi
+    detect_astrolabe "$ARTIFACTS"
+  fi
+elif [ -n "$ASTROLABE" ] && [ -n "$LAIT_ONLY" ]; then
+  echo "publish-feed: --astrolabe and --lait-only contradict each other" >&2
+  exit 1
+fi
 
 # 1. Seal the manifest from the artifacts as they exist on disk. Refuses a
 #    directory missing any lait target.
@@ -154,8 +208,19 @@ gcloud storage cp --cache-control="$IMMUTABLE" \
 # 4. Read the release back over the same door installed machines use, before
 #    the pointer moves. An upload that "succeeded" but does not serve is
 #    exactly the failure this ordering exists to keep out of the feed.
-for object in $(cd "$ARTIFACTS" && \
-  ls lait-*.zip lait-*.tar.gz astrolabe-*-setup.exe astrolabe-*.dmg astrolabe-*.tar.gz 2>/dev/null) manifest.json; do
+#    The list mirrors what step 3 uploaded, never the directory's contents: a
+#    local file that was deliberately not published — another version's
+#    installer in a reused directory included — must not fail the publish.
+VERIFY="manifest.json $(cd "$ARTIFACTS" && ls lait-*.zip lait-*.tar.gz 2>/dev/null || true)"
+if [ -n "$ASTROLABE" ]; then
+  for uploaded in "astrolabe-$ASTROLABE-setup.exe" "astrolabe-$ASTROLABE.dmg" \
+    "astrolabe-$ASTROLABE-x86_64-unknown-linux-gnu.tar.gz"; do
+    [ -f "$ARTIFACTS/$uploaded" ] && VERIFY="$VERIFY $uploaded"
+  done
+  VERIFY="$VERIFY $(cd "$ARTIFACTS" && \
+    ls astrolabe-tree-"$ASTROLABE"-*.tar.gz 2>/dev/null || true)"
+fi
+for object in $VERIFY; do
   curl -fsSLo /dev/null "$BASE_URL/releases/$VERSION/$object" \
     || { echo "publish-feed: $object uploaded but not served; pointer NOT moved" >&2; exit 1; }
 done

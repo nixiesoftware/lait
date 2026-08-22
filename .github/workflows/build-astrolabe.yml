@@ -1,3 +1,29 @@
+# DEPRECATED AND UNWIRED — this pipeline builds the **Flutter** client.
+#
+# Tauri (`apps/astrolabe-web`) is the canonical and only live interface. The
+# Flutter client under `apps/astrolabe` is deprecated (see
+# `apps/astrolabe/DEPRECATED.md`) and cannot currently build at all: its pinned
+# private `lit-ui` commit no longer resolves, so `flutter pub get` fails before
+# any platform step runs. Every job below therefore ships nothing, and left on
+# its old `workflow_run` trigger it would fail on every release — training
+# people to ignore red, which is the failure mode this repository already
+# names in `ci.yml`.
+#
+# So the automatic trigger is removed: this is `workflow_dispatch` only, kept
+# as reference rather than as a gate. **Nothing releases from it.**
+#
+# It is kept rather than deleted because a Tauri installer pipeline has to
+# inherit what is written down here and nowhere else: the Developer ID signing
+# and notarization flow and its five secrets, the NSIS invocation, the
+# release-tree packing, the provenance attestation, and the pair rule (CLIENT-12
+# — client and sidecar built from one tagged tree, asserted by running the
+# staged `lait` and comparing its version to the tag). Porting it means
+# enabling Tauri's bundler (`bundle.active` is false today) and re-proving each
+# of those on a real runner; none of it can be verified from a developer
+# machine, which is why it was not done blind.
+#
+# ---------------------------------------------------------------------------
+#
 # CD: build the Astrolabe installers for a released tag and attach them to the
 # release, so one tag ships every bundle (CLIENT-46).
 #
@@ -28,12 +54,11 @@
 # provenance. Publishing to the FEED stays a deliberate local act —
 # `ci/publish-feed.sh --from-release <tag>` — because the feed signing seed
 # never lives on a build machine (SUB-13 decision, 2026-08-15).
-name: Build Astrolabe installer
+name: Build Astrolabe installer (DEPRECATED — Flutter, manual only)
 
+# Manual only. The `workflow_run: ["Release"]` trigger was removed when Flutter
+# was deprecated — see the header. Nothing releases from this file.
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       tag:

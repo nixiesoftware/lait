@@ -13,7 +13,10 @@
 //! rule as `astrolabe`'s `sidecar::beside`. It holds:
 //!
 //! ```text
-//! astrolabe-stub(.exe)     this binary; the one file an update never moves
+//! astrolabe(.exe)          this binary, installed under the APPLICATION'S
+//!                          name — the one file an update never moves, so
+//!                          every shell artifact points here. `astrolabe-stub`
+//!                          is only the build name; nothing installs it.
 //! current/                 the live tree: the astrolabe+lait pair, flat
 //! previous/                the prior live tree, kept as the rollback target
 //! staged/                  a downloaded tree waiting to become current
@@ -74,6 +77,14 @@ pub const STAGED_DIR: &str = "staged";
 pub const CURRENT_DIR: &str = "current";
 /// The prior live tree, kept as the local rollback target.
 pub const PREVIOUS_DIR: &str = "previous";
+/// A client asking for the apply window: it writes the version it is
+/// yielding to here and exits, and the stub consumes the file and loops —
+/// apply, then start what is then current — instead of exiting with it.
+pub const RELAUNCH_REQUEST: &str = "relaunch.requested";
+/// Set on a launch that answers a [`RELAUNCH_REQUEST`], carrying the
+/// requested version, so that client can tell "my window happened and the
+/// apply was refused" from "nobody tried".
+pub const RELAUNCHED_ENV: &str = "ASTROLABE_RELAUNCHED";
 /// The claim: held for as long as a client started here is alive.
 pub const INSTANCE_LOCK: &str = "instance.lock";
 /// Held while `staged/` is written (by the stager) or consumed (here).
@@ -541,8 +552,26 @@ pub fn apply(root: &Path, _claim: &Claim) -> Outcome {
 /// start on every future launch, with the good tree sitting unused beside
 /// it.
 pub fn launch(root: &Path, args: &[std::ffi::OsString]) -> std::io::Result<std::process::Child> {
+    launch_answering(root, args, None)
+}
+
+/// [`launch`], answering a relaunch request: the child gets the requested
+/// version in [`RELAUNCHED_ENV`].
+pub fn launch_answering(
+    root: &Path,
+    args: &[std::ffi::OsString],
+    answering: Option<&str>,
+) -> std::io::Result<std::process::Child> {
+    let spawn = |entry: &Path| {
+        let mut command = std::process::Command::new(entry);
+        command.args(args);
+        if let Some(version) = answering {
+            command.env(RELAUNCHED_ENV, version);
+        }
+        command.spawn()
+    };
     let entry = root.join(CURRENT_DIR).join(entry_name());
-    match std::process::Command::new(&entry).args(args).spawn() {
+    match spawn(&entry) {
         Ok(child) => Ok(child),
         Err(error) => {
             let fallback = root.join(PREVIOUS_DIR).join(entry_name());
@@ -556,9 +585,23 @@ pub fn launch(root: &Path, args: &[std::ffi::OsString]) -> std::io::Result<std::
                      tree"
                 ),
             );
-            std::process::Command::new(&fallback).args(args).spawn()
+            spawn(&fallback)
         }
     }
+}
+
+/// Take the pending relaunch request, if the client left one.
+///
+/// Consuming is what bounds the relaunch loop — one relaunch per written
+/// request — so a request that cannot be *removed* must answer `None`:
+/// honouring an unremovable file would relaunch forever.
+/// Requiring the installation claim prevents a secondary stub from stealing
+/// the primary stub's request while that primary is waiting on its client.
+pub fn take_relaunch_request(root: &Path, _claim: &Claim) -> Option<String> {
+    let path = root.join(RELAUNCH_REQUEST);
+    let version = fs::read_to_string(&path).ok()?;
+    fs::remove_file(&path).ok()?;
+    Some(version.trim().to_owned())
 }
 
 /// The install root: the directory holding the stub itself.

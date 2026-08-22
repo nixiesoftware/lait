@@ -158,6 +158,12 @@ struct Inner {
     starting: StdMutex<std::collections::BTreeSet<String>>,
     start_timeout: Duration,
     stop_timeout: Duration,
+    /// The configuration this supervisor was started with, kept so
+    /// [`Supervisor::reload_in_place`] can restage from the same source under
+    /// the same policy. `None` for a supervisor constructed bare
+    /// ([`Supervisor::new`]) — there was no staging to repeat, and an
+    /// in-place reload is refused rather than guessed at.
+    reload_config: StdMutex<Option<Config>>,
 }
 
 /// Holds a head key's spawn reservation, and gives it back however the spawn ends.
@@ -330,8 +336,9 @@ impl Supervisor {
         // The staged copy is what devices are spawned from, so it is what the
         // driver is built with. `ImageFacts` keeps the source path, which is
         // the only reason the two can be told apart later.
-        let supervisor = Self::new(config.state_root, image.executable().to_owned())?;
+        let supervisor = Self::new(config.state_root.clone(), image.executable().to_owned())?;
         *lock_recovering(&supervisor.inner.image) = Some(image.facts().clone());
+        *lock_recovering(&supervisor.inner.reload_config) = Some(config.clone());
         let signals = supervisor.signals();
         supervisor.observe().await;
         supervisor.observe_in_background(config.observation_interval);
@@ -368,13 +375,13 @@ impl Supervisor {
         *lock_recovering(&self.inner.observer) = Some(observer);
     }
 
-    /// Stop observing, then stop every daemon this supervisor owns.
+    /// Stop observing and stop every head this supervisor owns.
     ///
-    /// In that order: a sampler still running while daemons come down races
+    /// In that order: a sampler still running while owned heads come down races
     /// each stop and publishes lifecycle events for transitions that are
-    /// already accounted for. Externally discovered daemons are left running,
-    /// as they are on every other path.
-    pub async fn shutdown(&self) {
+    /// already accounted for. This is the client-detach half of shutdown: it
+    /// deliberately leaves every daemon running.
+    pub async fn detach(&self) {
         let observer = lock_recovering(&self.inner.observer).take();
         if let Some(observer) = observer {
             observer.abort();
@@ -386,6 +393,14 @@ impl Supervisor {
         for id in heads {
             let _ = self.stop_head(&id).await;
         }
+    }
+
+    /// Detach the client, then stop every daemon this supervisor owns.
+    ///
+    /// Externally discovered daemons are left running, as they are on every
+    /// other path.
+    pub async fn shutdown(&self) {
+        self.detach().await;
         self.stop_all_owned().await;
     }
 
@@ -452,6 +467,7 @@ impl Supervisor {
                 starting: StdMutex::new(std::collections::BTreeSet::new()),
                 start_timeout,
                 stop_timeout,
+                reload_config: StdMutex::new(None),
             }),
         })
     }
@@ -1305,6 +1321,7 @@ impl Supervisor {
             capabilities: Capabilities::default(),
             devices: snapshots,
             connections,
+            image: self.image(),
         }
     }
 
@@ -1376,6 +1393,32 @@ impl Supervisor {
 
         self.publish_signal(ClientSignal::SnapshotRequired(SnapshotReason::Reloaded));
         Ok(report)
+    }
+
+    /// [`Supervisor::reload`] against the configuration this supervisor was
+    /// started with, and with no build step of its own.
+    ///
+    /// The inner-loop case: the source was already rebuilt outside — a
+    /// `cargo build` the person ran, a staging script, anything — and what is
+    /// wanted is *restage and bring the same set back up on the new image*.
+    /// The build stays the caller's exactly as it does for [`reload`]; this
+    /// merely remembers which source and policy "the same" means.
+    ///
+    /// Refused for a supervisor constructed bare, where no staging config was
+    /// ever stated — repeating a policy nobody set would be a guess.
+    ///
+    /// [`reload`]: Supervisor::reload
+    pub async fn reload_in_place(&self) -> Result<Reload, SupervisorError> {
+        let config = lock_recovering(&self.inner.reload_config)
+            .clone()
+            .ok_or_else(|| {
+                SupervisorError::Conflict(
+                    "this supervisor was not started from a configuration, so there is no \
+                 staging policy to reload under"
+                        .into(),
+                )
+            })?;
+        self.reload(&config, async { Ok(()) }).await
     }
 
     /// Start a browser head against one device's daemon.
@@ -2236,6 +2279,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn detach_stops_heads_and_observing_but_leaves_owned_daemons_running() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive.clone(), directory.path());
+        supervisor.observe_in_background(Duration::from_millis(5));
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("add device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+        lock_recovering(&supervisor.inner.heads).insert(
+            "issues".into(),
+            crate::heads::dead_head_for_test("issues".into()),
+        );
+
+        supervisor.detach().await;
+
+        assert!(
+            alive.load(Ordering::SeqCst),
+            "detach stopped an owned daemon"
+        );
+        assert!(
+            supervisor.list_heads().is_empty(),
+            "owned head survived detach"
+        );
+        assert!(
+            lock_recovering(&supervisor.inner.observer).is_none(),
+            "sampler survived detach"
+        );
+
+        supervisor.shutdown().await;
+    }
+
     /// The sampler holds a weak reference, so it cannot keep its own supervisor
     /// alive. A strong one would be a cycle: the task would own the `Inner` that
     /// owns the task's join handle, nothing would ever drop, and the sampling
@@ -2523,6 +2603,59 @@ mod tests {
                 .map(|facts| facts.fingerprint.clone()),
             Some(image.fingerprint),
             "the device does not report the image it is actually running"
+        );
+    }
+
+    /// An in-place reload repeats the staging the supervisor was started
+    /// with: the source was rebuilt outside, and the same set comes back on
+    /// the new image. A bare supervisor — no stated staging — is refused
+    /// rather than guessed at.
+    #[tokio::test]
+    async fn an_in_place_reload_restages_from_the_remembered_configuration() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let source = directory.path().join("lait.exe");
+        std::fs::write(&source, b"build one").expect("write executable");
+        let config =
+            Config::new(source.clone(), source.clone()).staged_in(directory.path().join("staging"));
+
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        let supervisor = fake_supervisor_with(alive, &fake, directory.path());
+
+        // Bare: nothing was staged and no policy was stated.
+        assert!(matches!(
+            supervisor.reload_in_place().await,
+            Err(SupervisorError::Conflict(_))
+        ));
+
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+
+        *lock_recovering(&supervisor.inner.reload_config) = Some(config);
+        std::fs::write(&source, b"build two").expect("rebuild outside");
+
+        let report = supervisor.reload_in_place().await.expect("reload in place");
+        assert_eq!(report.restarted, vec!["alice".to_owned()]);
+        let image = report.image.expect("an in-place reload staged an image");
+        assert_eq!(
+            std::fs::read(&image.staged_path).expect("read staged"),
+            b"build two",
+            "the in-place reload did not pick up the outside rebuild"
+        );
+        assert_eq!(
+            supervisor
+                .snapshot()
+                .await
+                .image
+                .map(|facts| facts.fingerprint),
+            Some(image.fingerprint),
+            "the snapshot does not carry the image the bench would spawn today"
         );
     }
 

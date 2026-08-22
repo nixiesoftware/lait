@@ -35,6 +35,12 @@ use astrolabe::Config;
 /// Found relative to the running test binary rather than by walking the
 /// workspace: `target/<profile>/deps/<test>-<hash>.exe` puts it two levels up,
 /// and that holds for every profile without knowing which one is in use.
+///
+/// Freshness is the caller's: nextest builds test binaries, never workspace
+/// bins, so what sits here is whatever the last `cargo build` left — run
+/// `cargo build --workspace --all-targets` first, as CI does. A stale binary
+/// fails these tests in ways that name everything except its own age; a
+/// stale receiver once read as a broken media pipeline for most of a day.
 fn sidecar() -> Option<PathBuf> {
     built_binary("lait")
 }
@@ -411,7 +417,12 @@ async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
 /// walked the uploaded container's own bytes over the content plane, planned
 /// every segment, and installed the presentation. Nothing in this test fetched
 /// a byte of media by hand.
-async fn wait_for_media(path: &Path, assignment: &str, program: &str) -> (String, String) {
+async fn wait_for_media(
+    path: &Path,
+    assignment: &str,
+    program: &str,
+    identity: &Path,
+) -> (String, String) {
     for _ in 0..200 {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -431,7 +442,45 @@ async fn wait_for_media(path: &Path, assignment: &str, program: &str) -> (String
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("assigned receiver never presented the stored film's ticket");
+    // Named, not shrugged: where the receiver actually stood, and the
+    // daemon's own account — the chain has five quiet places to stall.
+    let last = std::fs::read_to_string(path).unwrap_or_else(|_| "<no active.json>".into());
+    let log = daemon_log_tail(identity, 40);
+    panic!(
+        "assigned receiver never presented the stored film's ticket\n\
+         --- last active.json ---\n{last}\n--- daemon log tail ---\n{log}"
+    );
+}
+
+/// The last `lines` of every `daemon.log` under `root`.
+fn daemon_log_tail(root: &Path, lines: usize) -> String {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.file_name().is_some_and(|name| name == "daemon.log") {
+                out.push(path);
+            }
+        }
+    }
+    let mut logs = Vec::new();
+    walk(root, &mut logs);
+    if logs.is_empty() {
+        return format!("<no daemon.log under {}>", root.display());
+    }
+    logs.iter()
+        .map(|log| {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            let tail: Vec<&str> = text.lines().rev().take(lines).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            format!("{}:\n{}", log.display(), tail.join("\n"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Upload a real container and author the film program that plays it.
@@ -489,8 +538,44 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
         windows: Vec::new(),
     };
     let program_id = film_program.id.clone();
+    let entry_id = entry.id.clone();
     write_signage_media(client, space, entry).await;
     write_signage_program(client, space, film_program).await;
+
+    // The seed proves its own write: an entry the World cannot read back is a
+    // program that will blank as "unsupported" twenty seconds from now, in a
+    // place with no words for why.
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let call = signage_app::encode_call(&signage_app::SignageRequest::MediaGet {
+        media: entry_id.clone(),
+    })
+    .expect("encode Signage media read-back");
+    let reply = client
+        .daemon()
+        .expect("identity daemon for Signage read-back")
+        .call_world(
+            lait::control::ControlRoute::World {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&store),
+                    space_id,
+                ),
+                world: signage::contract::PRODUCT_WORLD.into(),
+            },
+            call.clone(),
+            None,
+        )
+        .await
+        .expect("read the Signage library entry back");
+    let decoded = signage_app::decode_reply(&call, reply).expect("decode Signage media read-back");
+    let response: signage_app::SignageResponse =
+        serde_json::from_value(decoded).expect("typed Signage media read-back");
+    let signage_app::SignageResponse::Media { media: read_back } = response else {
+        panic!("the Signage World did not answer the media read-back: {response:?}");
+    };
+    assert!(
+        read_back.as_ref().is_some_and(|row| row.id == entry_id),
+        "the stored film's library entry did not read back after MediaSaved: {read_back:?}"
+    );
     program_id
 }
 
@@ -840,7 +925,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     let selection = lait::config::Selection::for_identity(identity.path());
     let daemon = lait::daemon::Client::for_selection(&selection).expect("the identity daemon");
     assert!(
-        matches!(daemon.probe().await, lait::control::Probe::Healthy),
+        matches!(daemon.probe().await, lait::control::Probe::Healthy { .. }),
         "client startup returned before its identity daemon answered"
     );
     let displays = client
@@ -1181,6 +1266,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             &output_path.join("active.json"),
             &assignment_id,
             &receiver_program,
+            identity.path(),
         )
         .await;
         assert!(
@@ -1434,6 +1520,19 @@ fn stub_binary() -> PathBuf {
     })
 }
 
+/// The name the stub is *installed* under: the application's own, at the
+/// install root. The build name (`astrolabe-stub`) exists in no installation
+/// — every installer renames it — and the daemon's
+/// `lait::update::watch::install_root_of` keys on the installed name, so a
+/// fixture using the build name would exercise a layout that never ships.
+fn installed_stub_name() -> &'static str {
+    if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    }
+}
+
 /// The reference entry binary the fabricated trees carry.
 fn probe_binary() -> PathBuf {
     built_binary("chain-probe").unwrap_or_else(|| {
@@ -1596,17 +1695,13 @@ fn blake3_hex(bytes: &[u8]) -> String {
 /// what keeps the next phase from racing a still-exiting client over the
 /// directory it is about to rename.
 fn run_stub(root: &Path) {
-    let status = Command::new(root.join(if cfg!(windows) {
-        "astrolabe-stub.exe"
-    } else {
-        "astrolabe-stub"
-    }))
-    .env("CHAIN_PROBE_ANNOUNCE", root)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .status()
-    .expect("the stub spawns");
+    let status = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the stub spawns");
     assert!(
         status.success(),
         "the stub exited with a failure, and the stub must launch even when it refuses to apply"
@@ -1638,11 +1733,12 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(
-        &stub,
-        root.join(stub.file_name().expect("the stub has a name")),
-    )
-    .expect("the stub lands in the install root");
+    // Installed under the application's name, exactly as every installer
+    // lays it down — the build name `astrolabe-stub` exists in no
+    // installation, and `lait::update::watch::install_root_of` keys on the
+    // installed name to decide whether staging happens at all.
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
 
     // The live tree, version 0.0.1 — the install as the person has it.
     let current = root.join("current");
@@ -1773,5 +1869,215 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
     assert!(
         log.contains("verification failed"),
         "the tamper refusal must name verification, not fail vaguely: {log}"
+    );
+}
+
+/// The evergreen restart, end to end: a release staged while the client ran
+/// becomes the live tree with nobody launching anything. The client writes
+/// the relaunch request and exits; the stub — still holding the claim it
+/// took at the first launch — consumes the request, applies, and starts the
+/// new tree with the requested version in the relaunch env. This is the
+/// window a self-relaunch can never reach, because the stub is waiting on
+/// the very process that wants to move.
+///
+/// The request path and the env name are passed in from the *client's*
+/// constants (`client::update`), so the run also welds the mirrored
+/// vocabulary: the stub honouring this request is the two crates agreeing.
+#[test]
+fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+    let probe_bytes = std::fs::read(&probe).expect("the probe binary's bytes");
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    let runs = root.join("runs.log");
+    let gate = root.join("relaunch.gate");
+    let mut stub_process = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .env("CHAIN_PROBE_RUNS", &runs)
+        .env(
+            "CHAIN_PROBE_ENV_NAME",
+            astrolabe::client::update::RELAUNCHED_ENV,
+        )
+        .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
+        .env("CHAIN_PROBE_RELAUNCH_GATE", &gate)
+        .env(
+            "CHAIN_PROBE_REQUEST",
+            root.join(astrolabe::client::update::RELAUNCH_REQUEST),
+        )
+        .env("CHAIN_PROBE_REQUEST_BODY", "0.0.2")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the stub spawns");
+
+    // The old tree came up and is holding at the gate.
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.1",
+        "the wrong tree came up first"
+    );
+
+    // 0.0.2 lands while the client runs, staged exactly as the daemon would.
+    let archive = tree_artifact("0.0.2", &probe_bytes);
+    let (objects, resolved) = resolve_sealed_tree_release("0.0.2", &archive);
+    lait::update::tree::stage_tree_with(
+        |asked, _limit| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        &resolved,
+        tree_target(),
+        root,
+    )
+    .expect("the 0.0.2 tree stages under a live client");
+
+    // Open the gate: the client asks for the window and exits.
+    std::fs::write(&gate, b"go").expect("the gate opens");
+
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.2",
+        "the relaunch did not come up on the staged release"
+    );
+    let status = stub_process.wait().expect("the stub is waited on");
+    assert!(
+        status.success(),
+        "a clean relaunch chain still exited with a failure"
+    );
+    assert!(
+        !root
+            .join(astrolabe::client::update::RELAUNCH_REQUEST)
+            .exists(),
+        "the request survived being answered, which is a relaunch loop"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the runs log"),
+        "0.0.1 env=-\n0.0.2 env=0.0.2\n",
+        "the answering launch did not carry the requested version, or extra launches happened"
+    );
+}
+
+/// A second shell/protocol launch may start while the primary stub is waiting
+/// on its client, but it does not own the installation. It must not consume
+/// the request that tells the primary to open the apply window — neither at
+/// secondary startup nor after the secondary client exits.
+#[test]
+fn a_secondary_stub_cannot_consume_the_primary_relaunch_request() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    let gate = root.join("relaunch.gate");
+    let request = root.join(astrolabe::client::update::RELAUNCH_REQUEST);
+    let mut primary = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
+        .env("CHAIN_PROBE_RELAUNCH_GATE", &gate)
+        .env("CHAIN_PROBE_REQUEST", &request)
+        .env("CHAIN_PROBE_REQUEST_BODY", "0.0.9")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the primary stub starts");
+    assert_eq!(wait_for_announcement(root).trim(), "0.0.1");
+
+    std::fs::write(&request, "0.0.9").expect("the primary's relaunch request");
+    let secondary = Command::new(root.join(installed_stub_name()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the secondary stub runs");
+    assert!(secondary.success(), "the secondary launch failed");
+    assert_eq!(
+        std::fs::read_to_string(&request).expect("the request survived the secondary"),
+        "0.0.9",
+        "a claimless secondary consumed the primary's relaunch request"
+    );
+
+    std::fs::write(&gate, b"go").expect("the primary client exits");
+    assert!(
+        primary.wait().expect("the primary stub exits").success(),
+        "the primary did not answer its own relaunch request"
+    );
+    assert!(
+        !request.exists(),
+        "the owning primary did not consume the request"
+    );
+}
+
+/// A request with nothing staged is still answered — the person asked to
+/// restart, and turning that into a quit would be the launcher refusing to
+/// launch — but answered exactly once: consuming the request is what bounds
+/// the loop, and the plain exit then passes through.
+#[test]
+fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    let runs = root.join("runs.log");
+    let status = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_RUNS", &runs)
+        .env(
+            "CHAIN_PROBE_ENV_NAME",
+            astrolabe::client::update::RELAUNCHED_ENV,
+        )
+        .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
+        .env(
+            "CHAIN_PROBE_REQUEST",
+            root.join(astrolabe::client::update::RELAUNCH_REQUEST),
+        )
+        .env("CHAIN_PROBE_REQUEST_BODY", "0.0.9")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the stub runs the whole exchange");
+
+    assert!(
+        status.success(),
+        "the final plain exit did not pass through"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the runs log"),
+        "0.0.1 env=-\n0.0.1 env=0.0.9\n",
+        "one request must mean exactly one answering launch"
+    );
+    assert!(
+        !root
+            .join(astrolabe::client::update::RELAUNCH_REQUEST)
+            .exists(),
+        "an answered request was left behind"
     );
 }

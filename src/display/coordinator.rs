@@ -311,6 +311,12 @@ impl DisplayCoordinator {
         };
         let projection = self.render_surface(&want, Some(&assignment)).await?;
         let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
+        tracing::debug!(
+            device = %device,
+            assignment = %assignment.id,
+            tier = ?capabilities.playback.tier,
+            "compiling display program"
+        );
         let compiled = Arc::new(self.compiler.compile(
             &assignment.id,
             &assignment.program,

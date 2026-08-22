@@ -67,11 +67,19 @@ pub async fn exit(supervisor: &Supervisor, request: ExitRequest) -> ExitReport {
     let snapshot = supervisor.snapshot().await;
     let report = classify(&snapshot.devices, request);
 
-    if request == ExitRequest::GoOffline {
-        // `shutdown` stops observing first and then stops only what is owned,
-        // which is exactly this policy — so it is called rather than
-        // reimplemented here where the two could drift apart.
-        supervisor.shutdown().await;
+    match request {
+        ExitRequest::GoOffline => {
+            // `shutdown` detaches the client first and then stops only what is
+            // owned, which is exactly this policy — so it is called rather
+            // than reimplemented here where the two could drift apart.
+            supervisor.shutdown().await;
+        }
+        ExitRequest::StayOnline => {
+            // A browser head is a child of this client, not an always-running
+            // service. Leaving the daemons online must not orphan those heads
+            // (or the observer task) when the host process exits.
+            supervisor.detach().await;
+        }
     }
 
     report

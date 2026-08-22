@@ -222,6 +222,21 @@ impl BuildFingerprint {
     pub fn supersedes(&self, other: &Self) -> bool {
         self.exe == other.exe && self.built > other.built
     }
+
+    /// Whether this build's release version is ahead of `other`'s.
+    ///
+    /// Path-blind, unlike [`supersedes`] — the managed pair can never
+    /// path-match. An unparseable version is never ahead: eviction needs a
+    /// reason.
+    pub fn version_ahead_of(&self, other: &Self) -> bool {
+        match (
+            semver::Version::parse(&self.version),
+            semver::Version::parse(&other.version),
+        ) {
+            (Ok(ours), Ok(theirs)) => ours > theirs,
+            _ => false,
+        }
+    }
 }
 
 /// The oldest control protocol a client still talks to. Raising this retires a
@@ -3053,8 +3068,9 @@ pub struct StatusInfo {
 /// spawns a doomed second daemon over a held lock and waits out the full timeout.
 #[derive(Debug)]
 pub enum Probe {
-    /// Answered, and we understood the answer.
-    Healthy,
+    /// Answered, and we understood the answer. Carries the daemon's own
+    /// fingerprint when it offered one, for callers with a stricter stake.
+    Healthy { build: Option<BuildFingerprint> },
     /// Nothing is listening: no daemon for this home. Safe to spawn.
     Absent,
     /// Something is listening, but we can't talk to it — a daemon from a
@@ -3238,8 +3254,10 @@ async fn probe_inner(home: &Path) -> Probe {
                         // Same build, a newer one, or one that does not say:
                         // reuse it. Talking works, and evicting a daemon we are
                         // not ahead of is how two binaries run in turn come to
-                        // kill each other's on every start.
-                        _ => Probe::Healthy,
+                        // kill each other's on every start. A caller that
+                        // manages the daemon's own executable judges further
+                        // with the fingerprint carried here.
+                        build => Probe::Healthy { build },
                     }
                 }
                 Err(e) => Probe::Foreign {
@@ -4355,6 +4373,44 @@ mod tests {
         let b = build("0.7.2", "/t/b", 100);
         assert!(!a.supersedes(&b));
         assert!(!b.supersedes(&a));
+    }
+
+    /// A release ahead displaces across *any* pair of executables — the rule
+    /// the managed pair depends on, since the client probing its daemon can
+    /// never match its path. One-directional like `supersedes`: only the
+    /// newer version ever acts, so two builds of one version cannot ping-pong,
+    /// and a version that does not parse gives nobody a licence to evict.
+    #[test]
+    fn a_release_ahead_displaces_and_nothing_else_does() {
+        let daemon = build("0.9.0", "/install/current/lait", 0);
+        let client = build("0.9.1", "/install/current/astrolabe", 500);
+        assert!(
+            client.version_ahead_of(&daemon),
+            "the updated pair's client must retire the old daemon"
+        );
+        assert!(
+            !daemon.version_ahead_of(&client),
+            "an older build must never evict a newer"
+        );
+
+        let rebuilt = build("0.9.0", "/t/other", 900);
+        assert!(
+            !rebuilt.version_ahead_of(&daemon),
+            "two builds of one version keep the path-and-age rules"
+        );
+
+        let test_channel = build("0.9.1-test.1", "/t/a", 0);
+        assert!(
+            client.version_ahead_of(&build("0.9.1-test.1", "/t/b", 0)),
+            "a release outranks its own prereleases"
+        );
+        assert!(!test_channel.version_ahead_of(&client));
+
+        assert!(
+            !build("not-a-version", "/t/a", 900).version_ahead_of(&daemon),
+            "an unparseable version is never ahead"
+        );
+        assert!(!client.version_ahead_of(&build("also-not", "/t/b", 0)));
     }
 
     /// A client is not always the binary it would spawn.

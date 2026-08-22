@@ -643,11 +643,18 @@ impl Orbit {
         // full journal protocol before `submit` returns. A crash, kill, or
         // `wait` exit after an acknowledged commit loses nothing.
         let mut replica = replica::Replica::open(self.store.replica_dir()?, self.keys.clone())
-            .map_err(|e| match e {
-                replica::transaction::commit::Failure::Integrity(_) => {
-                    Failure::Integrity(Integrity::Replica)
+            .map_err(|e| {
+                // The mapped variant carries no reason; without this the cause
+                // of an unopenable Replica is lost at the one place that knew
+                // it.
+                tracing::warn!(cause = ?e, "the Replica did not open");
+                match e {
+                    replica::transaction::commit::Failure::Integrity(_)
+                    | replica::transaction::commit::Failure::IntegrityCause { .. } => {
+                        Failure::Integrity(Integrity::Replica)
+                    }
+                    _ => Failure::Persistence(Persistence::Replica),
                 }
-                _ => Failure::Persistence(Persistence::Replica),
             })?;
         // Declare the registry's schemas so Convergence can classify remote
         // material as interpretable versus opaque.

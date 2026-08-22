@@ -1,4 +1,4 @@
-//! One Astrolabe per machine, per identity.
+//! One Astrolabe per OS user, per identity.
 //!
 //! Acquired in the runner *before* the interface starts, so a second launch
 //! signals the first and exits rather than racing it. Racing is not theoretical
@@ -34,18 +34,195 @@ pub struct Guard {
 
 /// Take the single-instance guard for this machine.
 pub fn acquire() -> Result<Outcome> {
-    imp::acquire()
+    imp::acquire_named(INSTANCE)
 }
 
-/// The name is fixed and process-independent — it has to be, since the whole
-/// point is for two unrelated launches to collide on it. The `Local\` prefix
-/// scopes it to the logon session, so two people signed in to the same machine
-/// each get their own client rather than one locking the other out.
-const MUTEX_NAME: &str = r"Local\lait-astrolabe-single-instance";
+/// The base name every artifact of the guard derives from — the Windows
+/// mutex, the Unix lock file, the channel. Fixed and process-independent: the
+/// whole point is for two unrelated launches by the same user to collide on
+/// it. Its user-scoped spelling must not move after shipping, or clients on
+/// either side of an upgrade stop excluding each other.
+const INSTANCE: &str = "lait-astrolabe";
+
+/// What a launch is, once the guard has spoken.
+pub enum Claim {
+    /// This process is the client: the guard is held, and the channel — when
+    /// one could be bound — receives what later launches were asked to do. A
+    /// channel that failed to bind costs the handoff, never the guard.
+    Primary {
+        guard: Guard,
+        channel: Option<Channel>,
+    },
+    /// The running client has this launch's arguments; this process is done.
+    Forwarded,
+}
+
+/// The receiving half of the instance channel: one message per later launch,
+/// each the whole argv it arrived with.
+pub struct Channel {
+    listener: interprocess::local_socket::Listener,
+}
+
+impl Channel {
+    /// Every later launch's argv, blocking. A failed accept is tolerated —
+    /// the channel serves a whole tray-resident session, and one transient
+    /// error must not end it — but a channel that only errs eventually does.
+    pub fn messages(self) -> impl Iterator<Item = String> {
+        use interprocess::local_socket::traits::Listener as _;
+        use std::io::Read as _;
+        let mut consecutive_failures = 0u32;
+        std::iter::from_fn(move || loop {
+            match self.listener.accept() {
+                Ok(mut connection) => {
+                    consecutive_failures = 0;
+                    let mut message = String::new();
+                    if connection.read_to_string(&mut message).is_ok() {
+                        return Some(message);
+                    }
+                }
+                Err(_) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures > 100 {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        })
+    }
+}
+
+/// Claim the instance, or hand `args` to the one that already exists.
+///
+/// The channel is what makes `AlreadyRunning` an answer instead of a dead
+/// end: a `lait:` link opens a fresh process on the stub platforms, and
+/// without the handoff the link died with it.
+pub fn claim(args: impl IntoIterator<Item = String>) -> Result<Claim> {
+    claim_named(INSTANCE, args)
+}
+
+fn claim_named(instance: &str, args: impl IntoIterator<Item = String>) -> Result<Claim> {
+    match imp::acquire_named(instance)? {
+        Outcome::Held(guard) => {
+            let channel = match bind_channel(instance) {
+                Ok(channel) => Some(channel),
+                Err(error) => {
+                    eprintln!("astrolabe: no instance channel this session: {error:#}");
+                    None
+                }
+            };
+            Ok(Claim::Primary { guard, channel })
+        }
+        Outcome::AlreadyRunning => {
+            if let Err(error) = forward(instance, args) {
+                // The holder exists (the guard says so) and did not answer.
+                // Said rather than swallowed; there is nobody else to hand to.
+                eprintln!("astrolabe: the running client could not be reached: {error:#}");
+            }
+            Ok(Claim::Forwarded)
+        }
+    }
+}
+
+fn scoped_name(instance: &str, artifact: &str, user: &str) -> String {
+    format!("{instance}-{artifact}-{user}")
+}
+
+#[cfg(windows)]
+fn user_scope() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(unix)]
+fn user_scope() -> String {
+    // SAFETY: `geteuid` has no preconditions and returns the effective uid of
+    // this process. Unlike `$USER`, it cannot be changed to collide with a
+    // different login's instance artifacts.
+    unsafe { libc::geteuid() }.to_string()
+}
+
+/// Per user, matching the guard's scope — two people on one machine each get
+/// their own channel.
+fn channel_name(instance: &str) -> String {
+    scoped_name(instance, "instance", &user_scope())
+}
+
+#[cfg(not(windows))]
+fn lock_path(instance: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{}.lock",
+        scoped_name(instance, "guard", &user_scope())
+    ))
+}
+
+/// Windows names a pipe; elsewhere the channel is a socket file, unlinked
+/// before binding — a crash leaves the file behind with nothing listening,
+/// and the guard just won says nobody can be behind it.
+#[cfg(windows)]
+fn channel_address(instance: &str) -> Result<interprocess::local_socket::Name<'static>> {
+    use anyhow::Context as _;
+    use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
+    channel_name(instance)
+        .to_ns_name::<GenericNamespaced>()
+        .context("name the instance channel")
+}
+
+#[cfg(not(windows))]
+fn channel_address(instance: &str) -> Result<interprocess::local_socket::Name<'static>> {
+    use anyhow::Context as _;
+    use interprocess::local_socket::{GenericFilePath, ToFsName as _};
+    std::env::temp_dir()
+        .join(format!("{}.sock", channel_name(instance)))
+        .to_fs_name::<GenericFilePath>()
+        .context("name the instance channel")
+}
+
+fn bind_channel(instance: &str) -> Result<Channel> {
+    use anyhow::Context as _;
+    use interprocess::local_socket::ListenerOptions;
+    #[cfg(not(windows))]
+    {
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("{}.sock", channel_name(instance))),
+        );
+    }
+    let listener = ListenerOptions::new()
+        .name(channel_address(instance)?)
+        .create_sync()
+        .context("bind the instance channel")?;
+    Ok(Channel { listener })
+}
+
+fn forward(instance: &str, args: impl IntoIterator<Item = String>) -> Result<()> {
+    use anyhow::Context as _;
+    use interprocess::local_socket::traits::Stream as _;
+    use std::io::Write as _;
+    // The holder may still be between winning the guard and binding the
+    // channel — a person double-clicking a link cold is exactly that race —
+    // so the connect waits it out briefly rather than dropping the link.
+    let mut stream = None;
+    for _ in 0..40 {
+        match interprocess::local_socket::Stream::connect(channel_address(instance)?) {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let mut stream = stream.context("reach the running client")?;
+    let blob = args.into_iter().collect::<Vec<_>>().join("\n");
+    stream
+        .write_all(blob.as_bytes())
+        .context("hand the arguments over")?;
+    Ok(())
+}
 
 #[cfg(windows)]
 mod imp {
-    use super::{Guard, Outcome, MUTEX_NAME};
+    use super::{Guard, Outcome};
     use anyhow::Result;
 
     /// Held, never read. The handle *is* the guard: the mutex is released when
@@ -60,12 +237,15 @@ mod imp {
     unsafe impl Send for Handle {}
     unsafe impl Sync for Handle {}
 
-    pub fn acquire() -> Result<Outcome> {
+    pub fn acquire_named(instance: &str) -> Result<Outcome> {
         use std::os::windows::io::{FromRawHandle, RawHandle};
         use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
         use windows_sys::Win32::System::Threading::CreateMutexW;
 
-        let name: Vec<u16> = MUTEX_NAME.encode_utf16().chain(Some(0)).collect();
+        // `Local` scopes it to the logon session; the suffix is historic
+        // and must never move.
+        let mutex = format!(r"Local\{instance}-single-instance");
+        let name: Vec<u16> = mutex.encode_utf16().chain(Some(0)).collect();
         // SAFETY: `name` is a valid null-terminated wide string that outlives
         // the call. A null handle is returned as failure and never used.
         let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
@@ -98,8 +278,8 @@ mod imp {
     /// An advisory lock on a file under the temp directory. Same property that
     /// matters: the OS releases it when the process dies, so a crash cannot
     /// leave a stale guard.
-    pub fn acquire() -> Result<Outcome> {
-        let path = std::env::temp_dir().join("lait-astrolabe.lock");
+    pub fn acquire_named(instance: &str) -> Result<Outcome> {
+        let path = super::lock_path(instance);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -142,6 +322,56 @@ mod tests {
         assert!(
             matches!(third, Outcome::Held(_)),
             "the guard was not released, so no later launch can ever start"
+        );
+    }
+
+    /// `AlreadyRunning` is an answer, not a dead end: the second launch's
+    /// argv reaches the first through the channel — which is how a `lait:`
+    /// link opens in the running client instead of dying with the process
+    /// the OS started to deliver it. Scratch names, so a live client on the
+    /// machine running this suite is neither reached nor blocked.
+    #[test]
+    fn a_second_launch_hands_its_arguments_to_the_first() {
+        let instance = format!("lait-astrolabe-test-{}", std::process::id());
+
+        let Claim::Primary {
+            guard: _guard,
+            channel: receiver,
+        } = claim_named(&instance, Vec::new()).expect("first claim")
+        else {
+            panic!("the first launch was not the primary");
+        };
+        let receiver = receiver.expect("the primary bound its channel");
+        let received = std::thread::spawn(move || receiver.messages().next());
+
+        let second = claim_named(
+            &instance,
+            vec![
+                "astrolabe.exe".to_string(),
+                "lait://world/issues".to_string(),
+            ],
+        )
+        .expect("second claim");
+        assert!(
+            matches!(second, Claim::Forwarded),
+            "two launches both believed they were the only one"
+        );
+
+        let message = received
+            .join()
+            .expect("the drain thread")
+            .expect("a message arrived");
+        assert_eq!(message, "astrolabe.exe\nlait://world/issues");
+    }
+
+    #[test]
+    fn instance_artifacts_are_stable_within_a_user_and_distinct_between_users() {
+        let alice = scoped_name(INSTANCE, "guard", "1000");
+        assert_eq!(alice, scoped_name(INSTANCE, "guard", "1000"));
+        assert_ne!(alice, scoped_name(INSTANCE, "guard", "1001"));
+        assert_ne!(
+            scoped_name(INSTANCE, "instance", "1000"),
+            scoped_name(INSTANCE, "instance", "1001")
         );
     }
 }

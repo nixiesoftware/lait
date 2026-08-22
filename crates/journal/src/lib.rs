@@ -478,6 +478,79 @@ pub fn object_content_hash(bytes: &[u8]) -> [u8; 32] {
     object_hash(bytes)
 }
 
+/// The container generation immediately behind [`STORE_FORMAT_VERSION`]: one
+/// required-object index rather than the eager/deferred split, and no lazy
+/// caller indexes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorIndexedManifest {
+    format_version: u8,
+    sequence: u64,
+    required_object_index_root: Option<([u8; 32], u64)>,
+    caller_meta: Option<Object>,
+    caller_index_roots: Vec<([u8; 32], u64)>,
+}
+
+/// The oldest container generation still opened here.
+const PRIOR_STORE_FORMAT_VERSION: u8 = 2;
+
+/// Decode a manifest, distinguishing a store this build cannot open from one
+/// that is damaged.
+///
+/// The prior generation is recognized and refused rather than mapped forward.
+/// Its manifest would map — the single required index is the eager one and the
+/// indexes added since are empty-valid — but its index *values* carry no class
+/// tag, so every leaf would have to be rewritten. That is a rebuild
+/// (`GenerationSource` reads this generation), not an open, and an open that
+/// mapped the root would write a current manifest over a prior index tree.
+fn decode_manifest(bytes: &[u8]) -> Result<Manifest, Failure> {
+    if let Ok(manifest) = postcard::from_bytes::<Manifest>(bytes) {
+        if manifest.format_version == STORE_FORMAT_VERSION {
+            return Ok(manifest);
+        }
+    }
+    match postcard::from_bytes::<PriorIndexedManifest>(bytes) {
+        Ok(prior) if prior.format_version == PRIOR_STORE_FORMAT_VERSION => {
+            Err(Failure::Integrity(Defect::UnsupportedFormat))
+        }
+        _ => Err(Failure::Integrity(Defect::CorruptManifest)),
+    }
+}
+
+#[cfg(test)]
+mod manifest_generation_tests {
+    use super::*;
+
+    /// A store one generation behind is unsupported, not damaged. Reporting it
+    /// as corrupt sends somebody looking for a defect that is not there — and
+    /// the two call for opposite responses: a rebuild, or a restore.
+    #[test]
+    fn the_prior_generation_is_unsupported_and_only_nonsense_is_corrupt() {
+        let prior = PriorIndexedManifest {
+            format_version: PRIOR_STORE_FORMAT_VERSION,
+            sequence: 12,
+            required_object_index_root: None,
+            caller_meta: None,
+            caller_index_roots: Vec::new(),
+        };
+        let bytes = postcard::to_stdvec(&prior).expect("prior manifest");
+        assert!(
+            matches!(
+                decode_manifest(&bytes),
+                Err(Failure::Integrity(Defect::UnsupportedFormat))
+            ),
+            "the prior generation was not named as unsupported"
+        );
+
+        assert!(
+            matches!(
+                decode_manifest(&[0xff, 0xff, 0xff, 0xff]),
+                Err(Failure::Integrity(Defect::CorruptManifest))
+            ),
+            "damage was not reported as damage"
+        );
+    }
+}
+
 fn manifest_hash(bytes: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(MANIFEST_DOMAIN);
@@ -990,13 +1063,10 @@ impl Store {
 
     fn read_manifest_file(&self) -> Result<Option<(Manifest, [u8; 32])>, Failure> {
         match std::fs::read(self.root.join(MANIFEST_FILE)) {
+            // The hash is of the bytes on disk either way: it answers "did the
+            // commit I journalled land", not "what shape did I read".
             Ok(bytes) => {
-                let manifest: Manifest = postcard::from_bytes(&bytes)
-                    .map_err(|_| Failure::Integrity(Defect::CorruptManifest))?;
-                if manifest.format_version != STORE_FORMAT_VERSION {
-                    return Err(Failure::Integrity(Defect::UnsupportedFormat));
-                }
-                Ok(Some((manifest, manifest_hash(&bytes))))
+                decode_manifest(&bytes).map(|manifest| Some((manifest, manifest_hash(&bytes))))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(io_err(Operation::Read, e)),

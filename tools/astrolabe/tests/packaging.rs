@@ -125,18 +125,13 @@ fn every_shell_artifact_points_at_the_stub_and_never_into_a_release() {
     }
 }
 
-/// Nothing from a retired stack survives in the installer.
-///
-/// This list used to include Flutter and Dart, under revision 6, whose whole
-/// point was that the client was a single self-contained executable. **Revision
-/// 7 put the interface on Flutter over a Rust core**, so those two moved from
-/// forbidden to required and the assertion below them inverted — see
-/// [`the_installer_carries_the_whole_flutter_bundle`]. What remains here is the
-/// genuinely dead: the browser shells this design never went back to.
+/// Nothing from a retired stack survives in the installer. The list has
+/// inverted twice as interfaces came and went; today the Tauri host is the
+/// client and the Flutter payload is the corpse.
 #[test]
 fn the_installer_carries_nothing_from_the_retired_stacks() {
     let script = directives().to_ascii_lowercase();
-    for corpse in ["webview2", "tauri", "warpui", "egui"] {
+    for corpse in ["flutter", "dartjni", "icudtl", "msvcp140", "warpui", "egui"] {
         assert!(
             !script.contains(corpse),
             "the installer references '{corpse}', which no longer exists in this design"
@@ -144,51 +139,46 @@ fn the_installer_carries_nothing_from_the_retired_stacks() {
     }
 }
 
-/// The inverse of the test above, and the reason it had to change.
-///
-/// `astrolabe.exe` is a 92 KB runner. Installing it alone — which is exactly
-/// what this script did for the whole of revision 7's first half — produces a
-/// machine where the client cannot reach its first frame: no engine, no AOT
-/// image, no ICU table. The failure arrives in the loader, before anything this
-/// project wrote gets to run, which is the least diagnosable place it could.
+/// WebView2 is the one runtime the pair does not carry: the host draws
+/// through the system's Evergreen install, updated on the OS's schedule —
+/// which is the evergreen design's whole point on Windows. A machine without
+/// it must be given Microsoft's own bootstrapper, not a loader dialog.
 #[test]
-fn the_installer_carries_the_whole_flutter_bundle() {
+fn the_installer_ensures_webview2() {
     let script = directives();
     for required in [
-        // The engine, and the Rust core reached across the bridge.
-        r#"File "${STAGE}\flutter_windows.dll""#,
-        r#"File "${STAGE}\astrolabe.dll""#,
-        // The undecorated window and the tray icon are plugins, not framework.
-        r#"File "${STAGE}\*_plugin.dll""#,
-        // `data\` is resolved by path relative to the executable, so it has to
-        // arrive under that name and no other — beside the runner, inside the
-        // release.
-        r#"SetOutPath "$INSTDIR\current\data""#,
-        r#"File /r "${STAGE}\data\*.*""#,
+        // The presence check, against Evergreen's registration.
+        r#"EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"#,
+        // The bootstrapper, staged by build-astrolabe.sh and never installed.
+        r#"MicrosoftEdgeWebview2Setup.exe"#,
     ] {
         assert!(
             script.contains(required),
-            "the installer omits {required}, so the client cannot start"
+            "the installer omits {required}; a machine without WebView2 gets a loader dialog"
         );
     }
 }
 
-/// The C runtime ships beside the client.
+/// The pair carries its own C runtime.
 ///
-/// `astrolabe.exe` imports MSVCP140.dll and VCRUNTIME140*.dll. A development
-/// machine has them because Visual Studio installed them, which is precisely
-/// why leaving them out is invisible until somebody installs on a clean
-/// machine — the one test nothing in CI substitutes for.
+/// The Flutter bundle staged msvcp/vcruntime DLLs app-locally; the Tauri pair
+/// is built `+crt-static` by build-astrolabe.sh instead, so the installer
+/// ships no runtime DLLs and a clean machine has nothing to be missing. Both
+/// halves are pinned: the flag where the build sets it, and the absence of
+/// any DLL enumeration that would quietly resurrect the old posture.
 #[test]
 fn the_installer_carries_the_c_runtime() {
+    let build = std::fs::read_to_string(repo_root().join("packaging/build-astrolabe.sh"))
+        .expect("build-astrolabe.sh");
+    assert!(
+        build.contains("crt-static"),
+        "the Windows pair is not built with a static C runtime, and nothing ships one"
+    );
     let script = directives();
-    for required in [
-        r#"File "${STAGE}\msvcp140*.dll""#,
-        r#"File "${STAGE}\vcruntime140*.dll""#,
-    ] {
+    for corpse in [r#"msvcp140"#, r#"vcruntime140"#, r#"concrt140"#] {
         assert!(
-            script.contains(required),
-            "the installer omits {required}; a clean machine cannot start the client"
+            !script.to_ascii_lowercase().contains(corpse),
+            "the installer enumerates {corpse}, which a static-CRT pair must not ship"
         );
     }
 }
@@ -234,12 +224,9 @@ fn uninstalling_removes_the_program_and_never_the_persons_data() {
     // Recursive removal is allowed for the release trees, by name, and
     // nowhere else.
     //
-    // Under revision 6 this test forbade `RMDir /r` outright, which was right
-    // for an installer that placed two files. Revision 7's bundle nests
-    // `data\flutter_assets\<package>\...`; the staged-swap layout adds three
-    // trees whose contents are whatever the *update path* put there, and after
-    // the first update are not what any installer shipped. So the rule is a
-    // bound rather than a ban, and the bound is stated per directory.
+    // The release trees hold whatever the *update path* put there — after the
+    // first update, not what any installer shipped — so the rule is a bound
+    // rather than a ban, and the bound is stated per directory.
     // `$INSTDIR` itself still comes off with plain `RMDir`, which refuses a
     // non-empty directory: an unknown file left behind fails the uninstall
     // visibly instead of being swept away with everything around it.
@@ -424,6 +411,12 @@ fn dmg_directives() -> String {
         .join("\n")
 }
 
+fn client_build_script() -> String {
+    let path = repo_root().join("packaging/build-astrolabe.sh");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
 /// The pair ships together, macOS spelling: `sidecar::resolve` looks beside
 /// the executable, and `Contents/MacOS` is beside. A bundle missing either
 /// half — or carrying a sidecar that does not run — must be refused as a
@@ -431,7 +424,7 @@ fn dmg_directives() -> String {
 #[test]
 fn the_dmg_refuses_a_bundle_missing_either_half_of_the_pair() {
     let script = dmg_directives();
-    for binary in ["astrolabe", "lait", "libastrolabe.dylib"] {
+    for binary in ["astrolabe", "lait"] {
         assert!(
             script.contains(binary),
             "the packaging never checks for {binary}"
@@ -459,12 +452,60 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
         !script.contains("--deep"),
         "--deep signs every nesting level sight unseen; enumerate the payload instead"
     );
-    for signed in [
-        r#"sign "$STAGED/Contents/MacOS/libastrolabe.dylib""#,
-        r#"sign "$STAGED/Contents/MacOS/lait""#,
-    ] {
+    for signed in [r#"sign "$STAGED/Contents/MacOS/lait""#, r#"sign "$STAGED""#] {
         assert!(script.contains(signed), "not signed explicitly: {signed}");
     }
+    assert!(
+        !script.contains("libastrolabe.dylib")
+            && !script.contains("apps/astrolabe/macos/Runner/Release.entitlements"),
+        "the Tauri packager still depends on the retired Flutter payload"
+    );
+}
+
+/// A signed installer paired with an unsigned update tree would install once
+/// and then replace itself with a bundle Gatekeeper cannot verify. The DMG
+/// packager therefore exports its sealed staging app, and the tree consumes
+/// that output rather than the raw Tauri build directory.
+#[test]
+fn the_macos_update_tree_is_built_from_the_app_sealed_for_the_dmg() {
+    let dmg = dmg_directives();
+    assert!(
+        dmg.contains(r#"cp -R "$STAGED" "$SIGNED_APP_OUT""#),
+        "the sealed DMG payload cannot be exported for the update tree"
+    );
+
+    let build = client_build_script();
+    assert!(
+        build.contains(r#"--signed-app-out "$SIGNED_APP""#),
+        "the release build does not retain the app sealed by make-dmg"
+    );
+    assert!(
+        build.contains(r#"TREE_APP="$SIGNED_APP""#)
+            && build.contains(r#"make-tree.sh" --stage "$TREE_APP""#),
+        "the macOS update tree is still packed from the unsigned build output"
+    );
+}
+
+/// The feed's artifact keys are a closed platform vocabulary. Building on an
+/// extra Rust host must fail before producing a target-named tree that no
+/// manifest entry or installed client can ever select.
+#[test]
+fn the_client_builder_accepts_exactly_the_feed_supported_targets() {
+    let build = client_build_script();
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+    ] {
+        assert!(
+            build.contains(target),
+            "the builder cannot emit the feed's {target} artifact"
+        );
+    }
+    assert!(
+        build.contains("unsupported client target '$TARGET'") && build.contains("exit 1"),
+        "hosts outside the feed matrix are allowed to emit undiscoverable artifacts"
+    );
 }
 
 /// A signature from an "Apple Development" certificate succeeds locally and
@@ -537,7 +578,7 @@ fn linux_directives() -> String {
 #[test]
 fn the_linux_bundle_refuses_a_missing_or_mismatched_pair() {
     let script = linux_directives();
-    for required in ["astrolabe", "lait", "libastrolabe.so", "data", "lib"] {
+    for required in ["astrolabe", "lait"] {
         assert!(
             script.contains(required),
             "the Linux package never checks for {required}"
@@ -549,14 +590,14 @@ fn the_linux_bundle_refuses_a_missing_or_mismatched_pair() {
     );
 }
 
-/// Flutter documents the whole bundle directory as its Linux distribution
-/// unit. Copying selected files would silently drop a future engine artifact.
+/// The whole stage travels: copying selected files would silently drop
+/// whatever a future release adds beside the pair.
 #[test]
-fn the_linux_package_carries_the_whole_flutter_bundle_and_notices() {
+fn the_linux_package_carries_the_pair_and_notices() {
     let script = linux_directives();
     assert!(
         script.contains(r#"cp -a "$BUNDLE/." "$STAGED/current/""#),
-        "the Linux package enumerates a partial Flutter bundle"
+        "the Linux package copies selected files instead of the whole stage"
     );
     // The stub takes the root name, and the release sits beneath it — the
     // same shape as Windows, for the same reason: a path outside the install
@@ -650,6 +691,62 @@ fn the_client_and_its_sidecar_agree_about_the_layout() {
     );
 }
 
+/// The bundler's configuration is what makes the installed layout true, and
+/// three of its fields are load-bearing in ways nothing else would catch.
+///
+/// The test above proves the two *functions* agree about the layout. This
+/// proves the *bundle* produces it — which is a different claim, and the one
+/// that broke when the client moved to Tauri: the bundler names the main
+/// binary after `productName` unless told otherwise, so `Astrolabe` would
+/// have shipped where `update::custody_of` looks for `astrolabe`. On macOS a
+/// case-insensitive filesystem hides that; on Linux it does not, and either
+/// way the symptom is a sidecar that believes it may replace itself.
+///
+/// Read from the config rather than from a built bundle so it runs anywhere,
+/// including where no webview toolchain exists.
+#[test]
+fn the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs() {
+    let path = repo_root().join("apps/astrolabe-web/src-tauri/tauri.conf.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let config: serde_json::Value = serde_json::from_str(&text).expect("tauri.conf.json parses");
+
+    // 1. The entry binary's name, which `update::custody_of` looks for and
+    //    `update::tree::entry_for` names in every tree.
+    assert_eq!(
+        config["mainBinaryName"].as_str(),
+        Some("astrolabe"),
+        "the bundle would ship a binary that custody_of cannot recognise"
+    );
+
+    // 2. The sidecar rides inside, so the pair ships together (CLIENT-12) and
+    //    `sidecar::beside` finds it in the installed bundle.
+    let external = config["bundle"]["externalBin"]
+        .as_array()
+        .expect("externalBin is declared");
+    assert!(
+        external
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|entry| entry.ends_with("lait")),
+        "no lait sidecar is bundled, so the installed client has no daemon to start: {external:?}"
+    );
+
+    // 3. The terms travel with the copy. PolyForm makes carrying them an
+    //    obligation on whoever distributes one, and `make-tree.sh` refuses a
+    //    tree without them — so an omission here fails a release rather than
+    //    shipping quietly, but only if it is declared at all.
+    let resources = &config["bundle"]["resources"];
+    for required in ["LICENSE", "THIRD-PARTY-NOTICES.md"] {
+        assert!(
+            resources
+                .as_object()
+                .is_some_and(|map| map.values().any(|dest| dest.as_str() == Some(required))),
+            "the bundle does not carry {required}"
+        );
+    }
+}
+
 // --- The terms --------------------------------------------------------------
 //
 // PolyForm's Notices section makes carrying the terms an obligation on whoever
@@ -705,9 +802,7 @@ fn the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed() {
     };
 
     // The bundle seal: the last `sign`, the one that takes `$STAGED` itself.
-    let seal = at(
-        r#"sign --entitlements "$REPO/apps/astrolabe/macos/Runner/Release.entitlements" "$STAGED""#,
-    );
+    let seal = at(r#"sign "$STAGED""#);
 
     assert!(
         at("Contents/Resources/LICENSE") < seal,

@@ -220,7 +220,7 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
     let daemon_home = selection.daemon_home()?;
     rt.block_on(async {
         for _ in 0..200 {
-            if matches!(control::probe(&daemon_home).await, Probe::Healthy) {
+            if matches!(control::probe(&daemon_home).await, Probe::Healthy { .. }) {
                 return Ok(());
             }
             // Taken in its own statement so the guard drops before the bail —

@@ -32,8 +32,9 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 # The Swift boundary. Pinned exactly, because the generated Swift is checked in
-# and a generator bump regenerates the whole surface — the same discipline (and
-# the same sentence) as flutter_rust_bridge on the desktop boundary. UniFFI's
+# and a generator bump regenerates the whole surface. This is now the *only*
+# generated boundary in the repository — the desktop one went with the
+# deprecated Flutter client, and Tauri's host links the core directly. UniFFI's
 # default is its `cargo-metadata` generator feature; the runtime scaffolding
 # needs only core + macros, while the explicit `bindgen-cli` feature below owns
 # generation. Keeping the default off stops ordinary workspace builds from

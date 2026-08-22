@@ -19,19 +19,53 @@
 use crate::client::{ClientError, ClientResult};
 
 /// Open `url` in whatever the person has chosen as their browser.
-///
-/// Refuses anything that is not `http://` or `https://`. The URL reaching here
-/// is composed by this program from a head's own address, so this is not a
-/// filter against a hostile caller — it is the guard that stops a defect
-/// upstream from turning `ShellExecuteW` into "run whatever this string names",
-/// which is what the shell would do with a path or a `file:` URL.
 pub fn open(url: &str) -> ClientResult<()> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(ClientError::invalid(format!(
-            "'{url}' is not a web address, and the shell will not be asked to open it"
-        )));
-    }
+    ensure_web_url(url)?;
     imp::open(url)
+}
+
+/// Every URL here is composed by this program from a head's own address, so
+/// this is not a filter against a hostile caller — it stops a defect upstream
+/// from turning `ShellExecuteW` (or a webview) into "act on whatever this
+/// string names", which is what the shell would do with a path or `file:`.
+fn ensure_web_url(url: &str) -> ClientResult<()> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(ClientError::invalid(format!(
+            "'{url}' is not a web address, and nothing will be asked to open it"
+        )))
+    }
+}
+
+/// A World launch on its way to a person.
+#[derive(Debug, Clone)]
+pub struct WorldLaunch {
+    pub world: String,
+    pub title: String,
+    pub url: String,
+}
+
+static PRESENTER: std::sync::OnceLock<Box<dyn Fn(WorldLaunch) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Register how this process presents a World launch. First registration
+/// wins; `false` reports a later one was refused.
+pub fn present_with(presenter: impl Fn(WorldLaunch) + Send + Sync + 'static) -> bool {
+    PRESENTER.set(Box::new(presenter)).is_ok()
+}
+
+/// A launch goes to the registered presenter, and to [`open`] where no host
+/// registered one.
+pub(crate) fn deliver(launch: WorldLaunch) -> ClientResult<()> {
+    ensure_web_url(&launch.url)?;
+    match PRESENTER.get() {
+        Some(presenter) => {
+            presenter(launch);
+            Ok(())
+        }
+        None => open(&launch.url),
+    }
 }
 
 #[cfg(windows)]
