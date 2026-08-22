@@ -12,7 +12,7 @@ struct AstrolabeApp: App {
 
 /// One open World session. Identity is (space, world); everything else is
 /// presentation. Transient — a session lives exactly as long as its cover,
-/// and reopening from Spaces is the way back.
+/// and the World's tile is the way back. There is no session dock.
 struct OpenTab: Equatable, Identifiable {
     let spaceId: String
     let spaceName: String
@@ -32,51 +32,105 @@ struct PresentedLink: Identifiable {
     var id: String { link }
 }
 
+/// The one context rule, shared by Home and the switcher so the chooser and
+/// the resolver can never disagree: standing gates, presence only colors.
+/// Exactly two states fail standing — waiting on admission, and store gone.
+enum HomeStanding {
+    /// A Space you can act in. Everything lights up.
+    case active(SpaceRow)
+    /// Spaces exist but this context is not actable — the waiting room,
+    /// wearing the Space being waited on.
+    case waiting(SpaceRow)
+    /// Nothing known. Welcome territory.
+    case none
+
+    static func actable(_ space: SpaceRow) -> Bool {
+        switch space.status {
+        case .admissionPending, .storeMissing: false
+        default: true
+        }
+    }
+}
+
 struct RootView: View {
-    /// The one projection every surface draws.
-    @State private var view = Core.view()
+    /// The one projection every surface draws. The initializer is
+    /// `launchView`'s only caller: pre-start the read is cheap, and every
+    /// later one goes through `Core.view()` off the main thread.
+    @State private var view = Core.launchView()
     /// The in-process node's startup, reported honestly: nil while starting.
     @State private var nodeFailure: String?
     /// Navigation memory, not client state.
     @AppStorage("welcomed") private var welcomed = false
+    /// The active Space — the context every surface follows. Navigation
+    /// memory: the registry stays the truth about what exists.
+    @AppStorage("activeSpace") private var activeSpaceId = ""
+    /// The open World session — transient, gone when its cover goes.
     @State private var presented: OpenTab?
     @State private var arrivedInvite: PresentedLink?
-    /// The bar's five surfaces, left to right. Spaces is home.
-    @State private var selection = Surface.spaces
+    /// The bar's four surfaces, left to right. Home is home.
+    @State private var selection = Surface.home
     @Environment(\.scenePhase) private var scenePhase
     /// Whether the head was stepped down for a suspension it must now undo.
     /// Launch also lands on `.active`, and that arrival must not race the
     /// startup already running in `.task`.
     @State private var headSteppedDown = false
 
-    /// The five surfaces, in bar order.
+    /// The four surfaces, in bar order.
     enum Surface: Hashable {
-        case inbox, chats, spaces, library, you
+        case home, inbox, chats, you
+    }
+
+    /// Context resolution, one rule: the remembered Space keeps the seat even
+    /// unactable — silently reseating someone is the account-switcher sin —
+    /// else the first actable Space, else the wait, else nothing.
+    private var standing: HomeStanding {
+        if let remembered = view.spaces.first(where: { $0.spaceId == activeSpaceId }) {
+            return HomeStanding.actable(remembered) ? .active(remembered) : .waiting(remembered)
+        }
+        if let first = view.spaces.first(where: HomeStanding.actable(_:)) {
+            return .active(first)
+        }
+        if let pending = view.spaces.first {
+            return .waiting(pending)
+        }
+        return .none
     }
 
     var body: some View {
         TabView(selection: $selection) {
+            HomeView(
+                view: view,
+                standing: standing,
+                onRefresh: refresh,
+                onOpen: open,
+                onSelectSpace: { space in activeSpaceId = space.spaceId },
+                onFounded: { spaceId in
+                    activeSpaceId = spaceId
+                    welcomed = true
+                    refresh()
+                }
+            )
+            .tabItem { Label("Home", systemImage: "house") }
+            .tag(Surface.home)
             InboxView()
                 .tabItem { Label("Inbox", systemImage: "tray") }
                 .tag(Surface.inbox)
             ChatsView()
                 .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
                 .tag(Surface.chats)
-            SpacesView(view: view, onRefresh: refresh, onOpen: open)
-                .tabItem { Label("Spaces", systemImage: "circle.grid.2x2") }
-                .tag(Surface.spaces)
-            LibraryView(view: view)
-                .tabItem { Label("Library", systemImage: "books.vertical") }
-                .tag(Surface.library)
             YouView(view: view)
                 .tabItem { Label("You", systemImage: "person.crop.circle") }
                 .tag(Surface.you)
         }
+        .tint(Theme.cobalt)
+        // The visual language is a committed light look; until a dark variant
+        // is designed (not inverted), the app pins light so no sheet ever
+        // renders ink-on-dark.
+        .preferredColorScheme(.light)
         .task {
-            let outcome = await Task.detached { Core.startNode() }.value
-            switch outcome {
+            switch await Core.start() {
             case .ready:
-                refresh()
+                await refreshNow()
             case .failed(let reason):
                 nodeFailure = reason
             }
@@ -85,7 +139,7 @@ struct RootView: View {
             // without any surface owning a refresh button.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
-                refresh()
+                await refreshNow()
             }
         }
         .fullScreenCover(item: $presented) { tab in
@@ -114,30 +168,44 @@ struct RootView: View {
             }, initialLink: arrived.link)
         }
         .fullScreenCover(isPresented: welcomeShown) {
-            WelcomeView(onDone: { welcomed = true; refresh() })
+            WelcomeView(
+                onDone: { welcomed = true; refresh() },
+                onFounded: { spaceId in
+                    activeSpaceId = spaceId
+                    welcomed = true
+                    refresh()
+                }
+            )
         }
-        .alert("The node could not start", isPresented: nodeFailedShown) {
+        .alert("Astrolabe couldn't start", isPresented: nodeFailedShown) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(nodeFailure ?? "")
         }
     }
 
+    /// The next projection, fetched off the main thread — it asks each
+    /// Space's Station for membership — and applied on it.
+    @MainActor
+    private func refreshNow() async {
+        view = await Core.view()
+    }
+
+    /// The synchronous entry the callbacks use.
     func refresh() {
-        view = Core.view()
+        Task { await refreshNow() }
     }
 
     /// The background transition: the head drains under a background-task
     /// assertion, so the close finishes before the freeze instead of half of
-    /// it being carried into suspension.
+    /// it being carried into suspension. Submitted synchronously — the
+    /// transitions queue is what keeps a fast flip from applying this after
+    /// the foreground that follows it.
     private func stepDown() {
         headSteppedDown = true
         let assertion = UIApplication.shared.beginBackgroundTask(withName: "astrolabe-head-drain")
-        Task.detached {
-            Core.background()
-            await MainActor.run {
-                UIApplication.shared.endBackgroundTask(assertion)
-            }
+        Core.background {
+            UIApplication.shared.endBackgroundTask(assertion)
         }
     }
 
@@ -148,8 +216,7 @@ struct RootView: View {
     private func standBackUp() {
         guard headSteppedDown else { return }
         headSteppedDown = false
-        Task {
-            let outcome = await Task.detached { Core.foreground() }.value
+        Core.foreground { outcome in
             switch outcome {
             case .ready:
                 nodeFailure = nil
@@ -160,7 +227,7 @@ struct RootView: View {
         }
     }
 
-    private func open(space: SpaceRow, world: SpaceWorldRow) {
+    private func open(space: SpaceRow, world: BundledWorld) {
         presented = OpenTab(
             spaceId: space.spaceId,
             spaceName: space.name,

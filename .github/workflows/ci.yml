@@ -350,6 +350,13 @@ jobs:
         shell: bash
         run: bash ci/error-context-guard.sh
 
+      # UniFFI emits free functions into the app module, so no compiler holds
+      # the "one file calls the bridge" rule the way Dart's import grep did;
+      # this does. Pure grep — no Apple toolchain, so it runs on this leg.
+      - name: Swift bridge guard (one file calls the generated bridge)
+        shell: bash
+        run: bash ci/swift-bridge-guard.sh
+
       - name: Smoke run (P0 tracker flow)
         shell: bash
         run: bash ci/smoke-p0.sh linux

@@ -342,6 +342,13 @@ pub struct TicketFacts {
     pub name_hint: String,
     /// The inviter's nick. May be empty. A hint, never an authority.
     pub host_nick_hint: String,
+    /// Unix seconds when the carried admission stops working — the invite's
+    /// own bound, stated at read time rather than discovered at redemption.
+    /// `None` when the link carries no admission.
+    pub expires_at: Option<u64>,
+    /// How many bindings the admission allows (1 = single use). `None` when
+    /// the link carries no admission.
+    pub use_cap: Option<u32>,
 }
 
 #[derive(uniffi::Enum)]
@@ -355,13 +362,21 @@ pub enum TicketRead {
 #[uniffi::export]
 pub fn read_ticket(link: String) -> TicketRead {
     match SignedCoordinates::parse_link(&link).and_then(|c| c.verify()) {
-        Ok(verified) => TicketRead::Valid {
-            facts: TicketFacts {
-                space_id: verified.space.to_string(),
-                name_hint: verified.display_name_hint,
-                host_nick_hint: verified.approach_nick_hint,
-            },
-        },
+        Ok(verified) => {
+            let (expires_at, use_cap) = match &verified.admission {
+                Some(admission) => (Some(admission.expires_at), Some(admission.use_policy.cap())),
+                None => (None, None),
+            };
+            TicketRead::Valid {
+                facts: TicketFacts {
+                    space_id: verified.space.to_string(),
+                    name_hint: verified.display_name_hint,
+                    host_nick_hint: verified.approach_nick_hint,
+                    expires_at,
+                    use_cap,
+                },
+            }
+        }
         Err(invalid) => TicketRead::Invalid {
             reason: invalid.to_string(),
         },
@@ -471,6 +486,78 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
             reason: refusal(&other),
         },
         Err(error) => EnterOutcome::Refused {
+            reason: format!("{error:#}"),
+        },
+    }
+}
+
+/// What founding created, echoed back so the shell can seat the new Space
+/// as its context immediately.
+#[derive(uniffi::Record)]
+pub struct Founded {
+    pub space_id: String,
+    pub name: String,
+}
+
+#[derive(uniffi::Enum)]
+pub enum FoundOutcome {
+    Founded { founded: Founded },
+    Refused { reason: String },
+}
+
+/// Found a Space on this iPhone — the same `HostSpaceFound` the desktop
+/// Welcome flow sends, against the in-process daemon. Blocks; call off the
+/// main thread.
+#[uniffi::export]
+pub fn found_space(name: String, nick: Option<String>) -> FoundOutcome {
+    let node = match ensure_node() {
+        Ok(node) => node,
+        Err(reason) => return FoundOutcome::Refused { reason },
+    };
+    // A fresh store needs a directory before an id exists: the sanitized
+    // name, bumped on collision rather than salted — the id joins the
+    // registry, never the path.
+    let root = config::spaces_root();
+    let mut base: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    base.truncate(24);
+    let mut base = base.trim_matches('-').to_owned();
+    if base.is_empty() {
+        base = "space".to_owned();
+    }
+    let mut home = root.join(&base);
+    let mut bump = 2;
+    while home.exists() {
+        home = root.join(format!("{base}-{bump}"));
+        bump += 1;
+    }
+
+    let request = Request::HostSpaceFound {
+        home: home.to_string_lossy().into_owned(),
+        name,
+        nick,
+    };
+    let response = node.rt.block_on(async {
+        node.client
+            .request(control::ControlRoute::Daemon, &request, None)
+            .await
+    });
+    match response {
+        Ok(Response::Host(control::HostReply::Founded { space, name, .. })) => {
+            FoundOutcome::Founded {
+                founded: Founded {
+                    space_id: space,
+                    name,
+                },
+            }
+        }
+        Ok(other) => FoundOutcome::Refused {
+            reason: refusal(&other),
+        },
+        Err(error) => FoundOutcome::Refused {
             reason: format!("{error:#}"),
         },
     }

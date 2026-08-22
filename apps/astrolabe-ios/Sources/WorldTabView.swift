@@ -1,10 +1,10 @@
 import SwiftUI
 import WebKit
 
-/// The World view: WebKit full-bleed under a minimal native bar. The bar is
-/// where trust lives — it names the tab and carries the controls, and World
-/// pixels can never cover it. A failed load is a named state on this surface,
-/// never a silent white page.
+/// The World view: WebKit full-bleed under the ink trust bar. The bar is
+/// where trust lives — it carries the World's own mark, names where you are,
+/// and holds the exits; World pixels can never cover it. A failed load is a
+/// named state on this surface, never a silent white page.
 struct WorldTabView: View {
     let tab: OpenTab
     let head: HeadReady?
@@ -13,7 +13,8 @@ struct WorldTabView: View {
     @State private var loadFailure: String?
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
+            trustBar
             Group {
                 if let head {
                     // Keyed on the announcement, not just the reload count: a
@@ -36,28 +37,59 @@ struct WorldTabView: View {
                         }
                 } else {
                     ContentUnavailableView {
-                        Label("Head starting", systemImage: "clock")
+                        Label("Connecting…", systemImage: "clock")
                     } description: {
-                        Text("This tab opens as soon as the node's head is up.")
+                        Text("This World opens as soon as the connection is up.")
                     }
-                }
-            }
-            .navigationTitle("\(tab.worldName) · \(tab.spaceName)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Tabs") { dismiss() }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        loadFailure = nil
-                        reloadToken += 1
-                    } label: {
-                        Label("Reload", systemImage: "arrow.clockwise")
-                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Theme.ground)
                 }
             }
         }
+        .background(Theme.ink)
+    }
+
+    /// The shell's chrome, worn like the quick-menu bar: Home out, the
+    /// place in the middle (mark, World, Space), reload as recovery.
+    @ViewBuilder private var trustBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "house")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(.white.opacity(0.12), in: Circle())
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            HStack(spacing: 8) {
+                WorldTile(mount: tab.mount, accent: tab.accent, size: 24)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(tab.worldName)
+                        .font(.footnote.weight(.heavy))
+                        .foregroundStyle(.white)
+                    Text(tab.spaceName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
+            Spacer()
+            Button {
+                loadFailure = nil
+                reloadToken += 1
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(.white.opacity(0.12), in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.init(top: 8, leading: 14, bottom: 10, trailing: 14))
+        .background(Theme.ink)
     }
 }
 
@@ -83,9 +115,7 @@ private struct WorldWebView: UIViewRepresentable {
         #if DEBUG
             // Safari's inspector, for development builds only — a shipped
             // client must not expose its session to anything that asks.
-            if #available(iOS 16.4, *) {
-                view.isInspectable = true
-            }
+            view.isInspectable = true
         #endif
         if let url = URL(string: head.url) {
             view.load(URLRequest(url: url))
