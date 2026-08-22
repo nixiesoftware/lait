@@ -1275,6 +1275,19 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
         return attach_to(core, &state_root, &sidecar);
     }
 
+    // One client per machine, taken before anything is built: two would share
+    // the managed state root, and the single-writer registry behind it makes
+    // the loser fail at a point where a window already exists. Held for the
+    // life of the process — the kernel releases it however this process ends.
+    match crate::single_instance::acquire().map_err(|error| format!("{error:#}"))? {
+        crate::single_instance::Outcome::Held(guard) => std::mem::forget(guard),
+        crate::single_instance::Outcome::AlreadyRunning => {
+            return Err(
+                "another Astrolabe is already running on this machine; use its window".into(),
+            );
+        }
+    }
+
     let (woken, wakeups) = channel();
     let wake = woken.clone();
     let mut config = Config::new(state_root.clone(), sidecar.clone());
