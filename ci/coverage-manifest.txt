@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2574
-pr-platform    2104
-nightly        2602
+pr             2577
+pr-platform    2107
+nightly        2605
 mutants        106
 
 [gates]
@@ -187,6 +187,7 @@ astrolabe sidecar::tests::prerelease_and_build_metadata_are_ignored
 astrolabe sidecar::tests::something_that_is_not_a_version_is_unreadable_rather_than_mismatched
 astrolabe sidecar::tests::the_sidecar_is_resolved_beside_the_running_executable
 astrolabe single_instance::tests::a_second_acquire_is_told_somebody_else_holds_it
+astrolabe single_instance::tests::a_second_launch_hands_its_arguments_to_the_first
 astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
@@ -495,6 +496,7 @@ lait control::tests::a_different_executable_is_never_stale_however_new_we_are
 lait control::tests::a_drained_signal_says_how_many_were_lost
 lait control::tests::a_first_live_read_carries_no_generation_at_all
 lait control::tests::a_rebuild_of_the_same_path_is_detected
+lait control::tests::a_release_ahead_displaces_and_nothing_else_does
 lait control::tests::an_equal_timestamp_is_never_a_takeover
 lait control::tests::an_unchanged_live_view_is_its_own_kind
 lait control::tests::an_unmeasured_storage_figure_is_absent_on_the_wire_and_never_a_zero
@@ -624,6 +626,7 @@ lait host_client::tests::an_error_or_wrong_variant_is_unavailable_not_empty_name
 lait host_client::tests::client_side_exit_codes_come_from_the_type_not_the_prose
 lait host_client::tests::destructive_verbs_ask_and_the_rest_do_not
 lait host_client::tests::only_a_request_that_never_went_out_licenses_a_resend
+lait host_client::tests::only_the_managed_sidecar_path_licenses_an_eviction
 lait install::tests::claude_warns_about_shadowing_the_plugin
 lait install::tests::derived_agent_names_stay_lowercase_plain_identifiers
 lait install::tests::each_known_client_brings_its_own_agent_identity
