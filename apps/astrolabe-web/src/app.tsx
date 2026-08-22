@@ -479,7 +479,7 @@ function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
   // says what it is waiting for rather than going quiet.
   useEffect(() => {
     if (update?.kind === "forced" && update.holding.length === 0) {
-      void restartForUpdate();
+      void restartForUpdate(update.version);
     }
   }, [update]);
 
@@ -505,7 +505,7 @@ function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
   }
   return <span className="tip" title={`${update.version} is staged and applies when this client restarts`}>
     <Button className={`update-restart urgency-${update.urgency}`} aria-label={`Restart to update to ${update.version}`}
-      onPress={() => void restartForUpdate()}>↻ Restart to update</Button></span>;
+      onPress={() => void restartForUpdate(update.version)}>↻ Restart to update</Button></span>;
 }
 
 function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" {

@@ -2000,6 +2000,11 @@ fn project(app: &App) -> ClientView {
             app.update_standing(),
             crate::runtime::now_secs(),
             &app.in_flight_keys(),
+            // The version a relaunch already answered for this process, set
+            // by the stub on the launch that answered it.
+            std::env::var(crate::client::update::RELAUNCHED_ENV)
+                .ok()
+                .as_deref(),
         ) {
             crate::client::update::Intent::Nothing => None,
             crate::client::update::Intent::RestartRequested { version, urgency } => {

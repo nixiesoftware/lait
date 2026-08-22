@@ -598,9 +598,9 @@ export function hostOwnsFullscreen(): boolean {
  *
  * Does not return on success.
  */
-export async function restartForUpdate(): Promise<void> {
+export async function restartForUpdate(version: string): Promise<void> {
   if (!isTauri()) return;
-  await invoke("restart_for_update");
+  await invoke("restart_for_update", { version });
 }
 
 /**

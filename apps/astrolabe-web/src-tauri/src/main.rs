@@ -1319,8 +1319,15 @@ impl From<WebAction> for ActionRequest {
 ///
 /// Never returns on success.
 #[tauri::command]
-fn restart_for_update(app: tauri::AppHandle) {
-    app.restart();
+fn restart_for_update(app: tauri::AppHandle, version: Option<String>) {
+    // Under a stub, this process's own relaunch is NOT the window — the stub
+    // is waiting on this very process, and a self-relaunch would start old
+    // code beneath it. The request file is what reaches the window.
+    if astrolabe::client::update::request_relaunch(version.as_deref().unwrap_or("")) {
+        app.exit(0);
+    } else {
+        app.restart();
+    }
 }
 
 /// Big Picture takes the display, not the work area — and gives it back on

@@ -37,29 +37,43 @@ fn main() {
         }
     };
 
-    // The outcome has already been said (stderr and stub.log) by apply();
-    // nothing here may turn a refused update into a refused launch.
-    if let Some(claim) = &claim {
-        let _ = astrolabe_stub::apply(&root, claim);
-    }
-
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let mut child = match astrolabe_stub::launch(&root, &args) {
-        Ok(child) => child,
-        Err(error) => {
-            eprintln!("astrolabe-stub: the client could not be started: {error}");
-            std::process::exit(1);
-        }
-    };
 
-    match child.wait() {
-        Ok(status) => {
-            drop(claim);
-            std::process::exit(status.code().unwrap_or(0));
+    // A request surviving from an earlier session is answered by this very
+    // launch; only one written by the client below means "come back".
+    let _ = astrolabe_stub::take_relaunch_request(&root);
+    let mut answering: Option<String> = None;
+    loop {
+        // The outcome has already been said (stderr and stub.log) by apply();
+        // nothing here may turn a refused update into a refused launch.
+        if let Some(claim) = &claim {
+            let _ = astrolabe_stub::apply(&root, claim);
         }
-        Err(error) => {
-            eprintln!("astrolabe-stub: the client could not be waited on: {error}");
-            std::process::exit(1);
+
+        let mut child = match astrolabe_stub::launch_answering(&root, &args, answering.as_deref()) {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("astrolabe-stub: the client could not be started: {error}");
+                std::process::exit(1);
+            }
+        };
+
+        match child.wait() {
+            Ok(status) => {
+                // The client asked for the apply window and exited: loop
+                // under the same claim, so whatever staged while it ran is
+                // live on the very next start.
+                answering = astrolabe_stub::take_relaunch_request(&root);
+                if answering.is_some() {
+                    continue;
+                }
+                drop(claim);
+                std::process::exit(status.code().unwrap_or(0));
+            }
+            Err(error) => {
+                eprintln!("astrolabe-stub: the client could not be waited on: {error}");
+                std::process::exit(1);
+            }
         }
     }
 }

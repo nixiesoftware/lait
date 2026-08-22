@@ -1617,3 +1617,155 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
         "the tamper refusal must name verification, not fail vaguely: {log}"
     );
 }
+
+/// The evergreen restart, end to end: a release staged while the client ran
+/// becomes the live tree with nobody launching anything. The client writes
+/// the relaunch request and exits; the stub — still holding the claim it
+/// took at the first launch — consumes the request, applies, and starts the
+/// new tree with the requested version in the relaunch env. This is the
+/// window a self-relaunch can never reach, because the stub is waiting on
+/// the very process that wants to move.
+///
+/// The request path and the env name are passed in from the *client's*
+/// constants (`client::update`), so the run also welds the mirrored
+/// vocabulary: the stub honouring this request is the two crates agreeing.
+#[test]
+fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+    let probe_bytes = std::fs::read(&probe).expect("the probe binary's bytes");
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    let runs = root.join("runs.log");
+    let gate = root.join("relaunch.gate");
+    let mut stub_process = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .env("CHAIN_PROBE_RUNS", &runs)
+        .env(
+            "CHAIN_PROBE_ENV_NAME",
+            astrolabe::client::update::RELAUNCHED_ENV,
+        )
+        .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
+        .env("CHAIN_PROBE_RELAUNCH_GATE", &gate)
+        .env(
+            "CHAIN_PROBE_REQUEST",
+            root.join(astrolabe::client::update::RELAUNCH_REQUEST),
+        )
+        .env("CHAIN_PROBE_REQUEST_BODY", "0.0.2")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the stub spawns");
+
+    // The old tree came up and is holding at the gate.
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.1",
+        "the wrong tree came up first"
+    );
+
+    // 0.0.2 lands while the client runs, staged exactly as the daemon would.
+    let archive = tree_artifact("0.0.2", &probe_bytes);
+    let (objects, resolved) = resolve_sealed_tree_release("0.0.2", &archive);
+    lait::update::tree::stage_tree_with(
+        |asked, _limit| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        &resolved,
+        tree_target(),
+        root,
+    )
+    .expect("the 0.0.2 tree stages under a live client");
+
+    // Open the gate: the client asks for the window and exits.
+    std::fs::write(&gate, b"go").expect("the gate opens");
+
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.2",
+        "the relaunch did not come up on the staged release"
+    );
+    let status = stub_process.wait().expect("the stub is waited on");
+    assert!(
+        status.success(),
+        "a clean relaunch chain still exited with a failure"
+    );
+    assert!(
+        !root
+            .join(astrolabe::client::update::RELAUNCH_REQUEST)
+            .exists(),
+        "the request survived being answered, which is a relaunch loop"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the runs log"),
+        "0.0.1 env=-\n0.0.2 env=0.0.2\n",
+        "the answering launch did not carry the requested version, or extra launches happened"
+    );
+}
+
+/// A request with nothing staged is still answered — the person asked to
+/// restart, and turning that into a quit would be the launcher refusing to
+/// launch — but answered exactly once: consuming the request is what bounds
+/// the loop, and the plain exit then passes through.
+#[test]
+fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    let runs = root.join("runs.log");
+    let status = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_RUNS", &runs)
+        .env(
+            "CHAIN_PROBE_ENV_NAME",
+            astrolabe::client::update::RELAUNCHED_ENV,
+        )
+        .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
+        .env(
+            "CHAIN_PROBE_REQUEST",
+            root.join(astrolabe::client::update::RELAUNCH_REQUEST),
+        )
+        .env("CHAIN_PROBE_REQUEST_BODY", "0.0.9")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the stub runs the whole exchange");
+
+    assert!(
+        status.success(),
+        "the final plain exit did not pass through"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the runs log"),
+        "0.0.1 env=-\n0.0.1 env=0.0.9\n",
+        "one request must mean exactly one answering launch"
+    );
+    assert!(
+        !root
+            .join(astrolabe::client::update::RELAUNCH_REQUEST)
+            .exists(),
+        "an answered request was left behind"
+    );
+}
