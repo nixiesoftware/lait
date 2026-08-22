@@ -35,6 +35,12 @@ use astrolabe::Config;
 /// Found relative to the running test binary rather than by walking the
 /// workspace: `target/<profile>/deps/<test>-<hash>.exe` puts it two levels up,
 /// and that holds for every profile without knowing which one is in use.
+///
+/// Freshness is the caller's: nextest builds test binaries, never workspace
+/// bins, so what sits here is whatever the last `cargo build` left — run
+/// `cargo build --workspace --all-targets` first, as CI does. A stale binary
+/// fails these tests in ways that name everything except its own age; a
+/// stale receiver once read as a broken media pipeline for most of a day.
 fn sidecar() -> Option<PathBuf> {
     built_binary("lait")
 }
@@ -411,7 +417,12 @@ async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
 /// walked the uploaded container's own bytes over the content plane, planned
 /// every segment, and installed the presentation. Nothing in this test fetched
 /// a byte of media by hand.
-async fn wait_for_media(path: &Path, assignment: &str, program: &str) -> (String, String) {
+async fn wait_for_media(
+    path: &Path,
+    assignment: &str,
+    program: &str,
+    identity: &Path,
+) -> (String, String) {
     for _ in 0..200 {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -431,7 +442,45 @@ async fn wait_for_media(path: &Path, assignment: &str, program: &str) -> (String
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("assigned receiver never presented the stored film's ticket");
+    // Named, not shrugged: where the receiver actually stood, and the
+    // daemon's own account — the chain has five quiet places to stall.
+    let last = std::fs::read_to_string(path).unwrap_or_else(|_| "<no active.json>".into());
+    let log = daemon_log_tail(identity, 40);
+    panic!(
+        "assigned receiver never presented the stored film's ticket\n\
+         --- last active.json ---\n{last}\n--- daemon log tail ---\n{log}"
+    );
+}
+
+/// The last `lines` of every `daemon.log` under `root`.
+fn daemon_log_tail(root: &Path, lines: usize) -> String {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.file_name().is_some_and(|name| name == "daemon.log") {
+                out.push(path);
+            }
+        }
+    }
+    let mut logs = Vec::new();
+    walk(root, &mut logs);
+    if logs.is_empty() {
+        return format!("<no daemon.log under {}>", root.display());
+    }
+    logs.iter()
+        .map(|log| {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            let tail: Vec<&str> = text.lines().rev().take(lines).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            format!("{}:\n{}", log.display(), tail.join("\n"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Upload a real container and author the film program that plays it.
@@ -489,8 +538,44 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
         windows: Vec::new(),
     };
     let program_id = film_program.id.clone();
+    let entry_id = entry.id.clone();
     write_signage_media(client, space, entry).await;
     write_signage_program(client, space, film_program).await;
+
+    // The seed proves its own write: an entry the World cannot read back is a
+    // program that will blank as "unsupported" twenty seconds from now, in a
+    // place with no words for why.
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let call = signage_app::encode_call(&signage_app::SignageRequest::MediaGet {
+        media: entry_id.clone(),
+    })
+    .expect("encode Signage media read-back");
+    let reply = client
+        .daemon()
+        .expect("identity daemon for Signage read-back")
+        .call_world(
+            lait::control::ControlRoute::World {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&store),
+                    space_id,
+                ),
+                world: signage::contract::PRODUCT_WORLD.into(),
+            },
+            call.clone(),
+            None,
+        )
+        .await
+        .expect("read the Signage library entry back");
+    let decoded = signage_app::decode_reply(&call, reply).expect("decode Signage media read-back");
+    let response: signage_app::SignageResponse =
+        serde_json::from_value(decoded).expect("typed Signage media read-back");
+    let signage_app::SignageResponse::Media { media: read_back } = response else {
+        panic!("the Signage World did not answer the media read-back: {response:?}");
+    };
+    assert!(
+        read_back.as_ref().is_some_and(|row| row.id == entry_id),
+        "the stored film's library entry did not read back after MediaSaved: {read_back:?}"
+    );
     program_id
 }
 
@@ -1181,6 +1266,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             &output_path.join("active.json"),
             &assignment_id,
             &receiver_program,
+            identity.path(),
         )
         .await;
         assert!(
