@@ -131,10 +131,18 @@ impl Standing {
 /// it.
 ///
 /// A tree-managed installation puts this binary at `<root>/current/lait`,
-/// with the stub at `<root>/astrolabe-stub`. Both halves are checked,
-/// because "my grandparent directory exists" is true of every binary
-/// everywhere: a developer's `target/debug/lait` must not be read as an
-/// installation and staged into.
+/// with the stub at `<root>/astrolabe` — the stub takes the *application's*
+/// name at the root, deliberately, so every shell artifact (shortcut,
+/// protocol handler, .desktop file) names a path no update ever moves. That
+/// is the layout `packaging/windows/astrolabe.nsi`, `packaging/linux/
+/// make-tarball.sh` and `packaging/build-astrolabe.sh` all assemble; this
+/// once looked for the stub's *build* name (`astrolabe-stub`), which no
+/// installation ever contains, so no stub installation could stage — the
+/// same silent-unreachable defect the macOS bundle shape had, one arm over.
+///
+/// Both halves are checked, because "my grandparent directory exists" is
+/// true of every binary everywhere: a developer's `target/debug/lait` must
+/// not be read as an installation and staged into.
 pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     let live = executable.parent()?;
     if live.file_name()? != tree::LIVE_DIR {
@@ -142,9 +150,9 @@ pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     }
     let root = live.parent()?;
     let stub = root.join(if cfg!(windows) {
-        "astrolabe-stub.exe"
+        "astrolabe.exe"
     } else {
-        "astrolabe-stub"
+        "astrolabe"
     });
     stub.is_file().then(|| root.to_path_buf())
 }
@@ -629,10 +637,12 @@ mod tests {
             "a live tree with no stub beside it was read as an installation"
         );
 
+        // The stub under the application's name — the shape every installer
+        // assembles, and the one this recognizer once refused.
         let stub = root.path().join(if cfg!(windows) {
-            "astrolabe-stub.exe"
+            "astrolabe.exe"
         } else {
-            "astrolabe-stub"
+            "astrolabe"
         });
         std::fs::write(&stub, b"not really a stub").expect("stage the stub");
         assert_eq!(
@@ -712,9 +722,9 @@ mod tests {
         let install = root.path().join("Programs").join("Astrolabe");
         std::fs::create_dir_all(install.join(tree::LIVE_DIR)).expect("the live tree");
         let stub = install.join(if cfg!(windows) {
-            "astrolabe-stub.exe"
+            "astrolabe.exe"
         } else {
-            "astrolabe-stub"
+            "astrolabe"
         });
         std::fs::write(&stub, b"the stub").expect("stage the stub");
         assert_eq!(

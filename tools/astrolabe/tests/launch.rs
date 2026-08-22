@@ -1266,6 +1266,19 @@ fn stub_binary() -> PathBuf {
     })
 }
 
+/// The name the stub is *installed* under: the application's own, at the
+/// install root. The build name (`astrolabe-stub`) exists in no installation
+/// — every installer renames it — and the daemon's
+/// `lait::update::watch::install_root_of` keys on the installed name, so a
+/// fixture using the build name would exercise a layout that never ships.
+fn installed_stub_name() -> &'static str {
+    if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    }
+}
+
 /// The reference entry binary the fabricated trees carry.
 fn probe_binary() -> PathBuf {
     built_binary("chain-probe").unwrap_or_else(|| {
@@ -1428,17 +1441,13 @@ fn blake3_hex(bytes: &[u8]) -> String {
 /// what keeps the next phase from racing a still-exiting client over the
 /// directory it is about to rename.
 fn run_stub(root: &Path) {
-    let status = Command::new(root.join(if cfg!(windows) {
-        "astrolabe-stub.exe"
-    } else {
-        "astrolabe-stub"
-    }))
-    .env("CHAIN_PROBE_ANNOUNCE", root)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .status()
-    .expect("the stub spawns");
+    let status = Command::new(root.join(installed_stub_name()))
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the stub spawns");
     assert!(
         status.success(),
         "the stub exited with a failure, and the stub must launch even when it refuses to apply"
@@ -1470,11 +1479,12 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(
-        &stub,
-        root.join(stub.file_name().expect("the stub has a name")),
-    )
-    .expect("the stub lands in the install root");
+    // Installed under the application's name, exactly as every installer
+    // lays it down — the build name `astrolabe-stub` exists in no
+    // installation, and `lait::update::watch::install_root_of` keys on the
+    // installed name to decide whether staging happens at all.
+    std::fs::copy(&stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
 
     // The live tree, version 0.0.1 — the install as the person has it.
     let current = root.join("current");

@@ -13,7 +13,10 @@
 //! rule as `astrolabe`'s `sidecar::beside`. It holds:
 //!
 //! ```text
-//! astrolabe-stub(.exe)     this binary; the one file an update never moves
+//! astrolabe(.exe)          this binary, installed under the APPLICATION'S
+//!                          name — the one file an update never moves, so
+//!                          every shell artifact points here. `astrolabe-stub`
+//!                          is only the build name; nothing installs it.
 //! current/                 the live tree: the astrolabe+lait pair, flat
 //! previous/                the prior live tree, kept as the rollback target
 //! staged/                  a downloaded tree waiting to become current
