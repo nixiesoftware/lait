@@ -1448,16 +1448,35 @@ async fn summon_world_settings(
     };
 
     // Flutter's settings window opens 560×680 and narrows to 440×520.
-    WebviewWindowBuilder::new(&app, &label, url)
+    let mut builder = WebviewWindowBuilder::new(&app, &label, url)
         .title(format!("{name} settings — Astrolabe"))
         .resizable(true)
         .minimizable(true)
         .visible(true)
         .inner_size(560.0, 680.0)
-        .min_inner_size(440.0, 520.0)
-        .build()
-        .map_err(|error| error.to_string())?;
+        .min_inner_size(440.0, 520.0);
+    builder = owned_by_main(&app, builder)?;
+    builder.build().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Give a secondary window to the main window, in the OS's own vocabulary:
+/// owner on Windows, child on macOS, transient-for on Linux. This is what
+/// keeps Book, Chat, Displays and settings travelling with the client —
+/// minimizing together, staying above it, dying with it — instead of being
+/// four sibling applications in the taskbar.
+///
+/// A missing main window (summoned very early, or after teardown) degrades
+/// to an unowned window: a secondary that fails to open at all would be a
+/// worse defect than one that opens free.
+fn owned_by_main<'a>(
+    app: &'a tauri::AppHandle,
+    builder: WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>,
+) -> Result<WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>, String> {
+    match app.get_webview_window("main") {
+        Some(main) => builder.parent(&main).map_err(|error| error.to_string()),
+        None => Ok(builder),
+    }
 }
 
 #[tauri::command]
@@ -1492,11 +1511,14 @@ fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result
         )
     };
 
-    let builder = WebviewWindowBuilder::new(app, label, url)
-        .title(surface.title())
-        .resizable(true)
-        .minimizable(true)
-        .visible(true);
+    let builder = owned_by_main(
+        app,
+        WebviewWindowBuilder::new(app, label, url)
+            .title(surface.title())
+            .resizable(true)
+            .minimizable(true)
+            .visible(true),
+    )?;
 
     match surface {
         // Flutter's address-book host is permanently portrait: it can resize
