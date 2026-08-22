@@ -34,20 +34,25 @@ pub struct Guard {
 
 /// Take the single-instance guard for this machine.
 pub fn acquire() -> Result<Outcome> {
-    imp::acquire_named(MUTEX_NAME)
+    imp::acquire_named(INSTANCE)
 }
 
-/// The name is fixed and process-independent — it has to be, since the whole
-/// point is for two unrelated launches to collide on it. The `Local\` prefix
-/// scopes it to the logon session, so two people signed in to the same machine
-/// each get their own client rather than one locking the other out.
-const MUTEX_NAME: &str = r"Local\lait-astrolabe-single-instance";
+/// The base name every artifact of the guard derives from — the Windows
+/// mutex, the Unix lock file, the channel. Fixed and process-independent: the
+/// whole point is for two unrelated launches to collide on it, and the Unix
+/// lock file's spelling must never move, or a client from before the rename
+/// and one from after stop excluding each other exactly across an upgrade.
+const INSTANCE: &str = "lait-astrolabe";
 
 /// What a launch is, once the guard has spoken.
 pub enum Claim {
-    /// This process is the client: the guard is held and the channel below
-    /// receives what later launches were asked to do.
-    Primary { guard: Guard, channel: Channel },
+    /// This process is the client: the guard is held, and the channel — when
+    /// one could be bound — receives what later launches were asked to do. A
+    /// channel that failed to bind costs the handoff, never the guard.
+    Primary {
+        guard: Guard,
+        channel: Option<Channel>,
+    },
     /// The running client has this launch's arguments; this process is done.
     Forwarded,
 }
@@ -59,16 +64,29 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Every later launch's argv, blocking. Ends with the process, or with a
-    /// channel that can no longer accept.
+    /// Every later launch's argv, blocking. A failed accept is tolerated —
+    /// the channel serves a whole tray-resident session, and one transient
+    /// error must not end it — but a channel that only errs eventually does.
     pub fn messages(self) -> impl Iterator<Item = String> {
         use interprocess::local_socket::traits::Listener as _;
         use std::io::Read as _;
+        let mut consecutive_failures = 0u32;
         std::iter::from_fn(move || loop {
-            let mut connection = self.listener.accept().ok()?;
-            let mut message = String::new();
-            if connection.read_to_string(&mut message).is_ok() {
-                return Some(message);
+            match self.listener.accept() {
+                Ok(mut connection) => {
+                    consecutive_failures = 0;
+                    let mut message = String::new();
+                    if connection.read_to_string(&mut message).is_ok() {
+                        return Some(message);
+                    }
+                }
+                Err(_) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures > 100 {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
             }
         })
     }
@@ -80,21 +98,23 @@ impl Channel {
 /// end: a `lait:` link opens a fresh process on the stub platforms, and
 /// without the handoff the link died with it.
 pub fn claim(args: impl IntoIterator<Item = String>) -> Result<Claim> {
-    claim_named(MUTEX_NAME, &channel_name(), args)
+    claim_named(INSTANCE, args)
 }
 
-fn claim_named(
-    mutex: &str,
-    channel: &str,
-    args: impl IntoIterator<Item = String>,
-) -> Result<Claim> {
-    match imp::acquire_named(mutex)? {
-        Outcome::Held(guard) => Ok(Claim::Primary {
-            guard,
-            channel: bind_channel(channel)?,
-        }),
+fn claim_named(instance: &str, args: impl IntoIterator<Item = String>) -> Result<Claim> {
+    match imp::acquire_named(instance)? {
+        Outcome::Held(guard) => {
+            let channel = match bind_channel(instance) {
+                Ok(channel) => Some(channel),
+                Err(error) => {
+                    eprintln!("astrolabe: no instance channel this session: {error:#}");
+                    None
+                }
+            };
+            Ok(Claim::Primary { guard, channel })
+        }
         Outcome::AlreadyRunning => {
-            if let Err(error) = forward(channel, args) {
+            if let Err(error) = forward(instance, args) {
                 // The holder exists (the guard says so) and did not answer.
                 // Said rather than swallowed; there is nobody else to hand to.
                 eprintln!("astrolabe: the running client could not be reached: {error:#}");
@@ -106,35 +126,69 @@ fn claim_named(
 
 /// Per user, matching the mutex's per-session scope — two people on one
 /// machine each get their own channel.
-fn channel_name() -> String {
+fn channel_name(instance: &str) -> String {
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "unknown".into());
-    format!("lait-astrolabe-instance-{user}")
+    format!("{instance}-instance-{user}")
 }
 
-fn bind_channel(name: &str) -> Result<Channel> {
+/// Windows names a pipe; elsewhere the channel is a socket file, unlinked
+/// before binding — a crash leaves the file behind with nothing listening,
+/// and the guard just won says nobody can be behind it.
+#[cfg(windows)]
+fn channel_address(instance: &str) -> Result<interprocess::local_socket::Name<'static>> {
     use anyhow::Context as _;
-    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _};
-    let ns_name = name
+    use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
+    channel_name(instance)
         .to_ns_name::<GenericNamespaced>()
-        .context("name the instance channel")?;
+        .context("name the instance channel")
+}
+
+#[cfg(not(windows))]
+fn channel_address(instance: &str) -> Result<interprocess::local_socket::Name<'static>> {
+    use anyhow::Context as _;
+    use interprocess::local_socket::{GenericFilePath, ToFsName as _};
+    std::env::temp_dir()
+        .join(format!("{}.sock", channel_name(instance)))
+        .to_fs_name::<GenericFilePath>()
+        .context("name the instance channel")
+}
+
+fn bind_channel(instance: &str) -> Result<Channel> {
+    use anyhow::Context as _;
+    use interprocess::local_socket::ListenerOptions;
+    #[cfg(not(windows))]
+    {
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("{}.sock", channel_name(instance))),
+        );
+    }
     let listener = ListenerOptions::new()
-        .name(ns_name)
+        .name(channel_address(instance)?)
         .create_sync()
         .context("bind the instance channel")?;
     Ok(Channel { listener })
 }
 
-fn forward(name: &str, args: impl IntoIterator<Item = String>) -> Result<()> {
+fn forward(instance: &str, args: impl IntoIterator<Item = String>) -> Result<()> {
     use anyhow::Context as _;
-    use interprocess::local_socket::{traits::Stream as _, GenericNamespaced, ToNsName as _};
+    use interprocess::local_socket::traits::Stream as _;
     use std::io::Write as _;
-    let ns_name = name
-        .to_ns_name::<GenericNamespaced>()
-        .context("name the instance channel")?;
-    let mut stream =
-        interprocess::local_socket::Stream::connect(ns_name).context("reach the running client")?;
+    // The holder may still be between winning the guard and binding the
+    // channel — a person double-clicking a link cold is exactly that race —
+    // so the connect waits it out briefly rather than dropping the link.
+    let mut stream = None;
+    for _ in 0..40 {
+        match interprocess::local_socket::Stream::connect(channel_address(instance)?) {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let mut stream = stream.context("reach the running client")?;
     let blob = args.into_iter().collect::<Vec<_>>().join("\n");
     stream
         .write_all(blob.as_bytes())
@@ -159,11 +213,14 @@ mod imp {
     unsafe impl Send for Handle {}
     unsafe impl Sync for Handle {}
 
-    pub fn acquire_named(mutex: &str) -> Result<Outcome> {
+    pub fn acquire_named(instance: &str) -> Result<Outcome> {
         use std::os::windows::io::{FromRawHandle, RawHandle};
         use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
         use windows_sys::Win32::System::Threading::CreateMutexW;
 
+        // `Local` scopes it to the logon session; the suffix is historic
+        // and must never move.
+        let mutex = format!(r"Local\{instance}-single-instance");
         let name: Vec<u16> = mutex.encode_utf16().chain(Some(0)).collect();
         // SAFETY: `name` is a valid null-terminated wide string that outlives
         // the call. A null handle is returned as failure and never used.
@@ -197,12 +254,10 @@ mod imp {
     /// An advisory lock on a file under the temp directory. Same property that
     /// matters: the OS releases it when the process dies, so a crash cannot
     /// leave a stale guard.
-    pub fn acquire_named(mutex: &str) -> Result<Outcome> {
-        let file_name: String = mutex
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-            .collect();
-        let path = std::env::temp_dir().join(format!("{file_name}.lock"));
+    pub fn acquire_named(instance: &str) -> Result<Outcome> {
+        // The historic spelling: a client from before this name was derived
+        // and one from after must still exclude each other.
+        let path = std::env::temp_dir().join(format!("{instance}.lock"));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -255,21 +310,20 @@ mod tests {
     /// machine running this suite is neither reached nor blocked.
     #[test]
     fn a_second_launch_hands_its_arguments_to_the_first() {
-        let mutex = format!(r"Local\lait-astrolabe-test-{}", std::process::id());
-        let channel = format!("lait-astrolabe-test-{}", std::process::id());
+        let instance = format!("lait-astrolabe-test-{}", std::process::id());
 
         let Claim::Primary {
             guard: _guard,
             channel: receiver,
-        } = claim_named(&mutex, &channel, Vec::new()).expect("first claim")
+        } = claim_named(&instance, Vec::new()).expect("first claim")
         else {
             panic!("the first launch was not the primary");
         };
+        let receiver = receiver.expect("the primary bound its channel");
         let received = std::thread::spawn(move || receiver.messages().next());
 
         let second = claim_named(
-            &mutex,
-            &channel,
+            &instance,
             vec![
                 "astrolabe.exe".to_string(),
                 "lait://world/issues".to_string(),

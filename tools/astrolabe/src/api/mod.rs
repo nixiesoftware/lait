@@ -1272,7 +1272,9 @@ pub fn claim_single_instance() -> Result<bool, String> {
             // Forgotten, not stored: held for the life of the process.
             std::mem::forget(guard);
             INSTANCE_HELD.store(true, std::sync::atomic::Ordering::Release);
-            drain_second_launches(channel);
+            if let Some(channel) = channel {
+                drain_second_launches(channel);
+            }
             Ok(true)
         }
         crate::single_instance::Claim::Forwarded => Ok(false),
