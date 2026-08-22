@@ -12,6 +12,7 @@ import {
   setFullscreen,
   summonOwnedWindow,
   restartForUpdate,
+  opensWorldsInOwnWindows,
   summonWorldSettings,
   updateInProgress,
   watchMenu,
@@ -163,10 +164,8 @@ function withDispatchFailure(view: ClientView, what: string, error: unknown, act
 
 function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedWindowSurface; view: ClientView; dispatch(action: ClientAction): Promise<void>; dark: boolean }) {
   const refreshing = view.inFlight.includes(actionKey.refresh);
-  // The owned windows carry no menu, and Book and Chat draw no refresh
-  // control — F5 is the one way to ask for a re-read, with the same refusal
-  // as the main window's: a re-read already in flight is a key that does
-  // nothing, not one that queues a second read.
+  // No menu here, and Book and Chat draw no refresh control — F5 is the one
+  // way to ask for a re-read, with the main window's in-flight refusal.
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.key === "F5") {
@@ -259,10 +258,7 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
 }) {
   if (view.library === null) return <LoadingLibrary />;
   if (view.library.length === 0) return <EmptyLibrary />;
-  // A launching World sits with the running: the act is already under way,
-  // and the rail should not file it under the ordinary rows mid-transition.
-  // Per World, by the head's own state — a global "any head exists" check is
-  // how opening Issues once filed Signage under RUNNING.
+  // A launching World sits with the running: the act is already under way.
   const running = view.library.filter((world) => {
     const state = lifecycle(view, world);
     return state === "Launching" || state === "Running";
@@ -362,7 +358,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
             : `Update to ${update.available} — this device is serving ${update.serving ?? "the built-in version"}`}>
           <Button className="update-control" aria-label={`Update ${world.displayName}`}
             onPress={() => void dispatch({ type: "updateWorld", world: world.worldMount })}>↻ <span>UPDATE</span></Button></span>
-        : state === "Ready" || state === "Stopped" ? <span className="tip" title={state === "Stopped" ? "This World's head exited — start it again" : "Start this World and hand it to my browser"}>
+        : state === "Ready" || state === "Stopped" ? <span className="tip" title={state === "Stopped" ? "This World's head exited — start it again" : (opensWorldsInOwnWindows() ? "Start this World in its own window" : "Start this World and hand it to my browser")}>
           <Button className="launch-control" aria-label="Launch World" onPress={() => {
             if (world.opensAt !== null) void dispatch({ type: "open", world: world.worldMount, entryPath: world.opensAt });
           }}>▶ <span>LAUNCH</span></Button></span>
@@ -530,16 +526,12 @@ function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
       onPress={() => void restartForUpdate(update.version)}>↻ Restart to update</Button></span>;
 }
 
-/// The heads serving exactly this World. A head with `world: null` predates
-/// the pin and deliberately matches no row: a surface cannot say a definite
-/// thing about it, and saying an indefinite thing is the defect the field
-/// closes. Opening Issues must never paint Signage as Running.
+/// A head with `world: null` predates the pin and deliberately matches no row.
 export function servingWorld(view: ClientView, mount: string): Head[] {
   return view.heads.filter((head) => head.orbit === null && head.world === mount);
 }
-/// Read from the head's own state, never from the fact that a row exists.
-/// Exited heads stay listed so a person can see the thing they opened died,
-/// so counting rows paints a crashed World as Running.
+/// Read from the head's own state: exited heads stay listed, so presence is
+/// not liveness.
 export function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" | "Stopped" | "Unknown" {
   if (isOpening(view, world)) return "Launching";
   if (world.opensAt === null) return "Unavailable";

@@ -44,8 +44,7 @@ struct WebClientView {
     in_flight: Vec<String>,
     image: Option<WebImage>,
     update: Option<WebUpdate>,
-    /// The exit this client asked for has been carried out; the host ends
-    /// the process on seeing it (the page never draws it).
+    /// The host ends the process on seeing this; the page never draws it.
     exited: bool,
 }
 
@@ -667,9 +666,6 @@ impl From<ClientView> for WebClientView {
             heads: heads
                 .into_iter()
                 .map(|head| {
-                    // Destructured whole for the same reason ClientView is:
-                    // this row grew `world` and `state` once and the browser
-                    // quietly kept painting presence as liveness without them.
                     let api::HeadRow {
                         id,
                         kind,
@@ -1354,9 +1350,8 @@ impl From<WebAction> for ActionRequest {
 /// Never returns on success.
 #[tauri::command]
 fn restart_for_update(app: tauri::AppHandle, version: Option<String>) {
-    // Under a stub, this process's own relaunch is NOT the window — the stub
-    // is waiting on this very process, and a self-relaunch would start old
-    // code beneath it. The request file is what reaches the window.
+    // Under a stub the window is the stub's launch, not this process's own
+    // relaunch — the stub is waiting on this very process.
     if astrolabe::client::update::request_relaunch(version.as_deref().unwrap_or("")) {
         app.exit(0);
     } else {
@@ -1470,15 +1465,47 @@ async fn summon_world_settings(
     Ok(())
 }
 
-/// Give a secondary window to the main window, in the OS's own vocabulary:
-/// owner on Windows, child on macOS, transient-for on Linux. This is what
-/// keeps Book, Chat, Displays and settings travelling with the client —
-/// minimizing together, staying above it, dying with it — instead of being
-/// four sibling applications in the taskbar.
-///
-/// A missing main window (summoned very early, or after teardown) degrades
-/// to an unowned window: a secondary that fails to open at all would be a
-/// worse defect than one that opens free.
+/// Not `owned_by_main`: a World keeps its own taskbar identity.
+fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::WorldLaunch) {
+    let sanitized: String = launch
+        .world
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '/' | ':' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let label = format!("world:{sanitized}");
+    let url: tauri::Url = match launch.url.parse() {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.navigate(url);
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .title(&launch.title)
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(800.0, 600.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .visible(true)
+        .build();
+    if built.is_err() {
+        let _ = astrolabe::browser::open(&launch.url);
+    }
+}
+
+/// Owner on Windows, child on macOS, transient-for on Linux. A missing main
+/// window degrades to an unowned one rather than refusing to open.
 fn owned_by_main<'a>(
     app: &'a tauri::AppHandle,
     builder: WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>,
@@ -1572,11 +1599,7 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::TrayIconBuilder;
 
-    // Two exits, because they answer different questions and a single Quit
-    // answers one of them by accident (`lifecycle::ExitRequest`): staying
-    // online closes the client and leaves this device serving its Spaces;
-    // going offline stops what this client owns — devices and the identity
-    // daemon — and says what it stopped before the process ends.
+    // The two answers of `lifecycle::ExitRequest`, never one generic Quit.
     let open = MenuItem::with_id(app, "open", "Open Astrolabe", true, None::<&str>)?;
     let stay = MenuItem::with_id(app, "exit-stay", "Close and stay online", true, None::<&str>)?;
     let offline = MenuItem::with_id(app, "exit-offline", "Go offline and exit", true, None::<&str>)?;
@@ -1597,10 +1620,8 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     let _ = window.set_focus();
                 }
             }
-            // Quitting is asked of the core, not taken here: the exit runs as
-            // an action, the report of what stopped crosses as a notice, and
-            // the process ends on the view's `exited` cue — so "go offline"
-            // cannot end the shell before the stopping has actually happened.
+            // The process ends on the view's `exited` cue, never here: the
+            // shell must not close before the stopping has happened.
             "exit-stay" => {
                 let _ = api::dispatch(ActionRequest::Exit { go_offline: false });
             }
@@ -1727,10 +1748,15 @@ fn main() {
         .append_invoke_initialization_script(PLATFORM_INIT)
         .setup(|app| {
             api::start(None, None).map_err(std::io::Error::other)?;
+            // Window creation hops to the main thread; every platform makes
+            // windows there.
+            let presenter = app.handle().clone();
+            astrolabe::browser::present_with(move |launch| {
+                let handle = presenter.clone();
+                let _ = presenter.run_on_main_thread(move || present_world_window(&handle, launch));
+            });
             let handle = app.handle().clone();
             api::subscribe(move |view| {
-                // The exit report has been carried out and said; ending the
-                // process is the shell's half, taken on the model's cue.
                 let exited = view.exited;
                 let _ = handle.emit(CLIENT_VIEW_EVENT, WebClientView::from(view));
                 if exited {

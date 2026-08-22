@@ -598,6 +598,11 @@ export function hostOwnsFullscreen(): boolean {
   return isTauri();
 }
 
+/** Copy only — the launch itself is delivered by the core either way. */
+export function opensWorldsInOwnWindows(): boolean {
+  return isTauri();
+}
+
 /**
  * Take the restart a staged release is waiting for.
  *

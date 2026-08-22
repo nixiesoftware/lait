@@ -607,6 +607,20 @@ struct Worker {
     correspondence: Option<std::sync::Mutex<DemoCarrier>>,
 }
 
+fn world_launch(mount: &str, url: String) -> crate::browser::WorldLaunch {
+    let title = crate::client::library::installed()
+        .into_iter()
+        .find(|row| row.world_mount == mount)
+        .map(|row| row.display_name)
+        // A label is not worth blocking a launch over.
+        .unwrap_or_else(|| mount.to_owned());
+    crate::browser::WorldLaunch {
+        world: mount.to_owned(),
+        title,
+        url,
+    }
+}
+
 /// Unix seconds, for the clocks the correspondence crate takes as arguments.
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -1017,11 +1031,9 @@ impl Worker {
             }
             Action::OpenWorld { world, entry_path } => {
                 let launch = client.open_world(world, entry_path).await?;
-                // The browser is the person's, and this is the only place in
-                // the client that starts something it does not own. It happens
-                // last: a launch URL composed and never opened is recoverable,
-                // and a browser opened at a ticket that was never minted is not.
-                crate::browser::open(&launch.url)?;
+                // Delivery happens last: an unshown URL is recoverable, and a
+                // surface opened at a ticket that was never minted is not.
+                crate::browser::deliver(world_launch(world, launch.url.clone()))?;
                 Ok(Outcome::Launched(launch))
             }
             Action::OpenLink { url } => {
@@ -1044,7 +1056,7 @@ impl Worker {
                             ))
                         })?;
                         let launch = client.open_world(&mount, &entry_path).await?;
-                        crate::browser::open(&launch.url)?;
+                        crate::browser::deliver(world_launch(&mount, launch.url.clone()))?;
                         Ok(Outcome::Launched(launch))
                     }
                     // Entering a Space is the destination's act — the head's
@@ -1491,9 +1503,7 @@ impl Worker {
             Action::Exit(request) => {
                 let report = crate::lifecycle::exit(client.supervisor(), *request).await;
                 // The identity daemon is not supervisor-owned, so the policy
-                // above cannot reach it — and going offline with it running
-                // would report a device stopped while its Spaces kept
-                // converging.
+                // above cannot reach it.
                 if *request == crate::lifecycle::ExitRequest::GoOffline {
                     client.stop_identity_daemon().await;
                 }
