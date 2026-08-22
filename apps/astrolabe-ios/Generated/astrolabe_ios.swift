@@ -497,6 +497,22 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -745,6 +761,64 @@ public func FfiConverterTypeEntered_lift(_ buf: RustBuffer) throws -> Entered {
 #endif
 public func FfiConverterTypeEntered_lower(_ value: Entered) -> RustBuffer {
     return FfiConverterTypeEntered.lower(value)
+}
+
+
+/**
+ * What founding created, echoed back so the shell can seat the new Space
+ * as its context immediately.
+ */
+public struct Founded: Equatable, Hashable {
+    public var spaceId: String
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spaceId: String, name: String) {
+        self.spaceId = spaceId
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Founded: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFounded: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Founded {
+        return
+            try Founded(
+                spaceId: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Founded, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.spaceId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFounded_lift(_ buf: RustBuffer) throws -> Founded {
+    return try FfiConverterTypeFounded.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFounded_lower(_ value: Founded) -> RustBuffer {
+    return FfiConverterTypeFounded.lower(value)
 }
 
 
@@ -1087,6 +1161,17 @@ public struct TicketFacts: Equatable, Hashable {
      * The inviter's nick. May be empty. A hint, never an authority.
      */
     public var hostNickHint: String
+    /**
+     * Unix seconds when the carried admission stops working — the invite's
+     * own bound, stated at read time rather than discovered at redemption.
+     * `None` when the link carries no admission.
+     */
+    public var expiresAt: UInt64?
+    /**
+     * How many bindings the admission allows (1 = single use). `None` when
+     * the link carries no admission.
+     */
+    public var useCap: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1099,10 +1184,21 @@ public struct TicketFacts: Equatable, Hashable {
          */nameHint: String, 
         /**
          * The inviter's nick. May be empty. A hint, never an authority.
-         */hostNickHint: String) {
+         */hostNickHint: String, 
+        /**
+         * Unix seconds when the carried admission stops working — the invite's
+         * own bound, stated at read time rather than discovered at redemption.
+         * `None` when the link carries no admission.
+         */expiresAt: UInt64?, 
+        /**
+         * How many bindings the admission allows (1 = single use). `None` when
+         * the link carries no admission.
+         */useCap: UInt32?) {
         self.spaceId = spaceId
         self.nameHint = nameHint
         self.hostNickHint = hostNickHint
+        self.expiresAt = expiresAt
+        self.useCap = useCap
     }
 
     
@@ -1123,7 +1219,9 @@ public struct FfiConverterTypeTicketFacts: FfiConverterRustBuffer {
             try TicketFacts(
                 spaceId: FfiConverterString.read(from: &buf), 
                 nameHint: FfiConverterString.read(from: &buf), 
-                hostNickHint: FfiConverterString.read(from: &buf)
+                hostNickHint: FfiConverterString.read(from: &buf), 
+                expiresAt: FfiConverterOptionUInt64.read(from: &buf), 
+                useCap: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -1131,6 +1229,8 @@ public struct FfiConverterTypeTicketFacts: FfiConverterRustBuffer {
         FfiConverterString.write(value.spaceId, into: &buf)
         FfiConverterString.write(value.nameHint, into: &buf)
         FfiConverterString.write(value.hostNickHint, into: &buf)
+        FfiConverterOptionUInt64.write(value.expiresAt, into: &buf)
+        FfiConverterOptionUInt32.write(value.useCap, into: &buf)
     }
 }
 
@@ -1218,6 +1318,78 @@ public func FfiConverterTypeEnterOutcome_lift(_ buf: RustBuffer) throws -> Enter
 #endif
 public func FfiConverterTypeEnterOutcome_lower(_ value: EnterOutcome) -> RustBuffer {
     return FfiConverterTypeEnterOutcome.lower(value)
+}
+
+
+
+
+public enum FoundOutcome: Equatable, Hashable {
+    
+    case founded(founded: Founded
+    )
+    case refused(reason: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FoundOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFoundOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = FoundOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FoundOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .founded(founded: try FfiConverterTypeFounded.read(from: &buf)
+        )
+        
+        case 2: return .refused(reason: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FoundOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .founded(founded):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeFounded.write(founded, into: &buf)
+            
+        
+        case let .refused(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFoundOutcome_lift(_ buf: RustBuffer) throws -> FoundOutcome {
+    return try FfiConverterTypeFoundOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFoundOutcome_lower(_ value: FoundOutcome) -> RustBuffer {
+    return FfiConverterTypeFoundOutcome.lower(value)
 }
 
 
@@ -1747,6 +1919,30 @@ fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1891,6 +2087,20 @@ public func enterSpace(link: String, nick: String?) -> EnterOutcome  {
 })
 }
 /**
+ * Found a Space on this iPhone — the same `HostSpaceFound` the desktop
+ * Welcome flow sends, against the in-process daemon. Blocks; call off the
+ * main thread.
+ */
+public func foundSpace(name: String, nick: String?) -> FoundOutcome  {
+    return try!  FfiConverterTypeFoundOutcome_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_astrolabe_ios_fn_func_found_space(
+        FfiConverterString.lower(name),
+        FfiConverterOptionString.lower(nick),uniffiCallStatus
+    )
+})
+}
+/**
  * Mint a single-use invite for a joined Space and answer with the full
  * `lait://join/…` link. Places the Orbit — minting needs a live Station, and
  * that is the user's explicit act, never a listing side effect.
@@ -1990,6 +2200,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_astrolabe_ios_checksum_func_enter_space() != 53924) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_astrolabe_ios_checksum_func_found_space() != 53533) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_astrolabe_ios_checksum_func_mint_invite() != 62254) {
