@@ -193,21 +193,13 @@ impl Client {
     }
 
     /// Ask the identity daemon to stop, when this client stood one up.
-    ///
-    /// The going-offline half of an exit: `lifecycle::exit` stops what the
-    /// supervisor owns, and the identity daemon is deliberately not that — so
-    /// without this, "go offline" left the one process that keeps every Space
-    /// converging, and the exit report told a person their device had stopped
-    /// serving while it kept serving. A standalone launch made no daemon and
-    /// asks nothing.
     pub async fn stop_identity_daemon(&self) {
         if !self.inner.hosted {
             return;
         }
         if let Ok(daemon) = self.daemon() {
-            // HostRestart stops the daemon once the reply is on the wire, and
-            // nothing here stands a fresh one up — which is what makes it a
-            // stop. A daemon that was already down needs nothing.
+            // HostRestart stops the daemon once the reply is on the wire;
+            // nothing standing a fresh one up is what makes it a stop.
             let _ = daemon
                 .request(
                     lait::control::ControlRoute::Daemon,

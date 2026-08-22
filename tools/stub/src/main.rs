@@ -39,8 +39,7 @@ fn main() {
 
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
-    // A request surviving from an earlier session is answered by this very
-    // launch; only one written by the client below means "come back".
+    // A stale request is answered by this very launch.
     let _ = astrolabe_stub::take_relaunch_request(&root);
     let mut answering: Option<String> = None;
     loop {
@@ -60,9 +59,6 @@ fn main() {
 
         match child.wait() {
             Ok(status) => {
-                // The client asked for the apply window and exited: loop
-                // under the same claim, so whatever staged while it ran is
-                // live on the very next start.
                 answering = astrolabe_stub::take_relaunch_request(&root);
                 if answering.is_some() {
                     continue;

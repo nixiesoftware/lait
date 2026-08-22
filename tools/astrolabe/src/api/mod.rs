@@ -103,10 +103,8 @@ pub struct ClientView {
     /// state — nothing to say — and covers a machine that has never
     /// completed a check, which is not "up to date".
     pub update: Option<UpdateRow>,
-    /// An exit was requested and carried out: the shell's cue to end the
-    /// process. The report itself already crossed as a notice; this is only
-    /// the fact that closing may now happen, kept as a flag because the shell
-    /// needs nothing else from it.
+    /// An exit was carried out: the shell's cue to end the process. The
+    /// report itself crossed as a notice.
     pub exited: bool,
 }
 
@@ -818,11 +816,8 @@ pub enum ActionRequest {
     /// image — owned devices and heads through the supervisor, then the
     /// identity daemon. The inner-loop gesture: `cargo build`, then this.
     Reload,
-    /// End the client, having answered the one question quitting asks: does
-    /// this device stay online? `go_offline` stops what this client owns —
-    /// its devices and its identity daemon — before the shell closes; staying
-    /// online closes only the window's process and leaves the device serving.
-    /// The report of what stopped and what was left crosses as a notice, and
+    /// End the client, answering the one question quitting asks: does this
+    /// device stay online? The report crosses as a notice, and
     /// [`ClientView::exited`] is the shell's cue that closing may happen.
     Exit {
         go_offline: bool,
@@ -1294,11 +1289,9 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
         return attach_to(core, &state_root, &sidecar);
     }
 
-    // One client per machine, taken before anything is built: two would share
-    // the managed state root, and the single-writer registry behind it makes
-    // the loser fail at a point where a window already exists. Held for the
-    // life of the process — the kernel releases it however this process ends.
     match crate::single_instance::acquire().map_err(|error| format!("{error:#}"))? {
+        // Forgotten, not stored: held for the life of the process, and the
+        // kernel releases it however that ends.
         crate::single_instance::Outcome::Held(guard) => std::mem::forget(guard),
         crate::single_instance::Outcome::AlreadyRunning => {
             return Err(
@@ -2033,8 +2026,6 @@ fn project(app: &App) -> ClientView {
             app.update_standing(),
             crate::runtime::now_secs(),
             &app.in_flight_keys(),
-            // The version a relaunch already answered for this process, set
-            // by the stub on the launch that answered it.
             std::env::var(crate::client::update::RELAUNCHED_ENV)
                 .ok()
                 .as_deref(),

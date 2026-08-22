@@ -157,10 +157,8 @@ pub fn intent(
         Standing::Refused { why } | Standing::Stale { why } => {
             Intent::Attention { why: why.clone() }
         }
-        // A forced restart that already had its window and came back on this
-        // same release did not apply — restarting again would loop the pair
-        // through boot forever, and the refusal is written where a person
-        // can read it, not where this process can.
+        // The same release came back from its own window: asking again would
+        // boot-loop, so the loop is cut here, by naming the failure.
         Standing::Staged {
             version,
             below_floor: true,
@@ -211,10 +209,8 @@ pub const RELAUNCHED_ENV: &str = "ASTROLABE_RELAUNCHED";
 
 /// The stub that owns this executable's relaunch, when there is one.
 ///
-/// The inverse of the stub's own layout, seen from inside `current/`: the
-/// entry sits at `<root>/current/<name>` with the stub at `<root>/<name>`.
-/// `None` is a developer's build or a macOS bundle, where this process's own
-/// relaunch is the apply window.
+/// `None` — a developer's build or a macOS bundle — means this process's
+/// own relaunch is the apply window.
 pub fn managing_stub_of(executable: &Path) -> Option<PathBuf> {
     let live = executable.parent()?;
     if live.file_name()? != "current" {
@@ -230,9 +226,8 @@ pub fn managing_stub_of(executable: &Path) -> Option<PathBuf> {
 
 /// Ask the managing stub for the apply window on behalf of `version`.
 ///
-/// `true` means the request is written and exiting reaches the window;
-/// `false` means no stub manages this executable — or the root refused the
-/// write — and the caller's own relaunch is the best remaining move.
+/// `false` — no managing stub, or the root refused the write — means the
+/// caller's own relaunch is the best remaining move.
 pub fn request_relaunch(version: &str) -> bool {
     let Some(stub) = std::env::current_exe()
         .ok()

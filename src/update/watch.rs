@@ -128,17 +128,9 @@ impl Standing {
 }
 
 /// The install root of a stub-managed client, discovered from a path inside
-/// it.
-///
-/// A tree-managed installation puts this binary at `<root>/current/lait`,
-/// with the stub at `<root>/astrolabe` — the stub takes the *application's*
-/// name at the root, deliberately, so every shell artifact (shortcut,
-/// protocol handler, .desktop file) names a path no update ever moves. That
-/// is the layout `packaging/windows/astrolabe.nsi`, `packaging/linux/
-/// make-tarball.sh` and `packaging/build-astrolabe.sh` all assemble; this
-/// once looked for the stub's *build* name (`astrolabe-stub`), which no
-/// installation ever contains, so no stub installation could stage — the
-/// same silent-unreachable defect the macOS bundle shape had, one arm over.
+/// it: this binary at `<root>/current/lait`, the stub at `<root>/astrolabe`
+/// — the stub's *installed* name, which every installer renames it to so
+/// shell artifacts point at a path no update moves.
 ///
 /// Both halves are checked, because "my grandparent directory exists" is
 /// true of every binary everywhere: a developer's `target/debug/lait` must
@@ -637,8 +629,6 @@ mod tests {
             "a live tree with no stub beside it was read as an installation"
         );
 
-        // The stub under the application's name — the shape every installer
-        // assembles, and the one this recognizer once refused.
         let stub = root.path().join(if cfg!(windows) {
             "astrolabe.exe"
         } else {
