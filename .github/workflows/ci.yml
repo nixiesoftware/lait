@@ -773,6 +773,10 @@ jobs:
           done
           grep -q -- '--from-run' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
+          grep -q -- '--promote' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot promote exact tested bytes"; exit 1; }
+          grep -q -- '--if-generation-match=0' ci/publish-feed.sh \
+            || { echo "::error::feed publisher can overwrite an immutable release"; exit 1; }
           if grep -q -- '--from-release' ci/publish-feed.sh; then
             echo "::error::feed publisher still depends on GitHub Release assets"
             exit 1
