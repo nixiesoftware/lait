@@ -38,7 +38,9 @@ Release objects are immutable and long-cached. `channels/test` and
 Worlds have their own signed channel pointers and immutable manifests under
 `channels/worlds/<world-id>/` and `releases/worlds/<world-id>/<version>/`.
 A host tag never publishes or promotes a World. First-party World source
-changes publish to `test`; stable promotion is an explicit pointer move.
+changes publish a new version to `test`; an already occupied version is never
+rebuilt. Stable promotion fetches that exact tested manifest and is only a
+signed pointer move.
 
 ## Consumer verification
 

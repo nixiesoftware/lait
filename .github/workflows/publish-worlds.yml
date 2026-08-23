@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       stable:
-        description: Also promote the exact published releases to stable
+        description: Promote the existing tested releases to stable without rebuilding
         required: true
         default: false
         type: boolean
@@ -43,8 +43,64 @@ env:
   RUSTUP_MAX_RETRIES: "10"
 
 jobs:
+  gate:
+    name: decide which immutable releases are new
+    if: ${{ github.event_name == 'push' || inputs.stable == false }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      issues-needed: ${{ steps.releases.outputs.issues-needed }}
+      signage-needed: ${{ steps.releases.outputs.signage-needed }}
+      any-needed: ${{ steps.releases.outputs.any-needed }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - id: releases
+        name: Refuse to rebuild an occupied release coordinate
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://storage.googleapis.com/the-foundation-dist
+
+          version_of() {
+            sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -1
+          }
+          needs_release() {
+            local world="$1" version="$2" status
+            status="$(curl --retry 5 --retry-all-errors -sS -o /dev/null \
+              -w '%{http_code}' "$base/releases/worlds/$world/$version/manifest.json")"
+            case "$status" in
+              200)
+                echo "==> $world $version is already immutable; skipping its rebuild" >&2
+                printf false
+                ;;
+              404) printf true ;;
+              *)
+                echo "unexpected HTTP $status while checking $world $version" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          issues_version="$(version_of products/issues/Cargo.toml)"
+          signage_version="$(version_of products/signage/Cargo.toml)"
+          [ -n "$issues_version" ] && [ -n "$signage_version" ]
+          issues_needed="$(needs_release com.lait.issues "$issues_version")"
+          signage_needed="$(needs_release com.lait.signage "$signage_version")"
+          any_needed=false
+          if [ "$issues_needed" = true ] || [ "$signage_needed" = true ]; then
+            any_needed=true
+          fi
+          echo "issues-needed=$issues_needed" >> "$GITHUB_OUTPUT"
+          echo "signage-needed=$signage_needed" >> "$GITHUB_OUTPUT"
+          echo "any-needed=$any_needed" >> "$GITHUB_OUTPUT"
+
   build:
     name: build World runners (${{ matrix.target }})
+    needs: gate
+    if: ${{ needs.gate.outputs.any-needed == 'true' }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -84,7 +140,7 @@ jobs:
 
   publish:
     name: seal and publish World channels
-    needs: build
+    needs: [gate, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -112,11 +168,12 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
           version: '>= 416.0.0'
-      - name: Publish test, then promote when explicitly requested
+      - name: Publish new immutable releases to test
         shell: bash
         env:
           WORLD_FEED_SIGNING_SEED: ${{ secrets.WORLD_FEED_SIGNING_SEED }}
-          PROMOTE_STABLE: ${{ inputs.stable }}
+          ISSUES_NEEDED: ${{ needs.gate.outputs.issues-needed }}
+          SIGNAGE_NEEDED: ${{ needs.gate.outputs.signage-needed }}
         run: |
           set -euo pipefail
           [ -n "$WORLD_FEED_SIGNING_SEED" ] || {
@@ -149,12 +206,62 @@ jobs:
             FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
               --world "$world" --version "$version" "${args[@]}" \
               --channel test --seed "$seed"
-            if [ "$PROMOTE_STABLE" = "true" ]; then
-              FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
-                --world "$world" --version "$version" --channel stable \
-                --promote --seed "$seed"
-            fi
           }
 
-          publish_world com.lait.issues products/issues/Cargo.toml
-          publish_world com.lait.signage products/signage/Cargo.toml
+          if [ "$ISSUES_NEEDED" = true ]; then
+            publish_world com.lait.issues products/issues/Cargo.toml
+          fi
+          if [ "$SIGNAGE_NEEDED" = true ]; then
+            publish_world com.lait.signage products/signage/Cargo.toml
+          fi
+
+  promote:
+    name: promote the exact tested World releases
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.stable }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - name: Build the feed sealer
+        run: cargo build --release --locked -p lait-feed
+      - name: Authenticate to the distribution bucket
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_WORLD_PUBLISHER_SERVICE_ACCOUNT }}
+      - name: Install gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          version: '>= 416.0.0'
+      - name: Move stable pointers to the existing tested manifests
+        shell: bash
+        env:
+          WORLD_FEED_SIGNING_SEED: ${{ secrets.WORLD_FEED_SIGNING_SEED }}
+        run: |
+          set -euo pipefail
+          [ -n "$WORLD_FEED_SIGNING_SEED" ] || {
+            echo "WORLD_FEED_SIGNING_SEED is not configured" >&2
+            exit 1
+          }
+          seed="$RUNNER_TEMP/world-feed-signing.seed"
+          printf '%s\n' "$WORLD_FEED_SIGNING_SEED" > "$seed"
+          chmod 600 "$seed"
+
+          promote_world() {
+            local world="$1" manifest="$2" version
+            version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
+            [ -n "$version" ] || { echo "$manifest has no version" >&2; exit 1; }
+            FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
+              --world "$world" --version "$version" --channel stable \
+              --promote --seed "$seed"
+          }
+
+          promote_world com.lait.issues products/issues/Cargo.toml
+          promote_world com.lait.signage products/signage/Cargo.toml

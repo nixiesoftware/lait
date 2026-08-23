@@ -2422,7 +2422,14 @@ mod tests {
         let mixed_answer = run(&mixed, &query, &gates, bound()).expect("mixed incoming");
         let mixed_elapsed = mixed_started.elapsed();
         assert_eq!(mixed_answer.output, visible_answer.output);
-        assert_eq!(mixed_answer.usage, visible_answer.usage);
+        // `wall_millis` is an observed duration, not evaluator work. The two
+        // sequential runs may straddle a millisecond boundary even when their
+        // deterministic work is identical, so exclude only that clock sample.
+        let mut visible_work = visible_answer.usage;
+        visible_work.wall_millis = 0;
+        let mut mixed_work = mixed_answer.usage;
+        mixed_work.wall_millis = 0;
+        assert_eq!(mixed_work, visible_work);
         assert!(visible_elapsed < std::time::Duration::from_secs(1));
         assert!(mixed_elapsed < std::time::Duration::from_secs(1));
     }
