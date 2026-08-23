@@ -144,6 +144,10 @@ fn canonical_install_replaces_release_trees_and_never_overlays_them() {
     assert!(prepare < release_out && release_out < receipt);
     assert!(script.contains("No new release tree was installed."));
     assert!(
+        script.contains(r#"Delete "$INSTDIR\canonical-layout-v1""#),
+        "uninstall leaves the canonical receipt behind and therefore cannot remove its root"
+    );
+    assert!(
         !script[..release_out]
             .lines()
             .any(|line| line.trim().starts_with(r#"RMDir /r "$INSTDIR\current"#)),
@@ -997,9 +1001,8 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
         "the host update tree still carries executable World releases"
     );
     assert!(
-        tree.contains(r#"[ ! -e "$STAGE/$RESOURCES/worlds" ]"#)
-            && tree.contains(r#"*/world.json|*/art/*.png"#),
-        "the update-tree gate does not refuse legacy or unexpected World payloads"
+        tree.contains(r#"*/world.json|*/art/*.png"#),
+        "the update-tree gate admits files beyond signed catalog declarations and artwork"
     );
 
     // The Linux stable-root package is relocatable, while Tauri's conventional

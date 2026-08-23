@@ -264,6 +264,8 @@ Section "Uninstall"
   Delete "$INSTDIR\staging.lock"
   Delete "$INSTDIR\stub.log"
   Delete "$INSTDIR\staged.manifest.json"
+  Delete "$INSTDIR\relaunch-request.json"
+  Delete "$INSTDIR\canonical-layout-v1"
 
   ; Three recursive removals, each bounded to a release tree by name.
   ;

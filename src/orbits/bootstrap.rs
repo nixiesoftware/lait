@@ -680,7 +680,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             };
             if router.reviewed_world_implementation(&world_id).is_none() {
                 return Some(Response::not_found(format!(
-                    "World '{world}' is not installed in this build"
+                    "World '{world}' is not installed for this identity"
                 )));
             }
             let worlds = crate::serve::head::installations_root(router.catalog().identity());
@@ -711,7 +711,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             };
             if router.reviewed_world_implementation(&world_id).is_none() {
                 return Some(Response::not_found(format!(
-                    "World '{world}' is not installed in this build"
+                    "World '{world}' is not installed for this identity"
                 )));
             }
             let worlds = crate::serve::head::installations_root(router.catalog().identity());

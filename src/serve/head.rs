@@ -95,7 +95,7 @@ pub fn installations_root(identity: &Path) -> PathBuf {
     identity.join("world-bundles-v1")
 }
 
-/// Serve a World's staged payload, when one is staged for it.
+/// Serve a World's selected installed bundle, when one is installed for it.
 ///
 /// Nothing here reads a declaration or verifies bytes: staging is what proves
 /// a bundle *and* what decides whether this build can run it, so a directory
