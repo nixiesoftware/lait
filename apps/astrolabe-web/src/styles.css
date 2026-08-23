@@ -187,3 +187,8 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 .incoming-button[data-active] { color:#fff; background:var(--brand); }
 .incoming-count { position:absolute; top:-4px; right:-4px; min-width:15px; border-radius:8px; padding:1px 4px; color:#fff; background:#c2453e; font-size:9px; font-weight:750; text-align:center; }
 .message-row { cursor:pointer; }
+.install-control { min-height:40px; display:flex; align-items:center; gap:9px; border:0; border-radius:4px; padding:0 18px; box-shadow:inset 0 1px rgb(255 255 255 / .18),0 2px 4px rgb(0 0 0 / .22); color:#fff; background:#3d74d8; font-size:18px; }
+.install-control:hover { background:#4a82e9; }
+.install-control:focus-visible { outline:2px solid var(--brand); outline-offset:-2px; }
+.install-progress { max-width:520px; margin:0 0 20px; color:var(--muted); font-size:13px; }
+.install-progress progress { display:block; width:100%; height:8px; margin-top:10px; accent-color:#3d74d8; }

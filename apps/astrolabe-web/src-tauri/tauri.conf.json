@@ -35,7 +35,7 @@
     "resources": {
       "../../../LICENSE": "LICENSE",
       "../../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
-      "bundled-worlds/": "worlds/"
+      "world-catalog/": "world-catalog/"
     },
     "icon": [
       "icons/32x32.png",

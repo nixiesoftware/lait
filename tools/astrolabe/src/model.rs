@@ -133,7 +133,7 @@ pub struct ChatMessage {
 }
 use crate::client::heads::McpBindingOutcome;
 use crate::client::host::HostContext;
-use crate::client::library::{LaunchTicket, LibraryEntry, WorldStanding};
+use crate::client::library::{LaunchTicket, LibraryEntry, WorldInstallProgress, WorldStanding};
 use crate::client::space::SpaceView;
 use crate::client::storage::{StorageFacts, TransferFacts};
 use crate::client::ClientError;
@@ -152,6 +152,8 @@ pub struct App {
     /// id. A World absent from this map has never been checked — which is not
     /// "up to date", and draws no update affordance at all.
     world_standings: BTreeMap<String, WorldStanding>,
+    /// Explicit first-install progress, keyed by catalog mount.
+    world_installs: BTreeMap<String, WorldInstallProgress>,
     /// What each Space is holding. Empty until an engine read supplies it —
     /// and empty is drawn as "no Spaces", not as "zero bytes", because those
     /// are different claims.
@@ -202,7 +204,7 @@ pub struct App {
     stale: Option<StaleReason>,
     /// The background half said no snapshot is ever coming. Ends "loading"
     /// without pretending anything was read: a window over a system that is
-    /// not there draws the passively read install list, plus the failure that
+    /// not there draws the passively read catalog/install state, plus the failure that
     /// says why.
     unstartable: bool,
     /// The staged image this client spawns from, when one was staged. Carries
@@ -282,6 +284,14 @@ impl App {
             Update::UpdateStanding(standing) => self.update_standing = standing,
             Update::Library(entries) => self.absorb_library(entries),
             Update::WorldStandings(standings) => self.absorb_world_standings(standings),
+            Update::WorldInstall { world, progress } => match progress {
+                Some(progress) => {
+                    self.world_installs.insert(world, progress);
+                }
+                None => {
+                    self.world_installs.remove(&world);
+                }
+            },
             Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.absorb_context(*context),
@@ -425,6 +435,10 @@ impl App {
     /// What is known about one World's channel, if anything is.
     pub fn world_standing(&self, world: &str) -> Option<&WorldStanding> {
         self.world_standings.get(world)
+    }
+
+    pub fn world_install(&self, mount: &str) -> Option<&WorldInstallProgress> {
+        self.world_installs.get(mount)
     }
 
     pub fn absorb_storage(&mut self, storage: Vec<StorageFacts>, transfers: Vec<TransferFacts>) {

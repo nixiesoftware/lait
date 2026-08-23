@@ -90,18 +90,21 @@ fn the_installer_places_both_binaries_in_one_directory() {
         "the stub is installed after the release, so it would land inside it"
     );
 
-    // The host resources are part of the same release tree. A recursive copy
-    // is intentional here: World ids and versions are independently owned,
-    // while the `worlds/` boundary itself is fixed and reviewed.
-    let worlds_out = script
-        .find(r#"SetOutPath "$INSTDIR\current\worlds""#)
-        .expect("the installer never enters the bundled Worlds resource directory");
-    let worlds = script
-        .find(r#"File /r "${STAGE}\worlds\*.*""#)
-        .expect("the installer does not carry the staged World releases");
+    // Library metadata is part of the host release. Executable World releases
+    // are not: the signed World channels install those independently.
+    let catalog_out = script
+        .find(r#"SetOutPath "$INSTDIR\current\world-catalog""#)
+        .expect("the installer never enters the World catalog resource directory");
+    let catalog = script
+        .find(r#"File /r "${STAGE}\world-catalog\*.*""#)
+        .expect("the installer does not carry the staged World catalog");
     assert!(
-        out < worlds_out && worlds_out < worlds,
-        "the bootstrap Worlds are not installed inside the current release tree"
+        out < catalog_out && catalog_out < catalog,
+        "the World catalog is not installed inside the current release tree"
+    );
+    assert!(
+        !script.contains(r#"${STAGE}\worlds"#),
+        "the host installer still carries executable World releases"
     );
 
     // Portable editor bindings invoke `lait mcp` from PATH. The installer must
@@ -492,9 +495,6 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
     for signed in [r#"sign "$STAGED/Contents/MacOS/lait""#, r#"sign "$STAGED""#] {
         assert!(script.contains(signed), "not signed explicitly: {signed}");
     }
-    let runners = script
-        .find(r#"find "$WORLD_ROOT" -type f -path '*/bin/*' -print0"#)
-        .expect("the packager does not enumerate bundled World runners");
     let sidecar = script
         .find(r#"sign "$STAGED/Contents/MacOS/lait""#)
         .expect("the packager does not sign the lait sidecar");
@@ -502,11 +502,12 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
         .find(r#"sign "$STAGED""#)
         .expect("the packager does not sign the outer app");
     assert!(
-        script.contains(r#"file -b "$runner""#)
-            && script.contains(r#"sign "$runner""#)
-            && runners < sidecar
-            && sidecar < bundle,
-        "nested World runners, the sidecar, and the outer app are not signed inside-out"
+        sidecar < bundle,
+        "the sidecar and the outer app are not signed inside-out"
+    );
+    assert!(
+        !script.contains("WORLD_ROOT") && !script.contains("$runner"),
+        "the macOS host package still enumerates bundled World executables"
     );
     assert!(
         script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
@@ -680,12 +681,13 @@ fn the_linux_package_carries_the_pair_and_notices() {
         script.contains(r#"find "$STAGED" -type f -exec chmod 0644 {} +"#)
             && script.contains(
                 r#"chmod 0755 "$STAGED/astrolabe" "$STAGED/current/astrolabe" "$STAGED/current/lait""#
-            )
-            && script.contains(
-                r#"find "$STAGED/current/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +"#
             ),
         "the Linux package inherits host-specific file modes, or leaves the \
-         stub, a half of the pair, or a World runner unexecutable"
+         stub or a half of the native pair unexecutable"
+    );
+    assert!(
+        !script.contains("$STAGED/current/worlds"),
+        "the Linux host package still treats World payloads as host resources"
     );
 }
 
@@ -810,6 +812,34 @@ fn the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs() {
             "the bundle does not carry {required}"
         );
     }
+    assert!(
+        resources.as_object().is_some_and(|map| {
+            map.values()
+                .any(|dest| dest.as_str() == Some("world-catalog/"))
+        }),
+        "the native bundle does not carry the World catalog"
+    );
+}
+
+/// The staging script may carry first-party metadata and artwork, but never a
+/// runner or web payload. Installation obtains those bytes from the World's
+/// own signed channel.
+#[test]
+fn the_native_client_stages_a_catalog_without_world_payloads() {
+    let script =
+        std::fs::read_to_string(repo_root().join("apps/astrolabe-web/scripts/stage-sidecar.mjs"))
+            .expect("read the native staging script");
+    assert!(
+        script.contains("src-tauri\", \"world-catalog")
+            && script.contains("writeFileSync(join(root, \"world.json\")"),
+        "the staging script does not build the first-party catalog"
+    );
+    assert!(
+        !script.contains("lait-world-issues-runner")
+            && !script.contains("lait-world-signage-runner")
+            && !script.contains("issues-app/dist"),
+        "the native staging script still builds or copies a World payload"
+    );
 }
 
 // --- The terms --------------------------------------------------------------
@@ -919,26 +949,28 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
         "the plain update tree is sealed before its terms are staged"
     );
     assert!(
-        at(r#"cp -R "$BUNDLED_WORLDS" "$STAGE/$LIVE_DIR/worlds""#)
+        at(r#"cp -R "$WORLD_CATALOG" "$STAGE/$LIVE_DIR/world-catalog""#)
             < at(r#"--stage "$STAGE/$LIVE_DIR""#),
-        "the plain update tree is sealed before its bootstrap Worlds are staged"
+        "the plain update tree is sealed before its World catalog is staged"
     );
 
     // `make-tree` is the final common boundary and must refuse an empty
-    // Library even when invoked outside the normal release builder. It also
-    // owns the Unix mode normalization, so independently named runners regain
-    // their executable bit after the blanket 0644 pass.
+    // catalog even when invoked outside the normal release builder. It owns
+    // Unix mode normalization for the native host pair only.
     let tree = std::fs::read_to_string(repo_root().join("packaging/make-tree.sh"))
         .expect("read the update-tree packager");
     assert!(
-        tree.contains(r#"find "$WORLD_ROOT" -type f -name world.json -print -quit"#),
-        "an update tree with no World declaration is publishable"
+        tree.contains(r#"find "$CATALOG_ROOT" -type f -name world.json -print -quit"#),
+        "an update tree with no World catalog declaration is publishable"
     );
     assert!(
-        tree.contains(
-            r#"find "$STAGED/$RESOURCES/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +"#
-        ),
-        "the update tree strips the executable bit from World runners"
+        !tree.contains("$STAGED/$RESOURCES/worlds"),
+        "the host update tree still carries executable World releases"
+    );
+    assert!(
+        tree.contains(r#"[ ! -e "$STAGE/$RESOURCES/worlds" ]"#)
+            && tree.contains(r#"*/world.json|*/art/*.png"#),
+        "the update-tree gate does not refuse legacy or unexpected World payloads"
     );
 
     // The Linux stable-root package is relocatable, while Tauri's conventional
@@ -948,8 +980,9 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
         std::fs::read_to_string(repo_root().join("apps/astrolabe-web/src-tauri/src/main.rs"))
             .expect("read the Tauri host");
     assert!(
-        host.contains("std::env::current_exe()") && host.contains(r#"parent.join("worlds")"#),
-        "the relocatable Linux client cannot find its carried World resources"
+        host.contains("std::env::current_exe()")
+            && host.contains(r#"parent.join("world-catalog")"#),
+        "the relocatable Linux client cannot find its World catalog"
     );
 
     // macOS stages by a different route and is correct for a different reason:

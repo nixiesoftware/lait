@@ -73,20 +73,36 @@ for required in "$ENTRY" "$SIDECAR"; do
   }
 done
 
-# The Library is the selected immutable release set. A tree without its
-# bootstrap declarations installs successfully and then honestly reports no
-# Worlds; refuse that artifact here, at the boundary that can still prevent it
-# from reaching a channel. World ids and versions remain independently owned,
-# so the check requires declarations rather than hard-coding today's catalog.
-WORLD_ROOT="$STAGE/$RESOURCES/worlds"
-[ -d "$WORLD_ROOT" ] || {
-  echo "make-tree: $STAGE is missing the bundled Worlds resource tree" >&2
+# Library membership is catalog metadata, not installation. Refuse a host tree
+# that would install with an empty catalog, while keeping executable World
+# payloads out of this artifact entirely.
+CATALOG_ROOT="$STAGE/$RESOURCES/world-catalog"
+[ -d "$CATALOG_ROOT" ] || {
+  echo "make-tree: $STAGE is missing the first-party World catalog" >&2
   exit 1
 }
-[ -n "$(find "$WORLD_ROOT" -type f -name world.json -print -quit)" ] || {
-  echo "make-tree: $WORLD_ROOT contains no immutable World declaration" >&2
+[ -n "$(find "$CATALOG_ROOT" -type f -name world.json -print -quit)" ] || {
+  echo "make-tree: $CATALOG_ROOT contains no World catalog declaration" >&2
   exit 1
 }
+[ ! -e "$STAGE/$RESOURCES/worlds" ] || {
+  echo "make-tree: $STAGE still contains the retired executable World resource tree" >&2
+  exit 1
+}
+[ -z "$(find "$CATALOG_ROOT" -type l -print -quit)" ] || {
+  echo "make-tree: $CATALOG_ROOT contains a symbolic link" >&2
+  exit 1
+}
+while IFS= read -r catalog_file; do
+  relative="${catalog_file#"$CATALOG_ROOT/"}"
+  case "$relative" in
+    */world.json|*/art/*.png) ;;
+    *)
+      echo "make-tree: World catalog contains a payload file: $relative" >&2
+      exit 1
+      ;;
+  esac
+done < <(find "$CATALOG_ROOT" -type f -print)
 for required in "$DOCS/LICENSE" "$DOCS/THIRD-PARTY-NOTICES.md"; do
   [ -f "$STAGE/$required" ] || {
     echo "make-tree: $STAGE is missing $required — a tree that drops the terms on the first self-update" >&2
@@ -111,12 +127,6 @@ cp -a "$STAGE/." "$STAGED/"
 find "$STAGED" -type d -exec chmod 0755 {} +
 find "$STAGED" -type f -exec chmod 0644 {} +
 chmod 0755 "$STAGED/$ENTRY" "$STAGED/$SIDECAR"
-# World runners are executables too. They are discovered from independently
-# versioned releases under worlds/*/*/bin rather than enumerated by product id.
-# Resetting every payload to 0644 without restoring these made a Unix client
-# carry a complete World that the OS would still refuse to launch.
-find "$STAGED/$RESOURCES/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +
-
 # Determinism, portably. GNU tar has --sort and --mtime; bsdtar (macOS, where
 # the .app tree is packed) has neither, so the two properties are established
 # on the filesystem instead: every timestamp zeroed with `touch`, and the

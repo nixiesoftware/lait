@@ -113,26 +113,12 @@ cp "$REPO/LICENSE" "$STAGED/Contents/Resources/LICENSE"
 #
 # `--options runtime` (the hardened runtime) is on every executable because
 # notarization requires it on every executable, not just the app. The Tauri
-# bundle carries `lait` beside its main executable and independently versioned
-# World runners under Resources. Sign those leaves explicitly before signing
-# the app; the outer signature then seals the complete reviewed code graph.
+# bundle carries `lait` beside its main executable. Worlds are independently
+# distributed and are not code inside this app; the catalog under Resources is
+# ordinary metadata sealed by the outer app signature.
 sign() {
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$@"
 }
-
-WORLD_ROOT="$STAGED/Contents/Resources/worlds"
-if [ -d "$WORLD_ROOT" ]; then
-  while IFS= read -r -d '' runner; do
-    # A World's bin/ directory is code-only. Refuse an unexpected payload
-    # rather than signing arbitrary data or silently shipping a runner that
-    # Gatekeeper cannot assess as native code.
-    if ! file -b "$runner" | grep -q 'Mach-O'; then
-      echo "make-dmg: World runner is not Mach-O code: $runner" >&2
-      exit 1
-    fi
-    sign "$runner"
-  done < <(find "$WORLD_ROOT" -type f -path '*/bin/*' -print0)
-fi
 
 sign "$STAGED/Contents/MacOS/lait"
 # The app itself deliberately claims no exceptional entitlements. Tauri does

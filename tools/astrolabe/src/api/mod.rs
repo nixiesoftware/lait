@@ -199,6 +199,9 @@ pub struct LibraryRow {
     /// silently follow whatever moved into that position.
     pub key: String,
     pub world_mount: String,
+    /// Catalog presence is not installation. False draws Install and makes
+    /// Open unavailable until a signed immutable release is selected.
+    pub installed: bool,
     /// What the World calls itself. Always present — an installed package
     /// declares its name, so there is no unnamed row to draw.
     pub display_name: String,
@@ -220,12 +223,22 @@ pub struct LibraryRow {
     /// when nothing has ever been checked — which is not "up to date", and
     /// draws exactly what this row drew before any of it existed.
     pub update: Option<WorldUpdateRow>,
+    /// Live first-install progress. Separate from `update`: there is no serving
+    /// release to update until this operation completes.
+    pub install: Option<WorldInstallRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldInstallRow {
+    pub phase: String,
+    pub received: Option<u64>,
+    pub total: Option<u64>,
 }
 
 /// A World's channel, as this machine last found it.
 ///
 /// Separate from the row's signed declaration because the two are different
-/// kinds of fact: the list is the selected install list, while this is
+/// kinds of fact: the list joins catalog and selected-installation state, while this is
 /// measured and can. Keeping them apart is what stops the Library becoming a
 /// surface that probes to draw itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -836,6 +849,10 @@ pub enum ActionRequest {
     UpdateWorld {
         world: String,
     },
+    /// Install a World that is already visible in the Library catalog.
+    InstallWorld {
+        world: String,
+    },
     StartDevice {
         id: String,
     },
@@ -1054,6 +1071,7 @@ impl ActionRequest {
         Ok(match self {
             Self::Refresh => Action::Refresh,
             Self::UpdateWorld { world } => Action::UpdateWorld { world },
+            Self::InstallWorld { world } => Action::InstallWorld { world },
             Self::Reload => Action::Reload,
             Self::Exit { go_offline } => Action::Exit(if go_offline {
                 crate::lifecycle::ExitRequest::GoOffline
@@ -1246,6 +1264,7 @@ struct Core {
     runtime: Runtime,
     state_root: PathBuf,
     sidecar: PathBuf,
+    world_catalog: Option<PathBuf>,
 }
 
 static CORE: OnceLock<Mutex<Core>> = OnceLock::new();
@@ -1315,14 +1334,15 @@ fn drain_second_launches(channel: crate::single_instance::Channel) {
 /// different identity — is refused rather than spawning a second supervisor
 /// of the same devices.
 pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), String> {
-    start_with_worlds(state_root, sidecar, None)
+    start_with_catalog(state_root, sidecar, None)
 }
 
-/// Start with trusted first-party World releases carried by the native host.
-pub fn start_with_worlds(
+/// Start with reviewed first-party World catalog metadata carried by the
+/// native host. The catalog contains no executable World payload.
+pub fn start_with_catalog(
     state_root: Option<String>,
     sidecar: Option<String>,
-    bundled_worlds: Option<String>,
+    world_catalog: Option<String>,
 ) -> Result<(), String> {
     // Resolved here when the caller has no opinion, which is every real launch.
     // The interface must not compute either of these: a path worked out on the
@@ -1370,7 +1390,7 @@ pub fn start_with_worlds(
     let (woken, wakeups) = channel();
     let wake = woken.clone();
     let mut config = Config::new(state_root.clone(), sidecar.clone());
-    config.bundled_worlds = bundled_worlds.map(PathBuf::from);
+    config.world_catalog = world_catalog.clone().map(PathBuf::from);
     // A standalone launch, set by the environment: come up without the identity
     // daemon rather than waiting on one. `env_flag` so `1`, `true`, `on` and
     // `yes` all read the same, and an empty or absent value stays off.
@@ -1399,6 +1419,7 @@ pub fn start_with_worlds(
         runtime,
         state_root,
         sidecar,
+        world_catalog: world_catalog.map(PathBuf::from),
     }));
     let _ = WOKEN.set(woken);
 
@@ -1527,7 +1548,7 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
     view
 }
 
-/// The artwork one installed World ships, by mount.
+/// The artwork one installed or catalogued World declares, by mount.
 ///
 /// The one thing that crosses this boundary without being part of
 /// [`ClientView`], and for a reason the view's own contract gives: the view is
@@ -1539,7 +1560,11 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
 ///
 /// An unknown mount answers with no artwork, not an error.
 pub fn world_artwork(mount: String) -> WorldArtwork {
-    let art = crate::client::library::artwork(&mount);
+    let catalog = CORE
+        .get()
+        .and_then(|core| core.lock().ok())
+        .and_then(|core| core.world_catalog.clone());
+    let art = crate::client::library::artwork(&mount, catalog.as_deref());
     WorldArtwork {
         mark: art.mark,
         hero: art.hero,
@@ -1682,6 +1707,7 @@ fn project(app: &App) -> ClientView {
                 .map(|entry| LibraryRow {
                     key: entry.world_mount.clone(),
                     world_mount: entry.world_mount.clone(),
+                    installed: entry.installed,
                     display_name: entry.display_name.clone(),
                     opens_at: entry.entry_path.clone(),
                     version: entry.version,
@@ -1700,6 +1726,13 @@ fn project(app: &App) -> ClientView {
                             progress: standing.progress.clone(),
                             message: standing.message.clone(),
                         }),
+                    install: app.world_install(&entry.world_mount).map(|progress| {
+                        WorldInstallRow {
+                            phase: progress.phase.clone(),
+                            received: progress.received,
+                            total: progress.total,
+                        }
+                    }),
                 })
                 .collect()
         }),
@@ -2332,9 +2365,9 @@ mod tests {
         assert!(project(&App::new()).update.is_none());
     }
 
-    /// The install list crosses the bridge as it stands: the selected signed
-    /// declaration, keyed by mount, with an undeclared entry path travelling
-    /// as absent rather than as a guessed `/`.
+    /// Catalog and installation state cross the bridge as distinct facts,
+    /// keyed by mount, with an undeclared entry path travelling as absent
+    /// rather than as a guessed `/`.
     #[test]
     fn the_library_crosses_as_the_declaration_keyed_by_mount() {
         let mut app = App::new();
@@ -2342,6 +2375,7 @@ mod tests {
             LibraryEntry {
                 world_mount: "issues".into(),
                 world: "com.lait.issues".into(),
+                installed: true,
                 display_name: "Issues".into(),
                 entry_path: Some("/".into()),
                 tagline: Some("Track the work".into()),
@@ -2351,6 +2385,7 @@ mod tests {
             LibraryEntry {
                 world_mount: "notes".into(),
                 world: "com.lait.notes".into(),
+                installed: false,
                 display_name: "Notes".into(),
                 entry_path: None,
                 tagline: None,
@@ -2364,6 +2399,8 @@ mod tests {
         assert_eq!(rows[0].display_name, "Issues");
         assert_eq!(rows[0].opens_at.as_deref(), Some("/"));
         assert_eq!(rows[0].version, Some(7));
+        assert!(rows[0].installed);
+        assert!(!rows[1].installed, "a catalog row crossed as installed");
         assert_eq!(
             rows[1].opens_at, None,
             "`/` was guessed on a World's behalf"

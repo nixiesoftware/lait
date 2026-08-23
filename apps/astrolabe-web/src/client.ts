@@ -8,14 +8,23 @@
 export interface LibraryWorld {
   key: string;
   worldMount: string;
+  /** Catalogued does not mean installed; false offers Install, never Open. */
+  installed: boolean;
   displayName: string;
   opensAt: string | null;
   version: number | null;
   tagline: string | null;
-  /** Packed 0xRRGGBB, as supplied by the bundled World. */
+  /** Packed 0xRRGGBB, as supplied by the catalog or installed declaration. */
   accent: number | null;
   people: WorldPerson[] | null;
   update: WorldUpdate | null;
+  install: WorldInstall | null;
+}
+
+export interface WorldInstall {
+  phase: "resolving" | "downloading" | "verifying" | "installing";
+  received: number | null;
+  total: number | null;
 }
 
 export interface WorldPerson {
@@ -271,6 +280,7 @@ export type ClientAction =
   | { type: "openLink"; url: string }
   | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
+  | { type: "installWorld"; world: string }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
   | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
   | { type: "startHead" } | { type: "stopHead"; id: string } | { type: "forgetOrbit"; space: string }
@@ -301,6 +311,7 @@ export const actionKey = {
   exit: "exit",
   open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
+  installWorld: (world: string) => `world.install:${world}`,
   startDevice: (id: string) => `device.start:${id}`,
   stopDevice: (id: string) => `device.stop:${id}`,
   restartDevice: (id: string) => `device.restart:${id}`,
@@ -355,6 +366,7 @@ export function keyFor(action: ClientAction): string {
     case "openLink": return `link.open:${action.url}`;
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
+    case "installWorld": return actionKey.installWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
     case "stopDevice": return actionKey.stopDevice(action.id);
     case "restartDevice": return actionKey.restartDevice(action.id);
@@ -527,10 +539,10 @@ export async function closeOwnedWindow(): Promise<void> {
 }
 
 /**
- * The artwork one World ships, as data URIs. Not part of the view, and the
- * omission is the core's design: artwork is a build constant that cannot
- * change while the process runs, so a surface asks once per mount and this
- * module caches the answer for the life of the window.
+ * The artwork one World declares, as data URIs. Not part of the view, and the
+ * omission is the core's design: a surface asks only when the catalog or
+ * selected release generation changes, rather than remarshal images in every
+ * pushed view.
  */
 export interface WorldArtwork {
   mark: string | null;
@@ -540,15 +552,16 @@ export interface WorldArtwork {
 const noArtwork: WorldArtwork = { mark: null, hero: null };
 const artworkCache = new Map<string, Promise<WorldArtwork>>();
 
-export function worldArtwork(mount: string): Promise<WorldArtwork> {
-  const cached = artworkCache.get(mount);
+export function worldArtwork(mount: string, generation = "catalog"): Promise<WorldArtwork> {
+  const cacheKey = `${mount}:${generation}`;
+  const cached = artworkCache.get(cacheKey);
   if (cached !== undefined) return cached;
   // An unknown mount — or a host with no artwork command — answers with no
   // artwork, not an error: the accent plate is a first-class face.
   const asked = isTauri()
     ? invoke<WorldArtwork>("world_artwork", { mount }).catch(() => noArtwork)
     : Promise.resolve(noArtwork);
-  artworkCache.set(mount, asked);
+  artworkCache.set(cacheKey, asked);
   return asked;
 }
 
@@ -871,13 +884,14 @@ function createUnavailableTransport(): ClientTransport {
   };
 }
 
-/** The bundled Issues World is development data, not the application model. */
+/** A catalogued Issues World is development data, not the application model. */
 export const fixtureClientView: ClientView = {
   loading: false,
   stale: null,
   library: [{
     key: "issues",
     worldMount: "issues",
+    installed: true,
     displayName: "Issues",
     opensAt: "/",
     version: null,
@@ -890,6 +904,7 @@ export const fixtureClientView: ClientView = {
       { name: "Brin", picture: null, presence: "offline", agent: false, here: false },
     ],
     update: null,
+    install: null,
   }],
   heads: [],
   host: {

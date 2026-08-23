@@ -117,6 +117,41 @@ fn stage_bundled_worlds(root: &Path) {
     }
 }
 
+/// Put the real test runners into the identity with an archive-domain digest.
+/// The helper above assembles a release tree; `seed_bundled` records its tree
+/// digest, so rewrite that test-only record to model an independently fetched
+/// artifact and keep the legacy-retirement migration from correctly moving it.
+fn install_test_worlds(source: &Path, identity: &Path) {
+    let worlds = lait::serve::head::worlds_root(identity);
+    lait::update::world::seed_bundled(source, &worlds).expect("install test World releases");
+    for world in ["com.lait.issues", "com.lait.signage"] {
+        let selected = lait::update::world::staged(&worlds, world).expect("selected test World");
+        let digest = blake3::hash(
+            format!("independent-test-artifact:{world}:{}", selected.version).as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        for record in [
+            worlds.join(world).join("current.json"),
+            worlds
+                .join(world)
+                .join("records")
+                .join(format!("{}.json", selected.version)),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&record).expect("read test World release record"),
+            )
+            .expect("decode test World release record");
+            value["digest"] = serde_json::Value::String(digest.clone());
+            std::fs::write(
+                record,
+                serde_json::to_vec_pretty(&value).expect("encode test World release record"),
+            )
+            .expect("write test World release record");
+        }
+    }
+}
+
 fn package_version(manifest: &Path) -> String {
     std::fs::read_to_string(manifest)
         .expect("read product manifest")
@@ -1100,6 +1135,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     let identity = tempfile::tempdir().expect("an identity home");
     let bundled_worlds = tempfile::tempdir().expect("bundled first-party World releases");
     stage_bundled_worlds(bundled_worlds.path());
+    install_test_worlds(bundled_worlds.path(), identity.path());
     // Declared before the client, so it drops after it: the daemon is asked to
     // stop once nothing is still speaking to it, and before the temporary homes
     // it is holding open are removed.
@@ -1107,7 +1143,6 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
-    config.bundled_worlds = Some(bundled_worlds.path().to_path_buf());
     let (client, signals) = Client::start(config)
         .await
         .expect("a client that starts its identity daemon");

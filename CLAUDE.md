@@ -162,11 +162,15 @@ clicked. The keys live in `actionKey` and are pinned by test against
 *nowhere*, it just never matches `inFlight`, so the control stays live through
 its own action and can be pressed twice.
 
-### The Library is the install list
+### The Library is the catalog, not the install list
 
-One row per selected immutable World release, read passively from its signed
-`world.json`; listing starts no runner. Name, tagline, accent, entry path and
-reviewed implementation version belong to that release. Which Spaces serve a
+One row per reviewed first-party catalog entry, plus any independently
+installed World not in that catalog. Listing starts no runner and fetches no
+payload. Catalog membership and installation are separate facts: an
+uninstalled row offers `Install`, reports `Installing` progress while its signed
+channel artifact is fetched and verified, and offers `Open` only after an
+immutable release is selected. Name, tagline, accent and entry path come from
+the catalog until the installed release supersedes them. Which Spaces serve a
 World, and whether any is up, are the destination's facts: the head's front
 page carries the Space selector, and selecting there is what attaches a
 daemon. Do not reintroduce Space rows or a placement badge here — a row whose

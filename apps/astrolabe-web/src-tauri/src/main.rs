@@ -205,6 +205,7 @@ struct WebStaleness {
 struct WebLibraryWorld {
     key: String,
     world_mount: String,
+    installed: bool,
     display_name: String,
     opens_at: Option<String>,
     version: Option<u32>,
@@ -212,6 +213,15 @@ struct WebLibraryWorld {
     accent: Option<u32>,
     people: Option<Vec<WebWorldPerson>>,
     update: Option<WebWorldUpdate>,
+    install: Option<WebWorldInstall>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebWorldInstall {
+    phase: String,
+    received: Option<u64>,
+    total: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -545,6 +555,7 @@ impl From<ClientView> for WebClientView {
                     .map(|row| WebLibraryWorld {
                         key: row.key,
                         world_mount: row.world_mount,
+                        installed: row.installed,
                         display_name: row.display_name,
                         opens_at: row.opens_at,
                         version: row.version,
@@ -590,6 +601,11 @@ impl From<ClientView> for WebClientView {
                                 progress,
                                 message,
                             }
+                        }),
+                        install: row.install.map(|install| WebWorldInstall {
+                            phase: install.phase,
+                            received: install.received,
+                            total: install.total,
                         }),
                     })
                     .collect()
@@ -1017,6 +1033,9 @@ enum WebAction {
     UpdateWorld {
         world: String,
     },
+    InstallWorld {
+        world: String,
+    },
     StartDevice {
         id: String,
     },
@@ -1246,6 +1265,7 @@ impl From<WebAction> for ActionRequest {
             WebAction::OpenLink { url } => Self::OpenLink { url },
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
+            WebAction::InstallWorld { world } => Self::InstallWorld { world },
             WebAction::StartDevice { id } => Self::StartDevice { id },
             WebAction::StopDevice { id } => Self::StopDevice { id },
             WebAction::RestartDevice { id } => Self::RestartDevice { id },
@@ -1403,9 +1423,9 @@ fn client_current() -> WebClientView {
     api::current().into()
 }
 
-/// The artwork one World ships, as data URIs. Not part of the view, and the
-/// omission is the core's design: artwork is a build constant that cannot
-/// change while the process runs, so a surface asks once per mount and caches.
+/// The artwork one World declares, as data URIs. Not part of the view, and the
+/// omission is the core's design: a surface asks only when the catalog or
+/// selected release generation changes rather than remarshal images in each view.
 /// An unknown mount answers with no artwork, not an error.
 #[derive(Serialize)]
 struct WebWorldArtwork {
@@ -1840,27 +1860,27 @@ fn main() {
                 .path()
                 .resource_dir()
                 .map_err(std::io::Error::other)?;
-            let mut worlds = resources.join("worlds");
+            let mut catalog = resources.join("world-catalog");
             // The canonical Linux package is a relocatable stable-root tree,
             // not a system package under /usr/lib. Tauri therefore resolves
             // its conventional resource directory outside that tree. The
-            // release builder carries the same `worlds/` resource beside the
+            // release builder carries the same catalog resource beside the
             // host on Windows and Linux; prefer Tauri's platform location and
             // fall back to that owned sibling only when it is the one present.
-            if !worlds.is_dir() {
+            if !catalog.is_dir() {
                 if let Some(beside) = std::env::current_exe()
                     .map_err(std::io::Error::other)?
                     .parent()
-                    .map(|parent| parent.join("worlds"))
+                    .map(|parent| parent.join("world-catalog"))
                     .filter(|candidate| candidate.is_dir())
                 {
-                    worlds = beside;
+                    catalog = beside;
                 }
             }
-            api::start_with_worlds(
+            api::start_with_catalog(
                 None,
                 None,
-                Some(worlds.to_string_lossy().into_owned()),
+                Some(catalog.to_string_lossy().into_owned()),
             )
             .map_err(std::io::Error::other)?;
             // Window creation hops to the main thread; every platform makes

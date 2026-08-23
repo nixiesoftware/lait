@@ -80,6 +80,19 @@ pub enum Outcome {
     },
 }
 
+/// Observable phases of an explicitly requested World installation.
+///
+/// These are deliberately mechanical and bounded. They let the native client
+/// say that an install is moving without making any phase authoritative: only
+/// the selected immutable release record proves completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallProgress {
+    Resolving,
+    Downloading { received: u64, total: u64 },
+    Verifying,
+    Installing,
+}
+
 /// Which immutable release the current pointer selects.
 ///
 /// Beside, because everything inside that directory may be *served*: a marker
@@ -226,6 +239,61 @@ pub fn seed_bundled(source: &Path, worlds: &Path) -> Result<usize> {
         }
     }
     Ok(seeded)
+}
+
+/// Move releases created by the retired client-bundle bootstrap out of the
+/// active registry without deleting them.
+///
+/// That bootstrap wrote a deterministic *directory* digest into a field whose
+/// contract is the signed archive digest. Equality with a fresh directory
+/// digest is therefore an exact legacy marker. Independently downloaded
+/// releases carry the archive digest and are never selected by this migration.
+/// Whole World roots move together so the selected pointer, release records,
+/// standings, and any interrupted scratch remain available for audit while no
+/// longer looking installed to the runtime.
+pub fn retire_bundled(worlds: &Path, retired: &Path) -> Result<usize> {
+    let mut moved = 0usize;
+    for entry in read_sorted_directories(worlds)? {
+        let world = entry.file_name().to_string_lossy().to_string();
+        let Some(selected) = staged(worlds, &world) else {
+            continue;
+        };
+        let Some(active) = release_dir(worlds, &world, &selected.version) else {
+            continue;
+        };
+        let Ok((directory, _)) = directory_digest(&active) else {
+            continue;
+        };
+        if !directory.eq_ignore_ascii_case(&selected.digest) {
+            continue;
+        }
+
+        let suffix = &selected.digest[..selected.digest.len().min(12)];
+        let name = format!("{}-{suffix}", selected.version);
+        let mut destination = retired.join(&world).join(&name);
+        // A rollback to an old client can seed the same legacy payload again.
+        // Preserve both quarantines; an occupied audit path must not reactivate
+        // the later copy or make the new client unable to start.
+        let mut ordinal = 2u64;
+        while destination.exists() {
+            destination = retired.join(&world).join(format!("{name}-{ordinal}"));
+            ordinal = ordinal.saturating_add(1);
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| anyhow!("retired World destination has no parent"))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create retired World directory at {}", parent.display()))?;
+        std::fs::rename(entry.path(), &destination).with_context(|| {
+            format!(
+                "retire legacy bundled World {world} {} to {}",
+                selected.version,
+                destination.display()
+            )
+        })?;
+        moved = moved.saturating_add(1);
+    }
+    Ok(moved)
 }
 
 fn read_sorted_directories(root: &Path) -> Result<Vec<std::fs::DirEntry>> {
@@ -466,6 +534,22 @@ pub fn stage_bundle_with<F>(
 where
     F: Fn(&str, u64) -> std::result::Result<Vec<u8>, feed::Failure>,
 {
+    stage_bundle_with_progress(fetch, resolved, world, offers, worlds, |_| {})
+}
+
+/// [`stage_bundle_with`] with observable install phases.
+pub fn stage_bundle_with_progress<F, P>(
+    fetch: F,
+    resolved: &feed::Resolved,
+    world: &str,
+    offers: &std::collections::BTreeMap<String, semver::Version>,
+    worlds: &Path,
+    progress: P,
+) -> Result<Outcome>
+where
+    F: Fn(&str, u64) -> std::result::Result<Vec<u8>, feed::Failure>,
+    P: Fn(InstallProgress),
+{
     let version = resolved
         .manifest
         .bundles
@@ -501,6 +585,7 @@ where
                 artifact.blake3
             );
         }
+        progress(InstallProgress::Installing);
         select(worlds, &bundle)?;
         return Ok(Outcome::Staged { version });
     }
@@ -513,6 +598,7 @@ where
 
     let bytes = fetch(&artifact.url, artifact.size)
         .map_err(|error| anyhow!("world bundle download: {error}"))?;
+    progress(InstallProgress::Verifying);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != artifact.size {
         bail!(
             "world bundle size mismatch: manifest says {} bytes, got {}",
@@ -529,6 +615,7 @@ where
         );
     }
 
+    progress(InstallProgress::Installing);
     let root = world_root(worlds, world);
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create the World directory at {}", root.display()))?;
@@ -673,6 +760,20 @@ fn stage_into(
 /// "this release does not run here" and "this release holds nothing for this
 /// World" are ordinary [`Outcome`]s.
 pub fn check(world: &str, worlds: &Path, channel: feed::Channel) -> Result<Outcome> {
+    check_with_progress(world, worlds, channel, |_| {})
+}
+
+/// Resolve and install one World's signed channel release with progress.
+pub fn check_with_progress<P>(
+    world: &str,
+    worlds: &Path,
+    channel: feed::Channel,
+    progress: P,
+) -> Result<Outcome>
+where
+    P: Fn(InstallProgress) + Clone,
+{
+    progress(InstallProgress::Resolving);
     let pubkeys = feed::pinned_pubkeys().map_err(|error| anyhow!("{error}"))?;
     let url = pointer_url(feed::FEED_BASE_URL, world, channel);
     let resolved = feed::resolve_pointer_with(
@@ -683,12 +784,19 @@ pub fn check(world: &str, worlds: &Path, channel: feed::Channel) -> Result<Outco
         None,
     )
     .map_err(|error| anyhow!("{error}"))?;
-    stage_bundle_with(
-        feed::http_fetch,
+    let download_progress = progress.clone();
+    stage_bundle_with_progress(
+        move |url, size| {
+            let report = download_progress.clone();
+            feed::http_fetch_with_progress(url, size, move |received, total| {
+                report(InstallProgress::Downloading { received, total });
+            })
+        },
         &resolved,
         world,
         &super::facts::offered(),
         worlds,
+        progress,
     )
 }
 
@@ -751,6 +859,91 @@ mod tests {
                 ("index.html".into(), b"<html>the head</html>".to_vec()),
             ],
         )
+    }
+
+    /// The retired bootstrap can be recognized without a version deny-list:
+    /// it alone put a directory digest in the archive-digest field. A real
+    /// downloaded release at the same version must stay active.
+    #[test]
+    fn retirement_moves_only_the_legacy_directory_digest_and_preserves_its_bytes() {
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        let retired = tempfile::tempdir().expect("a retirement root");
+
+        let bundled = release_dir(worlds.path(), WORLD, "0.9.2").expect("a release path");
+        std::fs::create_dir_all(&bundled).expect("a bundled release directory");
+        std::fs::write(
+            bundled.join("world.json"),
+            declaration(WORLD, "0.9.2", serde_json::json!([])),
+        )
+        .expect("a bundled declaration");
+        std::fs::write(bundled.join("payload"), b"legacy bytes").expect("a bundled payload");
+        let (digest, files) = directory_digest(&bundled).expect("the legacy tree digest");
+        let legacy = StagedBundle {
+            world: WORLD.into(),
+            version: "0.9.2".into(),
+            digest: digest.clone(),
+            files,
+        };
+        select(worlds.path(), &legacy).expect("select the bundled release");
+
+        let downloaded_world = "world.lait.signage";
+        let downloaded =
+            release_dir(worlds.path(), downloaded_world, "0.1.1").expect("a release path");
+        std::fs::create_dir_all(&downloaded).expect("a downloaded release directory");
+        std::fs::write(downloaded.join("payload"), b"signed archive bytes")
+            .expect("a downloaded payload");
+        select(
+            worlds.path(),
+            &StagedBundle {
+                world: downloaded_world.into(),
+                version: "0.1.1".into(),
+                digest: "ab".repeat(32),
+                files: 1,
+            },
+        )
+        .expect("select the downloaded release");
+
+        assert_eq!(
+            retire_bundled(worlds.path(), retired.path()).expect("retire legacy releases"),
+            1
+        );
+        assert!(
+            !world_root(worlds.path(), WORLD).exists(),
+            "the legacy World still looks installed"
+        );
+        let preserved = retired
+            .path()
+            .join(WORLD)
+            .join(format!("0.9.2-{}", &digest[..12]));
+        assert_eq!(
+            std::fs::read(preserved.join("releases/0.9.2/payload")).expect("the retired payload"),
+            b"legacy bytes"
+        );
+        let reseeded = release_dir(worlds.path(), WORLD, "0.9.2").expect("a release path");
+        std::fs::create_dir_all(&reseeded).expect("a reseeded release directory");
+        std::fs::write(
+            reseeded.join("world.json"),
+            declaration(WORLD, "0.9.2", serde_json::json!([])),
+        )
+        .expect("a reseeded declaration");
+        std::fs::write(reseeded.join("payload"), b"legacy bytes").expect("a reseeded payload");
+        select(worlds.path(), &legacy).expect("select the reseeded legacy release");
+        assert_eq!(
+            retire_bundled(worlds.path(), retired.path()).expect("retire the rollback copy"),
+            1
+        );
+        assert!(
+            retired
+                .path()
+                .join(WORLD)
+                .join(format!("0.9.2-{}-2", &digest[..12]))
+                .is_dir(),
+            "the rollback copy was not preserved beside the first quarantine"
+        );
+        assert!(
+            world_root(worlds.path(), downloaded_world).is_dir(),
+            "an independently downloaded release was retired"
+        );
     }
 
     fn sealed(

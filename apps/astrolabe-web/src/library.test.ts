@@ -16,6 +16,7 @@ function world(mount: string): LibraryWorld {
   return {
     key: mount,
     worldMount: mount,
+    installed: true,
     displayName: mount,
     opensAt: "/",
     version: 1,
@@ -23,6 +24,7 @@ function world(mount: string): LibraryWorld {
     accent: null,
     people: null,
     update: null,
+    install: null,
   };
 }
 
@@ -71,5 +73,12 @@ describe("the Library reads heads per World, by their own state", () => {
   it("a World that declares no entry stays Unavailable whatever the heads say", () => {
     const shared = view([head({ world: "issues" })]);
     expect(lifecycle(shared, { ...world("issues"), opensAt: null })).toBe("Unavailable");
+  });
+
+  it("a catalogued World stays visible as Not installed until a release is selected", () => {
+    const catalogued = { ...world("issues"), installed: false };
+    expect(lifecycle(view([]), catalogued)).toBe("Not installed");
+    const installing = { ...view([]), inFlight: ["world.install:issues"] };
+    expect(lifecycle(installing, catalogued)).toBe("Installing");
   });
 });

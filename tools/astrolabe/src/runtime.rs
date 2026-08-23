@@ -37,7 +37,7 @@ use crate::client::correspondence::DemoCarrier;
 use crate::client::display::DisplayAssignmentInput;
 use crate::client::heads::{McpBinding, McpBindingOutcome};
 use crate::client::host::HostContext;
-use crate::client::library::{LaunchTicket, LibraryEntry};
+use crate::client::library::{LaunchTicket, LibraryEntry, WorldInstallProgress};
 use crate::client::space::{SpaceOp, SpaceRef, SpaceView};
 use crate::client::storage::StorageFacts;
 use crate::client::{Client, ClientError, ClientResult, Config};
@@ -65,6 +65,10 @@ pub enum Action {
     },
     /// Fetch one World's newest bundle now.
     UpdateWorld {
+        world: String,
+    },
+    /// Install a catalogued World's selected signed channel release.
+    InstallWorld {
         world: String,
     },
     /// Act on a `lait:` link the OS delivered.
@@ -246,6 +250,7 @@ impl Action {
             Self::Refresh => "refresh".into(),
             Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
+            Self::InstallWorld { world } => format!("world.install:{world}"),
             Self::OpenLink { url } => format!("link.open:{url}"),
             Self::Reload => "image.reload".into(),
             Self::StartDevice(id) => format!("device.start:{id}"),
@@ -332,6 +337,7 @@ impl Action {
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
+            Self::InstallWorld { world } => format!("install {world}"),
             Self::OpenLink { url } => format!("open {url}"),
             Self::Reload => "roll forward onto the rebuilt image".into(),
             Self::StartDevice(id) => format!("start {id}"),
@@ -432,6 +438,12 @@ pub enum Update {
     /// fact: the list is read passively from selected manifests, while this is
     /// measured and can go stale.
     WorldStandings(std::collections::BTreeMap<String, crate::client::library::WorldStanding>),
+    /// Live progress for an explicit first install. `None` clears the phase
+    /// after the resulting Library read has landed.
+    WorldInstall {
+        world: String,
+        progress: Option<WorldInstallProgress>,
+    },
     Storage(Vec<StorageFacts>),
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
@@ -674,6 +686,7 @@ async fn serve(
     let correspondence_demo = config.correspondence_demo;
     let post_url = config.post_url.clone();
     let identity = config.identity.clone();
+    let world_catalog = config.world_catalog.clone();
     let remembered = crate::screen::load(&state_root);
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
@@ -685,7 +698,10 @@ async fn serve(
             send(
                 &updates,
                 wake.as_ref(),
-                Update::Library(crate::client::library::installed()),
+                Update::Library(crate::client::library::available_for(
+                    identity.as_deref(),
+                    world_catalog.as_deref(),
+                )),
             );
             send(&updates, wake.as_ref(), Update::Unstartable);
             send(
@@ -847,8 +863,8 @@ impl Worker {
             self.client.supervisor().snapshot().await,
         )));
         self.send(Update::Heads(self.client.heads()));
-        // The Library is the selected install list. Reading it launches no
-        // runner and cannot go stale against a daemon.
+        // The Library joins passive catalog metadata to selected installations.
+        // Reading it launches no runner and cannot go stale against a daemon.
         self.send(Update::Library(self.client.get_library()));
         match self.client.get_storage().await {
             Ok(facts) => self.send(Update::Storage(facts)),
@@ -973,6 +989,12 @@ impl Worker {
         let what = action.what();
         match self.perform(&action).await {
             Ok(outcome) => {
+                if let Action::InstallWorld { world } = &action {
+                    self.send(Update::WorldInstall {
+                        world: world.clone(),
+                        progress: None,
+                    });
+                }
                 self.send(Update::Done { key, outcome });
                 // Every action above changes something a read would report, so
                 // the re-read is here rather than in each arm. It is what makes
@@ -982,7 +1004,15 @@ impl Worker {
                     self.refresh().await;
                 }
             }
-            Err(error) => self.fail(Some(key), &what, error),
+            Err(error) => {
+                if let Action::InstallWorld { world } = &action {
+                    self.send(Update::WorldInstall {
+                        world: world.clone(),
+                        progress: None,
+                    });
+                }
+                self.fail(Some(key), &what, error)
+            }
         }
     }
 
@@ -1009,6 +1039,71 @@ impl Worker {
                     "update accepted ({})",
                     job.operation_hex()
                 )))
+            }
+            Action::InstallWorld { world } => {
+                let entry = client
+                    .get_library()
+                    .into_iter()
+                    .find(|entry| entry.world_mount == *world)
+                    .ok_or_else(|| {
+                        ClientError::refused(format!("no catalogued World is mounted at '{world}'"))
+                    })?;
+                if entry.installed {
+                    return Err(ClientError::refused(format!(
+                        "{} is already installed",
+                        entry.display_name
+                    )));
+                }
+                let identity = client.identity_dir().ok_or_else(|| {
+                    ClientError::internal("the World installation has no identity directory")
+                })?;
+                let worlds = lait::serve::head::worlds_root(&identity);
+                let world_id = entry.world;
+                let mount = world.clone();
+                let updates = self.updates.clone();
+                let wake = self.wake.clone();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    lait::update::world::check_with_progress(
+                        &world_id,
+                        &worlds,
+                        lait::update::feed::Channel::current(),
+                        move |progress| {
+                            send(
+                                &updates,
+                                wake.as_ref(),
+                                Update::WorldInstall {
+                                    world: mount.clone(),
+                                    progress: Some(progress.into()),
+                                },
+                            );
+                        },
+                    )
+                })
+                .await
+                .map_err(|error| ClientError::internal(format!("join World installer: {error}")))?
+                .map_err(|error| ClientError::internal(format!("install World: {error:#}")))?;
+                match outcome {
+                    lait::update::world::Outcome::Staged { version }
+                    | lait::update::world::Outcome::Current { version } => {
+                        // The daemon loaded its World registry at process start.
+                        // Roll it only after the immutable selection is sealed so
+                        // the first Open reaches the newly installed package.
+                        client.roll_identity_daemon().await?;
+                        self.send(Update::Library(client.get_library()));
+                        Ok(Outcome::Said(format!("installed {world} {version}")))
+                    }
+                    lait::update::world::Outcome::Unmet { version, why } => {
+                        Err(ClientError::refused(format!(
+                            "{world} {version} cannot run on this build: {}",
+                            why.join("; ")
+                        )))
+                    }
+                    lait::update::world::Outcome::NothingPublished { version } => {
+                        Err(ClientError::refused(format!(
+                            "{world} {version} carries no payload for this machine"
+                        )))
+                    }
+                }
             }
             Action::Reload => {
                 // The bench half first: the supervisor stops what it owns,
@@ -1533,6 +1628,9 @@ impl Action {
                 | Self::ReadEvents { .. }
                 | Self::ReadTransitions { .. }
                 | Self::ReadSpace(_)
+                // Installation publishes its authoritative Library read before
+                // it completes, after the daemon has loaded the new registry.
+                | Self::InstallWorld { .. }
                 // Presenting reads a World and writes nothing, and it already
                 // publishes its own update. A full re-read behind every frame
                 // boundary would put a snapshot of the whole machine on the
