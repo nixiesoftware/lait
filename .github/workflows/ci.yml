@@ -743,9 +743,15 @@ jobs:
             echo "::error::feed publisher still depends on GitHub Release assets"
             exit 1
           fi
-          for workflow in .github/workflows/build-binaries.yml .github/workflows/dev-release.yml; do
-            if grep -Eq 'lait-(issues|signage)-runner|stage-worlds\.sh' "$workflow"; then
-              echo "::error::$workflow still builds or carries a World in a host release"
+          host_distribution=(
+            .github/workflows/build-binaries.yml
+            .github/workflows/dev-release.yml
+            .github/scripts/archive-unix.sh
+            .github/scripts/archive-windows.sh
+          )
+          for path in "${host_distribution[@]}"; do
+            if grep -Eq 'lait-(issues|signage)-runner|stage-worlds\.sh|[ /]worlds([ /]|$)' "$path"; then
+              echo "::error::$path still builds or carries a World in a host release"
               exit 1
             fi
           done
