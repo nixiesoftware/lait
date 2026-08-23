@@ -44,4 +44,15 @@ are disabled.
 `display-output/active.json` is the atomic native-renderer handoff. When its
 scene is `frame`, `display-output/frame.png` contains the fully verified current
 frame. A native shell can watch the status file and swap the image on its own
-compositor without implementing the network protocol.
+compositor without implementing the network protocol — and one ships beside
+the receiver:
+
+```text
+cargo run -p astrolabe-display-reference --bin astrolabe-display-shell --   --output display-output          # [--player mpv]
+```
+
+It keeps exactly one player process matching the handoff: a film keeps
+playing across status rewrites that name the same URL, a frame re-presents
+when its pixels actually change, a blank is a killed player and a reason on
+stderr, and a player that dies under an unchanged scene is restarted. The
+kiosk pair is the receiver and the shell against one output directory.
