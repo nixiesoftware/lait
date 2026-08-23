@@ -54,6 +54,9 @@ unsigned local disk image is deliberately labelled unsafe to publish.
 
 Worlds do not ride host tags. `.github/workflows/publish-worlds.yml` builds
 first-party World runners when their source or shared runtime changes and
-publishes them to their own `test` channels. Stable World promotion is an
-explicit manual dispatch. Product versions must be bumped before changed bytes
-can occupy a new immutable World release coordinate.
+publishes only previously unoccupied product versions to their own `test`
+channels. An existing version is never rebuilt or overwritten: product
+versions must be bumped before changed bytes can occupy a new immutable World
+release coordinate. Stable World promotion is an explicit manual dispatch
+that fetches each tested manifest and moves only its signed pointer; it does
+not rebuild a runner.
