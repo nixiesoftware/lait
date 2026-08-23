@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "addressbook",
  "anyhow",

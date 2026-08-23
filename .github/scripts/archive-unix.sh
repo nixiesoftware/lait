@@ -17,7 +17,6 @@ mkdir -p "$NAME"
 cp "$BIN" "$NAME/lait"
 # Keep this documented payload in sync with the release contract.
 cp CHANGELOG.md LICENSE README.md "$NAME/"
-bash .github/scripts/stage-worlds.sh "$TARGET" "$NAME"
 
 tar czf "$ARCHIVE" "$NAME"
 shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"

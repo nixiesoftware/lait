@@ -168,9 +168,9 @@ jobs:
 
       # `tauri-build` validates both `bundle.externalBin` and every resource
       # directory even for `cargo check`. Use the production staging command so
-      # this gate proves the host sees the daemon and the independently carried
-      # immutable World releases that the actual application bundle contains.
-      - name: Stage the lait sidecar and carried Worlds the bundler requires
+      # this gate proves the host sees the daemon and reviewed catalog while the
+      # production stage keeps executable World payloads out of the bundle.
+      - name: Stage the lait sidecar and reviewed World catalog
         run: npm run stage-bundle
         working-directory: apps/astrolabe-web
 
@@ -743,6 +743,18 @@ jobs:
             echo "::error::feed publisher still depends on GitHub Release assets"
             exit 1
           fi
+          host_distribution=(
+            .github/workflows/build-binaries.yml
+            .github/workflows/dev-release.yml
+            .github/scripts/archive-unix.sh
+            .github/scripts/archive-windows.sh
+          )
+          for path in "${host_distribution[@]}"; do
+            if grep -Eq 'lait-(issues|signage)-runner|stage-worlds\.sh|[ /]worlds([ /]|$)' "$path"; then
+              echo "::error::$path still builds or carries a World in a host release"
+              exit 1
+            fi
+          done
 
   # The self-updater's in-archive binary path is a claim about our feed's
   # layout, and the unit tests can only check it against our MODEL of that

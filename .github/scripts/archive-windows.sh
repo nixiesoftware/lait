@@ -20,10 +20,9 @@ trap 'rm -rf "$STAGE"' EXIT
 # Flat archive: binary + docs at the zip root (the updater's published layout).
 cp "$BIN" "$STAGE/lait.exe"
 cp CHANGELOG.md LICENSE README.md "$STAGE/"
-bash .github/scripts/stage-worlds.sh "$TARGET" "$STAGE"
 (
   cd "$STAGE"
-  7z a "../../../$ARCHIVE" lait.exe worlds CHANGELOG.md LICENSE README.md >/dev/null
+  7z a "../../../$ARCHIVE" lait.exe CHANGELOG.md LICENSE README.md >/dev/null
 )
 sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
 
