@@ -42,6 +42,7 @@ pub mod address;
 pub mod client;
 pub mod firestore;
 pub mod http;
+pub mod registry;
 pub mod service;
 pub mod store;
 pub mod wire;

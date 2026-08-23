@@ -46,6 +46,7 @@
 //! nothing above this seam names a foreign id type.
 
 mod flow;
+mod flow_io;
 mod iroh;
 pub mod mem;
 #[cfg(test)]
@@ -65,6 +66,7 @@ use mechanics::ids::{DeviceId, SpaceId};
 /// selects, and the factory that builds it. Exported under their role rather
 /// than their vendor, so replacing the contractor is a change here and nowhere
 /// else — no consumer names it, and the module behind these is private.
+pub use flow_io::FlowIo;
 pub use iroh::{IrohFactory as DefaultFactory, IrohTransport as DefaultTransport};
 
 pub use flow::{Connection, IncomingConnection, PathKind, PathQuality, RecvFlow, SendFlow};
