@@ -302,9 +302,9 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
-      # Cargo produces the runner executables but not the application-bundle
-      # layout. Real-process tests must see the same carried immutable releases
-      # as a clean native install, before they start a product-blind head.
+      # Cargo produces runner executables but not the installable fixture tree.
+      # Process tests explicitly install this tree into throwaway identities;
+      # production never discovers executable Worlds beside the host.
       - name: Stage first-party Worlds for process tests
         shell: bash
         run: bash ci/stage-test-worlds.sh

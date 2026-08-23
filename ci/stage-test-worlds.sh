@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Assemble the carried first-party World releases beside the native debug
-# binaries before any test that spawns `lait` or Astrolabe. Cargo builds
-# executable targets, but it does not create an application bundle; without
-# this explicit step a clean checkout exercises a product-blind host with no
-# selected Worlds while a developer's previously staged target tree passes.
+# Assemble first-party World fixtures beside the native debug binaries before
+# any process test that explicitly installs them into its throwaway identity.
+# Production never discovers this directory; the test harness opts in so a
+# developer's previously staged target tree cannot make a clean checkout pass.
 set -euo pipefail
 
 OUTPUT="${1:-target/debug}"
