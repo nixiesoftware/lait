@@ -4,7 +4,7 @@
 //! that is what a transport owns; anything serving or speaking a byte
 //! protocol over a flow — HTTP most of all — wants `AsyncRead`/`AsyncWrite`.
 //! This is that adapter, shared so the coordinator's overlay server and the
-//! reach router's bridge cannot drift apart in how they read a flow.
+//! reach router's splice cannot drift apart in how they read a flow.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};

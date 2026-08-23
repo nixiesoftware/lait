@@ -1,4 +1,4 @@
-//! The reach router: a blind bridge from Web-PKI receivers to identity
+//! The reach router: a blind splice from Web-PKI receivers to identity
 //! coordinators over the display overlay.
 //!
 //! One TCP listener, expected behind the deployment's TLS terminator (the
@@ -32,7 +32,7 @@ use tokio::net::{TcpListener, TcpStream};
 const DISPLAY_ALPN: &[u8] = b"lait/display/1";
 
 /// Bound on one request head. A head that has not ended by now is not a
-/// request this bridge carries.
+/// request this splice carries.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
 /// How a label becomes an overlay endpoint.
@@ -76,7 +76,7 @@ impl Resolver for StaticResolver {
 
 /// The first label of the request's `Host`, lowercased — the identity this
 /// connection is for. `None` when the head carries no usable host, which is a
-/// request this bridge has nowhere to send.
+/// request this splice has nowhere to send.
 fn label_of(head: &str) -> Option<String> {
     let host = head
         .split("\r\n")
@@ -113,7 +113,7 @@ async fn read_head(tcp: &mut TcpStream) -> Result<Vec<u8>> {
     }
 }
 
-async fn bridge(
+async fn splice(
     mut tcp: TcpStream,
     transport: Arc<DefaultTransport>,
     resolver: Arc<dyn Resolver>,
@@ -155,7 +155,7 @@ async fn bridge(
         .connect_session(peer, DISPLAY_ALPN)
         .await
         .with_context(|| format!("dial the coordinator for '{label}'"))?;
-    let (mut send, recv) = connection.open_bi().await.context("open the bridge flow")?;
+    let (mut send, recv) = connection.open_bi().await.context("open the splice flow")?;
     // Replay everything already read — the head and whatever body arrived
     // with it — then splice. From here the router understands nothing.
     send.write_all(&buffered).await.context("replay the head")?;
@@ -163,7 +163,7 @@ async fn bridge(
     match tokio::io::copy_bidirectional(&mut tcp, &mut flow).await {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(error) => Err(anyhow!(error)).context("bridge splice"),
+        Err(error) => Err(anyhow!(error)).context("splice splice"),
     }
 }
 
@@ -177,8 +177,8 @@ async fn serve(
         let transport = transport.clone();
         let resolver = resolver.clone();
         tokio::spawn(async move {
-            if let Err(error) = bridge(tcp, transport, resolver).await {
-                tracing::debug!(%error, %peer, "bridge ended");
+            if let Err(error) = splice(tcp, transport, resolver).await {
+                tracing::debug!(%error, %peer, "splice ended");
             }
         });
     }
@@ -272,12 +272,12 @@ mod tests {
         assert_eq!(label_of(none), None);
     }
 
-    /// The bridge end to end: a real TCP client, the router, and a
+    /// The splice end to end: a real TCP client, the router, and a
     /// coordinator-shaped overlay server, all in this process over Isolated
     /// transports. The response crossing back proves the splice carries both
     /// directions; nothing here interprets a byte after the head.
     #[tokio::test]
-    async fn a_receiver_reaches_its_coordinator_through_the_bridge() {
+    async fn a_receiver_reaches_its_coordinator_through_the_splice() {
         use hyper::server::conn::http1;
         use hyper_util::rt::TokioIo;
         use hyper_util::service::TowerToHyperService;
@@ -297,7 +297,7 @@ mod tests {
         );
         let app = axum::Router::new().route(
             "/head/v1/instance",
-            axum::routing::get(|| async { "bridged-coordinator" }),
+            axum::routing::get(|| async { "spliced-coordinator" }),
         );
         let serving = coordinator.clone();
         tokio::spawn(async move {
@@ -340,14 +340,14 @@ mod tests {
         let resolver: Arc<dyn Resolver> = Arc::new(StaticResolver(
             [("acme".to_string(), coordinator.my_id())].into(),
         ));
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind bridge");
-        let bridge_addr = listener.local_addr().expect("bridge address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind splice");
+        let splice_addr = listener.local_addr().expect("splice address");
         tokio::spawn(serve(listener, router_transport, resolver));
 
-        // The receiver: plain HTTP at the bridge, host names the identity.
-        let mut tcp = TcpStream::connect(bridge_addr)
+        // The receiver: plain HTTP at the splice, host names the identity.
+        let mut tcp = TcpStream::connect(splice_addr)
             .await
-            .expect("reach the bridge");
+            .expect("reach the splice");
         tcp.write_all(
             b"GET /head/v1/instance HTTP/1.1\r\nhost: acme.foundation.pub\r\nconnection: close\r\n\r\n",
         )
@@ -356,12 +356,12 @@ mod tests {
         let mut response = Vec::new();
         tokio::time::timeout(Duration::from_secs(20), tcp.read_to_end(&mut response))
             .await
-            .expect("bridged response timed out")
+            .expect("spliced response timed out")
             .expect("read response");
         let text = String::from_utf8_lossy(&response);
-        assert!(text.starts_with("HTTP/1.1 200"), "bridged: {text}");
+        assert!(text.starts_with("HTTP/1.1 200"), "spliced: {text}");
         assert!(
-            text.contains("bridged-coordinator"),
+            text.contains("spliced-coordinator"),
             "the body crossed: {text}"
         );
     }

@@ -5,7 +5,7 @@
 //! no listening port and no inbound hole. The TCP listener in
 //! [`super::http`] remains for the one case that needs it — televisions on
 //! the same LAN, which cannot speak the overlay — and this is every other
-//! case: a router bridging receivers in from anywhere, a placement reached
+//! case: a router splicing receivers in from anywhere, a placement reached
 //! across the world, a machine behind a NAT nobody will configure.
 //!
 //! Each accepted bidirectional flow carries ordinary HTTP/1.1 — the same
@@ -103,7 +103,7 @@ mod tests {
     /// The plane end to end, with no relay and no listener: an Isolated
     /// overlay pair, a dial by direct address, one bidirectional flow, and an
     /// ordinary HTTP/1.1 exchange over it against a real axum router. This is
-    /// what the daemon serves and what the router will bridge into; the
+    /// what the daemon serves and what the router will splice into; the
     /// coordinator's own routes ride it unchanged because they are the same
     /// `axum::Router` type this test hands in.
     #[tokio::test]
