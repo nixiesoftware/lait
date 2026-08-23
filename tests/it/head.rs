@@ -88,8 +88,13 @@ impl Head {
             .expect("read the readiness line");
         let banner: serde_json::Value = serde_json::from_str(line.trim())
             .unwrap_or_else(|error| panic!("readiness line is not JSON ({error}): {line}"));
-        let port = banner["port"].as_u64().expect("port");
-        let token = banner["token"].as_str().expect("token").to_string();
+        let port = banner["port"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("readiness line carries no port: {banner}"));
+        let token = banner["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("readiness line carries no token: {banner}"))
+            .to_string();
         Head {
             child,
             config: config.to_path_buf(),

@@ -102,6 +102,10 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
+      - name: Stage first-party Worlds for process tests
+        shell: bash
+        run: bash ci/stage-test-worlds.sh
+
       # The `nightly` profile runs everything and gives the heavy gates their
       # own slow-timeout budget, plus a retry on the real-network group — a
       # relay hiccup at 04:41 should not read as a code regression.

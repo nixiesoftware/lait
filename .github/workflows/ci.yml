@@ -339,6 +339,13 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
+      # Cargo produces the runner executables but not the application-bundle
+      # layout. Real-process tests must see the same carried immutable releases
+      # as a clean native install, before they start a product-blind head.
+      - name: Stage first-party Worlds for process tests
+        shell: bash
+        run: bash ci/stage-test-worlds.sh
+
       # The `pr` profile in .config/nextest.toml is the tier definition: the
       # whole suite minus the four heavy gates and the real-network suites,
       # which `nightly.yml` runs at full count. Naming a PROFILE rather than an
@@ -470,7 +477,11 @@ jobs:
       # of /bin/sleep is not a valid subject, so there is no fallback the test
       # could quietly take instead.
       - name: Build the binaries the seam tests spawn
-        run: cargo build --locked --all-features -p lait -p astrolabe-stub --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper
+        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
+
+      - name: Stage first-party Worlds for process tests
+        shell: bash
+        run: bash ci/stage-test-worlds.sh
 
       - name: Test (OS seam — unit tests, every crate)
         run: cargo nextest run --workspace --locked --all-features --profile pr-platform --lib

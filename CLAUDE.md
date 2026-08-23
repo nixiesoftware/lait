@@ -341,19 +341,20 @@ link step fails (`taskkill //F //IM lait.exe` on Windows).
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features --locked
   cargo build --workspace --locked --all-targets --all-features
+  bash ci/stage-test-worlds.sh
   cargo nextest run --workspace --all-features --profile pr --no-fail-fast
   bash ci/third-party-notices.sh --check
   ```
 
   `--workspace` is load-bearing: a bare `cargo test` covers only the root
-  package and silently skips every product and crate. **The build step is
-  load-bearing too**: nextest builds test binaries and never workspace bins,
-  and `tools/astrolabe/tests/launch.rs` execs four of them (`lait`,
-  `astrolabe-stub`, `chain-probe`, `astrolabe-display-reference`) from
-  `target/debug` as it finds them. A stale bin fails those tests in ways that
-  name everything except its own age — a pre-#136 receiver read as a broken
-  media pipeline for most of a day. Tiering lives in `.config/nextest.toml`;
-  see [`docs/TESTING.md`](docs/TESTING.md).
+  package and silently skips every product and crate. **The build and World
+  staging steps are load-bearing too**: nextest builds test binaries, never the
+  workspace bins or the application-bundle layout. The real-process suites
+  execute those bins and expect the independently carried releases beside
+  `lait`. A stale bin or an unstaged World fails those tests in ways that name
+  everything except the missing prerequisite — a pre-#136 receiver read as a
+  broken media pipeline for most of a day. Tiering lives in
+  `.config/nextest.toml`; see [`docs/TESTING.md`](docs/TESTING.md).
 - End to end against the real binary: `bash ci/smoke-p0.sh`. It starts the head
   and drives all three HTTP planes — the closest thing to "run the product".
 - Two nodes on one machine: `bash ci/bench-two-node.sh`. Two scratch identities
