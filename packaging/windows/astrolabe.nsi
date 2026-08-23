@@ -143,13 +143,11 @@ Section "Astrolabe" SecMain
   File "${STAGE}\THIRD-PARTY-NOTICES.md"
   File "${STAGE}\LICENSE"
 
-  ; The reviewed bootstrap releases. Their ids and versions are deliberately
-  ; not enumerated here: each World owns its release cadence, and the client
-  ; seeds whatever immutable declarations this signed build carries. Unlike
-  ; the two fixed programs above, this is therefore one recursive resource
-  ; boundary.
-  SetOutPath "$INSTDIR\current\worlds"
-  File /r "${STAGE}\worlds\*.*"
+  ; The reviewed first-party catalog: declarations and artwork only. World
+  ; runners and application payloads arrive independently after the person
+  ; chooses Install and the signed World channel verifies.
+  SetOutPath "$INSTDIR\current\world-catalog"
+  File /r "${STAGE}\world-catalog\*.*"
 
   SetOutPath "$INSTDIR"
 

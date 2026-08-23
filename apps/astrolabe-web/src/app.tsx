@@ -263,8 +263,9 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
     const state = lifecycle(view, world);
     return state === "Launching" || state === "Running";
   });
-  const ready = view.library.filter((world) => !running.includes(world) && world.opensAt !== null);
-  const unavailable = view.library.filter((world) => !running.includes(world) && world.opensAt === null);
+  const ready = view.library.filter((world) => world.installed && !running.includes(world) && world.opensAt !== null);
+  const unavailable = view.library.filter((world) => world.installed && !running.includes(world) && world.opensAt === null);
+  const uninstalled = view.library.filter((world) => !world.installed);
   return <section className="library">
     <aside className="library-rail" style={{ width: railWidth }}>
       <div className="library-heading"><span>LIBRARY</span><span>{view.library.length}</span></div>
@@ -272,6 +273,7 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
         {running.length > 0 && <WorldSection label="RUNNING" rows={running} view={view} showing={showing} onSelect={onSelect} />}
         {ready.length > 0 && <WorldSection rows={ready} view={view} showing={showing} onSelect={onSelect} />}
         {unavailable.length > 0 && <WorldSection label="UNAVAILABLE" rows={unavailable} view={view} showing={showing} onSelect={onSelect} />}
+        {uninstalled.length > 0 && <WorldSection label="NOT INSTALLED" rows={uninstalled} view={view} showing={showing} onSelect={onSelect} />}
       </div>
     </aside>
     {showing !== null && <WorldDetail view={view} world={showing} dispatch={dispatch} dark={dark} />}
@@ -283,14 +285,15 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
  * draws the accent fallback and the art arrives a frame later — the same
  * fallback a World that ships no art keeps for good.
  */
-function useWorldArtwork(mount: string): WorldArtwork {
+function useWorldArtwork(world: LibraryWorld): WorldArtwork {
   const [art, setArt] = useState<WorldArtwork>({ mark: null, hero: null });
+  const generation = `${world.installed}:${world.version ?? ""}:${world.update?.serving ?? ""}`;
   useEffect(() => {
     let alive = true;
     setArt({ mark: null, hero: null });
-    void worldArtwork(mount).then((answer) => { if (alive) setArt(answer); });
+    void worldArtwork(world.worldMount, generation).then((answer) => { if (alive) setArt(answer); });
     return () => { alive = false; };
-  }, [mount]);
+  }, [world.worldMount, generation]);
   return art;
 }
 
@@ -315,7 +318,7 @@ function WorldSection({ label, rows, view, showing, onSelect }: {
  * that ships no art is making a choice rather than missing a file.
  */
 function WorldMark({ world }: { world: LibraryWorld }) {
-  const art = useWorldArtwork(world.worldMount);
+  const art = useWorldArtwork(world);
   if (art.mark !== null) return <img className="world-mark" src={art.mark} alt="" />;
   return <span className="world-mark" style={{ background: accentColor(world) }}>{world.worldMount.slice(0, 1).toUpperCase()}</span>;
 }
@@ -334,6 +337,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
   // watches "UPDATE" flash and reads the update as done before it started.
   const updating = view.inFlight.includes(actionKey.updateWorld(world.worldMount))
     || updateInProgress(update);
+  const installing = view.inFlight.includes(actionKey.installWorld(world.worldMount));
   const state = lifecycle(view, world);
   // What became of the last update, when it did not simply land: a bundle
   // this build cannot run, or a refused operation. Said in place — a person
@@ -347,7 +351,11 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
   return <section className="world-detail">
     <WorldHero world={world} />
     <div className="world-action-band">
-      {stopping ? <PendingAction label="STOPPING" />
+      {!world.installed ? installing ? <PendingAction label="INSTALLING" />
+        : <span className="tip" title={`Download and verify ${world.displayName} from its signed channel`}>
+          <Button className="install-control" aria-label={`Install ${world.displayName}`}
+            onPress={() => void dispatch({ type: "installWorld", world: world.worldMount })}>↓ <span>INSTALL</span></Button></span>
+        : stopping ? <PendingAction label="STOPPING" />
         : running ? <RunningAction owned={stoppable !== undefined}
           onOpen={entryPath === null ? undefined : () => void dispatch({ type: "open", world: world.worldMount, entryPath })}
           onStop={() => { if (stoppable !== undefined) void dispatch({ type: "stopHead", id: stoppable.id }); }} />
@@ -355,7 +363,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
         : updating ? <PendingAction label="UPDATING" />
         : update?.behind ? <span className="tip" title={update.available === null
             ? "Fetch the newest bundle for this World"
-            : `Update to ${update.available} — this device is serving ${update.serving ?? "the built-in version"}`}>
+            : `Update to ${update.available} — this device is serving ${update.serving ?? "an earlier selected version"}`}>
           <Button className="update-control" aria-label={`Update ${world.displayName}`}
             onPress={() => void dispatch({ type: "updateWorld", world: world.worldMount })}>↻ <span>UPDATE</span></Button></span>
         : state === "Ready" || state === "Stopped" ? <span className="tip" title={state === "Stopped" ? "This World's head exited — start it again" : (opensWorldsInOwnWindows() ? "Start this World in its own window" : "Start this World and hand it to my browser")}>
@@ -376,11 +384,28 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
       </span>
     </div>
     <div className="world-detail-content">
+      {!world.installed && installing && <InstallProgress install={world.install} />}
       {updating && update?.progress != null && <p className="update-note">{update.progress}</p>}
       {!updating && updateNote !== null && <p className="update-note">{updateNote}</p>}
       <PeopleGlance people={world.people} />
     </div>
   </section>;
+}
+
+function InstallProgress({ install }: { install: LibraryWorld["install"] }) {
+  const phase = install?.phase ?? "resolving";
+  const received = install?.received ?? null;
+  const total = install?.total ?? null;
+  const hasBytes = phase === "downloading" && received !== null && total !== null;
+  const percent = hasBytes && total > 0 ? Math.min(100, Math.round(received * 100 / total)) : null;
+  const label = phase === "resolving" ? "Checking the signed World channel…"
+    : phase === "downloading" ? `Downloading${percent === null ? "…" : ` — ${percent}%`}`
+      : phase === "verifying" ? "Verifying the signed release…"
+        : "Installing the immutable release…";
+  return <div className="install-progress" role="status" aria-live="polite">
+    <span>{label}</span>
+    <progress max={total ?? 1} value={hasBytes ? received : undefined} />
+  </div>;
 }
 
 /**
@@ -390,7 +415,7 @@ function WorldDetail({ view, world, dispatch, dark }: { view: ClientView; world:
  * exactly what it drew before.
  */
 function WorldHero({ world }: { world: LibraryWorld }) {
-  const art = useWorldArtwork(world.worldMount);
+  const art = useWorldArtwork(world);
   const accent = accentColor(world);
   const wash = `color-mix(in srgb, ${accent} 38%, #11151d)`;
   const style: React.CSSProperties & { "--world-accent": string } = { height: heroHeight, "--world-accent": accent };
@@ -446,7 +471,7 @@ function RunningAction({ owned, onOpen, onStop }: { owned: boolean; onOpen?: () 
 
 function PendingAction({ label }: { label: string }) { return <div className="pending-control"><span className="spinner" />{label}</div>; }
 function LoadingLibrary() { return <section className="library loading-library"><aside className="library-rail" style={{ width: railWidth }}><div className="skeleton heading" /><div className="skeleton row" /><div className="skeleton row" /></aside><div className="skeleton hero" /></section>; }
-function EmptyLibrary() { return <section className="empty-library"><h1>Library</h1><p>This build installs no Worlds.</p><p>A World ships inside the client. This binary was built without any, so there is nothing to open.</p></section>; }
+function EmptyLibrary() { return <section className="empty-library"><h1>Library</h1><p>No Worlds are in this Library.</p><p>This client has no catalog entries to offer for installation.</p></section>; }
 
 /**
  * Persistent operational truth at the bottom of the window — a status bar,
@@ -532,7 +557,10 @@ export function servingWorld(view: ClientView, mount: string): Head[] {
 }
 /// Read from the head's own state: exited heads stay listed, so presence is
 /// not liveness.
-export function lifecycle(view: ClientView, world: LibraryWorld): "Launching" | "Running" | "Ready" | "Unavailable" | "Stopped" | "Unknown" {
+export function lifecycle(view: ClientView, world: LibraryWorld): "Installing" | "Not installed" | "Launching" | "Running" | "Ready" | "Unavailable" | "Stopped" | "Unknown" {
+  if (!world.installed) {
+    return view.inFlight.includes(actionKey.installWorld(world.worldMount)) ? "Installing" : "Not installed";
+  }
   if (isOpening(view, world)) return "Launching";
   if (world.opensAt === null) return "Unavailable";
   const heads = servingWorld(view, world.worldMount);

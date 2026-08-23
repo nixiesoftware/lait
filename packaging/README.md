@@ -60,3 +60,9 @@ versions must be bumped before changed bytes can occupy a new immutable World
 release coordinate. Stable World promotion is an explicit manual dispatch
 that fetches each tested manifest and moves only its signed pointer; it does
 not rebuild a runner.
+
+Astrolabe's signed host package carries only a reviewed first-party World
+catalog (declarations and artwork). A catalog row may be uninstalled. Choosing
+Install resolves that World's signed channel, downloads the platform artifact,
+verifies and atomically selects it, and only then makes Open available. World
+runners and application assets never ride an Astrolabe host release.

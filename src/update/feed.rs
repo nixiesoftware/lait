@@ -558,17 +558,44 @@ where
 /// published yet, and a refused connection is a channel that could not be
 /// asked — neither is an answer.
 pub fn http_fetch(url: &str, limit: u64) -> Result<Vec<u8>, Failure> {
+    http_fetch_with_progress(url, limit, |_, _| {})
+}
+
+/// Fetch a URL while reporting how many bytes have arrived.
+///
+/// The caller supplies the signed manifest's size as `limit`, so the progress
+/// denominator is an authenticated claim rather than an HTTP header supplied
+/// by the object host. The final size and digest are still checked by the
+/// installer after this returns; progress never becomes authority.
+pub fn http_fetch_with_progress(
+    url: &str,
+    limit: u64,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<Vec<u8>, Failure> {
     use std::io::Read;
     let response = ureq::get(url)
         .timeout(std::time::Duration::from_secs(300))
         .call()
         .map_err(|e| Failure::Unreachable(e.to_string()))?;
     let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|e| Failure::Unreachable(format!("read body: {e}")))?;
+    let mut reader = response.into_reader().take(limit.saturating_add(1));
+    // A bounded heap buffer keeps large artifacts off the stack and avoids
+    // flooding a native view with one progress frame per network packet.
+    let mut chunk = vec![0_u8; 256 * 1024];
+    progress(0, limit);
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|e| Failure::Unreachable(format!("read body: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        let received = chunk.get(..read).ok_or_else(|| {
+            Failure::Unreachable("reader returned more bytes than its buffer can hold".into())
+        })?;
+        bytes.extend_from_slice(received);
+        progress(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit);
+    }
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
         return Err(Failure::Invalid(format!(
             "body exceeds {limit} bytes, not a feed object"

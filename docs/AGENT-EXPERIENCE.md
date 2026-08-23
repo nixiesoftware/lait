@@ -55,8 +55,8 @@ Do not treat onboarding as invite→connect: that is the peer-JOIN flow for a
 new node, not for a sponsored agent attaching to a Space that already
 exists. `whoami` is this agent's membership. `doctor` is this *device's*
 onboarding gates — a pending membership there can be the machine, not the
-agent. The Library is the install list of Worlds; Spaces belong to the
-head and are not titled here.
+agent. The Library is the catalog of Worlds, with installation reported as a
+separate fact; Spaces belong to the head and are not titled here.
 
 ### The custody rule
 

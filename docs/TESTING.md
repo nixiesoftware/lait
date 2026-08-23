@@ -251,7 +251,7 @@ tests — and is unrelated to any of this.
 
 The nextest profiles in `.config/nextest.toml` **are** the tier definitions, so
 CI is reproducible locally after building the executable subjects and assembling
-the carried World releases a native application bundle supplies:
+the independently installed World fixtures used by integration tests:
 
 ```sh
 cargo build --workspace --locked --all-targets --all-features

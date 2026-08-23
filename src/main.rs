@@ -206,7 +206,7 @@ impl Mode {
                     store: None,
                 };
                 let identity = selection.identity_dir()?;
-                lait::world::installed::seed_carried(&identity)?;
+                lait::world::installed::retire_legacy_bundles(&identity)?;
                 let installation =
                     lait::world::installed::load(&lait::serve::head::worlds_root(&identity))?;
                 lait::daemon::run_lait_daemon(
@@ -231,7 +231,7 @@ impl Mode {
                         None => error,
                     })?;
                 let identity = selection.identity_dir()?;
-                lait::world::installed::seed_carried(&identity)?;
+                lait::world::installed::retire_legacy_bundles(&identity)?;
                 lait::mcp::run_mcp(&home, selection).await
             }
             Mode::Serve {

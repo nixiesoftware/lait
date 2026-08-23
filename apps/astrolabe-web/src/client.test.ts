@@ -25,6 +25,7 @@ describe("client transport", () => {
     expect(keyFor({ type: "open", world: "issues", entryPath: "/" })).toBe("open:issues");
     expect(keyFor({ type: "enterPresentation" })).toBe("present.enter");
     expect(keyFor({ type: "updateWorld", world: "issues" })).toBe("world.update:issues");
+    expect(keyFor({ type: "installWorld", world: "issues" })).toBe("world.install:issues");
     expect(keyFor({ type: "stopHead", id: "identity:default" })).toBe("head.stop:identity:default");
     expect(keyFor({ type: "bookMerge", from: "old", into: "new" })).toBe("book.merge:old:new");
     expect(keyFor({ type: "installMcp", client: "claude", scope: null, name: "lait", agent: null, noAgent: false, project: "/project", world: null, preview: true })).toBe("mcp.preview");

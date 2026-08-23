@@ -30,22 +30,22 @@ pub struct Declaration {
     pub manifest: WorldManifest,
 }
 
-/// Install trusted bootstrap releases carried beside the current executable.
+/// Retire releases seeded by the former native-bundle bootstrap.
 ///
-/// Native clients place a product-neutral `worlds/` tree next to `lait`. Every
-/// entry point must seed it before loading the selected registry: on a fresh
-/// install there is deliberately nothing under the identity yet, and waiting
-/// for a spawned daemon is too late for a head or MCP server that resolves its
-/// World before that spawn.
-pub fn seed_carried(identity: &Path) -> Result<usize> {
-    let executable = std::env::current_exe().context("resolve the current Lait executable")?;
-    let installation = executable
-        .parent()
-        .ok_or_else(|| anyhow!("the current Lait executable has no installation directory"))?;
-    crate::update::world::seed_bundled(
-        &installation.join("worlds"),
-        &crate::serve::head::worlds_root(identity),
-    )
+/// New native packages carry catalog metadata only. This one-way compatibility
+/// boundary recognizes the old directory-digest records and quarantines their
+/// complete roots; it never inspects or installs resources beside the binary.
+pub fn retire_legacy_bundles(identity: &Path) -> Result<usize> {
+    let worlds = crate::serve::head::worlds_root(identity);
+    let retired = identity.join("retired-bundled-worlds");
+    let retired_count = crate::update::world::retire_bundled(&worlds, &retired)?;
+    if retired_count > 0 {
+        tracing::info!(
+            retired = retired_count,
+            "retired legacy client-bundled World releases"
+        );
+    }
+    Ok(retired_count)
 }
 
 /// Passively enumerate selected signed declarations without launching code.

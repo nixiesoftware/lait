@@ -47,6 +47,9 @@ struct Inner {
     /// The identity home this client is bound to. Every plane resolves through
     /// it, so a client can never straddle two identities by accident.
     identity: Option<PathBuf>,
+    /// Reviewed first-party catalog metadata carried by the native client.
+    /// This is not an installation root and contains no executable payload.
+    world_catalog: Option<PathBuf>,
     /// Whether this launch hosts an identity daemon at all. A standalone
     /// launch (`skip_sidecar`) deliberately has none, and a roll-forward must
     /// not stand one up that the launch chose not to have.
@@ -61,15 +64,9 @@ impl Client {
     /// holding its stream would have a window in which events vanish.
     pub async fn start(config: Config) -> ClientResult<(Self, Signals)> {
         let selection = selection_for(config.identity.as_deref());
-        if let Some(bundled) = config.bundled_worlds.as_deref() {
-            let identity = selection.identity_dir().map_err(|error| {
-                ClientError::internal(format!("resolve identity for bundled Worlds: {error:#}"))
-            })?;
-            lait::update::world::seed_bundled(bundled, &lait::serve::head::worlds_root(&identity))
-                .map_err(|error| {
-                    ClientError::internal(format!("install bundled Worlds: {error:#}"))
-                })?;
-        }
+        let identity_dir = selection.identity_dir().map_err(|error| {
+            ClientError::internal(format!("resolve identity for the World library: {error:#}"))
+        })?;
         // The supervisor first: starting it spawns nothing, and it is what
         // stages the image everything else runs from. The daemon below is
         // then spawned from the *staged* copy, so no long-lived process holds
@@ -82,6 +79,16 @@ impl Client {
         })
         .await
         .map_err(ClientError::from)?;
+        // v0.9.1/v0.9.2 silently installed locally rebuilt World payloads.
+        // Move only releases carrying that exact legacy digest marker aside;
+        // independently downloaded releases are archive-digested and remain.
+        //
+        // On Windows an old daemon can still have a bundled runner open, which
+        // prevents the containing directory from being renamed. Stop that
+        // daemon, wait for its process tree to release the files, and retry.
+        // A successful migration also requires a restart: a daemon that loaded
+        // the old registry before the move must not keep advertising it.
+        retire_bundled_worlds(&selection, &identity_dir, !config.skip_sidecar).await?;
         // The sidecar is what makes this a hosted identity. Skipping it is a
         // deliberate standalone launch: the daemon-backed planes will report
         // unreachable, but the window comes up at once instead of waiting on a
@@ -110,6 +117,7 @@ impl Client {
                 inner: Arc::new(Inner {
                     supervisor,
                     identity: config.identity,
+                    world_catalog: config.world_catalog,
                     hosted: !config.skip_sidecar,
                 }),
             },
@@ -126,6 +134,7 @@ impl Client {
             inner: Arc::new(Inner {
                 supervisor,
                 identity,
+                world_catalog: None,
                 // A wrapped supervisor has no daemon of this client's making,
                 // and a roll-forward must not invent one.
                 hosted: false,
@@ -261,6 +270,56 @@ impl Client {
     }
 }
 
+async fn retire_bundled_worlds(
+    selection: &lait::config::Selection,
+    identity: &std::path::Path,
+    hosted: bool,
+) -> ClientResult<()> {
+    let worlds = lait::serve::head::worlds_root(identity);
+    let retired = identity.join("retired-bundled-worlds");
+    let first = lait::update::world::retire_bundled(&worlds, &retired);
+    let needs_restart = match first {
+        Ok(0) => return Ok(()),
+        Ok(_) => true,
+        Err(error) if hosted => {
+            tracing::warn!(error = %error, "legacy World retirement is waiting for the daemon to release its runners");
+            true
+        }
+        Err(error) => {
+            return Err(ClientError::internal(format!(
+                "retire bundled Worlds: {error:#}"
+            )));
+        }
+    };
+
+    if needs_restart {
+        if let Ok(daemon) = lait::daemon::Client::for_selection(selection) {
+            let _ = daemon
+                .request(
+                    lait::control::ControlRoute::Daemon,
+                    &lait::control::Request::HostRestart,
+                    None,
+                )
+                .await;
+        }
+    }
+
+    // `HostRestart` acknowledges before exiting. Retry the filesystem move,
+    // rather than racing the process teardown or sleeping for a guessed delay.
+    let mut last = None;
+    for _ in 0..100 {
+        match lait::update::world::retire_bundled(&worlds, &retired) {
+            Ok(_) => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let error = last.expect("a failed retirement records its error");
+    Err(ClientError::internal(format!(
+        "retire bundled Worlds after stopping the old daemon: {error:#}"
+    )))
+}
+
 /// The staged image this client spawns from, as a fact a surface can draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageStanding {
@@ -289,8 +348,11 @@ pub struct Config {
     pub staging: lait_workbench::Staging,
     /// `None` selects the ordinary per-user identity.
     pub identity: Option<PathBuf>,
-    /// Trusted first-party immutable releases carried by this client bundle.
-    pub bundled_worlds: Option<PathBuf>,
+    /// Reviewed first-party catalog metadata carried by this client bundle.
+    /// The directory contains declarations and artwork, never runners or World
+    /// application payloads; choosing Install fetches those from the signed
+    /// World channel.
+    pub world_catalog: Option<PathBuf>,
     /// Do not spawn or wait for the identity daemon (the `lait` sidecar).
     ///
     /// The client comes up standalone: the Library, the correspondence desk and
@@ -333,7 +395,7 @@ impl Config {
             observation_interval: lait_workbench::OBSERVATION_INTERVAL,
             staging,
             identity: None,
-            bundled_worlds: None,
+            world_catalog: None,
             skip_sidecar: false,
             correspondence_demo: false,
             post_url: None,

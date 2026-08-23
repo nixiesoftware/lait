@@ -21,7 +21,7 @@
 // without privileges.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51,8 +51,6 @@ const target = join(targetDir, targetName);
 const buildArgs = [
   "build",
   "-p", "lait",
-  "-p", "lait-issues-runner",
-  "-p", "lait-signage-runner",
   "--locked",
 ];
 if (bundle) buildArgs.push("--release");
@@ -81,11 +79,14 @@ try {
 }
 console.log(`staged ${targetName} at ${target}`);
 
-// Trusted first-party Worlds enter through the same immutable-release loader
-// as every later update. The client bundle is only their bootstrap vehicle:
-// after first launch each follows its own signed channel and cadence.
-const bundledWorlds = resolve(here, "..", "src-tauri", "bundled-worlds");
-rmSync(bundledWorlds, { recursive: true, force: true });
+// The native package carries the reviewed first-party catalog, not World code.
+// Catalog membership is why a row exists; choosing Install resolves the
+// World's independently signed channel and downloads its native payload.
+const worldCatalog = resolve(here, "..", "src-tauri", "world-catalog");
+// Collect generated output from the retired bootstrap layout so an old local
+// build cannot be mistaken for a resource owned by this one.
+rmSync(resolve(here, "..", "src-tauri", "bundled-worlds"), { recursive: true, force: true });
+rmSync(worldCatalog, { recursive: true, force: true });
 
 function packageVersion(relativeManifest) {
   const manifest = readFileSync(join(repo, relativeManifest), "utf8");
@@ -94,38 +95,38 @@ function packageVersion(relativeManifest) {
   return match[1];
 }
 
-function stageWorld({ id, version, template, runner, web, art }) {
-  const root = join(bundledWorlds, id, version);
-  mkdirSync(join(root, "bin"), { recursive: true });
-  copyFileSync(join(repo, "target", profile, `${runner}${process.platform === "win32" ? ".exe" : ""}`),
-    join(root, "bin", `${runner}${process.platform === "win32" ? ".exe" : ""}`));
-  if (web !== undefined) cpSync(join(repo, web), root, { recursive: true });
+function stageCatalogEntry({ id, version, template, art }) {
+  const root = join(worldCatalog, id);
+  mkdirSync(root, { recursive: true });
   for (const [from, to] of art ?? []) {
     const destination = join(root, to);
     mkdirSync(dirname(destination), { recursive: true });
     copyFileSync(join(repo, from), destination);
   }
-  const declaration = readFileSync(join(repo, template), "utf8")
+  const releaseDeclaration = readFileSync(join(repo, template), "utf8")
     .replaceAll("${VERSION}", version)
     .replaceAll("${EXE}", process.platform === "win32" ? ".exe" : "");
-  writeFileSync(join(root, "world.json"), declaration);
+  const declaration = JSON.parse(releaseDeclaration);
+  // Runner paths, compatibility claims and payload inventory belong to the
+  // signed World release. The host catalog says only what can be installed
+  // and how the client should present it before installation.
+  delete declaration.runners;
+  delete declaration.requires;
+  writeFileSync(join(root, "world.json"), `${JSON.stringify(declaration, null, 2)}\n`);
 }
 
-stageWorld({
+stageCatalogEntry({
   id: "com.lait.issues",
   version: packageVersion("products/issues/Cargo.toml"),
   template: "products/issues-runner/world.json.template",
-  runner: "lait-world-issues",
-  web: "products/issues-app/assets/web",
   art: [
     ["products/issues-app/assets/mark.png", "art/mark.png"],
     ["products/issues-app/assets/hero.png", "art/hero.png"],
   ],
 });
-stageWorld({
+stageCatalogEntry({
   id: "com.lait.signage",
   version: packageVersion("products/signage/Cargo.toml"),
   template: "products/signage-runner/world.json.template",
-  runner: "lait-world-signage",
 });
-console.log(`staged first-party World releases at ${bundledWorlds}`);
+console.log(`staged first-party World catalog at ${worldCatalog}`);

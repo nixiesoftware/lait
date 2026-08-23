@@ -1,8 +1,10 @@
 //! The Library, and the handoff that opens something in it.
 //!
-//! One row per selected immutable World release in the identity's installation.
-//! The manifest is read passively; listing launches no runner. `Open` hands off
-//! to that World's own head; the client never draws a World.
+//! One row per World in the reviewed first-party catalog or the identity's
+//! selected immutable releases. Catalog membership and installation are
+//! separate facts: listing launches no runner and fetches no payload. `Open`
+//! exists only after installation and hands off to the World's own head; the
+//! client never draws a World.
 //!
 //! What is deliberately *not* listed here is Spaces. A World and the Spaces it
 //! is served in are different axes, and the destination owns the second one:
@@ -46,6 +48,41 @@ pub struct WorldStanding {
     pub phase: Option<String>,
     pub progress: Option<String>,
     pub message: Option<String>,
+}
+
+/// Progress of an explicit first installation, keyed by the catalog mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldInstallProgress {
+    pub phase: String,
+    pub received: Option<u64>,
+    pub total: Option<u64>,
+}
+
+impl From<lait::update::world::InstallProgress> for WorldInstallProgress {
+    fn from(progress: lait::update::world::InstallProgress) -> Self {
+        match progress {
+            lait::update::world::InstallProgress::Resolving => Self {
+                phase: "resolving".into(),
+                received: None,
+                total: None,
+            },
+            lait::update::world::InstallProgress::Downloading { received, total } => Self {
+                phase: "downloading".into(),
+                received: Some(received),
+                total: Some(total),
+            },
+            lait::update::world::InstallProgress::Verifying => Self {
+                phase: "verifying".into(),
+                received: None,
+                total: None,
+            },
+            lait::update::world::InstallProgress::Installing => Self {
+                phase: "installing".into(),
+                received: None,
+                total: None,
+            },
+        }
+    }
 }
 
 /// What the daemon has learned about each installed World.
@@ -100,13 +137,13 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
         .collect()
 }
 
-/// One row of the Library: an installed World.
+/// One row of the Library: a catalogued or installed World.
 ///
-/// Every field is read from the selected release's signed `world.json`. There
-/// is no daemon to ask and no runner to launch, so listing stays passive and
-/// current about what is installed. Which Spaces serve a World, and whether
-/// any of them is up, are the destination's facts and deliberately not this
-/// row's.
+/// Before installation the fields come from the reviewed host catalog; after
+/// installation the selected release's signed `world.json` replaces them.
+/// There is no daemon to ask and no runner to launch, so listing stays passive.
+/// Which Spaces serve a World, and whether any of them is up, are the
+/// destination's facts and deliberately not this row's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryEntry {
     /// The mount this release serves the World at — the row's stable key.
@@ -114,6 +151,9 @@ pub struct LibraryEntry {
     /// The World's id — the key Live-plane scopes name, so presence in a
     /// World can be joined to its row.
     pub world: String,
+    /// Whether this identity has a selected immutable release for the World.
+    /// A catalog row remains present when false and offers Install, not Open.
+    pub installed: bool,
     /// What the World calls itself. Always present: an installed package
     /// declares its name, so there is no unnamed row to draw.
     pub display_name: String,
@@ -151,13 +191,13 @@ pub struct Artwork {
     pub hero: Option<Vec<u8>>,
 }
 
-/// The artwork one installed World declares, by mount.
+/// The artwork one installed or catalogued World declares, by mount.
 ///
 /// An unknown mount answers with no artwork rather than an error: a surface
-/// asking about a World this build does not install is asking a question whose
+/// asking about a World outside this Library is asking a question whose
 /// honest answer is "nothing to draw".
-pub fn artwork(mount: &str) -> Artwork {
-    declarations(None)
+pub fn artwork(mount: &str, catalog: Option<&Path>) -> Artwork {
+    if let Some(art) = declarations(None)
         .into_iter()
         .find(|declaration| declaration.manifest.mount() == mount)
         .map(|declaration| Artwork {
@@ -171,6 +211,22 @@ pub fn artwork(mount: &str) -> Artwork {
                 .hero
                 .as_ref()
                 .and_then(|path| std::fs::read(declaration.root.join(path)).ok()),
+        })
+    {
+        return art;
+    }
+    catalog_for(catalog)
+        .into_iter()
+        .find(|(_, manifest)| manifest.mount() == mount)
+        .map(|(root, manifest)| Artwork {
+            mark: manifest
+                .mark
+                .as_ref()
+                .and_then(|path| std::fs::read(root.join(path)).ok()),
+            hero: manifest
+                .hero
+                .as_ref()
+                .and_then(|path| std::fs::read(root.join(path)).ok()),
         })
         .unwrap_or_default()
 }
@@ -186,7 +242,7 @@ pub struct LaunchTicket {
     pub expires_at_ms: u64,
 }
 
-/// The install list itself, free of [`Client`] so a test can read it without
+/// The installed half of the Library, free of [`Client`] so a test can read it without
 /// constructing one. What `get_library` returns IS this — delegation, not a
 /// second copy that could drift.
 ///
@@ -211,11 +267,49 @@ fn declarations(identity: Option<&Path>) -> Vec<lait::world::installed::Declarat
 fn installed_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
     declarations(identity)
         .into_iter()
-        .map(|declaration| library_entry(declaration.manifest))
+        .map(|declaration| library_entry(declaration.manifest, true))
         .collect()
 }
 
-fn library_entry(manifest: world_interface::manifest::WorldManifest) -> LibraryEntry {
+fn catalog_for(
+    catalog: Option<&Path>,
+) -> Vec<(std::path::PathBuf, world_interface::manifest::WorldManifest)> {
+    let Some(catalog) = catalog else {
+        return Vec::new();
+    };
+    let mut entries = match std::fs::read_dir(catalog) {
+        Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    entries
+        .into_iter()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let root = entry.path();
+            let manifest = std::fs::read(root.join("world.json"))
+                .ok()
+                .and_then(|bytes| world_interface::manifest::WorldManifest::parse(&bytes).ok())?;
+            (entry.file_name().to_string_lossy() == manifest.id).then_some((root, manifest))
+        })
+        .collect()
+}
+
+pub(crate) fn available_for(identity: Option<&Path>, catalog: Option<&Path>) -> Vec<LibraryEntry> {
+    let mut entries: BTreeMap<String, LibraryEntry> = catalog_for(catalog)
+        .into_iter()
+        .map(|(_, manifest)| (manifest.id.clone(), library_entry(manifest, false)))
+        .collect();
+    for installed in installed_for(identity) {
+        entries.insert(installed.world.clone(), installed);
+    }
+    entries.into_values().collect()
+}
+
+fn library_entry(
+    manifest: world_interface::manifest::WorldManifest,
+    installed: bool,
+) -> LibraryEntry {
     let entry_path = manifest.launch.iter().find_map(|entry| {
         (entry.present == world_interface::manifest::Present::Primary
             && entry
@@ -231,6 +325,7 @@ fn library_entry(manifest: world_interface::manifest::WorldManifest) -> LibraryE
     LibraryEntry {
         world_mount: manifest.mount().to_owned(),
         world: manifest.id.clone(),
+        installed,
         display_name: manifest.display_name().to_owned(),
         entry_path,
         tagline: manifest.tagline,
@@ -246,7 +341,7 @@ fn world_id_for_mount_in(entries: &[LibraryEntry], mount: &str) -> Option<String
         .map(|entry| entry.world.clone())
 }
 
-/// The World id behind one mount, when this build installs it.
+/// The installed World id behind one mount.
 ///
 /// The mount and the id are deliberately different strings for different jobs:
 /// the mount is the stable key a surface and a URL carry, the id is the
@@ -269,7 +364,10 @@ impl Client {
     /// Every selected World release this identity can open, read passively
     /// from its signed declaration.
     pub fn get_library(&self) -> Vec<LibraryEntry> {
-        installed_for(self.identity_dir().as_deref())
+        available_for(
+            self.identity_dir().as_deref(),
+            self.inner.world_catalog.as_deref(),
+        )
     }
 
     /// The URL `Open` sends the browser to, given a ticket the head minted.
@@ -335,12 +433,63 @@ mod tests {
     /// happened to be installed in the developer's ambient identity.
     #[test]
     fn the_library_maps_the_selected_declaration() {
-        let entry = library_entry(selected_manifest());
+        let entry = library_entry(selected_manifest(), true);
         assert_eq!(entry.display_name, "Issues");
         assert_eq!(entry.world_mount, "issues");
         assert_eq!(entry.world, "com.lait.issues");
         assert_eq!(entry.entry_path.as_deref(), Some("/"));
         assert_eq!(entry.version, Some(4));
+    }
+
+    /// Catalog membership is not installation. The row is offered before an
+    /// identity has payload bytes, and the selected immutable declaration
+    /// becomes authoritative once those bytes are installed.
+    #[test]
+    fn a_catalog_row_is_uninstalled_until_a_selected_release_replaces_it() {
+        let catalog = tempfile::tempdir().expect("a catalog");
+        let catalog_world = catalog.path().join("com.lait.issues");
+        std::fs::create_dir_all(&catalog_world).expect("a catalog World");
+        std::fs::write(
+            catalog_world.join("world.json"),
+            serde_json::to_vec(&selected_manifest()).expect("encode catalog declaration"),
+        )
+        .expect("write catalog declaration");
+        let identity = tempfile::tempdir().expect("an identity");
+
+        let offered = available_for(Some(identity.path()), Some(catalog.path()));
+        assert_eq!(offered.len(), 1);
+        assert!(!offered[0].installed, "catalog membership looked installed");
+
+        let worlds = lait::serve::head::worlds_root(identity.path());
+        let release = worlds
+            .join("com.lait.issues")
+            .join("releases")
+            .join("1.2.3");
+        std::fs::create_dir_all(&release).expect("an installed release");
+        std::fs::write(
+            release.join("world.json"),
+            serde_json::to_vec(&selected_manifest()).expect("encode installed declaration"),
+        )
+        .expect("write installed declaration");
+        let selected = lait::update::world::StagedBundle {
+            world: "com.lait.issues".into(),
+            version: "1.2.3".into(),
+            digest: "ab".repeat(32),
+            files: 1,
+        };
+        std::fs::write(
+            worlds.join("com.lait.issues/current.json"),
+            serde_json::to_vec(&selected).expect("encode selected record"),
+        )
+        .expect("write selected record");
+
+        let installed = available_for(Some(identity.path()), Some(catalog.path()));
+        assert_eq!(
+            installed.len(),
+            1,
+            "catalog and installation became two rows"
+        );
+        assert!(installed[0].installed, "the selected release did not win");
     }
 
     /// Update consent on the daemon is scoped by World id, but a surface holds
@@ -349,7 +498,7 @@ mod tests {
     /// mount answers with nothing rather than travelling onward as an id.
     #[test]
     fn a_mount_resolves_to_the_world_id_updates_are_scoped_by() {
-        let entries = vec![library_entry(selected_manifest())];
+        let entries = vec![library_entry(selected_manifest(), true)];
         assert_eq!(
             world_id_for_mount_in(&entries, "issues").as_deref(),
             Some("com.lait.issues")
@@ -365,6 +514,7 @@ mod tests {
         let entry = LibraryEntry {
             world_mount: "issues".into(),
             world: "com.lait.issues".into(),
+            installed: true,
             display_name: "Issues".into(),
             entry_path: None,
             tagline: None,

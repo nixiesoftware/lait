@@ -222,7 +222,7 @@ pub async fn run_until(
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
     let worlds = head::worlds_root(&identity);
-    crate::world::installed::seed_carried(&identity)?;
+    crate::world::installed::retire_legacy_bundles(&identity)?;
     let registry = Arc::new(crate::world::installed::load(&worlds)?.clients);
     run_until_with_registry(
         port,
