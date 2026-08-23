@@ -437,21 +437,26 @@ fn the_dmg_refuses_a_bundle_missing_either_half_of_the_pair() {
 }
 
 /// Every executable is signed with the hardened runtime, nested code before
-/// the bundle that seals it, and never with `--deep`. Notarization requires
-/// the runtime flag on every executable; `--deep` is the deprecated way to
-/// half-do this sight unseen — an enumerated payload is the point, same as
-/// the NSIS file list.
+/// the bundle that seals it, and never *signed* with `--deep`. Notarization
+/// requires the runtime flag on every executable; deep signing is the
+/// deprecated way to half-do this sight unseen — an enumerated payload is the
+/// point, same as the NSIS file list. Deep verification remains desirable.
 #[test]
-fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
+fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep_signs() {
     let script = dmg_directives();
     assert!(
         script.contains("--options runtime"),
         "signing without the hardened runtime notarizes nothing"
     );
-    assert!(
-        !script.contains("--deep"),
-        "--deep signs every nesting level sight unseen; enumerate the payload instead"
-    );
+    for command in script
+        .lines()
+        .filter(|line| line.trim_start().starts_with("codesign --force"))
+    {
+        assert!(
+            !command.contains("--deep"),
+            "--deep signs every nesting level sight unseen; enumerate the payload instead"
+        );
+    }
     for signed in [r#"sign "$STAGED/Contents/MacOS/lait""#, r#"sign "$STAGED""#] {
         assert!(script.contains(signed), "not signed explicitly: {signed}");
     }
@@ -517,6 +522,36 @@ fn the_dmg_refuses_a_non_distribution_signing_identity() {
     assert!(
         dmg_directives().contains(r#""Developer ID Application"*)"#),
         "any codesigning identity is accepted; only Developer ID Application can be notarized"
+    );
+}
+
+/// Independently versioned Worlds are resources from Tauri's point of view,
+/// but their runners are executable code from Gatekeeper's point of view.
+/// They must be signed as leaves before the outer app seals the resource tree,
+/// and the final verification must recursively assess the same nesting Apple
+/// will inspect during notarization.
+#[test]
+fn the_dmg_signs_and_recursively_verifies_bundled_world_runners() {
+    let script = dmg_directives();
+    let runners = script
+        .find(r#"find "$WORLD_ROOT" -type f -path '*/bin/*' -print0"#)
+        .expect("the packager does not enumerate bundled World runners");
+    let sidecar = script
+        .find(r#"sign "$STAGED/Contents/MacOS/lait""#)
+        .expect("the packager does not sign the lait sidecar");
+    let bundle = script
+        .find(r#"sign "$STAGED""#)
+        .expect("the packager does not sign the outer app");
+    assert!(
+        script.contains(r#"file -b "$runner""#)
+            && script.contains(r#"sign "$runner""#)
+            && runners < sidecar
+            && sidecar < bundle,
+        "nested World runners, the sidecar, and the outer app are not signed inside-out"
+    );
+    assert!(
+        script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
+        "the preflight does not recursively verify the code graph Apple notarizes"
     );
 }
 

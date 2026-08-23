@@ -113,11 +113,26 @@ cp "$REPO/LICENSE" "$STAGED/Contents/Resources/LICENSE"
 #
 # `--options runtime` (the hardened runtime) is on every executable because
 # notarization requires it on every executable, not just the app. The Tauri
-# bundle has one nested executable, `lait`; signing the bundle signs its main
-# `astrolabe` executable and seals the already-signed sidecar.
+# bundle carries `lait` beside its main executable and independently versioned
+# World runners under Resources. Sign those leaves explicitly before signing
+# the app; the outer signature then seals the complete reviewed code graph.
 sign() {
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$@"
 }
+
+WORLD_ROOT="$STAGED/Contents/Resources/worlds"
+if [ -d "$WORLD_ROOT" ]; then
+  while IFS= read -r -d '' runner; do
+    # A World's bin/ directory is code-only. Refuse an unexpected payload
+    # rather than signing arbitrary data or silently shipping a runner that
+    # Gatekeeper cannot assess as native code.
+    if ! file -b "$runner" | grep -q 'Mach-O'; then
+      echo "make-dmg: World runner is not Mach-O code: $runner" >&2
+      exit 1
+    fi
+    sign "$runner"
+  done < <(find "$WORLD_ROOT" -type f -path '*/bin/*' -print0)
+fi
 
 sign "$STAGED/Contents/MacOS/lait"
 # The app itself deliberately claims no exceptional entitlements. Tauri does
@@ -128,7 +143,7 @@ sign "$STAGED"
 # Prove the seal before shipping it. `--strict` is the assessment Gatekeeper
 # actually runs; a signature that verifies loosely and fails strictly is a
 # failure that would otherwise first appear on someone else's machine.
-codesign --verify --strict --verbose=1 "$STAGED"
+codesign --verify --deep --strict --verbose=1 "$STAGED"
 
 # The update tree must carry these signed bytes too. The caller supplies a
 # disposable destination because this script's own work directory is removed
