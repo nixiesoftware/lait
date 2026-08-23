@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "id": "com.lait.signage",
+  "version": "${VERSION}",
+  "mount": "signage",
+  "name": "Signage",
+  "tagline": "Author durable programs for managed displays",
+  "implementation_version": 4,
+  "accent": 10182117,
+  "requires": [
+    { "name": "lait.control", "range": ">=15, <16" },
+    { "name": "lait.world-runner.protocol", "range": ">=1, <2" },
+    { "name": "lait.world-sdk.protocol", "range": ">=3, <4" }
+  ],
+  "runners": [
+    { "preferred": true, "program": "bin/lait-world-signage${EXE}" }
+  ],
+  "launch": []
+}

@@ -15,7 +15,7 @@ use issues::dto::CatalogScope;
 use issues::ids::SpaceId;
 use replica::body::BodyKey;
 use runtime::world::{DirtyPlane, DirtyScope, Invalidation, ScopeRef};
-use runtime::{find as find_api, world::Query, Session};
+use runtime::{find as find_api, world::call::SessionAccess, world::Query};
 
 /// Issues' one container kind. World-declared vocabulary: the host carries this
 /// string and never interprets it.
@@ -30,7 +30,7 @@ pub struct StatusProjection {
 }
 
 /// Read issue/project counts and the product-owned Space metadata.
-pub fn status(session: &Session) -> Option<StatusProjection> {
+pub fn status(session: &dyn SessionAccess) -> Option<StatusProjection> {
     let space = status_find(session, "space", None, true)?;
     let publication = Some(space.coordinates().publication());
     let row = space.rows().first()?;
@@ -51,7 +51,7 @@ pub fn status(session: &Session) -> Option<StatusProjection> {
 }
 
 fn status_find(
-    session: &Session,
+    session: &dyn SessionAccess,
     kind: &str,
     publication: Option<runtime::publication::PublicationId>,
     pack_space: bool,
@@ -123,7 +123,7 @@ fn find_text(row: &find_api::ResultRow, field: &str) -> Option<String> {
 }
 
 /// Query one Issues projection as JSON through a pinned Session.
-pub fn query_json(session: &Session, query: IssueQuery) -> Option<serde_json::Value> {
+pub fn query_json(session: &dyn SessionAccess, query: IssueQuery) -> Option<serde_json::Value> {
     let bytes = session
         .query(Query {
             schema: contract::issue_schema(),
@@ -143,7 +143,7 @@ pub struct RingState {
     pub planes: BTreeMap<CatalogScope, String>,
 }
 
-pub fn ring_state(session: &Session) -> Option<RingState> {
+pub fn ring_state(session: &dyn SessionAccess) -> Option<RingState> {
     let _ = session;
     Some(RingState {
         planes: BTreeMap::new(),
@@ -156,7 +156,7 @@ pub fn ring_state(session: &Session) -> Option<RingState> {
 /// are product-defined. A missing projection conservatively returns no named
 /// Bodies; the generic Observation reset/authority flags still pass through.
 pub fn observation(
-    session: &Session,
+    session: &dyn SessionAccess,
     space: &SpaceId,
     bodies: &[BodyKey],
     baseline: &mut Option<BTreeMap<CatalogScope, String>>,
@@ -192,7 +192,10 @@ fn observation_bound(body_count: usize) -> find_api::Bound {
     }
 }
 
-fn seek_body_facts(session: &Session, bodies: &[BodyKey]) -> Option<Vec<find_api::ResultRow>> {
+fn seek_body_facts(
+    session: &dyn SessionAccess,
+    bodies: &[BodyKey],
+) -> Option<Vec<find_api::ResultRow>> {
     if bodies.len() > 4_096 {
         return None;
     }

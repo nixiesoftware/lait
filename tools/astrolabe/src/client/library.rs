@@ -1,8 +1,8 @@
 //! The Library, and the handoff that opens something in it.
 //!
-//! One row per World this build ships a client package for — the install list,
-//! read from the binary's own composition and from nothing else. `Open` hands
-//! off to that World's own head; the client never draws a World.
+//! One row per selected immutable World release in the identity's installation.
+//! The manifest is read passively; listing launches no runner. `Open` hands off
+//! to that World's own head; the client never draws a World.
 //!
 //! What is deliberately *not* listed here is Spaces. A World and the Spaces it
 //! is served in are different axes, and the destination owns the second one:
@@ -30,8 +30,7 @@ use super::{ClientError, ClientResult};
 /// of this existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldStanding {
-    /// The bundle version serving now. `None` is the embedded floor this build
-    /// ships, which is an answer rather than a gap.
+    /// The selected bundle version. `None` means no valid release is selected.
     pub serving: Option<String>,
     /// The version the World's channel named when it was last asked.
     pub available: Option<String>,
@@ -49,7 +48,7 @@ pub struct WorldStanding {
     pub message: Option<String>,
 }
 
-/// What the daemon has learned about each World this build ships.
+/// What the daemon has learned about each installed World.
 ///
 /// Keyed by World id. Empty when there is no identity bound yet, which is the
 /// same answer as "nothing has been checked" and draws the same way.
@@ -64,10 +63,11 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
         return BTreeMap::new();
     };
     let worlds = lait::serve::head::worlds_root(identity);
-    lait::composition::bundled_client_packages()
-        .packages()
-        .filter_map(|package| {
-            let world = package.world().as_str().to_string();
+    lait::world::installed::declarations(&worlds)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|declaration| {
+            let world = declaration.manifest.id;
             let standing = lait::update::world::standing(&worlds, &world)?;
             let upgrade = lait::update::consent::load(&worlds, &world).ok().flatten();
             let progress = upgrade.as_ref().map(|job| {
@@ -102,14 +102,14 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
 
 /// One row of the Library: an installed World.
 ///
-/// Every field is declared by the bundled package and resolved at compile time
-/// — there is no daemon to ask, no registry to read and no probe to run, which
-/// is what makes listing free and its answer always current about what is
-/// installed. Which Spaces serve a World, and whether any of them is up, are
-/// the destination's facts and deliberately not this row's.
+/// Every field is read from the selected release's signed `world.json`. There
+/// is no daemon to ask and no runner to launch, so listing stays passive and
+/// current about what is installed. Which Spaces serve a World, and whether
+/// any of them is up, are the destination's facts and deliberately not this
+/// row's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryEntry {
-    /// The mount this build serves the World at — the row's stable key.
+    /// The mount this release serves the World at — the row's stable key.
     pub world_mount: String,
     /// The World's id — the key Live-plane scopes name, so presence in a
     /// World can be joined to its row.
@@ -125,18 +125,17 @@ pub struct LibraryEntry {
     /// The colour it is drawn from, packed `0xRRGGBB`. A seed a client
     /// derives a plate or an accent from, locally.
     pub accent: Option<u32>,
-    /// The reviewed implementation version bundled for this World.
+    /// The reviewed implementation version declared by this World release.
     pub version: Option<u32>,
 }
 
-/// A World's own artwork, as the bundled package compiled it in.
+/// A World's own artwork, read from its selected immutable release.
 ///
 /// Deliberately *not* a field on [`LibraryEntry`]. The Library entry is part of
 /// the view, and the view is pushed whole to every attached surface on every
 /// pump — a mark and a hero riding in it would be re-marshalled on every
-/// presence sample to say a thing that cannot change while the process runs.
-/// This is read once per World instead, by a surface that has decided to draw
-/// it.
+/// presence sample. This is read once per World instead, by a surface that has
+/// decided to draw it.
 ///
 /// Named apart from the interface type it feeds (`api::WorldArtwork`) because
 /// the bridge codegen keys types by bare name across the whole crate: two
@@ -158,11 +157,20 @@ pub struct Artwork {
 /// asking about a World this build does not install is asking a question whose
 /// honest answer is "nothing to draw".
 pub fn artwork(mount: &str) -> Artwork {
-    lait::composition::bundled_client_packages()
-        .package_for_mount(mount)
-        .map(|package| Artwork {
-            mark: package.display().mark().map(<[u8]>::to_vec),
-            hero: package.display().hero().map(<[u8]>::to_vec),
+    declarations(None)
+        .into_iter()
+        .find(|declaration| declaration.manifest.mount() == mount)
+        .map(|declaration| Artwork {
+            mark: declaration
+                .manifest
+                .mark
+                .as_ref()
+                .and_then(|path| std::fs::read(declaration.root.join(path)).ok()),
+            hero: declaration
+                .manifest
+                .hero
+                .as_ref()
+                .and_then(|path| std::fs::read(declaration.root.join(path)).ok()),
         })
         .unwrap_or_default()
 }
@@ -181,33 +189,87 @@ pub struct LaunchTicket {
 /// The install list itself, free of [`Client`] so a test can read it without
 /// constructing one. What `get_library` returns IS this — delegation, not a
 /// second copy that could drift.
-fn installed() -> Vec<LibraryEntry> {
-    let packages = lait::composition::bundled_client_packages();
-    let hosted = lait::composition::bundled_packages();
-    packages
-        .packages()
-        .map(|package| LibraryEntry {
-            world_mount: package.mount().to_owned(),
-            world: package.world().as_str().to_owned(),
-            display_name: package.display().name().to_owned(),
-            entry_path: package.display().entry_path().map(str::to_owned),
-            tagline: package.display().tagline().map(str::to_owned),
-            accent: package.display().accent(),
-            version: hosted
-                .reviewed_state(package.world())
-                .map(|(_, version)| version),
+///
+/// `pub(crate)` because the runtime also reads it on the one path that has no
+/// client to ask: a supervisor that failed to start can still read signed
+/// manifests without starting their processes.
+pub(crate) fn installed() -> Vec<LibraryEntry> {
+    installed_for(None)
+}
+
+fn declarations(identity: Option<&Path>) -> Vec<lait::world::installed::Declaration> {
+    let identity = identity
+        .map(std::path::PathBuf::from)
+        .or_else(|| lait::config::Selection::default().identity_dir().ok());
+    identity
+        .and_then(|identity| {
+            lait::world::installed::declarations(&lait::serve::head::worlds_root(&identity)).ok()
         })
+        .unwrap_or_default()
+}
+
+fn installed_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
+    declarations(identity)
+        .into_iter()
+        .map(|declaration| library_entry(declaration.manifest))
         .collect()
 }
 
+fn library_entry(manifest: world_interface::manifest::WorldManifest) -> LibraryEntry {
+    let entry_path = manifest.launch.iter().find_map(|entry| {
+        (entry.present == world_interface::manifest::Present::Primary
+            && entry
+                .when
+                .as_ref()
+                .is_none_or(|when| when.admits(std::env::consts::OS, std::env::consts::ARCH)))
+        .then(|| match &entry.target {
+            world_interface::manifest::Target::Web { path } => Some(path.clone()),
+            _ => None,
+        })
+        .flatten()
+    });
+    LibraryEntry {
+        world_mount: manifest.mount().to_owned(),
+        world: manifest.id.clone(),
+        display_name: manifest.display_name().to_owned(),
+        entry_path,
+        tagline: manifest.tagline,
+        accent: manifest.accent,
+        version: manifest.implementation_version,
+    }
+}
+
+fn world_id_for_mount_in(entries: &[LibraryEntry], mount: &str) -> Option<String> {
+    entries
+        .iter()
+        .find(|entry| entry.world_mount == mount)
+        .map(|entry| entry.world.clone())
+}
+
+/// The World id behind one mount, when this build installs it.
+///
+/// The mount and the id are deliberately different strings for different jobs:
+/// the mount is the stable key a surface and a URL carry, the id is the
+/// reverse-domain name the daemon scopes update consent by. A surface holds
+/// only the mount, so the selected manifest is where one becomes the other.
+/// An unknown mount answers with nothing rather than letting a mount travel
+/// onward dressed as an id.
+pub fn world_id_for_mount(mount: &str) -> Option<String> {
+    world_id_for_mount_in(&installed(), mount)
+}
+
 impl Client {
-    /// Every World this build can open.
-    ///
-    /// Read from the compiled-in composition, joined with the hosted side for
-    /// the reviewed version — the same join the daemon must not be asked to
-    /// make, because it would be answering for a package it does not hold.
+    pub(crate) fn installed_world_ids(&self) -> Vec<String> {
+        installed_for(self.inner.identity.as_deref())
+            .into_iter()
+            .map(|entry| entry.world)
+            .collect()
+    }
+
+    /// Every selected World release this identity can open, read passively
+    /// from its signed declaration.
     pub fn get_library(&self) -> Vec<LibraryEntry> {
-        installed()
+        installed_for(self.identity_dir().as_deref())
     }
 
     /// The URL `Open` sends the browser to, given a ticket the head minted.
@@ -248,26 +310,51 @@ impl Client {
 mod tests {
     use super::*;
 
-    /// The Library is the install list, and this build installs the Issues
-    /// World. Read through the same function `get_library` answers with, so
-    /// the test breaks when the declaration does — a row with no name, no
-    /// mount or no World id is a package that stopped declaring itself.
-    #[test]
-    fn the_library_lists_what_this_build_installs() {
-        let entries = installed();
+    fn selected_manifest() -> world_interface::manifest::WorldManifest {
+        world_interface::manifest::WorldManifest::parse(
+            br#"{
+                "format": 1,
+                "id": "com.lait.issues",
+                "version": "1.2.3",
+                "mount": "issues",
+                "name": "Issues",
+                "tagline": "Track the work",
+                "implementation_version": 4,
+                "runners": [{"preferred": true, "program": "bin/world"}],
+                "launch": [{
+                    "id": "app",
+                    "present": "primary",
+                    "target": {"type": "web", "path": "/"}
+                }]
+            }"#,
+        )
+        .expect("a selected World declaration")
+    }
 
-        assert!(
-            !entries.is_empty(),
-            "this build installs nothing, so the Library would always be empty"
+    /// The Library is derived from selected signed declarations, not from what
+    /// happened to be installed in the developer's ambient identity.
+    #[test]
+    fn the_library_maps_the_selected_declaration() {
+        let entry = library_entry(selected_manifest());
+        assert_eq!(entry.display_name, "Issues");
+        assert_eq!(entry.world_mount, "issues");
+        assert_eq!(entry.world, "com.lait.issues");
+        assert_eq!(entry.entry_path.as_deref(), Some("/"));
+        assert_eq!(entry.version, Some(4));
+    }
+
+    /// Update consent on the daemon is scoped by World id, but a surface holds
+    /// only the mount. The resolver is the seam between the two names: every
+    /// installed mount answers with the id its own row carries, and an unknown
+    /// mount answers with nothing rather than travelling onward as an id.
+    #[test]
+    fn a_mount_resolves_to_the_world_id_updates_are_scoped_by() {
+        let entries = vec![library_entry(selected_manifest())];
+        assert_eq!(
+            world_id_for_mount_in(&entries, "issues").as_deref(),
+            Some("com.lait.issues")
         );
-        for entry in &entries {
-            assert!(
-                !entry.display_name.is_empty(),
-                "an installed World declared no name"
-            );
-            assert!(!entry.world_mount.is_empty());
-            assert!(!entry.world.is_empty());
-        }
+        assert_eq!(world_id_for_mount_in(&entries, "no-such-mount"), None);
     }
 
     /// A World that declares no entry path stays unopenable rather than

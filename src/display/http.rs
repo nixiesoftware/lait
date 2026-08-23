@@ -398,11 +398,18 @@ async fn program_snapshot(
             ),
             authorized.next_challenge,
         ),
-        Err(_) => consumed_refusal(
-            ApiRefusalCode::TemporarilyUnavailable,
-            authorized.next_challenge,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ),
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                %error,
+                "display program snapshot compilation failed"
+            );
+            consumed_refusal(
+                ApiRefusalCode::TemporarilyUnavailable,
+                authorized.next_challenge,
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        }
     }
 }
 
@@ -453,19 +460,31 @@ async fn program_changes(
             now(),
         )
         .await;
-    let Ok(mut compiled) = first else {
-        return consumed_refusal(
-            ApiRefusalCode::TemporarilyUnavailable,
-            authorized.next_challenge,
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
+    let mut compiled = match first {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                %error,
+                "display program change compilation failed"
+            );
+            return consumed_refusal(
+                ApiRefusalCode::TemporarilyUnavailable,
+                authorized.next_challenge,
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
     };
+    let mut aligned_playback = None;
     if parsed.revision.as_ref() == Some(&compiled.program.revision) {
         let requested_wait = parsed.wait_ms.unwrap_or(1);
         let scheduled_wait = compiled
             .refresh_after_ms
             .map_or(requested_wait, |refresh| refresh.min(requested_wait));
-        state
+        let source_refresh_due = compiled
+            .source_refresh_after_ms
+            .is_some_and(|refresh| refresh <= scheduled_wait);
+        let changed = state
             .coordinator
             .wait_for_change(
                 &assignment,
@@ -485,22 +504,52 @@ async fn program_changes(
                 authorized.next_challenge,
             );
         }
-        match state
-            .coordinator
-            .compile_for_device(
-                &authorized.record.device,
-                &authorized.record.capabilities,
-                now(),
-            )
-            .await
-        {
-            Ok(refreshed) => compiled = refreshed,
-            Err(_) => {
-                return consumed_refusal(
-                    ApiRefusalCode::TemporarilyUnavailable,
-                    authorized.next_challenge,
-                    StatusCode::SERVICE_UNAVAILABLE,
+        // A doorbell or package deadline can change program semantics and must
+        // go back through the World. A pure sync-boundary timeout only moves
+        // the cursor on the already compiled program and stays on the cheap
+        // persisted group clock below.
+        if changed || source_refresh_due {
+            match state
+                .coordinator
+                .compile_for_device(
+                    &authorized.record.device,
+                    &authorized.record.capabilities,
+                    now(),
                 )
+                .await
+            {
+                Ok(refreshed) => compiled = refreshed,
+                Err(error) => {
+                    tracing::warn!(
+                        device = %authorized.record.device,
+                        %error,
+                        "refreshed display program compilation failed"
+                    );
+                    return consumed_refusal(
+                        ApiRefusalCode::TemporarilyUnavailable,
+                        authorized.next_challenge,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                }
+            }
+        } else if compiled.program.playback.sync.is_some() {
+            match state
+                .coordinator
+                .aligned_playback_for(&assignment, &compiled.program, now())
+            {
+                Ok(playback) => aligned_playback = Some(playback),
+                Err(error) => {
+                    tracing::warn!(
+                        device = %authorized.record.device,
+                        %error,
+                        "display playback realignment failed"
+                    );
+                    return consumed_refusal(
+                        ApiRefusalCode::TemporarilyUnavailable,
+                        authorized.next_challenge,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                }
             }
         }
     }
@@ -534,7 +583,7 @@ async fn program_changes(
             );
         };
         let playback = if compiled.program.playback.sync.is_some() {
-            compiled.program.playback.clone()
+            aligned_playback.unwrap_or_else(|| compiled.program.playback.clone())
         } else {
             DisplayPlayback {
                 current_index: index,

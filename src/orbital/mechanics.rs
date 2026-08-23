@@ -66,6 +66,27 @@ const RECOVERY_KEY_FILE: &str = "recovery.key";
 /// authority material an elevation converts into a threshold group key.
 const SPACE_RECOVERY_KEY_FILE: &str = "space-recovery.key";
 
+fn assignment_salt(
+    actor: &ActorId,
+    capability: &mechanics::authorization::PolicyCapability,
+    resource: &mechanics::authorization::Resource,
+) -> Result<[u8; 16]> {
+    let mut input = Vec::new();
+    input.extend_from_slice(actor.as_str().as_bytes());
+    input.push(0);
+    input.extend_from_slice(capability.name.as_bytes());
+    input.push(0);
+    input.extend_from_slice(resource.segments.join("/").as_bytes());
+    let derived = blake3::derive_key("lait.access-grant-salt.v1", &input);
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(
+        derived
+            .get(..16)
+            .ok_or_else(|| anyhow!("derived access-grant salt is too short"))?,
+    );
+    Ok(salt)
+}
+
 /// Extract an invite nonce from either an orbital Coordinates link (its
 /// embedded admission capability) or a raw 32-hex string.
 fn parse_invite_nonce(input: &str) -> Option<[u8; 16]> {
@@ -268,6 +289,43 @@ impl Inner {
         self.ledger
             .commit_batch(&effects, &sealed_records)
             .map_err(|e| anyhow!("authority commit: {e}"))?;
+        Ok(())
+    }
+
+    /// Author a causally chained set of ACL actions in one durable batch.
+    /// Either every authority transition lands or none does.
+    pub(super) fn author_actions(
+        &mut self,
+        actions: Vec<AclAction>,
+        sealed_records: Vec<Vec<u8>>,
+    ) -> Result<()> {
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let me = self
+            .my_actor()
+            .ok_or_else(|| anyhow!("no actor identity"))?;
+        let actor_asof = self.ledger.actor_heads(&me);
+        let mut parents = self.ledger.acl_heads();
+        let mut effects = Vec::with_capacity(actions.len());
+        for action in actions {
+            let op = acl::sign_op(
+                &self.seed,
+                &AclOp {
+                    action,
+                    by: me.clone(),
+                    actor_asof: actor_asof.clone(),
+                    nonce: None,
+                },
+                parents,
+                &self.space,
+            );
+            parents = vec![op.hash()];
+            effects.push(Effect::Acl(op).encode());
+        }
+        self.ledger
+            .commit_batch(&effects, &sealed_records)
+            .map_err(|error| anyhow!("authority batch commit: {error}"))?;
         Ok(())
     }
 
@@ -1063,36 +1121,27 @@ impl SpaceAuthority {
         ))
     }
 
-    /// Mint an admission capability carrying a **role's** exact expanded
-    /// assignments as generic [`WorldAssignmentEvidence`] (version-2 evidence:
-    /// role id/revision provenance in the bounded opaque field, the definition
-    /// digest, the parent Manifest root, and the expansion — always including
-    /// the mandatory `space.issue.read` baseline — inside the signed digest).
+    /// Mint an admission capability carrying a World's exact expanded
+    /// assignments as generic [`WorldAssignmentEvidence`].
     ///
     /// Issuance proves the issuer may delegate EVERY assignment: Space policy
     /// administration or an effective exact-resource delegation per
     /// capability. An administrator invite additionally requires policy
     /// administration (the meta-grant is never delegable), so escalation
-    /// stops at issuance. Unknown roles reject.
+    /// stops at issuance. Role lookup and expansion have already happened in
+    /// the selected World generation; Mechanics sees only bounded evidence.
     pub fn mint_admission(
         &self,
         issuer_seed: &[u8; 32],
         ttl_secs: u64,
         reusable: bool,
         now: u64,
-        role_selector: &str,
-        parent_manifest_root: [u8; 32],
+        evidence: mechanics::authorization::WorldAssignmentEvidence,
     ) -> Result<AdmissionCapability> {
         let mut inner = self.lock();
-        let role_id = crate::world::roles::resolve_role_selector(role_selector)
-            .ok_or_else(|| anyhow!("unknown role `{role_selector}`"))?;
-        let revision = crate::world::roles::built_in(role_id)
-            .ok_or_else(|| anyhow!("unknown role `{role_selector}`"))?;
-        if revision.body.tombstone {
-            return Err(anyhow!("role `{role_id}` is tombstoned"));
-        }
-        let evidence =
-            crate::world::roles::role_admission_evidence(&revision, parent_manifest_root);
+        evidence
+            .validate()
+            .map_err(|error| anyhow!("invalid World assignment evidence: {error}"))?;
         // Prove the issuer may delegate every assignment BEFORE anything is
         // signed. The issuing device must resolve to a member actor.
         let issuer_device = device_from_seed(issuer_seed);
@@ -1365,29 +1414,28 @@ impl SpaceAuthority {
         Ok(())
     }
 
-    /// Elevate or demote an existing member: a **full** role change across both
-    /// authority layers, so a promoted admin is a real admin (GOV-11).
-    ///
-    /// Promotion writes the signed [`AclAction::SetGrants`] (ACL admin standing,
-    /// which gates member add/remove and key rotation) **and** installs the
-    /// administrator role's admission evidence — including the Mechanics
-    /// policy-admin meta-grant, the capability that `may_delegate` (and thus
-    /// invite minting) requires. Without the second half a "promoted" admin
-    /// could manage members but not mint invites; that half-admin was the bug.
-    /// Because minting a policy admin needs policy authority, promotion requires
-    /// the caller to *be* a policy admin (you cannot grant authority you lack).
-    /// Demotion reverses both: ACL standing back to a plain member and the
-    /// admin/meta capability grants revoked (contributor + read remain).
+    /// Elevate or demote an existing member and apply the exact generic
+    /// assignments supplied by the installed Worlds.
     ///
     /// Refuses to demote the last admin, and to promote an agent (agents hold
     /// no membership authority by construction). Idempotent per layer.
     ///
     /// The agent refusal is one of the three things a re-granting feature would
     /// have to change; `mechanics::acl::sponsored_agent_grants` lists them all.
-    pub fn member_set_role(&self, actor_str: &str, admin: bool) -> Result<ActorId> {
-        // Phase 1 (locked): resolve, gate, flip ACL standing, and collect the
-        // admin-capability grant ids to revoke on demotion.
-        let (actor, revoke_on_demote) = {
+    pub fn member_set_role(
+        &self,
+        actor_str: &str,
+        admin: bool,
+        grant: &[(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )],
+        revoke: &[(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )],
+    ) -> Result<ActorId> {
+        let actor = {
             let mut inner = self.lock();
             let actor = inner.resolve_actor(actor_str).ok_or_else(|| {
                 anyhow!(
@@ -1395,21 +1443,17 @@ impl SpaceAuthority {
                      act_ prefix) or one of their device ids"
                 )
             })?;
-            let gate_ok = match inner.my_actor() {
-                // Promotion mints policy authority, so the promoter must hold
-                // it; demotion is an ordinary admin action.
-                Some(me) if admin => inner.acl().is_policy_admin(&me),
-                Some(me) => inner.acl().is_admin(&me),
-                None => false,
-            };
-            if !gate_ok {
-                return Err(anyhow!(if admin {
-                    "only a policy admin may promote a member to a full admin (one who can \
-                     invite and manage policy) — ask a founder or an existing policy admin, \
-                     or admit them with an administrator invite"
-                } else {
-                    "only an admin may change a member's role"
-                }));
+            let me = inner
+                .my_actor()
+                .ok_or_else(|| anyhow!("no actor identity"))?;
+            if admin {
+                if !inner.acl().is_policy_admin(&me) {
+                    return Err(anyhow!(
+                        "only a policy admin may promote a member to full administrator"
+                    ));
+                }
+            } else if !inner.acl().is_admin(&me) {
+                return Err(anyhow!("only an admin may change a member's role"));
             }
             if inner.acl().is_agent(&actor) {
                 return Err(anyhow!(
@@ -1436,57 +1480,53 @@ impl SpaceAuthority {
                     ));
                 }
             }
-            // Flip ACL standing only when it needs flipping (idempotent).
-            if inner.acl().is_admin(&actor) != admin {
-                inner.author(
-                    AclAction::SetGrants {
-                        actor: actor.clone(),
-                        grants: acl::membership_grants(admin),
-                    },
-                    None,
-                    vec![],
-                    vec![],
-                )?;
+            let acl_state = inner.acl();
+            for (capability, resource) in grant {
+                if !acl_state.may_delegate(&me, capability, resource) {
+                    return Err(anyhow!(
+                        "you may not delegate `{}` — the role change is refused",
+                        capability.name
+                    ));
+                }
             }
-            // On demotion, gather the admin/meta capability grants to revoke.
-            let revoke = if admin {
-                Vec::new()
-            } else {
-                let space_res =
-                    mechanics::authorization::Resource::root(crate::world::contract::PRODUCT_WORLD);
-                let acl_state = inner.acl();
-                let mut ids = acl_state.effective_capability_grants(
-                    &actor,
-                    &mechanics::authorization::PolicyCapability::new(
-                        crate::world::contract::PRODUCT_WORLD,
-                        "space.admin",
-                    ),
-                    &space_res,
-                );
-                ids.extend(acl_state.effective_capability_grants(
-                    &actor,
-                    &acl::policy_admin_capability(),
-                    &acl::policy_admin_resource(),
-                ));
-                ids
-            };
-            (actor, revoke)
-        };
 
-        // Phase 2 (re-locking helpers): sync the capability layer.
-        if admin {
-            // The administrator role's admission evidence uniquely carries the
-            // policy-admin meta-grant; grant_assignments is idempotent and
-            // re-checks that this caller may delegate every capability.
-            let revision = crate::world::roles::built_in("lait.administrator")
-                .ok_or_else(|| anyhow!("built-in administrator role is missing"))?;
-            let evidence = crate::world::roles::role_admission_evidence(&revision, [0u8; 32]);
-            self.grant_assignments(&actor, &evidence.assignments)?;
-        } else {
-            for grant_id in revoke_on_demote {
-                self.revoke_assignment(grant_id)?;
+            let mut actions = Vec::new();
+            if admin {
+                for (capability, resource) in grant {
+                    let salt = assignment_salt(&actor, capability, resource)?;
+                    let grant_id = acl::capability_grant_id(&actor, capability, resource, &salt)
+                        .ok_or_else(|| anyhow!("grant id"))?;
+                    if !acl_state
+                        .effective_capability_grants(&actor, capability, resource)
+                        .contains(&grant_id)
+                    {
+                        actions.push(AclAction::GrantCapability {
+                            grant_id,
+                            actor: actor.clone(),
+                            capability: capability.clone(),
+                            resource: resource.clone(),
+                            salt,
+                        });
+                    }
+                }
+            } else {
+                for (capability, resource) in revoke {
+                    for grant_id in
+                        acl_state.effective_capability_grants(&actor, capability, resource)
+                    {
+                        actions.push(AclAction::RevokeCapability { grant_id });
+                    }
+                }
             }
-        }
+            if acl_state.is_admin(&actor) != admin {
+                actions.push(AclAction::SetGrants {
+                    actor: actor.clone(),
+                    grants: acl::membership_grants(admin),
+                });
+            }
+            inner.author_actions(actions, vec![])?;
+            actor
+        };
         Ok(actor)
     }
 
@@ -1709,7 +1749,14 @@ impl SpaceAuthority {
     /// working colleague, not a mute spectator) through the same grant set any
     /// member carries — never membership authority. Its standing still dies with
     /// the sponsor. Returns the sponsored agent's actor id.
-    pub fn agent_add(&self, key: &str) -> Result<ActorId> {
+    pub fn agent_add(
+        &self,
+        key: &str,
+        assignments: &[(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )],
+    ) -> Result<ActorId> {
         let agent = {
             let mut inner = self.lock();
             let me = inner
@@ -1729,43 +1776,36 @@ impl SpaceAuthority {
             if inner.acl().is_member(&agent) {
                 return Err(anyhow!("{} is already a principal", agent.short()));
             }
+            let acl_state = inner.acl();
+            for (capability, resource) in assignments {
+                if !acl_state.may_delegate(&me, capability, resource) {
+                    return Err(anyhow!(
+                        "you may not delegate `{}` — sponsorship is refused",
+                        capability.name
+                    ));
+                }
+            }
             let sealed = inner.seal_records_for_actor(&agent)?;
-            inner.author(
-                AclAction::AddAgent {
+            let mut actions = vec![AclAction::AddAgent {
+                actor: agent.clone(),
+                grants: acl::sponsored_agent_grants(),
+            }];
+            for (capability, resource) in assignments {
+                let salt = assignment_salt(&agent, capability, resource)?;
+                let grant_id = acl::capability_grant_id(&agent, capability, resource, &salt)
+                    .ok_or_else(|| anyhow!("grant id"))?;
+                actions.push(AclAction::GrantCapability {
+                    grant_id,
                     actor: agent.clone(),
-                    grants: acl::sponsored_agent_grants(),
-                },
-                None,
-                vec![],
-                sealed,
-            )?;
+                    capability: capability.clone(),
+                    resource: resource.clone(),
+                    salt,
+                });
+            }
+            inner.author_actions(actions, sealed)?;
             agent
-        }; // lock dropped before granting the scoped capabilities below
-
-        // The ACL write grant is *content authority*; a functional
-        // contributor also needs the World's *scoped* capabilities — the
-        // mandatory `space.issue.read` (to even read the catalog) and
-        // `space.contributor` (the write demand). These live in the separate
-        // policy plane, so grant the sponsored member the contributor role's
-        // exact expansion. Requires the sponsor to be able to delegate them
-        // (a policy admin, or a delegate); a plain member cannot hand out
-        // authority it lacks, and the up-front check keeps that a clean refusal
-        // rather than a Write-but-cannot-read half-member.
-        self.grant_contributor_capabilities(&agent)?;
+        };
         Ok(agent)
-    }
-
-    /// Granting `actor` the built-in **contributor** role's scoped capabilities
-    /// (`space.contributor` + the mandatory `space.issue.read` baseline) on the
-    /// Space — so a sponsored member can actually read and write, not merely
-    /// hold the ACL write grant. Idempotent (already-effective grants skip).
-    fn grant_contributor_capabilities(&self, actor: &ActorId) -> Result<()> {
-        let contributor = crate::world::roles::built_in("lait.contributor")
-            .ok_or_else(|| anyhow!("built-in contributor role is missing"))?;
-        let assignments =
-            crate::world::roles::role_admission_evidence(&contributor, [0u8; 32]).assignments;
-        self.grant_assignments(actor, &assignments)?;
-        Ok(())
     }
 
     /// Provision a **co-located** agent identity in THIS shared store: incept
@@ -1775,7 +1815,14 @@ impl SpaceAuthority {
     /// is what makes "sponsor once, then it works" true for an agent on the same
     /// machine (Architecture B). Idempotent: re-provisioning a known, sponsored
     /// agent returns its actor. Returns the agent's actor id.
-    pub fn provision_agent(&self, agent_seed: &[u8; 32]) -> Result<ActorId> {
+    pub fn provision_agent(
+        &self,
+        agent_seed: &[u8; 32],
+        assignments: &[(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )],
+    ) -> Result<ActorId> {
         let agent_device = device_from_seed(agent_seed);
         // 1. Incept into the shared actor plane if not already known. The
         //    inception is self-signed (it proves key ownership); it establishes
@@ -1799,7 +1846,7 @@ impl SpaceAuthority {
         }
         // 2. Sponsor with the default content grant. `agent_add` refuses an
         //    existing principal, which for re-provisioning means "already done".
-        match self.agent_add(&agent_device.to_string()) {
+        match self.agent_add(&agent_device.to_string(), assignments) {
             Ok(actor) => Ok(actor),
             Err(e) if e.to_string().contains("already a principal") => self
                 .actor_of_device(&agent_device)
@@ -1966,19 +2013,7 @@ impl SpaceAuthority {
         let mut effects: Vec<Vec<u8>> = Vec::new();
         let mut granted = Vec::new();
         for (capability, resource) in assignments {
-            let mut salt_input = Vec::new();
-            salt_input.extend_from_slice(actor.as_str().as_bytes());
-            salt_input.push(0);
-            salt_input.extend_from_slice(capability.name.as_bytes());
-            salt_input.push(0);
-            salt_input.extend_from_slice(resource.segments.join("/").as_bytes());
-            let derived = blake3::derive_key("lait.access-grant-salt.v1", &salt_input);
-            let mut salt = [0u8; 16];
-            salt.copy_from_slice(
-                derived
-                    .get(..16)
-                    .ok_or_else(|| anyhow!("derived access-grant salt is too short"))?,
-            );
+            let salt = assignment_salt(actor, capability, resource)?;
             let grant_id = acl::capability_grant_id(actor, capability, resource, &salt)
                 .ok_or_else(|| anyhow!("grant id"))?;
             if acl_state

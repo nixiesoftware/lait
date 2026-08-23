@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "id": "com.lait.issues",
+  "version": "${VERSION}",
+  "mount": "issues",
+  "name": "Issues",
+  "tagline": "Plans, issues, and the Specs that govern them",
+  "implementation_version": 4,
+  "mark": "art/mark.png",
+  "hero": "art/hero.png",
+  "accent": 5009141,
+  "requires": [
+    { "name": "lait.control", "range": ">=15, <16" },
+    { "name": "lait.world-runner.protocol", "range": ">=1, <2" },
+    { "name": "lait.world-sdk.protocol", "range": ">=3, <4" }
+  ],
+  "runners": [
+    { "preferred": true, "program": "bin/lait-world-issues${EXE}" },
+    { "preferred": false, "program": "bin/lait-world-issues${EXE}", "args": ["--migrator"] }
+  ],
+  "launch": [
+    { "id": "app", "present": "primary", "target": { "type": "web", "path": "/" } }
+  ]
+}

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use issues::contract::{self, IssueIntent, IssueQuery, Pos, WorkAction};
 use issues::dto::{
     BoardPage, IssueRelationDto, IssueView, LabelDto, ProjectDto, Row, StatusCategory,
 };
@@ -22,8 +23,7 @@ use issues::ids::{
     ActorId, BaselineId, DeviceId, DocId, LabelId, ObservationId, ProjectId, SpecId,
     SystemUlidSource,
 };
-use lait::world::contract::{self, IssueIntent, IssueQuery, Pos, WorkAction};
-use lait::world::IssuesWorld;
+use issues::IssuesWorld;
 use mechanics::authorization::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
@@ -279,7 +279,7 @@ fn seed_project(driver: &mut Driver) -> String {
     let ts = driver.ts();
     let project = ProjectId::mint(&SystemUlidSource).as_str().to_string();
     driver
-        .submit(&lait::world::contract::initialize_tracker_intent(
+        .submit(&issues::contract::initialize_tracker_intent(
             "Parity Space",
             ts,
             &project,
@@ -659,7 +659,7 @@ fn verification_is_performed_locally_to_a_returned_outcome() {
                     &mut std::io::Cursor::new(bytes),
                 )
                 .map_err(|error| runtime::world::Failure::PersistenceCause {
-                    operation: "exec.perform.output",
+                    operation: "exec.perform.output".to_string(),
                     reason: error.to_string(),
                 })
                 .inspect(|content| reports.push(*content))

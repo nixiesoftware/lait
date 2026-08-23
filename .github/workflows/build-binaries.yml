@@ -1,27 +1,15 @@
-# Per-target build for lait's release archives.
-#
-# Runs as cargo-dist's local-artifacts job (dist-workspace.toml:
-# `build-local-artifacts = false`, `local-artifacts-jobs = ["./build-binaries"]`).
-# We own the build so the binary can be SIGNED before it is archived — cargo-dist
-# builds + archives atomically with no hook in between, and its built-in signers
-# can't do macOS notarization or Azure. See docs/RELEASE-SIGNING.md.
-#
-# The contract with cargo-dist is by FILENAME + in-archive layout (its `host` job
-# collects everything matching `artifacts-*`):
+# Per-target build for lait's release archives. The signed first-party feed is
+# the distribution contract; this workflow owns the bytes it receives:
 #   - unix:    lait-<target>.tar.gz  (+ .sha256), binary + misc nested under lait-<target>/
 #   - windows: lait-<target>.zip     (+ .sha256), flat: lait.exe + misc at the root
-#   - upload artifact name: artifacts-<target>
-# This is the same nested-unix / flat-windows split the self-updater and binstall
-# metadata encode — keep all three in lockstep.
-#
-# Step 1 (this file): reproduce today's UNSIGNED archives on the new architecture.
-# Signing (macOS notarize+staple, Windows Azure) is layered on next, secret-gated.
+#   - Actions staging artifact: host-<target>
+# The same nested-unix / flat-windows split is encoded by the self-updater.
 name: Build binaries
 
 on:
   workflow_call:
     inputs:
-      plan:
+      ref:
         required: true
         type: string
   # Build every target (unsigned) on PRs that touch the build path itself, so the
@@ -32,7 +20,10 @@ on:
     paths:
       - .github/workflows/build-binaries.yml
       - .github/scripts/archive-*.sh
-      - dist-workspace.toml
+      - .github/scripts/stage-worlds.sh
+      - products/issues-runner/world.json.template
+      - products/signage-runner/world.json.template
+      - .github/workflows/release.yml
 
 concurrency:
   group: build-binaries-${{ github.ref }}
@@ -57,12 +48,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, runner: namespace-profile-nixiesoftware }
+          - { target: x86_64-unknown-linux-gnu, runner: blacksmith-4vcpu-ubuntu-2404 }
           # arm64 Linux builds natively on GitHub's hosted arm64 runner.
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       # dtolnay/rust-toolchain@stable (branch head at time of pinning). The ref used
       # to select the channel, so `toolchain` is now passed explicitly — see the
@@ -74,8 +66,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: rel-${{ matrix.target }}
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build host and first-party World runners
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait -p lait-issues-runner -p lait-signage-runner
       - name: Archive (nested tar.gz + sha256)
         shell: bash
         env:
@@ -89,7 +81,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: artifacts-${{ matrix.target }}
+          name: host-${{ matrix.target }}
           path: |
             lait-${{ matrix.target }}.tar.gz
             lait-${{ matrix.target }}.tar.gz.sha256
@@ -110,6 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       # dtolnay/rust-toolchain@stable (branch head at time of pinning). The ref used
       # to select the channel, so `toolchain` is now passed explicitly — see the
@@ -121,8 +114,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: rel-${{ matrix.target }}
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build host and first-party World runners
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait -p lait-issues-runner -p lait-signage-runner
       # SIGNING SLOT (next increment): codesign --options runtime the binary here,
       # then notarize + staple a .pkg, before the archive step. Secret-gated.
       - name: Archive (nested tar.gz + sha256)
@@ -138,7 +131,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: artifacts-${{ matrix.target }}
+          name: host-${{ matrix.target }}
           path: |
             lait-${{ matrix.target }}.tar.gz
             lait-${{ matrix.target }}.tar.gz.sha256
@@ -155,6 +148,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       # dtolnay/rust-toolchain@stable (branch head at time of pinning). The ref used
       # to select the channel, so `toolchain` is now passed explicitly.
@@ -165,8 +159,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: rel-x86_64-pc-windows-msvc
-      - name: Build
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Build host and first-party World runners
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p lait -p lait-issues-runner -p lait-signage-runner
       # SIGNING SLOT (next increment): Azure-sign target\...\lait.exe here, before
       # the zip step. Secret-gated.
       - name: Archive (flat zip + sha256)
@@ -180,7 +174,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: artifacts-x86_64-pc-windows-msvc
+          name: host-x86_64-pc-windows-msvc
           path: |
             lait-x86_64-pc-windows-msvc.zip
             lait-x86_64-pc-windows-msvc.zip.sha256

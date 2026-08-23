@@ -161,6 +161,7 @@ impl SpaceOp {
                 reusable,
                 ttl_hours,
             } => Request::Invite {
+                world: None,
                 role: Some(role),
                 reusable,
                 ttl_hours: Some(ttl_hours),

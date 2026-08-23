@@ -888,7 +888,7 @@ impl crate::exec::Handler for EchoHandler {
 
     fn handle(
         &self,
-        _context: &mut crate::exec::Context<'_>,
+        _context: &mut dyn crate::exec::HandlerContext,
     ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
         Ok(crate::exec::Candidate {
             output: exec_schema("agent.output"),
@@ -913,7 +913,7 @@ impl crate::exec::Handler for PanicHandler {
 
     fn handle(
         &self,
-        _context: &mut crate::exec::Context<'_>,
+        _context: &mut dyn crate::exec::HandlerContext,
     ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
         panic!("inherited Began must not re-enter a handler");
     }
@@ -4748,7 +4748,7 @@ impl crate::exec::Handler for SearchHandler {
 
     fn handle(
         &self,
-        context: &mut crate::exec::Context<'_>,
+        context: &mut dyn crate::exec::HandlerContext,
     ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
         // An admitted query answers over the corpus pinned at the Run's
         // parent Manifest root.
@@ -4850,7 +4850,7 @@ impl crate::exec::Handler for ChildProbeHandler {
 
     fn handle(
         &self,
-        context: &mut crate::exec::Context<'_>,
+        context: &mut dyn crate::exec::HandlerContext,
     ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
         // The child's own independently authorized Grant admits its work…
         let answer = context.query(note_query("alpha", CHILD_GRANT_BOUND))?;
@@ -5257,7 +5257,7 @@ impl crate::exec::Handler for ResumableHandler {
 
     fn handle(
         &self,
-        context: &mut crate::exec::Context<'_>,
+        context: &mut dyn crate::exec::HandlerContext,
     ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
         let inline = context.input_inline().to_vec();
         let output = if let Some(checkpoint) = context.resume_checkpoint().cloned() {
@@ -5356,7 +5356,7 @@ fn checkpoint_perform_io<'a>(
                 &mut std::io::Cursor::new(bytes.to_vec()),
             )
             .map_err(|error| crate::world::Failure::PersistenceCause {
-                operation: "exec.test.output",
+                operation: "exec.test.output".into(),
                 reason: error.to_string(),
             })
     };
@@ -5364,7 +5364,7 @@ fn checkpoint_perform_io<'a>(
         station
             .content_read(identity, content, offset, len)
             .map_err(|error| crate::world::Failure::PersistenceCause {
-                operation: "exec.test.read",
+                operation: "exec.test.read".into(),
                 reason: error.to_string(),
             })
     };

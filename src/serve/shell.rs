@@ -1,17 +1,9 @@
-//! The served client — the React app compiled into the binary, and the client
-//! overlay the head composes over the documents it serves.
+//! The served World document and the client overlay composed over it.
 //!
-//! `include_dir!` reads `src/serve/assets` at **compile time**, which is why that
-//! directory holds *build output* and is *committed*. Three facts force it:
-//! `Cargo.toml` excludes `viewer/` from the published crate, `publish-crates.yml`
-//! is Rust-only, and `build.rs` deliberately never shells out to git so a plain
-//! `cargo install lait` stays reproducible with no external toolchain. Building
-//! the bundle during `cargo build` would need npm; leaving it in `viewer/` would
-//! mean crates.io users get a head with no UI. So it lives here, in git.
-//!
-//! The honest cost is build output under version control, kept fresh by
-//! `npm run build` (which writes straight here) and guarded by CI diffing a
-//! rebuild. See `docs/UI.md`, web surface.
+//! There is deliberately no compiled-in product floor here. A page is read
+//! only from the selected immutable World release, so removing or updating a
+//! World changes one independently owned installation rather than revealing a
+//! second copy hidden in the host executable.
 //!
 //! Serving it from the daemon — rather than from a dev server or a CDN — is also
 //! what makes the client **same-origin**, which is the precondition for the
@@ -30,7 +22,8 @@
 //!
 //! So [`asset`] and [`index`] stop being byte pipes for one kind of file: an
 //! HTML **document** is composed on the way out, and everything else — script,
-//! stylesheet, font, image — is still the embedded bytes, unread and unchanged.
+//! stylesheet, font, image — is still the selected release's bytes, unread and
+//! unchanged.
 //! Four properties hold that seam together, each of them a failure that would
 //! otherwise be invisible until a World's page broke in the field:
 //!
@@ -85,9 +78,6 @@ use std::sync::OnceLock;
 
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use include_dir::{include_dir, Dir};
-
-static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/serve/assets");
 
 /// The one content type composition keys off.
 ///
@@ -122,31 +112,19 @@ fn content_type(path: &str) -> &'static str {
 ///
 /// The fallback is what makes client-side routing work: an unknown path is a
 /// route for the app to resolve, not a 404 — the app is the only thing that knows
-/// its own routes. Paths that escape the bundle simply miss and fall back too;
-/// `include_dir` resolves against an embedded tree, not the filesystem, so there
-/// is no directory to traverse out of.
+/// its own routes. Paths that escape the release simply miss and fall back to
+/// that release's entry document.
 ///
 /// Documents go through [`compose`]; everything else is handed back as the exact
-/// bytes that were embedded.
+/// bytes the release carries.
 pub fn asset(path: &str, overlay: bool, head: &crate::serve::head::Source) -> Response {
     let path = path.trim_start_matches('/');
-    // An activated bundle answers first; the embedded tree is the floor
-    // beneath it, and a path neither holds is a route for the app to resolve.
     if let Some(bytes) = head.read(path) {
         let mime = content_type(path);
         let body: Cow<'static, [u8]> = if mime == HTML && overlay {
             Cow::Owned(compose(&bytes).into_owned())
         } else {
             Cow::Owned(bytes)
-        };
-        return ([(header::CONTENT_TYPE, mime)], body).into_response();
-    }
-    if let Some(file) = ASSETS.get_file(path) {
-        let mime = content_type(path);
-        let body = if mime == HTML && overlay {
-            compose(file.contents())
-        } else {
-            Cow::Borrowed(file.contents())
         };
         return ([(header::CONTENT_TYPE, mime)], body).into_response();
     }
@@ -163,22 +141,11 @@ pub fn index(overlay: bool, head: &crate::serve::head::Source) -> Response {
         };
         return ([(header::CONTENT_TYPE, HTML)], body).into_response();
     }
-    match ASSETS.get_file("index.html") {
-        Some(f) => {
-            let body = if overlay {
-                compose(f.contents())
-            } else {
-                Cow::Borrowed(f.contents())
-            };
-            ([(header::CONTENT_TYPE, HTML)], body).into_response()
-        }
-        // Only reachable if someone ships a build with an empty assets dir.
-        None => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "lait was built without its web client (src/serve/assets is empty — run `npm run build` in viewer/)",
-        )
-            .into_response(),
-    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the selected World release carries no web entry document",
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +265,7 @@ const RAISE_BASE: &str = "lait://client/";
 /// The attribute that marks a composed document, and carries this run's nonce.
 ///
 /// Used for three things at once: the idempotence check reads it, the overlay's
-/// container carries it, and a test asserts nothing in the embedded bundle can.
+/// container carries it, and a test asserts nothing in the World document can.
 /// Deliberately absent from the stylesheet below — the CSS hooks on a class
 /// instead, so *counting* this string counts overlays and not selectors.
 const OVERLAY_MARKER: &str = "data-lait-overlay";
@@ -551,17 +518,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_client_is_actually_embedded() {
-        // The failure this catches is a build that silently ships no UI — the
-        // whole point of committing the bundle.
-        assert!(
-            ASSETS.get_file("index.html").is_some(),
-            "index.html missing"
-        );
-        assert!(ASSETS.get_file("app.js").is_some(), "app.js missing");
-    }
-
-    #[test]
     fn content_types_cover_what_vite_emits() {
         assert_eq!(content_type("app.js"), "text/javascript; charset=utf-8");
         assert_eq!(content_type("index.css"), "text/css; charset=utf-8");
@@ -599,21 +555,38 @@ mod composition {
             .to_vec()
     }
 
+    fn released(files: &[(&str, &[u8])]) -> (tempfile::TempDir, crate::serve::head::Source) {
+        let release = tempfile::tempdir().expect("release");
+        for (path, bytes) in files {
+            let target = release.path().join(path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).expect("release directory");
+            }
+            std::fs::write(target, bytes).expect("release asset");
+        }
+        let source = crate::serve::head::Source::activated(release.path().to_path_buf());
+        (release, source)
+    }
+
     #[tokio::test]
     async fn an_asset_passes_through_byte_identical() {
         // The failure: composition that keys off "did this come from the bundle"
         // rather than off the content type. A `<div>` in a `.js` is a syntax
         // error at the top of the application and in a `.woff2` is a font the
         // browser refuses — both of them silent until something renders.
-        for path in ["app.js", "index.css", "inter-latin-wght-normal.woff2"] {
-            let embedded = ASSETS.get_file(path).expect(path).contents();
-            let served = body_of(asset(path, true, &crate::serve::head::Source::embedded())).await;
+        for (path, authored) in [
+            ("app.js", &b"export const answer = 42;"[..]),
+            ("index.css", &b"body{}"[..]),
+            ("inter-latin-wght-normal.woff2", &b"font"[..]),
+        ] {
+            let (_release, source) = released(&[(path, authored), ("index.html", b"<body/>")]);
+            let served = body_of(asset(path, true, &source)).await;
             assert_eq!(
                 served,
-                embedded,
+                authored,
                 "{path} was rewritten on the way out ({} bytes vs {})",
                 served.len(),
-                embedded.len(),
+                authored.len(),
             );
         }
     }
@@ -624,14 +597,11 @@ mod composition {
     /// it looks like a feature.
     #[tokio::test]
     async fn a_head_nobody_launched_from_the_client_serves_no_overlay() {
+        let authored = b"<!doctype html><html><body>World</body></html>";
+        let (_release, source) = released(&[("index.html", authored)]);
         for served in [
-            body_of(index(false, &crate::serve::head::Source::embedded())).await,
-            body_of(asset(
-                "/index.html",
-                false,
-                &crate::serve::head::Source::embedded(),
-            ))
-            .await,
+            body_of(index(false, &source)).await,
+            body_of(asset("/index.html", false, &source)).await,
         ] {
             assert!(
                 !contains(&served, OVERLAY_MARKER.as_bytes()),
@@ -639,28 +609,23 @@ mod composition {
             );
         }
 
-        // And what it serves is the embedded document, byte for byte — the
+        // And what it serves is the release document, byte for byte — the
         // ungated path is not a second, subtly different composition.
-        let embedded = ASSETS.get_file("index.html").expect("index").contents();
-        assert_eq!(
-            body_of(index(false, &crate::serve::head::Source::embedded())).await,
-            embedded
-        );
+        assert_eq!(body_of(index(false, &source)).await, authored);
     }
 
     #[tokio::test]
     async fn the_documents_the_head_serves_are_composed() {
+        let (_release, source) = released(&[(
+            "index.html",
+            b"<!doctype html><html><body>World</body></html>",
+        )]);
         // Both doors: the SPA entry and the same file reached as an asset. They
         // are separate functions, and a seam added to one of them is a seam a
         // person finds by opening the app the other way.
         for served in [
-            body_of(index(true, &crate::serve::head::Source::embedded())).await,
-            body_of(asset(
-                "/index.html",
-                true,
-                &crate::serve::head::Source::embedded(),
-            ))
-            .await,
+            body_of(index(true, &source)).await,
+            body_of(asset("/index.html", true, &source)).await,
         ] {
             assert!(
                 contains(&served, OVERLAY_MARKER.as_bytes()),
@@ -888,8 +853,10 @@ mod composition {
 
         // Nothing the bundle shipped carries it, because the bundle was written
         // before this process started.
-        for path in ["index.html", "app.js"] {
-            let authored = ASSETS.get_file(path).expect(path).contents();
+        for (path, authored) in [
+            ("index.html", &b"<html><body>World</body></html>"[..]),
+            ("app.js", &b"export const world = true;"[..]),
+        ] {
             assert!(
                 !contains(authored, nonce.as_bytes()),
                 "{path} carries this run's marker",

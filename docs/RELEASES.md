@@ -1,135 +1,57 @@
 # Release integrity
 
-This document describes the provenance guarantees attached to lait releases and
-how consumers can verify them. It intentionally excludes credential enrollment
-and private-key provisioning.
+Lait and Astrolabe are distributed by the signed first-party feed at
+`https://storage.googleapis.com/the-foundation-dist`. GitHub Actions builds
+native artifacts, but Actions artifacts are staging inputs, not a channel and
+not a location any installed client resolves.
 
-## Current status
+## Trust chain
 
-| Control | Status | What it establishes |
-|---|---|---|
-| Per-archive SHA-256 | Published with releases | A downloaded platform archive matches its `.sha256` sidecar. |
-| Source SHA-256 manifest (`sha256.sum`) | Published with releases | `source.tar.gz` matches the signed manifest. It does not cover the platform archives. |
-| GitHub build-provenance attestation | Enabled for release archives | An archive was produced by the repository's release workflow. |
-| GPG signatures for `sha256.sum` and `source.tar.gz` | Conditional on the release signing key being provisioned | The manifest or source archive was signed by the lait release key. |
-| GPG-signed Git tag | Maintainer release procedure | The source tag was signed by the lait release key. |
-| macOS Developer ID signing and notarization | Not enabled | No Apple platform-authenticity claim is currently made. |
-| Windows Artifact Signing | Not enabled | No Windows publisher-signature claim is currently made. |
+1. A reviewed commit is tagged `vX.Y.Z`; the tag must match the workspace
+   version.
+2. Repository-owned workflows build five host archives and native Astrolabe
+   packages for Windows, Apple Silicon macOS, and x86_64 Linux.
+3. The release gate requires every declared installer and updater tree and
+   verifies each SHA-256 sidecar.
+4. A maintainer downloads that complete build, seals its content hashes into an
+   Ed25519-signed immutable manifest, uploads and reads back every object, then
+   moves the signed channel pointer last.
+5. Installed clients pin the feed public key, verify pointer and manifest
+   signatures, enforce the compatibility floor, verify the selected artifact,
+   and only then stage it.
 
-GitHub attestations establish provenance, not software safety. A valid
-attestation links an artifact to a repository workflow and commit; it does not
-prove that the source or build process is free of vulnerabilities.
+Release objects are immutable and long-cached. `channels/test` and
+`channels/stable` are the only mutable host objects and are served with
+`no-cache`.
 
-## Download verification
+## Platform authenticity
 
-Each platform archive ships its own checksum file alongside it. Download both
-from the same release and verify the archive before running or installing it:
+- The macOS disk image and application are Developer ID signed, notarized, and
+  stapled. The updater tree is packed from that same signed application.
+- Windows currently relies on the signed feed and artifact hash; Authenticode
+  is not yet enabled.
+- Each native build receives a GitHub build-provenance attestation. This is an
+  additional source/build claim, not the distribution trust anchor.
 
-```sh
-sha256sum -c lait-<target>.<archive>.sha256
-```
+## World releases
 
-A verified download prints `lait-<target>.<archive>: OK`. On macOS, use
-`shasum -a 256 -c` if GNU `sha256sum` is unavailable.
+Worlds have their own signed channel pointers and immutable manifests under
+`channels/worlds/<world-id>/` and `releases/worlds/<world-id>/<version>/`.
+A host tag never publishes or promotes a World. First-party World source
+changes publish to `test`; stable promotion is an explicit pointer move.
 
-`sha256.sum` is a different artifact and does **not** cover the platform
-archives — it is the manifest for `source.tar.gz`, and it is what
-`sha256.sum.asc` signs (see [Source-signature verification](#source-signature-verification)).
-Running `sha256sum -c sha256.sum` next to a downloaded binary archive therefore
-reports `source.tar.gz: FAILED open or read` and checks nothing you have. That
-is the wrong file for the job, not a failed integrity check — but it is
-indistinguishable from one at a glance, so use the per-archive `.sha256` above.
+## Consumer verification
 
-## Build-provenance verification
+The client performs the cryptographic checks automatically. For a manually
+downloaded installer, compare it to the hash in the decoded, signature-verified
+manifest rather than trusting an adjacent checksum fetched from the same
+unauthenticated location.
 
-With a current GitHub CLI, verify the downloaded archive against this repository:
-
-```sh
-gh attestation verify ./lait-<target>.<archive> \
-  --repo nixiesoftware/lait
-```
-
-Verification must identify `nixiesoftware/lait` as the source repository and the
-expected release workflow. Do not weaken the repository constraint merely to
-make an unexpected artifact pass.
-
-## Source-signature verification
-
-The public release key is [`lait-release-key.asc`](./lait-release-key.asc). Import
-it only after comparing its fingerprint with a value published through an
-independent trusted channel:
+GitHub provenance can additionally be checked with:
 
 ```sh
-curl -fsSLo lait-release-key.asc \
-  https://raw.githubusercontent.com/nixiesoftware/lait/main/docs/lait-release-key.asc
-gpg --show-keys --fingerprint lait-release-key.asc
-gpg --import lait-release-key.asc
+gh attestation verify ./artifact --repo nixiesoftware/lait
 ```
 
-When a release contains detached signatures, always provide both the signature
-and signed file explicitly:
-
-```sh
-gpg --verify sha256.sum.asc sha256.sum
-gpg --verify source.tar.gz.asc source.tar.gz
-```
-
-Then verify the archive checksums from the authenticated manifest. A valid
-signature over `sha256.sum` authenticates the hashes recorded in that manifest;
-it does not authenticate an unlisted file.
-
-To verify a signed source tag in a clone:
-
-```sh
-git verify-tag vX.Y.Z
-```
-
-Confirm that Git reports the expected release key and that the tag resolves to
-the commit advertised by the release.
-
-## Missing signatures
-
-Absence of a GPG signature is not equivalent to a bad signature. It means the
-GPG provenance claim is unavailable and the consumer must decide whether GitHub
-attestation plus the HTTPS release channel meets their policy.
-
-A present but invalid signature, a signature by an unexpected key, a checksum
-mismatch, or an attestation for a different repository or workflow is a hard
-failure. Do not install the artifact.
-
-The current signing workflow can skip GPG signing when its repository key is not
-provisioned. Therefore consumers must check for signature assets rather than
-assuming every release has them. Stable releases should move to fail-closed
-signing once key provisioning is an enforced release prerequisite.
-
-## Key management policy
-
-- The public key is safe to distribute and is committed to this repository.
-- The certification key and revocation material remain offline.
-- CI receives only a dedicated release-signing subkey through repository secret
-  storage.
-- Private keys, certificate bundles, passphrases, API keys, tenant identifiers,
-  and signing-account credentials must never be committed.
-- Rotation publishes the updated public key before a release uses the new
-  subkey. Revocation is announced through the repository and release channels.
-- A compromised signing credential stops releases until it is revoked, replaced,
-  and the affected release set is identified.
-
-## Maintainer release policy
-
-1. Build only from an reviewed release commit and immutable version tag.
-2. Keep third-party actions pinned to immutable revisions.
-3. Give build jobs the minimum permissions required for checkout, attestation,
-   and upload.
-4. Sign before archiving when platform signing is enabled so distributed
-   archives contain the signed executable.
-5. Verify signatures and attestations before publishing release notes or package
-   manager metadata.
-6. Never print, upload as an artifact, or interpolate credential values into
-   command lines that may be logged.
-7. Treat an unsigned stable release as an explicit exception until the pipeline
-   enforces fail-closed signing.
-
-Credential provisioning and platform-account enrollment are maintained outside
-the public repository. Workflow comments mark the macOS and Windows insertion
-points without containing credentials.
+That verifies which repository workflow produced the bytes. It does not replace
+the feed signature and does not establish that the software is safe.

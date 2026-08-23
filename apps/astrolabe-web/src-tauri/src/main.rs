@@ -11,6 +11,8 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const CLIENT_VIEW_EVENT: &str = "astrolabe://client-view";
 const MENU_EVENT: &str = "astrolabe://menu";
+const EXIT_STAY_ID: &str = "exit-stay";
+const EXIT_OFFLINE_ID: &str = "exit-offline";
 
 // A browser preview must not infer desktop identity from its user agent. The
 // host owns this fact and installs it before the document's application code
@@ -42,6 +44,43 @@ struct WebClientView {
     notices: Vec<WebNotice>,
     failures: Vec<WebFailure>,
     in_flight: Vec<String>,
+    image: Option<WebImage>,
+    update: Option<WebUpdate>,
+    /// The host ends the process on seeing this; the page never draws it.
+    exited: bool,
+}
+
+/// The one thing a person is ever asked about this client's own updating:
+/// when to restart. Tagged, because the three cases are answered differently
+/// and a surface that flattened them would have to reconstruct which it had.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebUpdate {
+    RestartRequested {
+        version: String,
+        urgency: &'static str,
+    },
+    Waiting {
+        version: String,
+        holding: Vec<String>,
+    },
+    Attention {
+        why: String,
+    },
+    Forced {
+        version: String,
+        holding: Vec<String>,
+    },
+}
+
+/// The staged image this client spawns from, and whether the source was
+/// rebuilt since — the fact behind the roll-forward affordance.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebImage {
+    fingerprint: String,
+    staged_at_ms: u64,
+    source_changed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -192,6 +231,10 @@ struct WebWorldUpdate {
     available: Option<String>,
     behind: bool,
     unmet: Option<Vec<String>>,
+    operation: Option<String>,
+    phase: Option<String>,
+    progress: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -211,6 +254,12 @@ struct WebHead {
     origin: Option<String>,
     owned: bool,
     orbit: Option<String>,
+    /// The one World this head serves; `None` (a pre-pin head) matches no row.
+    world: Option<String>,
+    /// `running`, `exited` or `unknown`. Presence is not liveness: exited
+    /// heads stay listed so a person can see the thing they opened died.
+    state: String,
+    state_detail: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -240,6 +289,9 @@ struct WebDevice {
     pid: Option<u32>,
     can_force_stop: bool,
     last_error: Option<String>,
+    /// Hash of the image this device actually runs; compare against the
+    /// view's `image.fingerprint` to spot a node on older code.
+    image_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -358,6 +410,17 @@ struct WebDisplayFacts {
     devices: Vec<WebDisplayReceiver>,
     assignments: Vec<WebDisplayAssignment>,
     pending_pairings: Vec<WebDisplayPairing>,
+    /// `None` from a daemon that predates the custody split — not reported,
+    /// as distinct from reported-as-none.
+    identifier_custody: Option<WebIdentifierCustody>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebIdentifierCustody {
+    /// Kinds of unlock path, never material.
+    slots: Vec<String>,
+    portable: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -461,6 +524,9 @@ impl From<ClientView> for WebClientView {
             failures,
             in_flight,
             mcp,
+            image,
+            update,
+            exited,
         } = view;
         Self {
             loading: loading,
@@ -500,11 +566,30 @@ impl From<ClientView> for WebClientView {
                                 })
                                 .collect()
                         }),
-                        update: row.update.map(|update| WebWorldUpdate {
-                            serving: update.serving,
-                            available: update.available,
-                            behind: update.behind,
-                            unmet: update.unmet,
+                        update: row.update.map(|update| {
+                            // Destructured whole for the same reason ClientView
+                            // is: this row grew fields once and the browser
+                            // quietly drew a view without them.
+                            let api::WorldUpdateRow {
+                                serving,
+                                available,
+                                behind,
+                                unmet,
+                                operation,
+                                phase,
+                                progress,
+                                message,
+                            } = update;
+                            WebWorldUpdate {
+                                serving,
+                                available,
+                                behind,
+                                unmet,
+                                operation,
+                                phase,
+                                progress,
+                                message,
+                            }
                         }),
                     })
                     .collect()
@@ -590,15 +675,36 @@ impl From<ClientView> for WebClientView {
                         expires_at_unix_ms: pairing.expires_at_unix_ms,
                     })
                     .collect(),
+                identifier_custody: display.identifier_custody.map(|custody| {
+                    WebIdentifierCustody {
+                        slots: custody.slots,
+                        portable: custody.portable,
+                    }
+                }),
             }),
             heads: heads
                 .into_iter()
-                .map(|head| WebHead {
-                    id: head.id,
-                    kind: head.kind,
-                    origin: head.origin,
-                    owned: head.owned,
-                    orbit: head.orbit,
+                .map(|head| {
+                    let api::HeadRow {
+                        id,
+                        kind,
+                        orbit,
+                        world,
+                        origin,
+                        owned,
+                        state,
+                        state_detail,
+                    } = head;
+                    WebHead {
+                        id,
+                        kind,
+                        origin,
+                        owned,
+                        orbit,
+                        world,
+                        state,
+                        state_detail,
+                    }
                 })
                 .collect(),
             devices: devices
@@ -613,6 +719,7 @@ impl From<ClientView> for WebClientView {
                     pid: device.pid,
                     can_force_stop: device.can_force_stop,
                     last_error: device.last_error,
+                    image_fingerprint: device.image_fingerprint,
                 })
                 .collect(),
             storage: storage
@@ -811,6 +918,31 @@ impl From<ClientView> for WebClientView {
                 })
                 .collect(),
             in_flight: in_flight,
+            image: image.map(|image| WebImage {
+                fingerprint: image.fingerprint,
+                staged_at_ms: image.staged_at_ms,
+                source_changed: image.source_changed,
+            }),
+            exited,
+            update: update.map(|update| match update {
+                api::UpdateRow::RestartRequested { version, urgency } => {
+                    WebUpdate::RestartRequested {
+                        version,
+                        urgency: match urgency {
+                            api::UpdateUrgency::Quiet => "quiet",
+                            api::UpdateUrgency::Insistent => "insistent",
+                            api::UpdateUrgency::Urgent => "urgent",
+                        },
+                    }
+                }
+                api::UpdateRow::Waiting { version, holding } => {
+                    WebUpdate::Waiting { version, holding }
+                }
+                api::UpdateRow::Attention { why } => WebUpdate::Attention { why },
+                api::UpdateRow::Forced { version, holding } => {
+                    WebUpdate::Forced { version, holding }
+                }
+            }),
         }
     }
 }
@@ -856,9 +988,28 @@ fn display_sync_mode_name(mode: api::DisplaySyncMode) -> &'static str {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// `rename_all` renames only the variants; the fields of struct variants keep
+// their Rust names without `rename_all_fields`. The page sends camelCase for
+// both, and the mismatch fails *nowhere* — the invoke rejects, the surface
+// records a dispatch failure, and the action never reaches the core. The
+// deserialization tests below hold this seam still.
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum WebAction {
     Refresh,
+    /// End the client; goOffline stops what it owns first. Tray-dispatched.
+    Exit {
+        go_offline: bool,
+    },
+    /// Restage from the rebuilt source and bring everything back on the new
+    /// image — the inner-loop roll-forward.
+    Reload,
+    OpenLink {
+        url: String,
+    },
     Open {
         world: String,
         entry_path: String,
@@ -969,6 +1120,9 @@ enum WebAction {
     },
     DisplayDeviceRevoke {
         device: String,
+    },
+    DisplayIdentifierAdmitPassphrase {
+        passphrase: String,
     },
     SendMessage {
         to: String,
@@ -1087,6 +1241,9 @@ impl From<WebAction> for ActionRequest {
     fn from(action: WebAction) -> Self {
         match action {
             WebAction::Refresh => Self::Refresh,
+            WebAction::Exit { go_offline } => Self::Exit { go_offline },
+            WebAction::Reload => Self::Reload,
+            WebAction::OpenLink { url } => Self::OpenLink { url },
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
             WebAction::StartDevice { id } => Self::StartDevice { id },
@@ -1176,6 +1333,9 @@ impl From<WebAction> for ActionRequest {
                 Self::DisplayAssignmentRevoke { assignment }
             }
             WebAction::DisplayDeviceRevoke { device } => Self::DisplayDeviceRevoke { device },
+            WebAction::DisplayIdentifierAdmitPassphrase { passphrase } => {
+                Self::DisplayIdentifierAdmitPassphrase { passphrase }
+            }
             WebAction::SendMessage { to, body } => Self::SendMessage { to, body },
             WebAction::CollectMail => Self::CollectMail,
             WebAction::BlockSender { person } => Self::BlockSender { person },
@@ -1204,6 +1364,27 @@ impl From<WebAction> for ActionRequest {
             WebAction::PresentRefresh => Self::PresentRefresh,
             WebAction::LeavePresentation => Self::LeavePresentation,
         }
+    }
+}
+
+/// Take the restart a staged release is waiting for.
+///
+/// A host capability rather than an `ActionRequest`, because the core cannot
+/// do it: ending and relaunching this process is the host's own act, and the
+/// core would have to ask the host anyway. It is also not an *update* —
+/// nothing is applied here. Applying happens in the window this opens, at a
+/// moment no client is alive: the stub's launch window on Windows and Linux,
+/// the daemon's own act on macOS. All this does is reach that moment.
+///
+/// Never returns on success.
+#[tauri::command]
+fn restart_for_update(app: tauri::AppHandle, version: Option<String>) {
+    // Under a stub the window is the stub's launch, not this process's own
+    // relaunch — the stub is waiting on this very process.
+    if astrolabe::client::update::request_relaunch(version.as_deref().unwrap_or("")) {
+        app.exit(0);
+    } else {
+        app.restart();
     }
 }
 
@@ -1301,16 +1482,67 @@ async fn summon_world_settings(
     };
 
     // Flutter's settings window opens 560×680 and narrows to 440×520.
-    WebviewWindowBuilder::new(&app, &label, url)
+    let mut builder = WebviewWindowBuilder::new(&app, &label, url)
         .title(format!("{name} settings — Astrolabe"))
         .resizable(true)
         .minimizable(true)
         .visible(true)
         .inner_size(560.0, 680.0)
-        .min_inner_size(440.0, 520.0)
-        .build()
-        .map_err(|error| error.to_string())?;
+        .min_inner_size(440.0, 520.0);
+    builder = owned_by_main(&app, builder)?;
+    builder.build().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Not `owned_by_main`: a World keeps its own taskbar identity.
+fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::WorldLaunch) {
+    let sanitized: String = launch
+        .world
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '/' | ':' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let label = format!("world:{sanitized}");
+    let url: tauri::Url = match launch.url.parse() {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.navigate(url);
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .title(&launch.title)
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(800.0, 600.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .visible(true)
+        .build();
+    if built.is_err() {
+        let _ = astrolabe::browser::open(&launch.url);
+    }
+}
+
+/// Owner on Windows, child on macOS, transient-for on Linux. A missing main
+/// window degrades to an unowned one rather than refusing to open.
+fn owned_by_main<'a>(
+    app: &'a tauri::AppHandle,
+    builder: WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>,
+) -> Result<WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>, String> {
+    match app.get_webview_window("main") {
+        Some(main) => builder.parent(&main).map_err(|error| error.to_string()),
+        None => Ok(builder),
+    }
 }
 
 #[tauri::command]
@@ -1345,11 +1577,14 @@ fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result
         )
     };
 
-    let builder = WebviewWindowBuilder::new(app, label, url)
-        .title(surface.title())
-        .resizable(true)
-        .minimizable(true)
-        .visible(true);
+    let builder = owned_by_main(
+        app,
+        WebviewWindowBuilder::new(app, label, url)
+            .title(surface.title())
+            .resizable(true)
+            .minimizable(true)
+            .visible(true),
+    )?;
 
     match surface {
         // Flutter's address-book host is permanently portrait: it can resize
@@ -1393,9 +1628,26 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::TrayIconBuilder;
 
+    // The two answers of `lifecycle::ExitRequest`, never one generic Quit.
     let open = MenuItem::with_id(app, "open", "Open Astrolabe", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Astrolabe", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let stay = MenuItem::with_id(
+        app,
+        EXIT_STAY_ID,
+        "Close and stay online",
+        true,
+        None::<&str>,
+    )?;
+    let offline = MenuItem::with_id(
+        app,
+        EXIT_OFFLINE_ID,
+        "Go offline and exit",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(
+        app,
+        &[&open, &PredefinedMenuItem::separator(app)?, &stay, &offline],
+    )?;
 
     let mut tray = TrayIconBuilder::with_id("astrolabe")
         .menu(&menu)
@@ -1409,9 +1661,9 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     let _ = window.set_focus();
                 }
             }
-            // Quitting is not closing: this is the item that stops the client
-            // and everything it supervises.
-            "quit" => app.exit(0),
+            // The process ends on the view's `exited` cue, never here: the
+            // shell must not close before the stopping has happened.
+            id if dispatch_menu_exit(id) => {}
             _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
@@ -1419,6 +1671,22 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     tray.build(app)?;
     Ok(())
+}
+
+fn menu_exit_policy(id: &str) -> Option<bool> {
+    match id {
+        EXIT_STAY_ID => Some(false),
+        EXIT_OFFLINE_ID => Some(true),
+        _ => None,
+    }
+}
+
+fn dispatch_menu_exit(id: &str) -> bool {
+    let Some(go_offline) = menu_exit_policy(id) else {
+        return false;
+    };
+    let _ = api::dispatch(ActionRequest::Exit { go_offline });
+    true
 }
 
 /// The application menu, where the operating system keeps one of its own.
@@ -1430,6 +1698,12 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
+    // macOS's predefined Quit exits immediately inside the native menu
+    // implementation, bypassing the client's asynchronous lifecycle policy.
+    // These are ordinary menu events, and the two labels make the policy an
+    // explicit choice just as the tray does on every platform.
+    let stay = MenuItemBuilder::with_id(EXIT_STAY_ID, "Close and stay online").build(app)?;
+    let offline = MenuItemBuilder::with_id(EXIT_OFFLINE_ID, "Go offline and exit").build(app)?;
     let application = SubmenuBuilder::new(app, "Astrolabe")
         .about(None)
         .separator()
@@ -1439,7 +1713,8 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         .hide_others()
         .show_all()
         .separator()
-        .quit()
+        .item(&stay)
+        .item(&offline)
         .build()?;
 
     // ⌘R is what a Mac reaches for; F5 still works in the page itself.
@@ -1492,23 +1767,121 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         "chat" => {
             let _ = summon_surface(app, OwnedWindowSurface::Chat);
         }
+        id if dispatch_menu_exit(id) => {}
         _ => {}
     });
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page speaks camelCase for variants *and* fields. `rename_all`
+    /// covers only the variants, so the field half rests on
+    /// `rename_all_fields` — and losing it fails nowhere at build time: the
+    /// invoke rejects, the surface records "Dispatch open failed", and LAUNCH
+    /// reads as a control that does nothing. These are the exact payloads the
+    /// page sends.
+    #[test]
+    fn the_actions_the_page_sends_deserialize_whole() {
+        let payloads = [
+            r#"{"type":"reload"}"#,
+            r#"{"type":"exit","goOffline":true}"#,
+            r#"{"type":"displayIdentifierAdmitPassphrase","passphrase":"a dozen letters"}"#,
+            r#"{"type":"openLink","url":"lait://world/issues"}"#,
+            r#"{"type":"open","world":"issues","entryPath":"/"}"#,
+            r#"{"type":"updateWorld","world":"issues"}"#,
+            r#"{"type":"removeDevice","id":"dev","deleteData":true}"#,
+            r#"{"type":"installMcp","client":"claude","scope":null,"name":"lait","agent":null,"noAgent":false,"project":".","world":null,"preview":true}"#,
+            r#"{"type":"displayAssignmentPut","device":"d","orbit":"o","world":"w","surface":"s","inputJson":"{}","theme":"dark","staleAfterMs":1000,"onStale":"blank","syncGroup":null,"syncMode":"positional","staticDelayMs":0,"expiresAtUnixMs":null}"#,
+        ];
+        for payload in payloads {
+            if let Err(error) = serde_json::from_str::<WebAction>(payload) {
+                panic!("the page's own payload was refused: {error}\n  {payload}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_menu_exit_is_one_of_the_two_explicit_lifecycle_policies() {
+        assert_eq!(menu_exit_policy(EXIT_STAY_ID), Some(false));
+        assert_eq!(menu_exit_policy(EXIT_OFFLINE_ID), Some(true));
+        assert_eq!(menu_exit_policy("quit"), None);
+
+        // The native predefined item performs its own immediate exit. It must
+        // not return to the macOS application menu, where it would bypass the
+        // policy mapping above.
+        let source = include_str!("main.rs");
+        let predefined_quit = [".qu", "it()"].concat();
+        assert!(
+            !source.contains(&predefined_quit),
+            "the macOS menu contains a one-step native Quit"
+        );
+    }
+}
+
 fn main() {
+    // Before any window exists: a later launch hands its arguments — a
+    // `lait:` link among them — to the running client and ends here. On a
+    // claim that errs, api::start's backstop still guards the state root.
+    match api::claim_single_instance() {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => eprintln!("astrolabe: {error}"),
+    }
     tauri::Builder::default()
         .append_invoke_initialization_script(PLATFORM_INIT)
         .setup(|app| {
-            api::start(None, None).map_err(std::io::Error::other)?;
+            astrolabe::client::update::identify_running_version(
+                app.package_info().version.to_string(),
+            );
+            let worlds = app
+                .path()
+                .resource_dir()
+                .map_err(std::io::Error::other)?
+                .join("worlds");
+            api::start_with_worlds(
+                None,
+                None,
+                Some(worlds.to_string_lossy().into_owned()),
+            )
+            .map_err(std::io::Error::other)?;
+            // Window creation hops to the main thread; every platform makes
+            // windows there.
+            let presenter = app.handle().clone();
+            astrolabe::browser::present_with(move |launch| {
+                let handle = presenter.clone();
+                let _ = presenter.run_on_main_thread(move || present_world_window(&handle, launch));
+            });
             let handle = app.handle().clone();
             api::subscribe(move |view| {
+                let exited = view.exited;
                 let _ = handle.emit(CLIENT_VIEW_EVENT, WebClientView::from(view));
+                if exited {
+                    handle.exit(0);
+                }
+            });
+            let summoner = app.handle().clone();
+            api::on_second_launch(move || {
+                let handle = summoner.clone();
+                let _ = handle.clone().run_on_main_thread(move || {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                });
             });
             install_tray(app.handle())?;
             #[cfg(target_os = "macos")]
             install_menu(app.handle())?;
+            // The launch-argument half: Windows and Linux hand a registered
+            // scheme's URL to a fresh process this way, and so does a first
+            // launch on macOS.
+            if let Some(link) = astrolabe::link::Link::from_args(std::env::args()) {
+                open_link(&link.to_url());
+            }
             Ok(())
         })
         // Closing the primary window is not stopping: it hides to the tray so
@@ -1527,9 +1900,31 @@ fn main() {
             client_dispatch,
             world_artwork,
             set_fullscreen,
+            restart_for_update,
             summon_owned_window,
             summon_world_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("run Astrolabe Web desktop host");
+        .build(tauri::generate_context!())
+        .expect("build Astrolabe Web desktop host")
+        // A `lait:` link arrives two ways and both are the OS handing this
+        // process a URL: as a launch argument, and — while already running,
+        // which is the macOS path — as an open event.
+        .run(|_app, _event| {
+            // `RunEvent::Opened` exists only on macOS and iOS; on the stub
+            // platforms a link arrives as a launch argument instead.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                for url in urls {
+                    open_link(url.as_str());
+                }
+            }
+        });
+}
+
+/// Hand one `lait:` URL to the core, which decides what it names and whether
+/// this build can act on it. Refusals surface in the view like any other.
+fn open_link(url: &str) {
+    let _ = api::dispatch(ActionRequest::OpenLink {
+        url: url.to_owned(),
+    });
 }

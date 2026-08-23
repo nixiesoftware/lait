@@ -280,7 +280,7 @@ claims, or resource claims trustworthy.
   World descriptor and rejects Builds or handler bindings that name another
   World implementation, executable artifact, Spec, Role, or Link. This proves
   local configuration consistency; it does not prove publication authority or
-  sandbox the trusted in-process backend.
+  sandbox the trusted backend inside its supervised World runner.
 - Application controls reach generic lifecycle state through the typed Work
   capability. Runtime owns `WorkRequest`, `WorkReply`, authorization, and Run
   projection; the package owns words such as Issues `continue` and `stop`.
@@ -304,10 +304,10 @@ claims, or resource claims trustworthy.
 - The Issues reference adopter makes that split concrete. `issues_verify`
   carries a committed source ContentRef and a BuildId through a semantic issue
   action. When the caller omits `build`, the application package fills the
-  bundled in-process verifier and the check records `package_filled`; a named
+  first-party runner-local verifier and the check records `package_filled`; a named
   Build is recorded as caller-selected. Issues writes its check record only in
   the transaction that writes Runtime's `Started` event, and rejects a Run
-  link that differs from the request-derived coordinate. The bundled handler
+  link that differs from the request-derived coordinate. The runner-local handler
   binds the pinned source; it does not compile the repository, isolate the
   host, or turn an advisory backend into attestation. Build publication is
   durable identity, not a dispatch gate: the local dispatcher selects the
@@ -343,10 +343,11 @@ claims, or resource claims trustworthy.
   Attempt id. Automatic outbox retry is only a later `Try` after that unknown
   failure, `Resume::Restart`, remaining Attempt budget, and no later Return or
   handler/protocol failure.
-- The first trusted in-process backend explicitly reports resource enforcement
-  as advisory. It validates selected coordinates and candidate output and
-  contains a Rust unwind, but shares the host process and therefore claims no
-  memory, CPU, filesystem, network, or kernel isolation. Later measured,
+- The first trusted backend explicitly reports resource enforcement as
+  advisory. It validates selected coordinates and candidate output and contains
+  a Rust unwind inside the supervised World runner. The runner is a distinct
+  owned process from the core host, but this backend claims no memory, CPU,
+  filesystem, network, or kernel sandbox within that runner. Later measured,
   process, container, or externally attested backends must state that stronger
   enforcement without changing the durable Run model.
 - Counts and byte sizes for commands, Builds, Links, inputs, outputs,
@@ -402,7 +403,7 @@ claims, or resource claims trustworthy.
   for both discovery and invocation, then requires the Attempt's committed
   `Began` event to follow its selected lease and refuses terminal Attempts.
   Therefore a pre-commit candidate, a `Started`-only root, or an uncommitted
-  lifecycle extension cannot enter even the trusted in-process backend.
+  lifecycle extension cannot enter even the trusted runner-local backend.
 - Logs, metrics, refusals, and generic DTOs redact payloads, prompts, secrets,
   local paths, private Offer material, and protected content. Generic surfaces
   expose identifiers and lifecycle state without decoding World payloads.

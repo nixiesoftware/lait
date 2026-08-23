@@ -2,8 +2,8 @@
 
 Track work at typing speed, onboard a teammate with one link, and let your
 coding agents work the board like anyone else — no server, no signup, no
-account. One binary, and the app is a browser tab it serves to you off
-`127.0.0.1`.
+account. Astrolabe is the native Tauri client; it carries the matching `lait`
+sidecar and opens Worlds inside its own window.
 
 ```console
 $ lait
@@ -42,41 +42,24 @@ that need a shared board, the whole product is the one binary below.
 
 ## Install
 
-`lait` is a single self-contained binary, built for **macOS, Linux, and Windows**
-(arm64 + x86_64) and published as a GitHub Release on every tag. Pick a channel —
-they all land the same `lait`. Full matrix + verification in
+Canonical installers come from the signed first-party feed, not a GitHub
+Release or Cargo package channel. Windows ships a per-user installer, Apple
+Silicon macOS a signed and notarized disk image, and Linux a relocatable bundle.
+Use the exact commands and current release coordinate in
 [`docs/INSTALL.md`](docs/INSTALL.md).
 
-```bash
-# macOS / Linux — shell installer (places lait in ~/.cargo/bin)
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.sh | sh
-
-# Homebrew (macOS / Linux)
-brew install nixiesoftware/tap/lait
-
-# from source (Rust 1.91+)
-cargo install --locked --git https://github.com/nixiesoftware/lait lait
-```
-
-```powershell
-# Windows — PowerShell installer
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.ps1 | iex"
-# …or:  scoop install lait   ·   winget install NixieTechLLC.Lait
-```
-
-Upgrading is node maintenance rather than a command you type: the running daemon
-knows which build it is, so `{"cmd":"host_update"}` on the host plane pulls the
-latest release and swaps the binary in place, and `{"cmd":"host_restart"}` makes
-the swap take effect. Re-running the installer above works just as well. For an
-always-on **seed node**, see the [Docker setup](docker-compose.yml).
+After first install, the daemon resolves the signed `stable` pointer, verifies
+the immutable release manifest and artifact, and stages updates for the
+Astrolabe launcher to apply safely. For an always-on **seed node**, see the
+[Docker setup](docker-compose.yml).
 
 ### Nightly / dev builds
 
-Every merge to `main` publishes prebuilt binaries to a rolling **[`dev`
+Every merge to `main` publishes noncanonical test binaries to a rolling **[`dev`
 prerelease](https://github.com/nixiesoftware/lait/releases/tag/dev)** (Linux x64,
 macOS arm64/x64, Windows x64) — bleeding edge, for dogfooding the latest `main`.
-It's a GitHub *prerelease*, so it never shows as "Latest" and never touches the
-package managers or crates.io.
+It is a colleague-sharing tool keyed by Git head; it never moves a signed
+first-party channel.
 
 ```bash
 # grab the current dev build for your platform
@@ -90,7 +73,7 @@ that has to be answerable with nothing running, which is why it stayed a flag.
 ### Build from source
 
 ```bash
-cargo build --release          # Rust 1.91+ (floor driven by iroh 1.0.0-rc.1)
+cargo build --release          # Rust 1.92+
 ```
 
 Contributing? Enable the hooks once per clone
@@ -112,10 +95,10 @@ readiness line — `{"url":…,"token":…,"port":…}` — *before* the listene
 so a parent process can read one line and know the port is live. Exit codes:
 `0` ok · `1` usage/error · `2` selector matched nothing · `3` daemon unreachable.
 
-Astrolabe (`apps/astrolabe`) is the library client for the Worlds this device
-serves. It lists, launches, and authors an agent's MCP binding. It never
-draws a World — `Open` hands that to the browser. See
-[`apps/astrolabe/README.md`](apps/astrolabe/README.md).
+Astrolabe (`apps/astrolabe-web`) is the Tauri client for the Worlds this device
+serves. It lists and launches them in native webview windows and authors an
+agent's MCP binding. See
+[`apps/astrolabe-web/README.md`](apps/astrolabe-web/README.md).
 
 ## Use it like this
 

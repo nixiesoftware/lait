@@ -189,14 +189,16 @@ function ChatBody({ view, facts, active, dispatch }: {
       onCancel={() => setCarrying(null)}
     />}
     <div className="chat-composer">
-      <button className="rail-button" aria-label="Attach a file">📎</button>
+      <span className="tip" title="Attaching files is not available yet">
+        <button className="rail-button" aria-label="Attach a file (not available yet)" disabled>📎</button></span>
       <button
         className="rail-button"
         aria-label="Carry an invitation"
         aria-pressed={carrying === active}
         onClick={() => setCarrying(carrying === active ? null : active)}
       >✉</button>
-      <button className="rail-button" aria-label="Emoji">🙂</button>
+      <span className="tip" title="Emoji are not available yet">
+        <button className="rail-button" aria-label="Emoji (not available yet)" disabled>🙂</button></span>
       <textarea className="chat-input" placeholder="Message" rows={1} value={draft}
         onChange={(event) => { drafts.current.set(active, event.target.value); bump((n) => n + 1); }}
         onKeyDown={(event) => {

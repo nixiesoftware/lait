@@ -64,13 +64,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayIdentifierCustodyRow
-      dco_decode_box_autoadd_display_identifier_custody_row(dynamic raw);
+  dco_decode_box_autoadd_display_identifier_custody_row(dynamic raw);
 
   @protected
   DisplaySyncMode dco_decode_box_autoadd_display_sync_mode(dynamic raw);
 
   @protected
   HostFacts dco_decode_box_autoadd_host_facts(dynamic raw);
+
+  @protected
+  ImageRow dco_decode_box_autoadd_image_row(dynamic raw);
 
   @protected
   McpBindingRow dco_decode_box_autoadd_mcp_binding_row(dynamic raw);
@@ -140,7 +143,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayIdentifierCustodyRow dco_decode_display_identifier_custody_row(
-      dynamic raw);
+    dynamic raw,
+  );
 
   @protected
   DisplayPairingRow dco_decode_display_pairing_row(dynamic raw);
@@ -179,6 +183,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  ImageRow dco_decode_image_row(dynamic raw);
+
+  @protected
   LibraryRow dco_decode_library_row(dynamic raw);
 
   @protected
@@ -201,7 +208,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<DisplayAssignmentRow> dco_decode_list_display_assignment_row(
-      dynamic raw);
+    dynamic raw,
+  );
 
   @protected
   List<DisplayPairingRow> dco_decode_list_display_pairing_row(dynamic raw);
@@ -268,7 +276,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   CorrespondenceFacts? dco_decode_opt_box_autoadd_correspondence_facts(
-      dynamic raw);
+    dynamic raw,
+  );
 
   @protected
   DiagnosisRow? dco_decode_opt_box_autoadd_diagnosis_row(dynamic raw);
@@ -281,13 +290,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayIdentifierCustodyRow?
-      dco_decode_opt_box_autoadd_display_identifier_custody_row(dynamic raw);
+  dco_decode_opt_box_autoadd_display_identifier_custody_row(dynamic raw);
 
   @protected
   DisplaySyncMode? dco_decode_opt_box_autoadd_display_sync_mode(dynamic raw);
 
   @protected
   HostFacts? dco_decode_opt_box_autoadd_host_facts(dynamic raw);
+
+  @protected
+  ImageRow? dco_decode_opt_box_autoadd_image_row(dynamic raw);
 
   @protected
   McpBindingRow? dco_decode_opt_box_autoadd_mcp_binding_row(dynamic raw);
@@ -300,7 +312,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresentationChoice? dco_decode_opt_box_autoadd_presentation_choice(
-      dynamic raw);
+    dynamic raw,
+  );
 
   @protected
   PresentationFacts? dco_decode_opt_box_autoadd_presentation_facts(dynamic raw);
@@ -397,7 +410,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   RustStreamSink<ClientView> sse_decode_StreamSink_client_view_Sse(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
@@ -413,7 +427,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   ActionRequest sse_decode_box_autoadd_action_request(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   BookFacts sse_decode_box_autoadd_book_facts(SseDeserializer deserializer);
@@ -423,54 +438,68 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   CorrespondenceFacts sse_decode_box_autoadd_correspondence_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DiagnosisRow sse_decode_box_autoadd_diagnosis_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayFacts sse_decode_box_autoadd_display_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayHealthRow sse_decode_box_autoadd_display_health_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayIdentifierCustodyRow
-      sse_decode_box_autoadd_display_identifier_custody_row(
-          SseDeserializer deserializer);
+  sse_decode_box_autoadd_display_identifier_custody_row(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplaySyncMode sse_decode_box_autoadd_display_sync_mode(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   HostFacts sse_decode_box_autoadd_host_facts(SseDeserializer deserializer);
 
   @protected
+  ImageRow sse_decode_box_autoadd_image_row(SseDeserializer deserializer);
+
+  @protected
   McpBindingRow sse_decode_box_autoadd_mcp_binding_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   Missing sse_decode_box_autoadd_missing(SseDeserializer deserializer);
 
   @protected
   PresenceView sse_decode_box_autoadd_presence_view(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentationChoice sse_decode_box_autoadd_presentation_choice(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentationFacts sse_decode_box_autoadd_presentation_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentedProgram sse_decode_box_autoadd_presented_program(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   SpaceRow sse_decode_box_autoadd_space_row(SseDeserializer deserializer);
@@ -486,7 +515,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   WorldUpdateRow sse_decode_box_autoadd_world_update_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   CardRow sse_decode_card_row(SseDeserializer deserializer);
@@ -505,7 +535,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   CorrespondenceFacts sse_decode_correspondence_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DeviceRow sse_decode_device_row(SseDeserializer deserializer);
@@ -515,7 +546,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayAssignmentRow sse_decode_display_assignment_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayFacts sse_decode_display_facts(SseDeserializer deserializer);
@@ -525,23 +557,28 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayIdentifierCustodyRow sse_decode_display_identifier_custody_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayPairingRow sse_decode_display_pairing_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayReceiverRow sse_decode_display_receiver_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayStaleAction sse_decode_display_stale_action(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplaySurfaceRow sse_decode_display_surface_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplaySyncMode sse_decode_display_sync_mode(SseDeserializer deserializer);
@@ -568,6 +605,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  ImageRow sse_decode_image_row(SseDeserializer deserializer);
+
+  @protected
   LibraryRow sse_decode_library_row(SseDeserializer deserializer);
 
   @protected
@@ -578,33 +618,39 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<ChatMessageRow> sse_decode_list_chat_message_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ContactRow> sse_decode_list_contact_row(SseDeserializer deserializer);
 
   @protected
   List<ConversationRow> sse_decode_list_conversation_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<DeviceRow> sse_decode_list_device_row(SseDeserializer deserializer);
 
   @protected
   List<DisplayAssignmentRow> sse_decode_list_display_assignment_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<DisplayPairingRow> sse_decode_list_display_pairing_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<DisplayReceiverRow> sse_decode_list_display_receiver_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<DisplaySurfaceRow> sse_decode_list_display_surface_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<FailureRow> sse_decode_list_failure_row(SseDeserializer deserializer);
@@ -629,7 +675,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<PresentedItem> sse_decode_list_presented_item(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -639,11 +686,13 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<SuggestionRow> sse_decode_list_suggestion_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<WorldPersonRow> sse_decode_list_world_person_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   McpBindingRow sse_decode_mcp_binding_row(SseDeserializer deserializer);
@@ -662,59 +711,75 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   BookFacts? sse_decode_opt_box_autoadd_book_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   CorrespondenceFacts? sse_decode_opt_box_autoadd_correspondence_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DiagnosisRow? sse_decode_opt_box_autoadd_diagnosis_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayFacts? sse_decode_opt_box_autoadd_display_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayHealthRow? sse_decode_opt_box_autoadd_display_health_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplayIdentifierCustodyRow?
-      sse_decode_opt_box_autoadd_display_identifier_custody_row(
-          SseDeserializer deserializer);
+  sse_decode_opt_box_autoadd_display_identifier_custody_row(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DisplaySyncMode? sse_decode_opt_box_autoadd_display_sync_mode(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   HostFacts? sse_decode_opt_box_autoadd_host_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ImageRow? sse_decode_opt_box_autoadd_image_row(SseDeserializer deserializer);
 
   @protected
   McpBindingRow? sse_decode_opt_box_autoadd_mcp_binding_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   Missing? sse_decode_opt_box_autoadd_missing(SseDeserializer deserializer);
 
   @protected
   PresenceView? sse_decode_opt_box_autoadd_presence_view(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentationChoice? sse_decode_opt_box_autoadd_presentation_choice(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentationFacts? sse_decode_opt_box_autoadd_presentation_facts(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentedProgram? sse_decode_opt_box_autoadd_presented_program(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   SpaceRow? sse_decode_opt_box_autoadd_space_row(SseDeserializer deserializer);
@@ -730,21 +795,24 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   WorldUpdateRow? sse_decode_opt_box_autoadd_world_update_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
 
   @protected
   List<LibraryRow>? sse_decode_opt_list_library_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
   List<WorldPersonRow>? sse_decode_opt_list_world_person_row(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   OrbitRow sse_decode_orbit_row(SseDeserializer deserializer);
@@ -754,7 +822,8 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresentationChoice sse_decode_presentation_choice(
-      SseDeserializer deserializer);
+    SseDeserializer deserializer,
+  );
 
   @protected
   PresentationFacts sse_decode_presentation_facts(SseDeserializer deserializer);
@@ -806,11 +875,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_AnyhowException(
-      AnyhowException self, SseSerializer serializer);
+    AnyhowException self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_StreamSink_client_view_Sse(
-      RustStreamSink<ClientView> self, SseSerializer serializer);
+    RustStreamSink<ClientView> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
@@ -826,74 +899,114 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_box_autoadd_action_request(
-      ActionRequest self, SseSerializer serializer);
+    ActionRequest self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_book_facts(
-      BookFacts self, SseSerializer serializer);
+    BookFacts self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_client_view(
-      ClientView self, SseSerializer serializer);
+    ClientView self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_correspondence_facts(
-      CorrespondenceFacts self, SseSerializer serializer);
+    CorrespondenceFacts self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_diagnosis_row(
-      DiagnosisRow self, SseSerializer serializer);
+    DiagnosisRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_display_facts(
-      DisplayFacts self, SseSerializer serializer);
+    DisplayFacts self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_display_health_row(
-      DisplayHealthRow self, SseSerializer serializer);
+    DisplayHealthRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_display_identifier_custody_row(
-      DisplayIdentifierCustodyRow self, SseSerializer serializer);
+    DisplayIdentifierCustodyRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_display_sync_mode(
-      DisplaySyncMode self, SseSerializer serializer);
+    DisplaySyncMode self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_host_facts(
-      HostFacts self, SseSerializer serializer);
+    HostFacts self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_image_row(
+    ImageRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_mcp_binding_row(
-      McpBindingRow self, SseSerializer serializer);
+    McpBindingRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_missing(Missing self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_presence_view(
-      PresenceView self, SseSerializer serializer);
+    PresenceView self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_presentation_choice(
-      PresentationChoice self, SseSerializer serializer);
+    PresentationChoice self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_presentation_facts(
-      PresentationFacts self, SseSerializer serializer);
+    PresentationFacts self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_presented_program(
-      PresentedProgram self, SseSerializer serializer);
+    PresentedProgram self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_space_row(
-      SpaceRow self, SseSerializer serializer);
+    SpaceRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_staleness(
-      Staleness self, SseSerializer serializer);
+    Staleness self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
@@ -903,14 +1016,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_box_autoadd_world_update_row(
-      WorldUpdateRow self, SseSerializer serializer);
+    WorldUpdateRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_card_row(CardRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_chat_message_row(
-      ChatMessageRow self, SseSerializer serializer);
+    ChatMessageRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_client_view(ClientView self, SseSerializer serializer);
@@ -920,11 +1037,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_conversation_row(
-      ConversationRow self, SseSerializer serializer);
+    ConversationRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_correspondence_facts(
-      CorrespondenceFacts self, SseSerializer serializer);
+    CorrespondenceFacts self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_device_row(DeviceRow self, SseSerializer serializer);
@@ -934,38 +1055,54 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_display_assignment_row(
-      DisplayAssignmentRow self, SseSerializer serializer);
+    DisplayAssignmentRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_facts(DisplayFacts self, SseSerializer serializer);
 
   @protected
   void sse_encode_display_health_row(
-      DisplayHealthRow self, SseSerializer serializer);
+    DisplayHealthRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_identifier_custody_row(
-      DisplayIdentifierCustodyRow self, SseSerializer serializer);
+    DisplayIdentifierCustodyRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_pairing_row(
-      DisplayPairingRow self, SseSerializer serializer);
+    DisplayPairingRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_receiver_row(
-      DisplayReceiverRow self, SseSerializer serializer);
+    DisplayReceiverRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_stale_action(
-      DisplayStaleAction self, SseSerializer serializer);
+    DisplayStaleAction self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_surface_row(
-      DisplaySurfaceRow self, SseSerializer serializer);
+    DisplaySurfaceRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_sync_mode(
-      DisplaySyncMode self, SseSerializer serializer);
+    DisplaySyncMode self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_display_theme(DisplayTheme self, SseSerializer serializer);
@@ -989,6 +1126,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_image_row(ImageRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_library_row(LibraryRow self, SseSerializer serializer);
 
   @protected
@@ -999,39 +1139,57 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_list_chat_message_row(
-      List<ChatMessageRow> self, SseSerializer serializer);
+    List<ChatMessageRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_contact_row(
-      List<ContactRow> self, SseSerializer serializer);
+    List<ContactRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_conversation_row(
-      List<ConversationRow> self, SseSerializer serializer);
+    List<ConversationRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_device_row(
-      List<DeviceRow> self, SseSerializer serializer);
+    List<DeviceRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_display_assignment_row(
-      List<DisplayAssignmentRow> self, SseSerializer serializer);
+    List<DisplayAssignmentRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_display_pairing_row(
-      List<DisplayPairingRow> self, SseSerializer serializer);
+    List<DisplayPairingRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_display_receiver_row(
-      List<DisplayReceiverRow> self, SseSerializer serializer);
+    List<DisplayReceiverRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_display_surface_row(
-      List<DisplaySurfaceRow> self, SseSerializer serializer);
+    List<DisplaySurfaceRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_failure_row(
-      List<FailureRow> self, SseSerializer serializer);
+    List<FailureRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_gate_row(List<GateRow> self, SseSerializer serializer);
@@ -1041,38 +1199,54 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_list_library_row(
-      List<LibraryRow> self, SseSerializer serializer);
+    List<LibraryRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_member_row(
-      List<MemberRow> self, SseSerializer serializer);
+    List<MemberRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_notice_row(
-      List<NoticeRow> self, SseSerializer serializer);
+    List<NoticeRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_orbit_row(List<OrbitRow> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_presented_item(
-      List<PresentedItem> self, SseSerializer serializer);
+    List<PresentedItem> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_8_strict(
-      Uint8List self, SseSerializer serializer);
+    Uint8List self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_storage_row(
-      List<StorageRow> self, SseSerializer serializer);
+    List<StorageRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_suggestion_row(
-      List<SuggestionRow> self, SseSerializer serializer);
+    List<SuggestionRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_world_person_row(
-      List<WorldPersonRow> self, SseSerializer serializer);
+    List<WorldPersonRow> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_mcp_binding_row(McpBindingRow self, SseSerializer serializer);
@@ -1091,67 +1265,105 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_book_facts(
-      BookFacts? self, SseSerializer serializer);
+    BookFacts? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_correspondence_facts(
-      CorrespondenceFacts? self, SseSerializer serializer);
+    CorrespondenceFacts? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_diagnosis_row(
-      DiagnosisRow? self, SseSerializer serializer);
+    DiagnosisRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_display_facts(
-      DisplayFacts? self, SseSerializer serializer);
+    DisplayFacts? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_display_health_row(
-      DisplayHealthRow? self, SseSerializer serializer);
+    DisplayHealthRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_display_identifier_custody_row(
-      DisplayIdentifierCustodyRow? self, SseSerializer serializer);
+    DisplayIdentifierCustodyRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_display_sync_mode(
-      DisplaySyncMode? self, SseSerializer serializer);
+    DisplaySyncMode? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_host_facts(
-      HostFacts? self, SseSerializer serializer);
+    HostFacts? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_image_row(
+    ImageRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_mcp_binding_row(
-      McpBindingRow? self, SseSerializer serializer);
+    McpBindingRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_missing(
-      Missing? self, SseSerializer serializer);
+    Missing? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_presence_view(
-      PresenceView? self, SseSerializer serializer);
+    PresenceView? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_presentation_choice(
-      PresentationChoice? self, SseSerializer serializer);
+    PresentationChoice? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_presentation_facts(
-      PresentationFacts? self, SseSerializer serializer);
+    PresentationFacts? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_presented_program(
-      PresentedProgram? self, SseSerializer serializer);
+    PresentedProgram? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_space_row(
-      SpaceRow? self, SseSerializer serializer);
+    SpaceRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_staleness(
-      Staleness? self, SseSerializer serializer);
+    Staleness? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
@@ -1161,22 +1373,30 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_world_update_row(
-      WorldUpdateRow? self, SseSerializer serializer);
+    WorldUpdateRow? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_library_row(
-      List<LibraryRow>? self, SseSerializer serializer);
+    List<LibraryRow>? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_list_prim_u_8_strict(
-      Uint8List? self, SseSerializer serializer);
+    Uint8List? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_list_world_person_row(
-      List<WorldPersonRow>? self, SseSerializer serializer);
+    List<WorldPersonRow>? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_orbit_row(OrbitRow self, SseSerializer serializer);
@@ -1186,22 +1406,30 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_presentation_choice(
-      PresentationChoice self, SseSerializer serializer);
+    PresentationChoice self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_presentation_facts(
-      PresentationFacts self, SseSerializer serializer);
+    PresentationFacts self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_presented_item(PresentedItem self, SseSerializer serializer);
 
   @protected
   void sse_encode_presented_program(
-      PresentedProgram self, SseSerializer serializer);
+    PresentedProgram self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_presented_scene(
-      PresentedScene self, SseSerializer serializer);
+    PresentedScene self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_space_row(SpaceRow self, SseSerializer serializer);
@@ -1235,11 +1463,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_world_person_row(
-      WorldPersonRow self, SseSerializer serializer);
+    WorldPersonRow self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_world_update_row(
-      WorldUpdateRow self, SseSerializer serializer);
+    WorldUpdateRow self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class

@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `env_flag`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CallbackSink`, `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseExplicitAttribute): `subscribe`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`, `push`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `push`
@@ -78,29 +78,29 @@ sealed class ActionRequest with _$ActionRequest {
     required String entryPath,
   }) = ActionRequest_Open;
 
+  /// Restage from the rebuilt source and bring everything back on the new
+  /// image — owned devices and heads through the supervisor, then the
+  /// identity daemon. The inner-loop gesture: `cargo build`, then this.
+  const factory ActionRequest.reload() = ActionRequest_Reload;
+
   /// Fetch this World's newest bundle now rather than at the next period.
   ///
   /// The daemon stages on a period measured in hours; a World is published
   /// in seconds. This is the control that closes that gap, and it is the
   /// whole reason a Library row ever draws an update affordance.
-  const factory ActionRequest.updateWorld({
-    required String world,
-  }) = ActionRequest_UpdateWorld;
-  const factory ActionRequest.startDevice({
-    required String id,
-  }) = ActionRequest_StartDevice;
-  const factory ActionRequest.stopDevice({
-    required String id,
-  }) = ActionRequest_StopDevice;
-  const factory ActionRequest.restartDevice({
-    required String id,
-  }) = ActionRequest_RestartDevice;
+  const factory ActionRequest.updateWorld({required String world}) =
+      ActionRequest_UpdateWorld;
+  const factory ActionRequest.startDevice({required String id}) =
+      ActionRequest_StartDevice;
+  const factory ActionRequest.stopDevice({required String id}) =
+      ActionRequest_StopDevice;
+  const factory ActionRequest.restartDevice({required String id}) =
+      ActionRequest_RestartDevice;
 
   /// Force-stop. Only ever offered for a daemon this client owns: ownership
   /// is the safety boundary, and there is no pid-based path across it.
-  const factory ActionRequest.forceStopDevice({
-    required String id,
-  }) = ActionRequest_ForceStopDevice;
+  const factory ActionRequest.forceStopDevice({required String id}) =
+      ActionRequest_ForceStopDevice;
   const factory ActionRequest.stopAllOwned() = ActionRequest_StopAllOwned;
 
   /// Forget a device. `delete_data` additionally destroys what it holds, and
@@ -112,15 +112,13 @@ sealed class ActionRequest with _$ActionRequest {
 
   /// Read one Space. Choosing a Space to administer is an act, not a
   /// listing — it is the read that makes the Members surface answerable.
-  const factory ActionRequest.readSpace({
-    required String orbit,
-  }) = ActionRequest_ReadSpace;
+  const factory ActionRequest.readSpace({required String orbit}) =
+      ActionRequest_ReadSpace;
 
   /// Start a browser head for this identity.
   const factory ActionRequest.startHead() = ActionRequest_StartHead;
-  const factory ActionRequest.stopHead({
-    required String id,
-  }) = ActionRequest_StopHead;
+  const factory ActionRequest.stopHead({required String id}) =
+      ActionRequest_StopHead;
 
   /// Send a message to a person, over the configured carrier.
   const factory ActionRequest.sendMessage({
@@ -135,18 +133,16 @@ sealed class ActionRequest with _$ActionRequest {
   /// Take a correspondent in, by the announcement they handed over. The one
   /// of the pair that creates a relationship, which is why it is named for
   /// the person rather than for the artifact.
-  const factory ActionRequest.addCorrespondent({
-    required String announcement,
-  }) = ActionRequest_AddCorrespondent;
+  const factory ActionRequest.addCorrespondent({required String announcement}) =
+      ActionRequest_AddCorrespondent;
 
   /// Enter the Space an arriving invitation names.
   ///
   /// `message` is the invitation's deposit id in the transcript. Its
   /// coordinates verify against their own Space, so accepting is the same act
   /// as following an invite link — delivery was never admission.
-  const factory ActionRequest.openInvitation({
-    required String message,
-  }) = ActionRequest_OpenInvitation;
+  const factory ActionRequest.openInvitation({required String message}) =
+      ActionRequest_OpenInvitation;
 
   /// Carry an invitation this identity already holds to a correspondent.
   ///
@@ -162,43 +158,36 @@ sealed class ActionRequest with _$ActionRequest {
 
   /// Block a person at the carrier, so no device of theirs lands again. Also
   /// how an incoming stranger is dismissed.
-  const factory ActionRequest.blockSender({
-    required String person,
-  }) = ActionRequest_BlockSender;
+  const factory ActionRequest.blockSender({required String person}) =
+      ActionRequest_BlockSender;
 
   /// Accept an unknown correspondent into the address book.
-  const factory ActionRequest.acceptContact({
-    required String person,
-  }) = ActionRequest_AcceptContact;
+  const factory ActionRequest.acceptContact({required String person}) =
+      ActionRequest_AcceptContact;
 
   /// Open a conversation as a tab, and focus it. What a click in the address
   /// book asks for.
-  const factory ActionRequest.openConversation({
-    required String person,
-  }) = ActionRequest_OpenConversation;
+  const factory ActionRequest.openConversation({required String person}) =
+      ActionRequest_OpenConversation;
 
   /// Focus an already-open conversation tab.
-  const factory ActionRequest.focusConversation({
-    required String person,
-  }) = ActionRequest_FocusConversation;
+  const factory ActionRequest.focusConversation({required String person}) =
+      ActionRequest_FocusConversation;
 
   /// Close a conversation tab.
-  const factory ActionRequest.closeConversation({
-    required String person,
-  }) = ActionRequest_CloseConversation;
+  const factory ActionRequest.closeConversation({required String person}) =
+      ActionRequest_CloseConversation;
 
   /// Forget an Orbit. The store is left alone; this is registry-only.
-  const factory ActionRequest.forgetOrbit({
-    required String space,
-  }) = ActionRequest_ForgetOrbit;
+  const factory ActionRequest.forgetOrbit({required String space}) =
+      ActionRequest_ForgetOrbit;
   const factory ActionRequest.bookPut({
     String? card,
     required String name,
     String? note,
   }) = ActionRequest_BookPut;
-  const factory ActionRequest.bookDelete({
-    required String card,
-  }) = ActionRequest_BookDelete;
+  const factory ActionRequest.bookDelete({required String card}) =
+      ActionRequest_BookDelete;
 
   /// Set a card's picture from a file on this machine; `None` clears it.
   const factory ActionRequest.bookSetPicture({
@@ -209,9 +198,8 @@ sealed class ActionRequest with _$ActionRequest {
     required String from,
     required String into,
   }) = ActionRequest_BookMerge;
-  const factory ActionRequest.bookClaimSelf({
-    required String card,
-  }) = ActionRequest_BookClaimSelf;
+  const factory ActionRequest.bookClaimSelf({required String card}) =
+      ActionRequest_BookClaimSelf;
   const factory ActionRequest.bookLink({
     required String card,
     required String handle,
@@ -224,15 +212,12 @@ sealed class ActionRequest with _$ActionRequest {
     required String path,
     List<String>? cards,
   }) = ActionRequest_BookExport;
-  const factory ActionRequest.bookImport({
-    required String path,
-  }) = ActionRequest_BookImport;
-  const factory ActionRequest.bookAccept({
-    required String suggestion,
-  }) = ActionRequest_BookAccept;
-  const factory ActionRequest.bookDismiss({
-    required String suggestion,
-  }) = ActionRequest_BookDismiss;
+  const factory ActionRequest.bookImport({required String path}) =
+      ActionRequest_BookImport;
+  const factory ActionRequest.bookAccept({required String suggestion}) =
+      ActionRequest_BookAccept;
+  const factory ActionRequest.bookDismiss({required String suggestion}) =
+      ActionRequest_BookDismiss;
 
   /// Author, or preview, an MCP binding for one World.
   ///
@@ -260,9 +245,8 @@ sealed class ActionRequest with _$ActionRequest {
     required String pairing,
     required String label,
   }) = ActionRequest_DisplayPairingApprove;
-  const factory ActionRequest.displayPairingReject({
-    required String pairing,
-  }) = ActionRequest_DisplayPairingReject;
+  const factory ActionRequest.displayPairingReject({required String pairing}) =
+      ActionRequest_DisplayPairingReject;
 
   /// Assign one exact World display surface to an enrolled receiver. The
   /// input remains JSON here because each package owns its own input schema;
@@ -284,9 +268,8 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.displayAssignmentRevoke({
     required String assignment,
   }) = ActionRequest_DisplayAssignmentRevoke;
-  const factory ActionRequest.displayDeviceRevoke({
-    required String device,
-  }) = ActionRequest_DisplayDeviceRevoke;
+  const factory ActionRequest.displayDeviceRevoke({required String device}) =
+      ActionRequest_DisplayDeviceRevoke;
 
   /// Add a passphrase as a second way into the coordinator's identifier key.
   ///
@@ -557,6 +540,12 @@ class ClientView {
   /// Last MCP binding this client authored or previewed. Absent until then.
   final McpBindingRow? mcp;
 
+  /// The staged image this client spawns from, when one was staged. Carries
+  /// the roll-forward fact: the source was rebuilt after staging. `None`
+  /// for a launch that never staged, which is not "current" — it is a
+  /// launch with no image to be behind.
+  final ImageRow? image;
+
   const ClientView({
     required this.loading,
     this.stale,
@@ -575,6 +564,7 @@ class ClientView {
     required this.failures,
     required this.inFlight,
     this.mcp,
+    this.image,
   });
 
   @override
@@ -595,7 +585,8 @@ class ClientView {
       notices.hashCode ^
       failures.hashCode ^
       inFlight.hashCode ^
-      mcp.hashCode;
+      mcp.hashCode ^
+      image.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -618,7 +609,8 @@ class ClientView {
           notices == other.notices &&
           failures == other.failures &&
           inFlight == other.inFlight &&
-          mcp == other.mcp;
+          mcp == other.mcp &&
+          image == other.image;
 }
 
 /// One person one can message, with each device that is them.
@@ -792,6 +784,13 @@ class DeviceRow {
   final bool canForceStop;
   final String? lastError;
 
+  /// Content hash of the image this device is actually running, when it was
+  /// spawned from a staged copy. Reported rather than inferred: a staged
+  /// run outlives the tree that produced it. Compare against
+  /// `ClientView::image` to say "this node runs older code than the bench
+  /// would start today".
+  final String? imageFingerprint;
+
   const DeviceRow({
     required this.id,
     required this.label,
@@ -802,6 +801,7 @@ class DeviceRow {
     this.pid,
     required this.canForceStop,
     this.lastError,
+    this.imageFingerprint,
   });
 
   @override
@@ -814,7 +814,8 @@ class DeviceRow {
       home.hashCode ^
       pid.hashCode ^
       canForceStop.hashCode ^
-      lastError.hashCode;
+      lastError.hashCode ^
+      imageFingerprint.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -829,7 +830,8 @@ class DeviceRow {
           home == other.home &&
           pid == other.pid &&
           canForceStop == other.canForceStop &&
-          lastError == other.lastError;
+          lastError == other.lastError &&
+          imageFingerprint == other.imageFingerprint;
 }
 
 /// A diagnosis, when one was taken.
@@ -1168,11 +1170,7 @@ class DisplayReceiverRow {
           health == other.health;
 }
 
-enum DisplayStaleAction {
-  keepWithNativeBanner,
-  blank,
-  ;
-}
+enum DisplayStaleAction { keepWithNativeBanner, blank }
 
 class DisplaySurfaceRow {
   final String world;
@@ -1209,18 +1207,9 @@ class DisplaySurfaceRow {
           outputs == other.outputs;
 }
 
-enum DisplaySyncMode {
-  stayInSync,
-  positional,
-  ;
-}
+enum DisplaySyncMode { stayInSync, positional }
 
-enum DisplayTheme {
-  light,
-  dark,
-  highContrast,
-  ;
-}
+enum DisplayTheme { light, dark, highContrast }
 
 class FailureRow {
   final String what;
@@ -1283,14 +1272,7 @@ class GateRow {
 /// `Warn` is deliberately not blocking: a key-custody problem is urgent to fix
 /// and irrelevant to whether somebody is onboarded, and a warning that hijacked
 /// the blocker would tell a joiner they are stuck when they are not.
-enum GateState {
-  pass,
-  wait,
-  fail,
-  warn,
-  skip,
-  ;
-}
+enum GateState { pass, wait, fail, warn, skip }
 
 class HeadRow {
   final String id;
@@ -1402,6 +1384,37 @@ class HostFacts {
           identityHome == other.identityHome &&
           spacesRoot == other.spacesRoot &&
           orbitCount == other.orbitCount;
+}
+
+/// The staged image this client spawns from — see `client::ImageStanding`.
+class ImageRow {
+  /// Content hash of the staged bytes, as staged. Two processes reporting
+  /// the same fingerprint run the same code, whatever their paths say.
+  final String fingerprint;
+  final BigInt stagedAtMs;
+
+  /// The source was rebuilt after this image was staged: a roll-forward
+  /// would change what runs.
+  final bool sourceChanged;
+
+  const ImageRow({
+    required this.fingerprint,
+    required this.stagedAtMs,
+    required this.sourceChanged,
+  });
+
+  @override
+  int get hashCode =>
+      fingerprint.hashCode ^ stagedAtMs.hashCode ^ sourceChanged.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ImageRow &&
+          runtimeType == other.runtimeType &&
+          fingerprint == other.fingerprint &&
+          stagedAtMs == other.stagedAtMs &&
+          sourceChanged == other.sourceChanged;
 }
 
 /// One row of the Library: an installed World.
@@ -1569,7 +1582,6 @@ enum Missing {
 
   /// It could not be asked.
   unreachable,
-  ;
 }
 
 class NoticeRow {
@@ -1578,10 +1590,7 @@ class NoticeRow {
   /// Where a browser was sent, when that is what happened.
   final String? launched;
 
-  const NoticeRow({
-    required this.said,
-    this.launched,
-  });
+  const NoticeRow({required this.said, this.launched});
 
   @override
   int get hashCode => said.hashCode ^ launched.hashCode;
@@ -1636,7 +1645,6 @@ enum PresenceView {
   /// right now. A measurement — distinct from the card-level `None`, which
   /// is "no Space that names it could be asked".
   offline,
-  ;
 }
 
 /// What a screen was pointed at.
@@ -1687,11 +1695,7 @@ class PresentationFacts {
   /// different things to tell somebody standing in front of a screen.
   final String? failure;
 
-  const PresentationFacts({
-    this.chosen,
-    this.program,
-    this.failure,
-  });
+  const PresentationFacts({this.chosen, this.program, this.failure});
 
   @override
   int get hashCode => chosen.hashCode ^ program.hashCode ^ failure.hashCode;
@@ -1794,9 +1798,8 @@ sealed class PresentedScene with _$PresentedScene {
     /// `source_unavailable`, `unsupported`, or `program_ended`.
     required String reason,
   }) = PresentedScene_Blank;
-  const factory PresentedScene.unsupported({
-    required String output,
-  }) = PresentedScene_Unsupported;
+  const factory PresentedScene.unsupported({required String output}) =
+      PresentedScene_Unsupported;
 }
 
 /// The Space somebody is administering, as it last answered.
@@ -1851,9 +1854,7 @@ sealed class Staleness with _$Staleness {
   const factory Staleness.neverLoaded() = Staleness_NeverLoaded;
 
   /// The stream said so, and said why.
-  const factory Staleness.signalled(
-    String field0,
-  ) = Staleness_Signalled;
+  const factory Staleness.signalled(String field0) = Staleness_Signalled;
 }
 
 /// What one Orbit is holding.
@@ -1936,7 +1937,7 @@ class SuggestionRow {
           handles == other.handles;
 }
 
-/// The artwork one World ships, as PNG bytes compiled into this build.
+/// The artwork one selected World release ships, as bounded PNG bytes.
 ///
 /// Not part of [`LibraryRow`], and the omission is the design: see
 /// [`world_artwork`]. Both halves are optional and their absence is a real
@@ -1950,10 +1951,7 @@ class WorldArtwork {
   final Uint8List? mark;
   final Uint8List? hero;
 
-  const WorldArtwork({
-    this.mark,
-    this.hero,
-  });
+  const WorldArtwork({this.mark, this.hero});
 
   @override
   int get hashCode => mark.hashCode ^ hero.hashCode;
@@ -2023,12 +2021,12 @@ class WorldPersonRow {
 
 /// A World's channel, as this machine last found it.
 ///
-/// Separate from the row's compiled-in fields because the two are different
-/// kinds of fact: the list is the install list and cannot go stale, this is
-/// measured and can. Keeping them apart is what stops the Library becoming a
-/// surface that probes to draw itself.
+/// Separate from the row's signed declaration because the two are different
+/// kinds of fact: the list is the selected install list, while this is measured
+/// and can. Keeping them apart is what stops the Library becoming a surface
+/// that probes to draw itself.
 class WorldUpdateRow {
-  /// The bundle version serving now. `None` is the embedded floor.
+  /// The bundle version serving now. `None` means no valid release is selected.
   final String? serving;
 
   /// The version the channel named when it was last asked.

@@ -31,7 +31,7 @@
 //! `host_plane::deleting_an_issue_needs_confirmation_it_can_actually_ask_for`,
 //! which drives the 409 path `serve` answers with.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -202,37 +202,45 @@ fn a_spawned_daemon_does_not_hold_our_stdout_open() {
 
     // Read the readiness line first: it is emitted after `ensure_lait_daemon`,
     // so seeing it proves a daemon was really spawned and is really up.
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (eof_tx, eof_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut s = String::new();
-        tx.send(stdout.read_to_string(&mut s).map(|_| s)).ok();
+        let mut stdout = BufReader::new(stdout);
+        let mut banner = String::new();
+        let ready = stdout.read_line(&mut banner).map(|_| banner.clone());
+        ready_tx.send(ready).ok();
+        let rest = stdout.read_to_string(&mut banner).map(|_| banner);
+        eof_tx.send(rest).ok();
     });
 
-    // Give the server a moment to print, then end it. Killing (rather than a
-    // clean shutdown) is the sharpest form of the question: every handle this
-    // process owned is gone, so if stdout still does not reach EOF, somebody
-    // else is holding it.
-    std::thread::sleep(Duration::from_secs(3));
+    // Runner-backed startup is intentionally allowed to take longer than a
+    // fixed sleep. Wait for the readiness fact itself, then end the server.
+    // Killing (rather than a clean shutdown) is the sharpest form of the
+    // question: every handle this process owned is gone, so if stdout still
+    // does not reach EOF, somebody else is holding it.
+    let ready = ready_rx.recv_timeout(Duration::from_secs(20));
     let _ = child.kill();
     let _ = child.wait();
-    let read = rx.recv_timeout(Duration::from_secs(15));
+    let read = eof_rx.recv_timeout(Duration::from_secs(15));
 
     // Before any assert: a live daemon is what wedges the reader, and on failure
     // it would otherwise outlive the test and hold the *runner's* pipe too.
     shutdown(&home);
 
+    let banner = ready
+        .expect("the server did not emit its readiness line within 20 seconds")
+        .expect("reading the readiness line failed");
+    assert!(
+        banner.contains("\"token\""),
+        "the readiness line must prove a server came up; got: {banner:?}",
+    );
     let read = read.expect(
         "the server exited but its stdout never reached EOF — the daemon it spawned \
          inherited the write end and is holding it open. Whoever captures lait's \
          stdout (`npm run dev`, a test harness, an MCP client) hangs here.",
     );
-    let banner = read.expect("reading stdout failed");
-    assert!(
-        banner.contains("\"token\""),
-        "the readiness line must have been emitted (so a daemon was really \
-         started before the pipe question was asked); got: {banner:?}",
-    );
+    read.expect("reading stdout to EOF failed");
 }
 
 /// `try_wait` must answer *both* ways: a daemon that died is reported dead, and
@@ -259,7 +267,7 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     runtime.block_on(async {
         let client = lait::daemon::Client::at(daemon_home.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        while !matches!(client.probe().await, lait::control::Probe::Healthy) {
+        while !matches!(client.probe().await, lait::control::Probe::Healthy { .. }) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "Lait daemon did not become ready"

@@ -1,0 +1,5 @@
+# The staged `lait` sidecar that `bundle.externalBin` picks up. A build
+# product of this tree (scripts/stage-sidecar.mjs puts it here), never a
+# checked-in binary — the pair rule is "one tree builds both", and a committed
+# sidecar would be some other tree's.
+binaries/

@@ -31,6 +31,18 @@ export interface WorldUpdate {
   available: string | null;
   behind: boolean;
   unmet: string[] | null;
+  /** The durable native update operation, when consent has been recorded. */
+  operation: string | null;
+  /** accepted | fetching | migrating | waiting are live; verified | refused are done. */
+  phase: string | null;
+  progress: string | null;
+  message: string | null;
+}
+
+/** Whether a recorded update operation is still doing work. */
+export function updateInProgress(update: WorldUpdate | null): boolean {
+  return update !== null && update.phase !== null
+    && update.phase !== "verified" && update.phase !== "refused";
 }
 
 export interface Head {
@@ -39,6 +51,11 @@ export interface Head {
   origin: string | null;
   owned: boolean;
   orbit: string | null;
+  /** The one World this head serves; null (a pre-pin head) matches no row. */
+  world: string | null;
+  /** "running", "exited" or "unknown" — presence is not liveness. */
+  state: string;
+  stateDetail: string | null;
 }
 
 export interface HostFacts {
@@ -62,6 +79,8 @@ export interface Failure {
 export interface Device {
   id: string; label: string; state: string; owned: boolean; degraded: string | null;
   home: string; pid: number | null; canForceStop: boolean; lastError: string | null;
+  /** Hash of the image this device actually runs; compare with view.image. */
+  imageFingerprint: string | null;
 }
 
 export interface Storage { orbit: string; name: string | null; bytesOnDisk: number | null; objectCount: number | null; lastVerifiedMs: number | null; missing: "notPlaced" | "unreachable" | null; }
@@ -86,7 +105,8 @@ export interface DisplayHealth { revision: string; currentItem: string; elapsedM
 export interface DisplayReceiver { device: string; label: string; platform: string; build: string; issuedAtUnixMs: number; revokedAtUnixMs: number | null; health: DisplayHealth | null; }
 export interface DisplayAssignment { assignment: string; device: string; orbit: string; space: string; program: string; world: string; surface: string; controller: string; theme: DisplayTheme; syncGroup: string | null; syncMode: DisplaySyncMode | null; staticDelayMs: number; expiresAtUnixMs: number | null; revokedAtUnixMs: number | null; }
 export interface DisplayPairing { pairing: string; confirmationPhrase: string[]; certificateSha256: string; platform: string; build: string; createdAtUnixMs: number; expiresAtUnixMs: number; }
-export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; }
+export interface IdentifierCustody { slots: string[]; portable: boolean; }
+export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
 
 /**
@@ -202,10 +222,53 @@ export interface ClientView {
   failures: Failure[];
   /** Core action keys, not UI-local flags. */
   inFlight: string[];
+  /** The staged image this client spawns from; null when nothing was staged. */
+  image: ImageStanding | null;
+  /**
+   * The one thing a person is ever asked about this client's own updating:
+   * when to restart. `null` is the ordinary evergreen state — and also a
+   * machine that has never completed a check, which is not "up to date".
+   */
+  update: UpdateIntent | null;
+  /** An exit was carried out; the desktop host ends the process on this cue. */
+  exited: boolean;
+}
+
+/**
+ * Never a question about whether to take an update. Staging is silent and
+ * continuous; applying happens at a moment no client is alive. This is the
+ * request to reach that moment, or news that is not an update at all.
+ */
+export type UpdateIntent =
+  /** Staged and waiting for a restart this machine will not take on its own. */
+  | { kind: "restartRequested"; version: string; urgency: UpdateUrgency }
+  /** Ready, and something is holding the restart — being waited for, not ignored. */
+  | { kind: "waiting"; version: string; holding: string[] }
+  /** A signature that did not verify, or a pointer that went backwards. */
+  | { kind: "attention"; why: string }
+  /**
+   * Below the published floor: this build must move. The only case that
+   * restarts without asking — `holding` is what is still draining, and an
+   * empty list means take the restart now.
+   */
+  | { kind: "forced"; version: string; holding: string[] };
+
+/** How hard to ask, by how long the release has waited since staging. */
+export type UpdateUrgency = "quiet" | "insistent" | "urgent";
+
+/** The staged image, and whether the source was rebuilt since staging. */
+export interface ImageStanding {
+  fingerprint: string;
+  stagedAtMs: number;
+  /** A roll-forward would change what runs. */
+  sourceChanged: boolean;
 }
 
 export type ClientAction =
   | { type: "refresh" }
+  | { type: "reload" }
+  | { type: "exit"; goOffline: boolean }
+  | { type: "openLink"; url: string }
   | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
@@ -220,6 +283,7 @@ export type ClientAction =
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
   | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
+  | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
   | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
   | { type: "openInvitation"; message: string }
@@ -233,6 +297,8 @@ export type ClientAction =
 
 export const actionKey = {
   refresh: "refresh",
+  reload: "image.reload",
+  exit: "exit",
   open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
   startDevice: (id: string) => `device.start:${id}`,
@@ -260,6 +326,7 @@ export const actionKey = {
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
+  displayIdentifierAdmitPassphrase: "display.identifier.admit",
   sendMessage: (to: string) => `correspondence.send:${to}`,
   collectMail: "correspondence.collect",
   // Spelled to match `Action::key` in tools/astrolabe/src/runtime.rs. A key that
@@ -283,6 +350,9 @@ export const actionKey = {
 export function keyFor(action: ClientAction): string {
   switch (action.type) {
     case "refresh": return actionKey.refresh;
+    case "reload": return actionKey.reload;
+    case "exit": return actionKey.exit;
+    case "openLink": return `link.open:${action.url}`;
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
@@ -312,6 +382,7 @@ export function keyFor(action: ClientAction): string {
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
+    case "displayIdentifierAdmitPassphrase": return actionKey.displayIdentifierAdmitPassphrase;
     case "sendMessage": return actionKey.sendMessage(action.to);
     case "shareReach": return actionKey.shareReach;
     case "addCorrespondent": return actionKey.addCorrespondent;
@@ -499,6 +570,9 @@ export const loadingClientView: ClientView = {
   notices: [],
   failures: [],
   inFlight: [],
+  image: null,
+  update: null,
+  exited: false,
 };
 
 /**
@@ -526,6 +600,27 @@ export function watchMenu(listener: (id: string) => void): () => void {
  */
 export function hostOwnsFullscreen(): boolean {
   return isTauri();
+}
+
+/** Copy only — the launch itself is delivered by the core either way. */
+export function opensWorldsInOwnWindows(): boolean {
+  return isTauri();
+}
+
+/**
+ * Take the restart a staged release is waiting for.
+ *
+ * Nothing is applied here and nothing is downloaded — the release is already
+ * on disk. This ends the process so the swap can happen in the window where
+ * no client is alive. A host capability, because only the host can end and
+ * relaunch itself; outside the desktop host there is nothing to restart, and
+ * this does nothing rather than pretending.
+ *
+ * Does not return on success.
+ */
+export async function restartForUpdate(version: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("restart_for_update", { version });
 }
 
 /**
@@ -621,7 +716,7 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
         case "open":
           complete(key, (current) => ({
             ...current,
-            heads: current.heads.some((head) => head.orbit === null)
+            heads: current.heads.some((head) => head.orbit === null && head.world === action.world)
               ? current.heads
               : [...current.heads, {
                   id: "identity:fixture",
@@ -629,6 +724,9 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
                   origin: "http://127.0.0.1:52713/",
                   owned: true,
                   orbit: null,
+                  world: action.world,
+                  state: "running",
+                  stateDetail: null,
                 }],
             notices: [{ said: "World is ready in your browser.", launched: action.entryPath }, ...current.notices],
           }));
@@ -838,6 +936,7 @@ export const fixtureClientView: ClientView = {
       createdAtUnixMs: 1_755_000_000_000,
       expiresAtUnixMs: 1_755_000_600_000,
     }],
+    identifierCustody: { slots: ["windows-dpapi"], portable: false },
   },
   devices: [],
   storage: [],
@@ -900,6 +999,9 @@ export const fixtureClientView: ClientView = {
   inFlight: [],
   failures: [],
   notices: [],
+  image: null,
+  update: null,
+  exited: false,
 };
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

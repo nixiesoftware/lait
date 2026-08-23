@@ -101,6 +101,17 @@ impl Link {
         }
     }
 
+    /// The canonical spelling of this link.
+    ///
+    /// The inverse of [`Link::parse`], so a link recognized at a launch can be
+    /// carried onward as one value rather than as the argument it arrived in.
+    pub fn to_url(&self) -> String {
+        match self {
+            Self::Invite { ticket } => format!("{SCHEME}//join/{ticket}"),
+            Self::World { mount } => format!("{SCHEME}//world/{mount}"),
+        }
+    }
+
     /// The link this launch was asked to open, if any.
     ///
     /// The first argument that parses, rather than the first argument: a
@@ -116,6 +127,25 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every link this build recognizes survives being rendered and reparsed,
+    /// which is what lets one arrive as an argument and travel on as a value.
+    #[test]
+    fn a_link_round_trips_through_its_canonical_spelling() {
+        for link in [
+            Link::Invite {
+                ticket: "abc123".into(),
+            },
+            Link::World {
+                mount: "issues".into(),
+            },
+        ] {
+            assert_eq!(
+                Link::parse(&link.to_url()).expect("its own spelling parses"),
+                link
+            );
+        }
+    }
 
     #[test]
     fn an_invite_link_carries_its_ticket_through_either_spelling() {

@@ -198,18 +198,25 @@ impl DisplayCoordinator {
             input: want.input.clone(),
         };
         request.validate().map_err(adapter_failure)?;
-        let invocation = (surface.prepare)(&request).map_err(adapter_failure)?;
+        let invocation = surface.prepare(&request).map_err(adapter_failure)?;
         package
             .validate_invocation(&invocation)
             .map_err(adapter_failure)?;
+        // Process-backed packages keep their parsed operation opaque, so a
+        // legitimate World/Find query arrives as `Remote`. It is still bounded
+        // by `QueryOnlyHost` below: cross-World calls, Runtime Work, control,
+        // content, and every mutation-capable facility are refused at the
+        // callback boundary rather than trusted to the runner's classification.
         if invocation.access() != ClientAccess::Query
             || !matches!(
                 invocation.kind(),
-                ClientInvocationKind::World(_) | ClientInvocationKind::Find { .. }
+                ClientInvocationKind::World(_)
+                    | ClientInvocationKind::Find { .. }
+                    | ClientInvocationKind::Remote(_)
             )
         {
             return Err(anyhow!(
-                "display surface did not prepare a read-only World or Find invocation"
+                "display surface did not prepare a read-only World, Find, or remote invocation"
             ));
         }
 
@@ -238,7 +245,6 @@ impl DisplayCoordinator {
             .await
             .map_err(adapter_failure)?;
         let projection = surface
-            .renderer
             .project(value, &request)
             .await
             .map_err(adapter_failure)?;
@@ -311,6 +317,12 @@ impl DisplayCoordinator {
         };
         let projection = self.render_surface(&want, Some(&assignment)).await?;
         let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
+        tracing::debug!(
+            device = %device,
+            assignment = %assignment.id,
+            tier = ?capabilities.playback.tier,
+            "compiling display program"
+        );
         let compiled = Arc::new(self.compiler.compile(
             &assignment.id,
             &assignment.program,
@@ -360,14 +372,14 @@ impl DisplayCoordinator {
 
     /// Wait until either controller state changes, the assigned Orbit reports
     /// a relevant World invalidation/reset, or the receiver's bounded wait
-    /// expires. The caller always performs a fresh authoritative compile after
-    /// this returns; this is a doorbell, never a patch.
+    /// expires. `true` means a controller or relevant World doorbell fired;
+    /// `false` means only the timer elapsed. This is a doorbell, never a patch.
     pub async fn wait_for_change(
         &self,
         assignment: &AssignmentRecord,
         mut subscriptions: DisplayChangeSubscriptions,
         wait: Duration,
-    ) {
+    ) -> bool {
         let orbit = assignment.orbit.as_str();
         let world = assignment.source.world.as_str();
         let changed = async {
@@ -395,7 +407,26 @@ impl DisplayCoordinator {
                 }
             }
         };
-        let _ = tokio::time::timeout(wait, changed).await;
+        tokio::time::timeout(wait, changed).await.is_ok()
+    }
+
+    /// Re-sample one already compiled program on its persisted group clock.
+    ///
+    /// A timer-only long-poll wakeup changes playback position, not World
+    /// semantics or assets. Keeping that distinction here prevents members of
+    /// one sync group from queueing identical full renders behind the same
+    /// World runner at the boundary they are meant to share.
+    pub fn aligned_playback_for(
+        &self,
+        assignment: &AssignmentRecord,
+        program: &DisplayProgram,
+        sampled_at_unix_ms: u64,
+    ) -> Result<display_protocol::program::DisplayPlayback> {
+        let state = self.store.snapshot()?;
+        let alignment = playback_alignment(&state, assignment, sampled_at_unix_ms)?
+            .ok_or_else(|| anyhow!("display assignment has no sync alignment"))?;
+        super::compiler::aligned_playback(&program.items, program.playback.cycle, &alignment)
+            .map(|(playback, _)| playback)
     }
 
     pub fn current_asset(
@@ -1132,12 +1163,12 @@ mod tests {
             expires_at_unix_ms: None,
             revoked_at_unix_ms: None,
         };
-        let surface = world_interface::display::DisplaySurface {
+        let surface = world_interface::display::DisplaySurface::local(
             descriptor,
-            canonicalize_input: |_| unreachable!(),
-            prepare: |_| unreachable!(),
-            renderer: Arc::new(UnusedRenderer),
-        };
+            |_| unreachable!(),
+            |_| unreachable!(),
+            Arc::new(UnusedRenderer),
+        );
         validate_source_pin(&assignment, &surface).unwrap();
         let mut drifted = assignment;
         drifted.source.surface_contract_version = 2;

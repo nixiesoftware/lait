@@ -726,6 +726,106 @@ mod tests {
         );
     }
 
+    /// macOS keeps the pair nested inside the bundle, and every other staging
+    /// test in this file uses a flat Linux tree — so the one layout where the
+    /// pair is *not* at the root was checked only as two strings by
+    /// [`entry_for`]/[`sidecar_for`], never by staging an archive shaped like
+    /// one. That is the half of the contract a packaging change can break:
+    /// the client's bundler decides where the pair lands, and a bundle that
+    /// put it anywhere else would produce a tree this refuses — on macOS
+    /// only, discovered at the first update rather than at the build.
+    #[test]
+    fn a_macos_tree_stages_with_the_pair_nested_inside_the_bundle() {
+        let target = "aarch64-apple-darwin";
+        let archive = tree_targz(
+            "astrolabe-tree-0.0.2-aarch64-apple-darwin",
+            &[
+                ("Contents/MacOS/astrolabe", b"entry", true),
+                ("Contents/MacOS/lait", b"sidecar", true),
+                ("Contents/Resources/LICENSE", b"terms", false),
+                ("Contents/Info.plist", b"<plist/>", false),
+            ],
+        );
+        let (objects, pubkey) = sealed_tree_feed("0.0.2", target, &archive);
+        let resolved = resolve(&objects, pubkey);
+        let root = tempfile::tempdir().expect("an install root");
+
+        stage_tree_with(
+            |u, _| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            &resolved,
+            target,
+            root.path(),
+        )
+        .expect("a bundle-shaped tree stages");
+
+        // Staged where the stub looks, with the pair still nested and still
+        // executable — a bundle whose binaries lost their mode installs a
+        // client that cannot be launched.
+        for half in ["Contents/MacOS/astrolabe", "Contents/MacOS/lait"] {
+            let staged = root.path().join(STAGED_DIR).join(half);
+            assert!(staged.is_file(), "{half} did not survive staging");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = staged
+                    .metadata()
+                    .expect("staged metadata")
+                    .permissions()
+                    .mode();
+                assert!(
+                    mode & 0o111 != 0,
+                    "{half} was staged without its executable bit"
+                );
+            }
+        }
+        assert!(root.path().join(STAGE_MANIFEST).is_file());
+    }
+
+    /// The same refusal as the flat case, in the nested layout: a bundle
+    /// missing either half must be refused by name before it is staged.
+    #[test]
+    fn a_macos_tree_missing_half_the_pair_is_refused_by_its_nested_name() {
+        let target = "aarch64-apple-darwin";
+        for (missing, present) in [
+            ("Contents/MacOS/lait", "Contents/MacOS/astrolabe"),
+            ("Contents/MacOS/astrolabe", "Contents/MacOS/lait"),
+        ] {
+            let archive = tree_targz(
+                "astrolabe-tree-0.0.2-aarch64-apple-darwin",
+                &[(present, &b"half"[..], true)],
+            );
+            let (objects, pubkey) = sealed_tree_feed("0.0.2", target, &archive);
+            let resolved = resolve(&objects, pubkey);
+            let root = tempfile::tempdir().expect("an install root");
+            let error = stage_tree_with(
+                |u, _| {
+                    objects
+                        .get(u)
+                        .cloned()
+                        .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+                },
+                &resolved,
+                target,
+                root.path(),
+            )
+            .expect_err("half a bundle must refuse")
+            .to_string();
+            assert!(
+                error.contains(&format!("carries no {missing} at its root")),
+                "the refusal must name the missing half: {error}"
+            );
+            assert!(
+                !root.path().join(STAGE_MANIFEST).exists(),
+                "a refused bundle left a believable stage behind"
+            );
+        }
+    }
+
     #[test]
     fn the_entry_name_is_computable_for_every_target_from_any_host() {
         assert_eq!(entry_for("x86_64-pc-windows-msvc"), "astrolabe.exe");

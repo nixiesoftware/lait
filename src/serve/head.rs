@@ -1,11 +1,6 @@
 //! Where a World's web head comes from: a downloaded bundle when one is
-//! activated, the compiled-in tree otherwise (SUB-22).
-//!
-//! The embedded tree is the **floor**: compiled in, always present, always
-//! the version this binary was built with, and therefore always compatible
-//! with itself. A downloaded bundle sits over it, and the floor is what a
-//! rollback returns to — a target that cannot be missing, because it cannot
-//! be deleted.
+//! activated, unavailable otherwise. There is one selected release and no
+//! compiled-in product shadow behind it.
 //!
 //! Only a bundle whose declared runtime version equals this build's is ever
 //! activated. That check belongs to whoever activates ([`Source::activated`]);
@@ -15,9 +10,8 @@
 //!
 //! ## Traversal is ours to refuse now
 //!
-//! `include_dir` resolved against an embedded tree, so escaping it was not
-//! possible and `shell` said so in as many words. A directory on disk has no
-//! such property, so every lookup here refuses anything that is not a plain
+//! A directory on disk has no implicit containment property, so every lookup
+//! here refuses anything that is not a plain
 //! relative path before it touches the filesystem — and a refusal is a miss,
 //! which the SPA fallback answers exactly as it answers any other miss.
 
@@ -31,14 +25,13 @@ pub struct Source {
 }
 
 impl Source {
-    /// The compiled-in tree and nothing else — a build with no downloaded
-    /// bundle, which is every build until one is published and staged.
-    pub fn embedded() -> Self {
+    /// No selected release. Tests and diagnostics use this to model an
+    /// unavailable World without inventing product bytes.
+    pub fn unavailable() -> Self {
         Self { bundle: None }
     }
 
-    /// Serve from `bundle` when it holds the asked-for path, else from the
-    /// embedded floor.
+    /// Serve from the selected immutable release when it holds the path.
     ///
     /// Whether this build may run the bundle at all was settled when it was
     /// staged — a payload whose declared requirements are unmet never reaches
@@ -50,7 +43,7 @@ impl Source {
         }
     }
 
-    /// The activated bundle's root, when the head is not serving the floor.
+    /// The activated bundle's root.
     pub fn bundle(&self) -> Option<&Path> {
         self.bundle.as_deref()
     }
@@ -76,8 +69,8 @@ impl Source {
 /// Refuses anything that is not a plain relative path *before* touching the
 /// filesystem: an absolute path, a root or prefix component, and any `..` are
 /// all misses rather than reads. A miss is safe by construction here — the
-/// caller falls back to the embedded floor and then to the SPA entry — so the
-/// refusal costs nothing and needs no separate error path.
+/// caller falls back to the release's SPA entry — so the refusal costs nothing
+/// and needs no separate error path.
 fn read_under(root: &Path, relative: &str) -> Option<Vec<u8>> {
     let relative = relative.trim_start_matches('/');
     if relative.is_empty() {
@@ -109,12 +102,11 @@ pub fn worlds_root(identity: &Path) -> PathBuf {
 /// present under a World's name is one that was proven and admitted when it
 /// landed. What this settles is only *which* source a head serves from.
 pub fn activate(worlds: &Path, world: &str) -> Source {
-    let candidate = crate::update::world::live_dir(worlds, world);
-    if candidate.is_dir() {
+    if let Some(candidate) = crate::update::world::active_dir(worlds, world) {
         tracing::info!(bundle = %candidate.display(), %world, "serving a staged World payload");
         return Source::activated(candidate);
     }
-    Source::embedded()
+    Source::unavailable()
 }
 
 #[cfg(test)]
@@ -143,7 +135,7 @@ mod tests {
         );
         assert!(
             source.read("/not-in-the-bundle.js").is_none(),
-            "a path the bundle does not hold must fall through to the floor"
+            "a path the bundle does not hold must fall through to its entry"
         );
     }
 
@@ -157,8 +149,8 @@ mod tests {
         assert!(source.read("/index.html").is_some());
     }
 
-    /// `include_dir` made this impossible for free and the module it replaced
-    /// said so. A directory on disk gives nothing for free.
+    /// The old embedded source made this impossible for free. A selected
+    /// release directory on disk gives nothing for free.
     #[test]
     fn nothing_outside_the_bundle_is_readable_through_it() {
         let dir = bundle_with(&[("index.html", b"inside")]);
@@ -198,9 +190,21 @@ mod tests {
             "an absent worlds directory activated something"
         );
 
-        let a = crate::update::world::live_dir(&worlds, "world.a");
+        let a =
+            crate::update::world::release_dir(&worlds, "world.a", "1.0.0").expect("a release path");
         std::fs::create_dir_all(&a).expect("a payload for world.a");
         std::fs::write(a.join("index.html"), b"a").expect("its entry");
+        std::fs::write(
+            crate::update::world::world_root(&worlds, "world.a").join("current.json"),
+            serde_json::to_vec(&crate::update::world::StagedBundle {
+                world: "world.a".to_string(),
+                version: "1.0.0".to_string(),
+                digest: "00".repeat(32),
+                files: 1,
+            })
+            .expect("a pointer"),
+        )
+        .expect("write the pointer");
         assert_eq!(
             activate(&worlds, "world.a").bundle(),
             Some(a.as_path()),
@@ -213,18 +217,17 @@ mod tests {
     }
 
     #[test]
-    fn the_embedded_floor_is_the_source_when_nothing_is_activated() {
-        let source = Source::embedded();
+    fn no_release_is_available_when_nothing_is_activated() {
+        let source = Source::unavailable();
         assert!(source.bundle().is_none());
         assert!(
             source.read("/index.html").is_none(),
-            "the floor is read by the caller, not through the bundle path"
+            "an absent release must not reveal product bytes"
         );
     }
 
-    /// Deleting a bundle is a supported act with a defined outcome: the floor
-    /// serves. Nothing about it is an error, because the floor is compiled in
-    /// and cannot be the thing that went missing.
+    /// A vanished immutable release is unavailable; the host never substitutes
+    /// another product generation behind the selected coordinate.
     #[test]
     fn a_bundle_that_vanishes_underneath_falls_back_rather_than_failing() {
         let dir = bundle_with(&[("index.html", b"from the bundle")]);

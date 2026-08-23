@@ -866,20 +866,22 @@ mod tests {
     /// process alone would stop the parent and leave the work running.
     ///
     /// The fixture is a shell waiting on a child. Only the child is reachable by a
-    /// signal that ignores the group — the shell here ignores SIGTERM — so if the
-    /// tree goes down inside the budget, the signal reached the child.
+    /// signal that ignores the group — the shell handles SIGTERM with a no-op — so
+    /// if the tree goes down inside the budget, the signal reached the child.
     #[cfg(unix)]
     #[test]
     fn asking_reaches_the_childs_children() {
         let mut command = Command::new("sh");
-        // Order and readiness are both load-bearing. The child is spawned
-        // BEFORE the trap, because an ignored disposition survives exec — a
-        // child forked after `trap '' TERM` is TERM-deaf too, and the ask
-        // could reach nobody. And the readiness line is read before the stop,
-        // because without it the group signal could land before the trap is
-        // installed and kill the shell by default disposition — a pass that
-        // proves nothing about reaching descendants.
-        command.args(["-c", "sleep 60 & trap '' TERM; echo ready; wait"]);
+        // The descendant announces only after it has inherited SIGTERM's default
+        // disposition. The parent uses a caught no-op rather than an ignored
+        // disposition because caught handlers reset to default across `exec`,
+        // whereas ignored dispositions survive it. Without this handshake, the ask
+        // can land after the parent installs its handler but before it has spawned
+        // the child, turning a process-group proof into a race.
+        command.args([
+            "-c",
+            "trap : TERM; sh -c 'echo ready; exec sleep 60' & child=$!; wait \"$child\"",
+        ]);
         command.stdout(Stdio::piped());
         own_process_group(&mut command);
         let mut child = command.spawn().expect("spawn a parent with a child");
@@ -887,7 +889,7 @@ mod tests {
         let mut line = String::new();
         BufReader::new(stdout)
             .read_line(&mut line)
-            .expect("read the fixture's readiness line");
+            .expect("read the descendant's readiness line");
         assert_eq!(line.trim(), "ready");
 
         let mut head = OwnedHead {

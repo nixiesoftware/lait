@@ -295,7 +295,7 @@ struct VerifyArgs {
     reff: String,
     /// Pinned repository ContentRef (64 lowercase hex).
     source: Hex32Bytes,
-    /// Exact caller-selected Build id. Omit to use the bundled in-process
+    /// Exact caller-selected Build id. Omit to use the first-party runner-local
     /// verifier (the check records package_filled). That verifier binds the
     /// pinned source; it does not compile or isolate. Execution begins only
     /// when the named Build is installed locally.
@@ -916,7 +916,7 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<VerifyArgs>(
             "verify",
-            "Start a durable issue verification Run against one pinned repository ContentRef. Returns the stable Run id. The local Station may perform an Attempt after commit when a matching handler is installed. The bundled in-process verifier binds the pinned source; it does not compile the repository or isolate the host. Omit build to select that bundled Build — the check then records package_filled.",
+            "Start a durable issue verification Run against one pinned repository ContentRef. Returns the stable Run id. The local Station may perform an Attempt after commit when a matching handler is installed. The first-party runner-local verifier binds the pinned source; it does not compile the repository or sandbox that runner. Omit build to select that Build — the check then records package_filled.",
             verify,
         ),
         tool::<AcceptCheckArgs>(

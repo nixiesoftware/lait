@@ -109,7 +109,13 @@ pub struct Entered {
 /// created if absent; an existing space store there is a refusal, because one
 /// directory holds one Space and silently forming beside another is how a node
 /// ends up with two.
-pub fn found(home: &Path, identity_dir: &Path, name: &str, nick: Option<&str>) -> Result<Founded> {
+pub fn found(
+    packages: &crate::orbital::WorldPackages,
+    home: &Path,
+    identity_dir: &Path,
+    name: &str,
+    nick: Option<&str>,
+) -> Result<Founded> {
     let home = config::prepare_store_dir(home)?;
     refuse_occupied(&home)?;
 
@@ -120,7 +126,7 @@ pub fn found(home: &Path, identity_dir: &Path, name: &str, nick: Option<&str>) -
     let device = mechanics::actor::device_from_seed(&seed)
         .as_str()
         .to_string();
-    let (space, project) = crate::world::lifecycle::found_space(&home, &seed, name)?;
+    let (space, project) = crate::world::lifecycle::found_space(packages, &home, &seed, name)?;
 
     register(Entry {
         space: space.to_string(),
@@ -144,7 +150,13 @@ pub fn found(home: &Path, identity_dir: &Path, name: &str, nick: Option<&str>) -
 ///
 /// Idempotent for a re-join: a store that already holds this Space is left
 /// exactly as it is, and only the registry row is refreshed.
-pub fn enter(home: &Path, identity_dir: &Path, link: &str, nick: Option<&str>) -> Result<Entered> {
+pub fn enter(
+    packages: &crate::orbital::WorldPackages,
+    home: &Path,
+    identity_dir: &Path,
+    link: &str,
+    nick: Option<&str>,
+) -> Result<Entered> {
     let coordinates = runtime::coordinates::SignedCoordinates::parse_link(link.trim())
         .map_err(|error| anyhow!("invalid invite link: {error}"))?;
     let verified = coordinates
@@ -180,7 +192,7 @@ pub fn enter(home: &Path, identity_dir: &Path, link: &str, nick: Option<&str>) -
         .as_str()
         .to_string();
     if fresh {
-        crate::world::lifecycle::enter_space(&home, &seed, link)?;
+        crate::world::lifecycle::enter_space(packages, &home, &seed, link)?;
     }
 
     register(Entry {
@@ -479,14 +491,17 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 return Some(Response::err(format!("{refusal:#}")));
             }
             let identity = router.catalog().identity().to_path_buf();
+            let packages = router.packages();
             blocking(move || {
-                found(&home, &identity, &name, nick.as_deref()).map(|founded| HostReply::Founded {
-                    space: founded.space,
-                    home: founded.home.display().to_string(),
-                    device: founded.device,
-                    name: founded.name,
-                    project_key: founded.project.key,
-                    project_name: founded.project.name,
+                found(&packages, &home, &identity, &name, nick.as_deref()).map(|founded| {
+                    HostReply::Founded {
+                        space: founded.space,
+                        home: founded.home.display().to_string(),
+                        device: founded.device,
+                        name: founded.name,
+                        project_key: founded.project.key,
+                        project_name: founded.project.name,
+                    }
                 })
             })
             .await
@@ -503,8 +518,9 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 return Some(Response::err(format!("{refusal:#}")));
             }
             let identity = router.catalog().identity().to_path_buf();
+            let packages = router.packages();
             let bootstrapped = tokio::task::spawn_blocking(move || {
-                enter(&home, &identity, &link, nick.as_deref())
+                enter(&packages, &home, &identity, &link, nick.as_deref())
             })
             .await;
             match bootstrapped {
@@ -716,7 +732,8 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 version: crate::VERSION.to_string(),
                 identity_home: router.catalog().identity().display().to_string(),
                 spaces_root: config::spaces_root().display().to_string(),
-                worlds: crate::world::packages()
+                worlds: router
+                    .packages()
                     .world_ids()
                     .map(ToString::to_string)
                     .collect(),

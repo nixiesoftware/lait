@@ -69,7 +69,6 @@ export const IntegrationConfigModal: React.FC<IntegrationConfigModalProps> = ({
     }
     setValues(seed(kind, config));
     setName(config?.name ?? kind.label);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind?.kind]);
 
   const fields = useMemo(() => kind?.fields ?? [], [kind]);
@@ -97,7 +96,6 @@ export const IntegrationConfigModal: React.FC<IntegrationConfigModalProps> = ({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind?.kind, useCityPicker]);
 
   const handleCityPicked = (s: CitySelection) => {

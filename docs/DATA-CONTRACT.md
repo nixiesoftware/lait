@@ -550,8 +550,9 @@ locks. A refusal visibly reconciles the optimistic overlay with its typed
 cause. Therefore action size may affect completion time but never bounded
 time-to-feedback, continued interaction, or visual continuity.
 
-Blueprint is the Issues World bundled in Lait, not another layer in the generic
-engine. Lait owns publication, extraction, gates, Find, and causal storage.
+Blueprint is the independently shipped first-party Issues World, not another
+layer in the generic engine. Lait owns publication, extraction, gates, Find,
+and causal storage.
 Blueprint owns the meanings and physical sharding of Issue, relation, Plan,
 project, team, label, milestone, status, and closure.
 
@@ -596,7 +597,7 @@ and reverse traversal does not require cross-Body row assembly.
 
 V3 to v4 is one launcher-authorized, crash-resumable migration protocol, not one
 unbounded transaction and not a public Issue intent. Accepting the exact World
-update mints an in-process step capability bound to the source, migrator, and
+update mints a launcher-granted step capability bound to the source, migrator, and
 target identities; the caller cannot supply its actor or invoke the protocol
 through MCP. Its durable marker, canonical cursor, and audit log advance in
 deterministic batches below Replica's operation and byte ceilings. Issue roots

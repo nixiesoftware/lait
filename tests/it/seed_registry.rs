@@ -15,13 +15,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
 use comms::policy::Network;
 use comms::{Transport, TransportFactory};
 use lait::control::{request, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [141u8; 32];
 const OTHER_SEED: [u8; 32] = [142u8; 32];
@@ -107,7 +107,7 @@ fn space_of(rt: &tokio::runtime::Runtime, home: &Path) -> String {
 fn seed_pin_lists_structured_and_survives_restart() {
     let net = MemNet::new();
     let home = temp_home("pin");
-    lait::orbital::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
+    crate::world_fixture::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -126,6 +126,7 @@ fn seed_pin_lists_structured_and_survives_restart() {
         &rt,
         &home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -192,7 +193,7 @@ fn seed_pin_lists_structured_and_survives_restart() {
 fn seed_add_and_remove_by_device_id() {
     let net = MemNet::new();
     let home = temp_home("byid");
-    lait::orbital::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
+    crate::world_fixture::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();

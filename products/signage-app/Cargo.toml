@@ -8,6 +8,7 @@ license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [dependencies]
+anyhow = "1"
 font8x8 = "0.3.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 mechanics = { path = "../../crates/mechanics" }
@@ -20,6 +21,7 @@ serde_json = "1"
 sha2 = "0.10"
 signage = { package = "lait-signage", path = "../signage" }
 world-interface = { path = "../../crates/world-interface" }
+world-sdk = { path = "../../crates/world-sdk" }
 
 [lints]
 workspace = true

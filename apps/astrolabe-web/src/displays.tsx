@@ -91,7 +91,8 @@ type DisplaysDialog =
   | { kind: "approve"; pairing: DisplayPairing }
   | { kind: "assign"; receiver: DisplayReceiver }
   | { kind: "unassign"; assignment: DisplayAssignment }
-  | { kind: "revoke"; receiver: DisplayReceiver };
+  | { kind: "revoke"; receiver: DisplayReceiver }
+  | { kind: "passphrase" };
 
 export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }: {
   view: ClientView; dispatch: Dispatch; onBack(): void; ownedWindow?: boolean;
@@ -111,7 +112,7 @@ export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }:
       ? <div className="secondary-scroll"><div className="skeleton" style={{ height: 112, marginBottom: 22 }} />
           <div className="skeleton" style={{ height: 152, marginBottom: 9 }} /><div className="skeleton" style={{ height: 152 }} /></div>
       : <div className="secondary-scroll displays-surface">
-        <Coordinator display={display} />
+        <Coordinator display={display} openDialog={setDialog} />
         <section className="section-block">
           <SectionTitle label="PAIRING REQUESTS" count={display.pendingPairings.length} />
           {display.pendingPairings.length === 0
@@ -132,7 +133,7 @@ export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }:
   </section>;
 }
 
-function Coordinator({ display }: { display: Display }) {
+function Coordinator({ display, openDialog }: { display: Display; openDialog(dialog: DisplaysDialog): void }) {
   return <section className="coordinator-card">
     <div className="coordinator-title">
       <strong>{display.label}</strong>
@@ -144,7 +145,45 @@ function Coordinator({ display }: { display: Display }) {
     </div>
     <Fact label="LAN ORIGIN" value={display.origin} />
     <Fact label="CERTIFICATE SHA-256" value={display.certificateSha256} />
+    <IdentifierCustodyFacts custody={display.identifierCustody}
+      onAddPassphrase={() => openDialog({ kind: "passphrase" })} />
   </section>;
+}
+
+const slotNames: Record<string, string> = {
+  "recovery-key": "this identity",
+  "passphrase": "a passphrase",
+  "windows-dpapi": "this Windows profile",
+};
+
+/**
+ * On the coordinator card, not behind settings: the moment an operator wants
+ * this fact is after the machine is gone, and a warning only reachable from
+ * the lost machine is not a warning.
+ */
+function IdentifierCustodyFacts({ custody, onAddPassphrase }: {
+  custody: Display["identifierCustody"]; onAddPassphrase(): void;
+}) {
+  if (custody === null) {
+    return <Fact label="IDENTIFIER KEY UNLOCKS" value="not reported by this coordinator" />;
+  }
+  const paths = custody.slots.length === 0 ? "none" : custody.slots.map((slot) => slotNames[slot] ?? slot).join(", ");
+  // Offered once: the store refuses a second passphrase, and a control that
+  // would be refused is one this surface should not draw.
+  const hasPassphrase = custody.slots.includes("passphrase");
+  return <div className="identifier-custody">
+    <div className="coordinator-title">
+      <Fact label="IDENTIFIER KEY UNLOCKS" value={paths} />
+      {!hasPassphrase && <button className="quiet-button"
+        title="A way in that survives losing this machine and this identity."
+        onClick={onAddPassphrase}>Add a passphrase</button>}
+    </div>
+    <p className="custody-note" data-warning={!custody.portable || undefined}>
+      {custody.portable
+        ? "Losing every unlock path invalidates the item and asset identifiers already delivered to paired screens. They would each need pairing again."
+        : "Every unlock path is bound to this machine. Losing this profile invalidates the item and asset identifiers already delivered to paired screens, and they would each need pairing again. Add a passphrase or a second device."}
+    </p>
+  </div>;
 }
 
 function PairingCard({ pairing, view, dispatch, onApprove }: {
@@ -223,6 +262,7 @@ function DisplaysDialogs({ dialog, display, orbits, dispatch, onDismiss }: {
   dialog: DisplaysDialog; display: Display; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
 }) {
   switch (dialog.kind) {
+    case "passphrase": return <PassphraseDialog dispatch={dispatch} onDismiss={onDismiss} />;
     case "approve": return <ApproveDialog pairing={dialog.pairing} dispatch={dispatch} onDismiss={onDismiss} />;
     case "assign": return <AssignDialog receiver={dialog.receiver} surfaces={display.surfaces} orbits={orbits}
       dispatch={dispatch} onDismiss={onDismiss} />;
@@ -248,6 +288,38 @@ function DisplaysDialogs({ dialog, display, orbits, dispatch, onDismiss }: {
       </DialogFooter>
     </AppDialog>;
   }
+}
+
+/// A convenience floor so the control can refuse before a round trip; the
+/// daemon refuses shorter ones too, and its check is the real one.
+const minPassphrase = 12;
+
+function PassphraseDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismiss(): void }) {
+  const [entered, setEntered] = useState("");
+  const [again, setAgain] = useState("");
+  const long = [...entered].length >= minPassphrase;
+  const matches = entered === again;
+  return <AppDialog title="Add a passphrase"
+    description="A second way into the identifier key, independent of this machine and this identity. It is not stored — it wraps the key and is forgotten, so losing it costs this path and nothing else."
+    onDismiss={onDismiss}>
+    <label>Passphrase<input type="password" value={entered} onChange={(event) => setEntered(event.target.value)} /></label>
+    {/* Typed twice because it cannot be recovered and cannot be shown back:
+        a mistyped passphrase would look like a working slot until the day it
+        was the only one left. */}
+    <label>Again<input type="password" value={again} onChange={(event) => setAgain(event.target.value)} /></label>
+    {entered !== "" && !long
+      ? <p className="custody-note">At least {minPassphrase} characters.</p>
+      : again !== "" && !matches
+        ? <p className="custody-note">These do not match.</p>
+        : null}
+    <DialogFooter>
+      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
+      <button className="primary-button" disabled={!long || !matches} onClick={() => {
+        void dispatch({ type: "displayIdentifierAdmitPassphrase", passphrase: entered });
+        onDismiss();
+      }}>Add it</button>
+    </DialogFooter>
+  </AppDialog>;
 }
 
 function ApproveDialog({ pairing, dispatch, onDismiss }: { pairing: DisplayPairing; dispatch: Dispatch; onDismiss(): void }) {

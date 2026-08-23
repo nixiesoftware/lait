@@ -1,0 +1,22 @@
+[package]
+name = "lait-signage-runner"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Independent process runner for LAIT's first-party Signage World"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[[bin]]
+name = "lait-world-signage"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+signage = { package = "lait-signage", path = "../signage" }
+signage-app = { package = "lait-signage-app", path = "../signage-app" }
+world-runner = { path = "../../crates/world-runner" }
+world-sdk = { path = "../../crates/world-sdk" }
+
+[lints]
+workspace = true

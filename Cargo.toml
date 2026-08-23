@@ -16,16 +16,22 @@ members = [
     "crates/runtime",
     "crates/schedule",
     "crates/world-interface",
+    "crates/world-runner",
+    "crates/world-sdk",
     "products/issues",
     "products/issues-app",
+    "products/issues-runner",
     "products/signage",
     "products/signage-app",
+    "products/signage-runner",
     "receivers/reference",
     "tools/workbench",
     "tools/astrolabe",
     "tools/astrolabe-ios",
     "tools/feed",
     "tools/stub",
+    "tools/world-fixture",
+    "tools/world-semantic-fixture",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -51,7 +57,7 @@ resolver = "2"
 
 [package]
 name = "lait"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 # MSRV: driven by typst 0.15.1 (via products/issues-app), which requires rustc
 # 1.92. iroh 1.0.0-rc.1 held the floor at 1.91 before that; it is no longer the
@@ -86,28 +92,10 @@ exclude = [
     ".githooks/",
     ".claude/",
     ".claude-plugin/",
-    "dist-workspace.toml",
     "Dockerfile",
     "docker-compose.yml",
     ".dockerignore",
 ]
-
-# `cargo binstall lait` — fetch the prebuilt cargo-dist release archive from
-# GitHub instead of compiling. The URL/layout below matches what cargo-dist
-# **actually** publishes (verified against the released v0.4.8 assets), which is
-# per-OS, NOT flat everywhere: the unix `.tar.gz` archives nest the binary under
-# a `lait-<target-triple>/` directory, while the Windows `.zip` is flat with
-# `lait.exe` at the archive root. `bin-dir` must reflect that per-OS shape — the
-# same layout the self-updater encodes in `update_bin_path_in_archive` (app.rs).
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
-pkg-fmt = "tgz"
-bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
-
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-fmt = "zip"
-# Windows `.zip` is flat: `lait.exe` at the root, no nesting directory.
-bin-dir = "{ bin }{ binary-ext }"
 
 [lib]
 name = "lait"
@@ -145,6 +133,8 @@ lait-directory = { path = "crates/directory" }
 runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
 world-interface = { path = "crates/world-interface" }
+world-runner = { path = "crates/world-runner" }
+world-sdk = { path = "crates/world-sdk" }
 display-protocol = { path = "crates/display-protocol" }
 mediabox = { path = "crates/mediabox" }
 # The network adapter — how independently held replicas exchange their material.
@@ -152,13 +142,6 @@ mediabox = { path = "crates/mediabox" }
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor
 # behind it. Swapping the adapter is a manifest change, not a daemon rewrite.
 comms = { path = "crates/comms" }
-# The canonical bundled product. Its semantic World, schemas, DTOs, and ids are
-# independently packaged; this root owns only the application shell and local
-# control adapters that compose it into Daemon.
-issues = { package = "lait-issues", path = "products/issues" }
-issues-app = { package = "lait-issues-app", path = "products/issues-app" }
-signage = { package = "lait-signage", path = "products/signage" }
-signage-app = { package = "lait-signage-app", path = "products/signage-app" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 
@@ -227,13 +210,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
-# The web client, compiled into the binary. `include_dir` reads `src/serve/assets`
-# at compile time, which is why the built bundle is COMMITTED and lives under
-# `src/` rather than in the excluded `viewer/`: `cargo install lait` must not need
-# npm (same reproducibility bar `build.rs` holds by never shelling out to git),
-# and the published crate drops `viewer/` entirely. See `docs/UI.md`.
-include_dir = "0.7"
-
 # mcp server (stdio)
 rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
 # Already in the tree via rmcp (which `mcp.rs` derives against). Declared directly
@@ -247,7 +223,7 @@ schemars = "1"
 # pieces are owned directly instead of through `self_update`'s GitHub backend:
 # `ureq` + rustls fetches (pure Rust, no reqwest/native-tls/OpenSSL C dep),
 # `semver` orders releases (and lets a `-dev.<sha>` build heal onto stable),
-# flate2/tar/zip open exactly the archive shapes cargo-dist publishes, and
+# flate2/tar/zip open exactly the archive shapes the first-party feed publishes, and
 # `self-replace` performs the rename-out-of-the-way swap that works on a live
 # executable. Envelope verification is `mechanics::actor` — the feed signature
 # is an ordinary ed25519 detached signature, and the kernel stays the only
@@ -257,7 +233,7 @@ semver = "1"
 self-replace = "1"
 flate2 = "1"
 tar = "0.4"
-# `deflate` only — the codec every cargo-dist zip uses. The default feature set
+# `deflate` only — the codec every Windows feed archive uses. The default feature set
 # drags in aes/bzip2/zstd/lzma for codecs no release archive contains.
 zip = { version = "6", default-features = false, features = ["deflate"] }
 
@@ -323,6 +299,9 @@ tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }
 issues-app = { package = "lait-issues-app", path = "products/issues-app", features = ["fault-injection"] }
+issues = { package = "lait-issues", path = "products/issues" }
+signage = { package = "lait-signage", path = "products/signage" }
+signage-app = { package = "lait-signage-app", path = "products/signage-app" }
 # A zero-wiring test entrypoint: a `#[cfg(test)] #[ctor]` scrubs ambient `LAIT_*`
 # env at unit-test process load, *before* any test runs, so a developer's
 # inherited `$LAIT_HOME`/`$LAIT_STORE` can never silently redirect store/identity
@@ -350,7 +329,7 @@ tower = { version = "0.5", features = ["util"] }
 # archives itself now that `self_update` is gone. The `#[ignore]`d
 # `update_bin_path_is_a_real_entry_in_the_published_archives` still reads the
 # REAL published release archives in CI's `updater-contract` job — the model of
-# cargo-dist's layout is what was wrong in v0.4.8/v0.5.0.)
+# the published layout is what was wrong in v0.4.8/v0.5.0.)
 # `zip::write` is used by the updater's own extraction tests to build
 # archive fixtures; it ships in the same crate feature set.
 
@@ -361,11 +340,17 @@ tower = { version = "0.5", features = ["util"] }
 # into hundreds of GiB. Keep file-and-line backtraces, assertions, and overflow
 # checks, but do not retain the two high-volume caches. `test` inherits `dev`,
 # so this covers ordinary builds, checks, Clippy, and tests in one place.
+# Every release is downloaded by an evergreen client, repeatedly and silently.
+# Symbols are ~12% of the shipped tree and buy nothing on a machine that
+# reports failures through the daemon's own log rather than a stack trace.
+[profile.release]
+strip = "symbols"
+
 [profile.dev]
 debug = "line-tables-only"
 incremental = false
 
-# The profile that 'dist' will build with
+# Release binaries and native packaging use this profile.
 # Tests build with the `test` profile, which inherits `dev` — i.e. unoptimized.
 # That is fine for our own code and almost every dependency, but brutal at two
 # measured runtime boundaries: curve25519/FROST ceremony work, and the
@@ -465,10 +450,6 @@ opt-level = 3
 [profile.dev.package.simd-adler32]
 opt-level = 3
 
-[profile.dist]
-inherits = "release"
-lto = "thin"
-
 # The single definition of the workspace lint policy. Every member inherits it
 # with `[lints] workspace = true`; the block used to be copy-pasted into all
 # eleven manifests, which made any change to the policy an eleven-file edit and
@@ -489,13 +470,7 @@ lto = "thin"
 # on RUSTFLAGS, so it reaches every crate in the graph, not just the one that
 # reads it — declaring it here rather than in `fabric` alone matches that. Its
 # only consumer is still `crates/fabric/src/op.rs`.
-unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(lait_simulation)',
-    # Set by `flutter_rust_bridge`'s `#[frb]` macro while it expands the bridge
-    # surface. Declared here rather than allowed at each call site: the flag is
-    # the generator's, and three local allows would be three copies of one fact.
-    'cfg(frb_expand)',
-] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lait_simulation)'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -609,16 +584,6 @@ from_iter_instead_of_collect = "allow"      # 1
 for_kv_map = "allow"                        # 1
 equatable_if_let = "allow"                  # 1
 enum_variant_names = "allow"                # 1
-
-# `publish = false` above is Cargo's switch AND cargo-dist's signal that a
-# package is not an App to release — so setting it emptied the release plan
-# ("This workspace doesn't have anything for dist to Release!"), which fails
-# ci.yml's `release-dry-run`, produces no archives or installers on a tag, and
-# leaves every `workflow_run` publisher (homebrew, scoop, winget, sbom, and the
-# whole Astrolabe bundle job) waiting on a Release that never succeeded. This
-# is the opt-in dist's own diagnostic prescribes: not published, still shipped.
-[package.metadata.dist]
-dist = true
 
 [lints]
 workspace = true

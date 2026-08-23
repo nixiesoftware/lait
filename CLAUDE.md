@@ -51,72 +51,99 @@ Steam client — a library, a launcher, an identity — that **never draws a
 World**. `Open` is a handoff to the person's browser; `products/issues` ships
 its own head and stays the authority on its own presentation.
 
-**Tauri is the canonical interface** (`apps/astrolabe-web`, TypeScript/React
-over `src-tauri`). The Flutter interface (`apps/astrolabe`, joined by
-flutter_rust_bridge 2.12.0) still builds and still works; it is no longer the
-one to reach for. The egui interface that preceded revision 7 is deleted.
+**Tauri is the only interface** (`apps/astrolabe-web`, TypeScript/React over
+`src-tauri`). The Flutter interface (`apps/astrolabe`) and the egui one before
+it are both out of the live build: egui was deleted, Flutter is **deprecated
+and unwired** — see `apps/astrolabe/DEPRECATED.md`. Do not add to it, do not
+keep it compiling, and do not treat its generated Dart as current.
 
-The two differ in one way worth knowing before touching either. Tauri's host
-takes `api::ClientView` apart by **exhaustive destructuring**, so a field added
-to the boundary stops compiling there until somebody decides what the client
-does with it. Flutter's half is generated, and its drift check
-(`ci/bridge-drift.sh`) is real, works, and **is wired to no workflow** — so a
-change to `api/mod.rs` with no regeneration produces a Dart binding that
-compiles, runs, and disagrees with the model, and no machine will say so. Run
-it by hand when you touch the api module.
+Nothing in `tools/astrolabe` speaks to it any more: `flutter_rust_bridge`, the
+checked-in `frb_generated.rs`, every `#[frb]` annotation, and
+`api::watch(StreamSink)` are gone, and `ci/bridge-drift.sh` was deleted with
+them. `api::subscribe` — a native callback — is the only way to watch the view
+stream. **There is no generated binding and no codegen step any more.** Tauri's
+host takes `api::ClientView` apart by **exhaustive destructuring**, so a field
+added to the boundary stops compiling there until somebody decides what the
+client does with it; the compiler is the whole check.
 
-Both clients are gated: `astrolabe-web (client)` typechecks and tests the
-TypeScript, `astrolabe-web (host)` compiles the Rust behind a webview
+The client is gated by two jobs: `astrolabe-web (client)` typechecks and tests
+the TypeScript, `astrolabe-web (host)` compiles the Rust behind a webview
 toolchain, and both are in `orbital-complete`'s dependency list. `src-tauri` is
 deliberately **outside the cargo workspace** so the main build needs no webview
 libraries — which is why it needs a job of its own rather than none.
 
-```sh
-cd apps/astrolabe-web           # the canonical client
-npm ci && npm run tauri dev     # builds + stages the Rust core behind a webview
-npm run check && npm test       # tsc, then the vitest suite
-cargo test -p astrolabe         # the core: model, client, launch seam
+### Tauri is the installer, and the feed is the distribution
 
-cd apps/astrolabe               # the Flutter one, still building
-flutter run -d macos            # or -d windows
-flutter analyze && flutter test # the widget/interaction suite
+Nothing ships through a git forge. Installed machines follow a **signed channel
+pointer on the dist host** (`src/update/feed.rs`, SUB-13) and never read a
+release page. Two halves, both local:
+
+```sh
+packaging/build-astrolabe.sh --version 0.9.0 --out target/distrib \
+  --identity "Developer ID Application: … (TEAMID)" --notarize <profile>
+ci/publish-feed.sh --version 0.9.0 --channel test \
+  --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed
 ```
 
-The core is layered, and the boundary is the bridge and nothing else:
+The build emits what the feed serves, named the way it names things: the
+`.dmg` a person installs, and `astrolabe-tree-<version>-<target>.tar.gz`, which
+is what an already-running machine swaps in. **A release with an installer and
+no tree can be installed and never updated from**, so the tree is not optional.
+
+The bundle carries `lait` inside it (`bundle.externalBin`, staged from this
+tree by `scripts/stage-sidecar.mjs --bundle`) as `Contents/MacOS/lait` beside
+`Contents/MacOS/astrolabe`. Both names are load-bearing: `sidecar::beside`
+looks for the first, `update::custody_of` looks for the second — which is why
+`mainBinaryName` is `astrolabe` and not the product name. `build-astrolabe.sh`
+runs the bundled sidecar and compares its version to the release, because "the
+pair ships together by construction" is a claim and this is where claims get
+checked.
+
+macOS is complete and proven end to end. **Windows is not carried yet** and
+needs a decision rather than a script: `packaging/windows/astrolabe.nsi`
+installs `astrolabe.exe` as the *update stub* with the real client beside it,
+and Tauri's own NSIS target has no such shape. `build-astrolabe.sh` refuses
+there rather than emitting something unpublishable.
+
+The old `build-astrolabe.yml` built the Flutter bundles and is quarantined to
+`workflow_dispatch`; `apps/astrolabe/DEPRECATED.md` lists what it still records
+that a CI-side Tauri pipeline would need (signing secrets, provenance).
+
+```sh
+cd apps/astrolabe-web           # the canonical client
+npm ci && npm run tauri dev     # stages the lait sidecar, then builds + runs
+                                # the Rust core behind a webview. The sidecar
+                                # is resolved beside the host binary, never
+                                # from PATH — scripts/stage-sidecar.mjs puts
+                                # it there; without it the identity daemon
+                                # cannot start.
+npm run check && npm test       # tsc, then the vitest suite
+cargo test -p astrolabe         # the core: model, client, launch seam
+```
+
+The core is layered, and the boundary is `api/mod.rs` and nothing else:
 
 - `client/` is the reach: the supervisor library it embeds (`tools/workbench`)
   and the host, Space and World planes it speaks. It draws nothing, which is why
   its rules are testable without a window.
-- `model.rs` is the App-owned state — the *only* model of client state. Dart
-  receives whole immutable `ClientView` projections and holds nothing but
-  drafts. There is no optimistic local mutation, because that would be a second
-  model disagreeing with the first exactly when an action was refused.
+- `model.rs` is the App-owned state — the *only* model of client state. The
+  interface receives whole immutable `ClientView` projections and holds nothing
+  but drafts. There is no optimistic local mutation, because that would be a
+  second model disagreeing with the first exactly when an action was refused.
 - `api/mod.rs` is the whole boundary: one `ClientView` out, one `ActionRequest`
   back. The one read outside that pair is `world_artwork` — a World's
-  compiled-in PNGs, which are a build constant rather than state, asked for
-  once per mount and cached in Dart because the view is pushed whole to every
-  surface on every pump. Both generated halves are checked in; regenerate with
-  `flutter_rust_bridge_codegen generate` from `apps/astrolabe` (slow — it
-  cargo-expands the workspace).
+  PNGs from its selected immutable release, asked for once per mount and
+  cached on the interface side because the view is pushed whole to every
+  surface on every pump.
 
-  **Nothing checks this.** `ci/bridge-drift.sh` exists and works, and no
-  workflow references it — verified 2026-08-15. So a change to `api/mod.rs`
-  with no regeneration produces a binding that compiles, runs, and disagrees
-  with the model, and no machine will say so. Run it by hand until it is wired.
-  The same is true of `ci/dart-licences.sh`, and of the `Generated/` drift check
-  that `apps/astrolabe-ios/build-core.sh` says CI performs.
-- `lib/src/core/client.dart` is the only Dart file that may import the bridge.
-  The check: `grep -rn "import.*bridge/" lib/ | grep -v "^lib/src/bridge/"`
-  answers with that file and nothing else.
+  A field added here fails to compile in `src-tauri/src/main.rs` until somebody
+  decides what the client does with it — that exhaustive destructure is
+  deliberate and must not be relaxed with `..`. The `Generated/` drift check
+  that `apps/astrolabe-ios/build-core.sh` says CI performs is still unwired.
 
 ### Dispatch returns the view; a surface never keeps an answer
 
-`Client.dispatch` applies the returned view on the frame the click happened, so
-a control is disabled the moment it is clicked. Widget tests press a real
-control against `Client.canned` and read what the surface asked for — no
-bridge, no core, no daemon, no window (`apps/astrolabe/test/`).
-
-The same rule, spelled the same way, in Tauri: a control reads
+A control reads
 `view.inFlight.includes(actionKey.…)` and disables itself on the frame it was
 clicked. The keys live in `actionKey` and are pinned by test against
 `Action::key` in `tools/astrolabe/src/runtime.rs` — a key that disagrees fails
@@ -125,13 +152,13 @@ its own action and can be pressed twice.
 
 ### The Library is the install list
 
-One row per World this build bundles (`composition::bundled_client_packages`),
-with name, tagline, accent, entry path and version compiled in — no probe runs
-to draw it. Which Spaces serve a World, and whether any is up, are the
-destination's facts: the head's front page carries the Space selector, and
-selecting there is what attaches a daemon. Do not reintroduce Space rows or a
-placement badge here — a row whose kind depends on whether a daemon is up is
-the "Unnamed Space" defect.
+One row per selected immutable World release, read passively from its signed
+`world.json`; listing starts no runner. Name, tagline, accent, entry path and
+reviewed implementation version belong to that release. Which Spaces serve a
+World, and whether any is up, are the destination's facts: the head's front
+page carries the Space selector, and selecting there is what attaches a
+daemon. Do not reintroduce Space rows or a placement badge here — a row whose
+kind depends on whether a daemon is up is the "Unnamed Space" defect.
 
 ### Rules that are tested, not documented
 
@@ -243,7 +270,7 @@ A screenshot costs ~20k tokens and answers *"does this look right"*. Almost
 nothing you need to know is that question — the last design walk found four
 defect classes and every one of them was a number. `window.lait` carries the
 tools that return those numbers, in dev builds only (`viewer/src/dev/inspect.ts`,
-loaded behind `import.meta.env.DEV`, absent from the embedded bundle):
+loaded behind `import.meta.env.DEV`, absent from the shipped Issues release):
 
 ```js
 lait.where()                                  // url, viewport, theme, open dialog
@@ -287,15 +314,16 @@ wants a Space must ask for one.
 
 ## Rebuilding after a viewer change
 
-`src/serve/shell.rs` embeds `src/serve/assets/` via `include_dir!` at **compile
-time**, so a viewer edit is only visible through the running head after both steps:
+The viewer builds the independently shipped Issues web payload under
+`products/issues-app/assets/web/`. A viewer edit reaches a real head after the
+payload is rebuilt and staged with the Issues runner:
 
 ```sh
-(cd viewer && npm run build)   # regenerates src/serve/assets/*
-cargo build                    # re-embeds the fresh bundle
+(cd viewer && npm run build)   # regenerates products/issues-app/assets/web/*
+cargo build -p lait-issues-runner -p lait
 ```
 
-`cd viewer && npm run dev` does both plus a live head, which is what you want
+`cd viewer && npm run dev` runs a live development head, which is what you want
 while iterating; it shells out to `lait --orbit <sel> --port <n> --json` and
 reads that readiness line.
 
@@ -312,20 +340,35 @@ link step fails (`taskkill //F //IM lait.exe` on Windows).
   ```sh
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features --locked
+  cargo build --workspace --locked --all-targets --all-features
+  bash ci/stage-test-worlds.sh
   cargo nextest run --workspace --all-features --profile pr --no-fail-fast
   bash ci/third-party-notices.sh --check
   ```
 
   `--workspace` is load-bearing: a bare `cargo test` covers only the root
-  package and silently skips every product and crate. Tiering lives in
+  package and silently skips every product and crate. **The build and World
+  staging steps are load-bearing too**: nextest builds test binaries, never the
+  workspace bins or the application-bundle layout. The real-process suites
+  execute those bins and expect the independently carried releases beside
+  `lait`. A stale bin or an unstaged World fails those tests in ways that name
+  everything except the missing prerequisite — a pre-#136 receiver read as a
+  broken media pipeline for most of a day. Tiering lives in
   `.config/nextest.toml`; see [`docs/TESTING.md`](docs/TESTING.md).
 - End to end against the real binary: `bash ci/smoke-p0.sh`. It starts the head
   and drives all three HTTP planes — the closest thing to "run the product".
+- Two nodes on one machine: `bash ci/bench-two-node.sh`. Two scratch identities
+  under temp config roots, `LAIT_NETWORK=isolated` (no relay, no discovery —
+  the ticket carries direct addresses), found → invite → enter → membership
+  converges, and it stops the daemons it started. Safe beside a live daemon: it
+  sets `LAIT_DISPLAY=off` and takes ephemeral ports.
 
-**Kill `astrolabe.exe` before running its suite.** A running client holds the
-single-instance mutex, so `a_second_acquire_is_told_somebody_else_holds_it`
-fails with "the first launch was refused" — which reads like the guard being
-broken and is actually the guard working.
+**Kill the running Astrolabe client before running its suite.** A running
+client holds the single-instance mutex, so
+`a_second_acquire_is_told_somebody_else_holds_it` fails with "the first launch
+was refused" — which reads like the guard being broken and is actually the
+guard working. The display coordinator's fixed port is the same shape:
+`astrolabe::launch` needs 7443, and a live daemon holds it.
 
 Pre-commit/pre-push hooks run `cargo fmt --all --check` — run `cargo fmt --all`
 before committing Rust.

@@ -4,7 +4,7 @@
   "license": "PolyForm-Noncommercial-1.0.0",
   "version": "0.0.0",
   "type": "module",
-  "description": "lait's web client \u2014 a keyboard-first board over the local control plane. Builds into src/serve/assets, which the lait binary embeds and serves.",
+  "description": "The Issues World's keyboard-first web client, packaged in its independently shipped immutable release.",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:vite": "vite",

@@ -20,6 +20,9 @@
 //! The durable Signage World. A program authored here is the source of truth;
 //! display coordinators only query a bounded window and render it.
 
+/// Immutable release version carried by this product package.
+pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod contract;
 mod world;
 

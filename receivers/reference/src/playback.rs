@@ -45,17 +45,28 @@ impl Runtime {
         program: DisplayProgram,
         staged: BTreeMap<DisplayAssetId, StagedAsset>,
         media: BTreeMap<DisplayAssetId, String>,
+        snapshot_received_at: Instant,
     ) -> Self {
         let current_index = usize::from(program.playback.current_index);
         let elapsed_base_ms = u64::from(program.playback.elapsed_ms);
         let now = Instant::now();
+        // A sync cursor names the coordinator's shared timeline at snapshot
+        // receipt. Asset staging may take long enough to cross an item boundary,
+        // so starting its monotonic clock only after staging would put every
+        // newly joining receiver behind by exactly its staging latency.
+        // Unsynchronised programs retain activation-time semantics.
+        let item_started_at = if program.playback.sync.is_some() {
+            snapshot_received_at
+        } else {
+            now
+        };
         Self {
             program,
             staged,
             media,
             current_index,
             elapsed_base_ms,
-            item_started_at: now,
+            item_started_at,
             delivered_at: now,
             // Activation is itself a health transition. Report it immediately
             // so the controller can observe a newly staged program without a
@@ -450,6 +461,94 @@ fn atomic_json<T: Serialize>(target: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use display_protocol::ids::{
+        DisplayAssignmentId, DisplayProgramId, DisplayProgramItemId, ProgramRevision,
+    };
+    use display_protocol::program::{
+        canonical_program_revision, BlankReason, DisplayProgramItem, DisplaySyncMode,
+        FreshnessPolicy, SourceState,
+    };
+
+    fn two_card_program(synchronized: bool) -> DisplayProgram {
+        let mut program = DisplayProgram {
+            protocol_major: display_protocol::PROTOCOL_MAJOR,
+            assignment: DisplayAssignmentId::parse("0".repeat(32)).unwrap(),
+            program: DisplayProgramId::parse("1".repeat(32)).unwrap(),
+            revision: ProgramRevision::parse("0".repeat(64)).unwrap(),
+            program_state: SourceState::Current,
+            freshness: FreshnessPolicy {
+                stale_after_ms: 60_000,
+                on_stale: StaleAction::Blank,
+            },
+            playback: DisplayPlayback {
+                current_index: 0,
+                elapsed_ms: 0,
+                cycle: ProgramCycle::Loop,
+                sync: synchronized.then(|| DisplaySyncTarget {
+                    group: "lobby-wall".into(),
+                    mode: DisplaySyncMode::StayInSync,
+                    sampled_at_unix_ms: 1,
+                }),
+            },
+            items: vec![
+                DisplayProgramItem {
+                    id: DisplayProgramItemId::parse("2".repeat(64)).unwrap(),
+                    duration_ms: Some(60_000),
+                    source_state: SourceState::Current,
+                    scene: DisplayScene::Blank {
+                        reason: BlankReason::SourceUnavailable,
+                    },
+                    spoken_summary: None,
+                },
+                DisplayProgramItem {
+                    id: DisplayProgramItemId::parse("3".repeat(64)).unwrap(),
+                    duration_ms: Some(60_000),
+                    source_state: SourceState::Current,
+                    scene: DisplayScene::Blank {
+                        reason: BlankReason::SourceUnavailable,
+                    },
+                    spoken_summary: None,
+                },
+            ],
+        };
+        program.revision = canonical_program_revision(&program).unwrap();
+        program
+    }
+
+    #[test]
+    fn a_synchronized_snapshot_keeps_advancing_while_assets_are_staged() {
+        let received_at = Instant::now()
+            .checked_sub(Duration::from_millis(61_250))
+            .unwrap();
+        let mut runtime = Runtime::new(
+            two_card_program(true),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            received_at,
+        );
+
+        let playback = runtime.playback().unwrap();
+        assert_eq!(playback.current_index, 1);
+        assert!(playback.elapsed_ms >= 1_250);
+    }
+
+    #[test]
+    fn an_unsynchronized_snapshot_begins_when_it_is_activated() {
+        let received_at = Instant::now()
+            .checked_sub(Duration::from_millis(61_250))
+            .unwrap();
+        let mut runtime = Runtime::new(
+            two_card_program(false),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            received_at,
+        );
+
+        let playback = runtime.playback().unwrap();
+        assert_eq!(playback.current_index, 0);
+    }
 
     #[test]
     fn a_first_frame_is_flushed_and_presented_atomically() {

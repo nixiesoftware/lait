@@ -104,7 +104,7 @@ impl replica::transaction::TransactionAuthorizer for MechAuthorizer<'_> {
 
 /// The active IssuesWorld implementation id (matches what the founder seeds).
 fn impl_id() -> [u8; 32] {
-    lait::world::implementation_id()
+    issues_app::lifecycle::implementation_id()
 }
 
 /// The actor a device seed speaks for in this mechanics Space.
@@ -148,7 +148,7 @@ fn form(tag: &str) -> (PathBuf, SpaceAuthority) {
     let (mech, _coords) = SpaceAuthority::form(&root, &FOUNDER_SEED, "authist", vec![]).unwrap();
     // The founder product-authority bootstrap (activate impl + grant caps), so
     // the founder's own transactions authorize through the real ledger.
-    lait::orbital::seed_founder_policy(&mech).unwrap();
+    crate::world_fixture::seed_founder_policy(&mech).unwrap();
     (root, mech)
 }
 

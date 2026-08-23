@@ -17,8 +17,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use issues::ids::{ProjectId, SpaceId, SystemUlidSource};
 use runtime::{
-    world::Intent, world::LifecycleSourceCoordinate, world::LocalIdentity, world::Query,
-    world::RequestId, world::SignedWorldAction, Session,
+    world::call::{IdentityAccess, SessionAccess},
+    world::Intent,
+    world::LifecycleSourceCoordinate,
+    world::Query,
+    world::RequestId,
+    world::SignedWorldAction,
 };
 
 const UPGRADE_RECORD_VERSION: u16 = 1;
@@ -50,8 +54,8 @@ pub enum UpgradeAssessment {
 /// Opaque record placement and atomic persistence remain host-owned.
 pub struct UpgradeContext<'a> {
     pub space: &'a SpaceId,
-    pub session: &'a Session,
-    pub identity: &'a LocalIdentity,
+    pub session: &'a dyn SessionAccess,
+    pub identity: &'a dyn IdentityAccess,
     pub device: &'a str,
     pub active: ImplementationCoordinate,
     pub migrator: ImplementationCoordinate,
@@ -272,13 +276,18 @@ fn prepare_upgrade_record(
     cursor: String,
 ) -> Result<UpgradeRecord> {
     let ts = mechanics::wallclock::now_secs().max(1);
-    let plan = context
+    let mut prepare = |ctx: &runtime::world::Context<'_>| {
+        let plan =
+            issues::IssuesWorld::prepare_v4_migration_plan(ctx, completed, cursor.clone(), ts)?;
+        postcard::to_stdvec(&plan).map_err(|_| runtime::world::Rejection::ContractViolation)
+    };
+    let encoded = context
         .session
-        .with_lifecycle_source(context.source, |ctx| {
-            issues::IssuesWorld::prepare_v4_migration_plan(ctx, completed, cursor.clone(), ts)
-        })
+        .with_lifecycle_source(context.source, &mut prepare)
         .map_err(|error| anyhow!("open exact Issues migration source: {error:?}"))?
         .map_err(|error| anyhow!("prepare bounded Issues migration window: {error:?}"))?;
+    let plan = postcard::from_bytes(&encoded)
+        .map_err(|error| anyhow!("decode bounded Issues migration window: {error}"))?;
     let intent = issues::contract::IssueIntent::V4Migrate { plan };
     let action = context
         .identity
@@ -333,7 +342,7 @@ fn validate_prepared_action(
 }
 
 fn migration_verification(
-    session: &Session,
+    session: &dyn SessionAccess,
 ) -> Result<Option<issues::contract::MigrationVerification>> {
     let projection = session
         .query(Query {
@@ -542,8 +551,8 @@ pub fn read_bootstrap_record(store_root: &Path, space: &SpaceId) -> Option<Issue
 pub fn bootstrap_tracker(
     store_root: &Path,
     space: &SpaceId,
-    session: &Session,
-    identity: &LocalIdentity,
+    session: &dyn SessionAccess,
+    identity: &dyn IdentityAccess,
     device: &str,
     display_name: &str,
     initial_project: Option<InitialProject>,
@@ -565,8 +574,8 @@ pub fn bootstrap_tracker(
 pub fn bootstrap_tracker_with_fault(
     store_root: &Path,
     space: &SpaceId,
-    session: &Session,
-    identity: &LocalIdentity,
+    session: &dyn SessionAccess,
+    identity: &dyn IdentityAccess,
     device: &str,
     display_name: &str,
     initial_project: Option<InitialProject>,
@@ -588,8 +597,8 @@ pub fn bootstrap_tracker_with_fault(
 fn bootstrap_tracker_inner(
     store_root: &Path,
     space: &SpaceId,
-    session: &Session,
-    identity: &LocalIdentity,
+    session: &dyn SessionAccess,
+    identity: &dyn IdentityAccess,
     device: &str,
     display_name: &str,
     initial_project: Option<InitialProject>,

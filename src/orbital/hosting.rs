@@ -211,7 +211,7 @@ pub struct StationHost {
     station: Station,
     /// The canonical [`ApproachRoute`]s this Station advertises, resolved from
     /// the retained transport handle at activation (an Isolated endpoint's own
-    /// bound direct addresses) — the composition root's route source, kept
+    /// bound direct addresses) — the activated host's route source, kept
     /// beside the Station (which never exposes its own transport). Invite
     /// creation signs exactly these into Coordinates.
     advertised_routes: Vec<runtime::coordinates::ApproachRoute>,
@@ -454,7 +454,7 @@ impl StationRunner {
         Self::start_inner(home, device_seed, factory, packages, None).await
     }
 
-    /// Start through the composition-owned bounded blocking lane. Only the
+    /// Start through the host-owned bounded blocking lane. Only the
     /// synchronous store/authority/Runtime-open prelude consumes the permit;
     /// transport construction remains asynchronous.
     pub(crate) async fn start_admitted(
@@ -1115,16 +1115,19 @@ impl StationHost {
         );
         match reply.validate_for(call) {
             Ok(()) => {
-                self.deliver_nudges(control.nudges(
-                    call,
-                    &reply,
-                    &Context {
-                        session,
-                        identity,
-                        actor: &facts.actor,
-                        device: &facts.device,
-                    },
-                ));
+                self.deliver_nudges(
+                    call.world(),
+                    control.nudges(
+                        call,
+                        &reply,
+                        &Context {
+                            session,
+                            identity,
+                            actor: &facts.actor,
+                            device: &facts.device,
+                        },
+                    ),
+                );
                 reply
             }
             Err(error) => Reply::error(call, error.code, error.message()),
@@ -1153,7 +1156,7 @@ impl StationHost {
                     &mut reader,
                 )
                 .map_err(|error| runtime::world::Failure::PersistenceCause {
-                    operation: "exec.perform.output",
+                    operation: "exec.perform.output".into(),
                     reason: error.to_string(),
                 })
         }) {
@@ -1267,7 +1270,11 @@ impl StationHost {
     /// The World said who and what. This says whether they are reachable, which
     /// is the half a World must not know: one that could see who is connected
     /// would be a World holding a delivery plane.
-    fn deliver_nudges(&self, nudges: Vec<runtime::world::call::Nudge>) {
+    fn deliver_nudges(
+        &self,
+        world_id: &replica::body::WorldId,
+        nudges: Vec<runtime::world::call::Nudge>,
+    ) {
         if nudges.is_empty() {
             return;
         }
@@ -1286,7 +1293,6 @@ impl StationHost {
                 Some((station, actor))
             })
             .collect();
-        let world_id = crate::world::contract::world_id();
         let world = world_id.as_str().to_string();
         for (station, nudge) in Self::reachable(&here, &nudges) {
             if !self.declares(&world_id, nudge) {
@@ -1491,7 +1497,37 @@ impl StationHost {
                 Err(e) => Response::err(format!("{e}")),
             },
             Request::MemberSetRole { who, admin } => {
-                match self.mechanics.member_set_role(&who, admin) {
+                let parent = self.station.frontier().root;
+                let contributor = match self.worlds.membership_assignments("contributor", parent) {
+                    Ok(assignments) => assignments,
+                    Err(error) => {
+                        return Response::err(format!("expand contributor role: {error}"))
+                    }
+                };
+                let mut administrator =
+                    match self.worlds.membership_assignments("administrator", parent) {
+                        Ok(assignments) => assignments,
+                        Err(error) => {
+                            return Response::err(format!("expand administrator role: {error}"))
+                        }
+                    };
+                administrator.push((
+                    mechanics::membership::policy_admin_capability(),
+                    mechanics::membership::policy_admin_resource(),
+                ));
+                administrator.sort();
+                administrator.dedup();
+                let revoke: Vec<_> = administrator
+                    .iter()
+                    .filter(|assignment| !contributor.contains(assignment))
+                    .cloned()
+                    .collect();
+                match self.mechanics.member_set_role(
+                    &who,
+                    admin,
+                    if admin { &administrator } else { &[] },
+                    if admin { &[] } else { &revoke },
+                ) {
                     Ok(actor) => Response::Ok {
                         message: Some(if admin {
                             format!("promoted {} to admin", actor.short())
@@ -1555,7 +1591,10 @@ impl StationHost {
                 },
                 Err(e) => Response::err(format!("{e}")),
             },
-            Request::AgentAdd { key } => match self.mechanics.agent_add(&key) {
+            Request::AgentAdd { key } => match self
+                .contributor_assignments()
+                .and_then(|assignments| self.mechanics.agent_add(&key, &assignments))
+            {
                 Ok(actor) => Response::Ok {
                     message: Some(format!("sponsored agent {}", actor.short())),
                 },
@@ -1633,10 +1672,11 @@ impl StationHost {
             // sees it has been reached past that seam.
             Request::SponsorWatch { .. } => Response::Wait(crate::control::WaitReply::Idle),
             Request::Invite {
+                world,
                 role,
                 reusable,
                 ttl_hours,
-            } => self.invite(role.as_deref(), reusable, ttl_hours),
+            } => self.invite(world.as_deref(), role.as_deref(), reusable, ttl_hours),
             Request::Join { ticket } => self.connect(&ticket),
             Request::SpaceRecover => self.space_recover(),
             Request::SpaceRecoverApprove { session, expect } => {
@@ -1741,7 +1781,8 @@ impl StationHost {
     /// an error, and it is what a stale link should get.
     fn watching(
         &self,
-        issues: &[String],
+        world: &str,
+        bodies: &[[u8; 16]],
         carets: &[crate::control::WatchingCaret],
         typing: &[crate::control::WatchingTyping],
         previews: &[crate::control::WatchingPreview],
@@ -1749,21 +1790,27 @@ impl StationHost {
         use runtime::plane::live::LocalPublication;
         use runtime::transient::{Target, TransientPayload};
 
-        let world = crate::world::contract::world_id().as_str().to_string();
+        let Some(world_id) = WorldId::parse(world) else {
+            return Response::err("invalid World id");
+        };
+        if !self.worlds.contains(&world_id) {
+            return Response::not_found(format!("World '{world}' is not installed"));
+        }
+        let world = world.to_string();
         // Cursor state is the most perishable declaration, so admit it before
         // the passive Body scopes. A tab collection at the subscription ceiling
         // should lose an old facepile entry before it loses the caret currently
         // moving under somebody's hands.
         let mut candidates = Vec::new();
-        let issue_set: std::collections::BTreeSet<_> = issues.iter().map(String::as_str).collect();
+        let body_set: std::collections::BTreeSet<_> = bodies.iter().copied().collect();
         for preview in previews {
-            if !issue_set.contains(preview.issue.as_str()) || preview.field != "description" {
+            if !body_set.contains(&preview.body) {
                 continue;
             }
             candidates.push(LocalPublication {
                 scope: Target::Preview {
                     world: world.clone(),
-                    body: crate::world::contract::issue_body_id(&preview.issue).as_bytes(),
+                    body: preview.body,
                     field: preview.field.clone(),
                 },
                 payload: TransientPayload::Preview {
@@ -1780,10 +1827,10 @@ impl StationHost {
             });
         }
         for caret in carets {
-            if !issue_set.contains(caret.issue.as_str()) || caret.field != "description" {
+            if !body_set.contains(&caret.body) {
                 continue;
             }
-            let body = crate::world::contract::issue_body_id(&caret.issue).as_bytes();
+            let body = caret.body;
             let anchor = match self
                 .station
                 .live()
@@ -1818,22 +1865,22 @@ impl StationHost {
             });
         }
         for active in typing {
-            if !issue_set.contains(active.issue.as_str()) || active.field != "description" {
+            if !body_set.contains(&active.body) {
                 continue;
             }
             candidates.push(LocalPublication {
                 scope: Target::Typing {
                     world: world.clone(),
-                    body: crate::world::contract::issue_body_id(&active.issue).as_bytes(),
+                    body: active.body,
                     field: active.field.clone(),
                 },
                 payload: TransientPayload::Typing,
             });
         }
-        candidates.extend(issues.iter().map(|doc| LocalPublication {
+        candidates.extend(bodies.iter().map(|body| LocalPublication {
             scope: Target::Body {
                 world: world.clone(),
-                body: crate::world::contract::issue_body_id(doc).as_bytes(),
+                body: *body,
             },
             payload: TransientPayload::Presence,
         }));
@@ -1867,16 +1914,18 @@ impl StationHost {
             Request::Connect { ticket } => self.connect(&ticket),
             Request::Who => Response::Who { peers: self.who() },
             Request::Live {
+                world,
                 since_generation,
-                issue,
-            } => self.live(since_generation, issue.as_deref()),
+                body,
+            } => self.live(&world, since_generation, body),
             Request::LiveSubscribe { .. } => Response::err("live_subscribe is a streaming request"),
             Request::Watching {
-                issues,
+                world,
+                bodies,
                 carets,
                 typing,
                 previews,
-            } => self.watching(&issues, &carets, &typing, &previews),
+            } => self.watching(&world, &bodies, &carets, &typing, &previews),
             Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => Response::err(format!("request is not a Station operation: {other:?}")),
@@ -2132,7 +2181,11 @@ impl StationHost {
             Ok(s) => s,
             Err(e) => return Response::err(format!("provision agent '{name}': {e:#}")),
         };
-        match self.mechanics.provision_agent(&seed) {
+        let assignments = match self.contributor_assignments() {
+            Ok(assignments) => assignments,
+            Err(error) => return Response::err(format!("expand contributor role: {error}")),
+        };
+        match self.mechanics.provision_agent(&seed, &assignments) {
             Ok(actor) => {
                 let device = mechanics::actor::device_from_seed(&seed);
                 let did = mechanics::actor::did_key_from_device(&device).unwrap_or_default();
@@ -2152,6 +2205,18 @@ impl StationHost {
             }
             Err(e) => Response::err(format!("sponsor agent '{name}': {e:#}")),
         }
+    }
+
+    fn contributor_assignments(
+        &self,
+    ) -> Result<
+        Vec<(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )>,
+    > {
+        self.worlds
+            .membership_assignments("contributor", self.station.frontier().root)
     }
 
     /// The reconciled presence assembly: the persistent Neighbor registry's
@@ -2254,33 +2319,29 @@ impl StationHost {
     /// Modelled on [`Self::who`] and reporting a different truth: `who` is the
     /// durable Neighbor registry's reachability, this is the Live plane's
     /// transient table, which nothing journals and nothing replays.
-    fn live(&self, since_generation: Option<u64>, issue: Option<&str>) -> Response {
-        self.live_snapshot(since_generation, issue).0
+    fn live(&self, world: &str, since_generation: Option<u64>, body: Option<[u8; 16]>) -> Response {
+        self.live_snapshot(world, since_generation, body).0
     }
 
     /// One Live projection plus the next derived age/partial boundary.
     fn live_snapshot(
         &self,
+        world: &str,
         since_generation: Option<u64>,
-        issue: Option<&str>,
+        body: Option<[u8; 16]>,
     ) -> (Response, Option<Duration>) {
         let handle = self.station.live();
         // The issue's Body id, by the same one-way derivation the Issues World
         // commits under. It only runs this direction, which is why an unscoped
         // read hands back Body ids a browser cannot name.
-        let want = issue.map(|doc| {
-            (
-                crate::world::contract::world_id().as_str().to_string(),
-                crate::world::contract::issue_body_id(doc).as_bytes(),
-            )
-        });
+        let want = body.map(|body| (world.to_string(), body));
         // `LiveNarrow::Body` and never a scope. Scope narrowing is *equality*,
         // and an issue's caret and typing rows are `Field` and `Typing` over
         // the same Body — so asking for `Body` returns the presence rows
         // and silently drops the two a caret surface exists to draw.
         let narrow = match &want {
             Some((world, body)) => runtime::plane::live::LiveNarrow::Body { world, body: *body },
-            None => runtime::plane::live::LiveNarrow::Everything,
+            None => runtime::plane::live::LiveNarrow::World(world),
         };
         let view = handle.view_narrowed(narrow, tokio::time::Instant::now());
         let entries: Vec<_> = view.entries.iter().collect();
@@ -3461,7 +3522,13 @@ impl StationHost {
         }
     }
 
-    fn invite(&self, role: Option<&str>, reusable: bool, ttl_hours: Option<u64>) -> Response {
+    fn invite(
+        &self,
+        world: Option<&str>,
+        role: Option<&str>,
+        reusable: bool,
+        ttl_hours: Option<u64>,
+    ) -> Response {
         // Mint an admission-bearing Coordinates link. Accepting the invite is
         // the approval: the capability carries the selected role's exact
         // expanded assignments (default contributor), and redemption is
@@ -3469,13 +3536,27 @@ impl StationHost {
         // cap) instead of one person.
         let ttl_secs = ttl_hours.unwrap_or(168).max(1).saturating_mul(3600);
         let parent_root = self.station.frontier().root;
+        let world = match world {
+            Some(value) => match WorldId::parse(value) {
+                Some(world) => Some(world),
+                None => return Response::err("invalid World id"),
+            },
+            None => None,
+        };
+        let evidence = match self.worlds.admission_evidence(
+            world.as_ref(),
+            role.unwrap_or("contributor"),
+            parent_root,
+        ) {
+            Ok(evidence) => evidence,
+            Err(error) => return Response::err(format!("expand admission role: {error}")),
+        };
         let admission = match self.mechanics.mint_admission(
             &self.device_seed,
             ttl_secs,
             reusable,
             now_secs(),
-            role.unwrap_or("contributor"),
-            parent_root,
+            evidence,
         ) {
             Ok(a) => a,
             Err(e) => return Response::err(format!("mint admission: {e}")),
@@ -3973,8 +4054,8 @@ impl StationHost {
             self.stream_subscribe(write_half).await;
             return Served::Close;
         }
-        if let Request::LiveSubscribe { issue } = req {
-            self.stream_live(write_half, issue).await;
+        if let Request::LiveSubscribe { world, body } = req {
+            self.stream_live(write_half, world, body).await;
             return Served::Close;
         }
         // Stop is a real teardown request: answer, then signal the serve loop
@@ -4012,11 +4093,10 @@ impl StationHost {
         // Every package seeds its own projection baseline before the stream
         // opens, so product state never lives on the generic Station host.
         self.worlds.start_projectors(self.station.space_id());
-        let world = crate::world::contract::world_id();
-        let mut stream = match self
-            .worlds
-            .with_primary(&world, |session| session.observe(None))
-        {
+        let mut stream = match self.worlds.world_ids().find_map(|world| {
+            self.worlds
+                .with_primary(world, |session| session.observe(None))
+        }) {
             Some(stream) => stream,
             None => return,
         };
@@ -4167,7 +4247,8 @@ impl StationHost {
     async fn stream_live(
         self: &Arc<Self>,
         mut write_half: tokio::io::WriteHalf<LocalStream>,
-        issue: Option<String>,
+        world: String,
+        body: Option<[u8; 16]>,
     ) {
         let handle = self.station.live();
         // Subscribe before the first snapshot, closing both read/subscribe
@@ -4180,7 +4261,7 @@ impl StationHost {
         self.ensure_doorbell_pump().await;
         let mut stop_rx = self.stop_tx.subscribe();
         loop {
-            let (response, refresh_in) = self.live_snapshot(None, issue.as_deref());
+            let (response, refresh_in) = self.live_snapshot(&world, None, body);
             if write_line_half(&mut write_half, &response).await.is_err() {
                 break;
             }
@@ -4195,7 +4276,7 @@ impl StationHost {
                         break;
                     }
                 }
-                observed = next_live_body_observation(&mut observations, issue.as_deref()) => {
+                observed = next_live_body_observation(&mut observations, &world) => {
                     if !observed {
                         break;
                     }
@@ -4257,20 +4338,14 @@ fn render_body(body: &[u8; 16]) -> String {
 /// Whether a durable observation can change anchor resolution in this Live
 /// subscription. The transient payload itself need not change when its
 /// previously missing operation ids arrive in the watched Body.
-fn doorbell_touches_live(frame: &Doorbell, issue: Option<&str>) -> bool {
+fn doorbell_touches_live(frame: &Doorbell, world: &str) -> bool {
     if frame.reset {
         return true;
     }
-    let world = crate::world::contract::world_id();
     frame
         .invalidations
         .iter()
-        .filter(|invalidation| invalidation.world == world)
-        .flat_map(|invalidation| invalidation.dirty.iter())
-        .any(|scope| match issue {
-            Some(issue) => scope.docs.iter().any(|doc| doc == issue),
-            None => !scope.docs.is_empty(),
-        })
+        .any(|invalidation| invalidation.world.as_str() == world)
 }
 
 /// Wait past unrelated observations until the watched Body changes. Lag means
@@ -4278,11 +4353,11 @@ fn doorbell_touches_live(frame: &Doorbell, issue: Option<&str>) -> bool {
 /// re-read; closure means the observation pump is gone and the stream ends.
 async fn next_live_body_observation(
     observations: &mut tokio::sync::broadcast::Receiver<Doorbell>,
-    issue: Option<&str>,
+    world: &str,
 ) -> bool {
     loop {
         match observations.recv().await {
-            Ok(frame) if doorbell_touches_live(&frame, issue) => return true,
+            Ok(frame) if doorbell_touches_live(&frame, world) => return true,
             Ok(_) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
@@ -4704,9 +4779,13 @@ fn remove_seed(home: &Path, needle: &str) -> Result<usize, String> {
 
 /// Run one process-backed StationHost on `home`, holding the per-home lock for
 /// its lifetime. Identity is the process-global one.
-pub async fn run_station_process(home: PathBuf, factory: &dyn TransportFactory) -> Result<()> {
+pub async fn run_station_process(
+    home: PathBuf,
+    factory: &dyn TransportFactory,
+    packages: WorldPackages,
+) -> Result<()> {
     let device_seed = load_or_create_identity(&crate::config::identity_dir()?)?;
-    run_station_process_with(home, device_seed, factory).await
+    run_station_process_with(home, device_seed, factory, packages).await
 }
 
 /// The injectable process adapter with an explicit device seed. Several hosts
@@ -4716,14 +4795,14 @@ pub async fn run_station_process_with(
     home: PathBuf,
     device_seed: [u8; 32],
     factory: &dyn TransportFactory,
+    packages: WorldPackages,
 ) -> Result<()> {
-    run_station_process_with_packages(home, device_seed, factory, crate::world::packages()).await
+    run_station_process_with_packages(home, device_seed, factory, packages).await
 }
 
-/// Run a StationHost with an explicitly supplied compile-time World package
-/// set. This is the product-neutral composition seam used by Daemon; the
-/// convenience wrappers above preserve the issue tracker's existing entry
-/// points.
+/// Run a StationHost with the World packages pinned to this daemon generation.
+/// This is the product-neutral seam used by Daemon; callers supply packages
+/// adapted from independently selected releases.
 pub async fn run_station_process_with_packages(
     home: PathBuf,
     device_seed: [u8; 32],
@@ -4871,22 +4950,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_issue_is_named_by_its_doc_id_and_an_alias_names_nothing() {
-        // The derivation is a hash of the string as given. A viewer that sent
-        // `ENG-12` would ask about a Body nothing publishes under and be
-        // answered an empty table for ever, with nothing anywhere to say so.
-        let doc = "iss_01jz0000000000000000000000";
-        assert_ne!(
-            crate::world::contract::issue_body_id(doc).as_bytes(),
-            crate::world::contract::issue_body_id("ENG-12").as_bytes()
-        );
-    }
-
     fn observed_docs(docs: &[&str]) -> crate::control::Doorbell {
         crate::control::Doorbell {
             invalidations: vec![RoutedInvalidation {
-                world: crate::world::contract::world_id(),
+                world: replica::body::WorldId::parse("com.example.live").unwrap(),
                 dirty: vec![DirtyScope {
                     kind: "project".into(),
                     id: "prj_test".into(),
@@ -4900,36 +4967,36 @@ mod tests {
     }
 
     #[test]
-    fn a_live_issue_wakes_when_its_durable_body_arrives() {
+    fn a_live_stream_wakes_for_its_world() {
         let frame = observed_docs(&["iss_other", "iss_watched"]);
-        assert!(super::doorbell_touches_live(&frame, Some("iss_watched")));
-        assert!(!super::doorbell_touches_live(&frame, Some("iss_absent")));
+        assert!(super::doorbell_touches_live(&frame, "com.example.live"));
+        assert!(!super::doorbell_touches_live(&frame, "com.example.other"));
     }
 
     #[test]
     fn an_unscoped_live_stream_wakes_for_any_issue_body_or_reset() {
         assert!(super::doorbell_touches_live(
             &observed_docs(&["iss_any"]),
-            None
+            "com.example.live"
         ));
         assert!(super::doorbell_touches_live(
             &crate::control::Doorbell {
                 reset: true,
                 ..Default::default()
             },
-            Some("iss_watched")
+            "com.example.live"
         ));
     }
 
     #[tokio::test]
-    async fn a_live_body_wait_ignores_other_issues_before_the_watched_one() {
+    async fn a_live_body_wait_wakes_on_its_world() {
         let (send, mut receive) = tokio::sync::broadcast::channel(4);
         send.send(observed_docs(&["iss_other"])).unwrap();
         send.send(observed_docs(&["iss_watched"])).unwrap();
 
         let woke = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            super::next_live_body_observation(&mut receive, Some("iss_watched")),
+            super::next_live_body_observation(&mut receive, "com.example.live"),
         )
         .await
         .expect("the watched issue observation should wake the Live stream");

@@ -223,16 +223,16 @@ therefore the first point at which anything is started.
 
 ## The bundle
 
-The viewer's build output is **committed** under `src/serve/assets/` because
-`include_dir!` embeds it at compile time and `cargo install lait` must not
-require npm. Committed build output goes stale the first time somebody edits
-`viewer/` and forgets to rebuild, and it would go stale *silently* — shipping a
-binary whose UI predates its API. CI therefore rebuilds the bundle and fails if
-the result differs from what is in git. After a viewer change, locally:
+The Issues viewer's build output is **committed** under
+`products/issues-app/assets/web/`. The generic host embeds no product client;
+bootstrap installers and the World publication workflow place these bytes in
+the immutable Issues release beside its runner and declaration. Committed build
+output can still go stale, so CI rebuilds it and fails if the result differs
+from git. After a viewer change, locally:
 
 ```sh
-(cd viewer && npm run build)   # regenerates src/serve/assets/*
-cargo build                    # re-embeds the fresh bundle
+(cd viewer && npm run build)   # regenerates products/issues-app/assets/web/*
+cargo build -p lait-issues-runner -p lait
 ```
 
 ## Related

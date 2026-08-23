@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -18,7 +19,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [221u8; 32];
 const JOINER_SEED: [u8; 32] = [222u8; 32];
@@ -179,7 +179,7 @@ fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
 fn concurrent_issue_creation_converges_across_daemons() {
     let net = MemNet::new();
     let founder_home = temp_home("founder");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Concurrent Catalog").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Concurrent Catalog").unwrap();
     let _founder = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &founder_home);
@@ -209,6 +209,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
         &rt,
         &founder_home,
         Request::Invite {
+            world: None,
             role: Some("contributor".into()),
             reusable: false,
             ttl_hours: Some(24),
@@ -217,7 +218,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
         panic!("invite");
     };
     let joiner_home = temp_home("joiner");
-    lait::orbital::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
     let _joiner = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
     wait_online(&rt, &joiner_home);
     let admitted = poll_until(Duration::from_secs(30), || {
@@ -258,6 +259,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
         &rt,
         &founder_home,
         Request::Invite {
+            world: None,
             role: Some("viewer".into()),
             reusable: false,
             ttl_hours: Some(24),
@@ -266,7 +268,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
         panic!("viewer invite");
     };
     let viewer_home = temp_home("viewer");
-    lait::orbital::enter_space(&viewer_home, &VIEWER_SEED, &vinvite).unwrap();
+    crate::world_fixture::enter_space(&viewer_home, &VIEWER_SEED, &vinvite).unwrap();
     let _viewer = spawn_daemon(viewer_home.clone(), VIEWER_SEED, net.clone());
     wait_online(&rt, &viewer_home);
     let viewer_device = mechanics::actor::device_from_seed(&VIEWER_SEED).to_string();

@@ -14,10 +14,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use issues::contract::{self, IssueIntent, IssueQuery};
 use issues::dto::{CommentAnchorState, IssueView};
 use issues::ids::{ActorId, DeviceId, DocId, ProjectId, SystemUlidSource};
-use lait::world::contract::{self, IssueIntent, IssueQuery};
-use lait::world::IssuesWorld;
+use issues::IssuesWorld;
 use mechanics::authorization::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{

@@ -48,6 +48,14 @@ fi
 [ -x "$LAIT_BIN" ] || { echo "::error::no built lait binary at target/debug"; exit 1; }
 LAIT_BIN="$(cd "$(dirname "$LAIT_BIN")" && pwd)/$(basename "$LAIT_BIN")"
 
+# A clean CI checkout has no installed Worlds, by design. Assemble the same
+# first-party bootstrap tree a native client carries beside the binaries the
+# build step just produced. When the daemon self-spawns it seeds these bytes
+# through the ordinary immutable-release installer; the smoke therefore proves
+# the runner boundary instead of accidentally depending on a developer's
+# identity or the removed compiled-in implementation.
+bash ci/stage-test-worlds.sh "$(dirname "$LAIT_BIN")"
+
 has() { case "$1" in *"$2"*) : ;; *) echo "::error::expected '$2' in:"; echo "$1"; exit 1 ;; esac; }
 
 # The build string, with nothing running. The one question support asks first.

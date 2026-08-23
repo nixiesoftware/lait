@@ -25,7 +25,7 @@ daemon::Daemon
             ├─ vacant
             └─ orbits::Placement
                  ├─ hosting
-                 │    ├─ owned in-process
+                 │    ├─ owned local task
                  │    └─ attached compatibility process
                  └─ sole StationHost for the Orbit
                       └─ Station occupying the Orbit
@@ -36,7 +36,8 @@ daemon::Daemon
                            ├─ Neighbor registry and Contact
                            └─ WorldRouter
                                 └─ WorldHost
-                                     └─ docked Sessions
+                                     ├─ docked Sessions
+                                     └─ supervised selected World runner
 
 lait (the local app)
   └─ HTTP/SSE head -> daemon::Daemon
@@ -50,7 +51,7 @@ lait mcp (pinned agent head)
 
 astrolabe (library / launcher / identity)
   └─ tools/astrolabe core -> host / Space / World planes
-       └─ Flutter (apps/astrolabe) draws ClientView; never a World
+       └─ Tauri (apps/astrolabe-web) draws ClientView; never a World
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -125,17 +126,16 @@ discovers durable bindings; `orbits::Placement` records where an active Station
 is hosted; neither is a second lifecycle owner. The allowed Orbit set never
 rides on the wire as a client-controlled claim.
 
-Service boundaries are logical boundaries, not mandatory processes. The current deployment
-is one identity-scoped daemon::Daemon routing to zero or more Station placements and
-their in-process StationHosts. A StationHost or WorldHost may move to a worker
-process for stronger fault or plugin isolation without changing its route or
-client contract. The orbits::Router hosts a vacant Orbit in-process and attaches,
-without taking ownership, when a compatible historical per-home daemon already
-holds that Orbit. Both placement modes retain the per-home socket for Space
-control and Observation compatibility, but owned World calls dispatch directly
-to the in-process World host. An attached placement forwards the same opaque World
-call through that socket without translating its payload. Web and MCP requests
-enter through the one daemon::Daemon endpoint.
+Station placement remains a logical boundary: the current deployment is one
+identity-scoped `daemon::Daemon` routing to zero or more Station placements and
+their local StationHost tasks. World execution is a mandatory process boundary
+on process-capable platforms. `orbits::Router` hosts a vacant Orbit locally and
+attaches, without taking ownership, when a compatible historical per-home daemon
+already holds that Orbit. Both placement modes retain the per-home socket for
+Space control and Observation compatibility. An owned StationHost invokes the
+selected supervised World runner; an attached placement forwards the same opaque
+World call through its socket and that StationHost invokes its selected runner.
+Web and MCP requests enter through the one `daemon::Daemon` endpoint.
 
 Catalog listing remains passive. The web adapter asks daemon::Daemon for an
 `if_running` status; daemon::Daemon may inspect an already-live per-Orbit
@@ -219,7 +219,7 @@ issues-app Issues application protocol plus its web and MCP client interfaces
 lait       launcher, identity-scoped daemon, HTTP head, MCP head,
            host-capability adapters, viewer, and application composition
 astrolabe  identity-scoped library client: reach, one model of client
-           state, Flutter drawing. Never a World head; authors MCP bindings
+           state, Tauri drawing. Never a World head; authors MCP bindings
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
@@ -348,10 +348,29 @@ must remain visible.
 
 ## 5. Worlds and Sessions
 
-A World is trusted in-process semantic code registered under an
-authority-approved `WorldImplementationId`. The id commits its descriptor,
-schemas, policy table, and artifact identity. Runtime verifies that exact
-implementation is active before any World callback or projection.
+A World is an independently versioned immutable release. `world.json` declares
+its identity, presentation, host requirements, launch entries, and native
+runners. The signed feed manifest authenticates every target artifact; staging
+verifies size, digest, contained paths, declaration identity, compatibility,
+artwork, and applicable runner files before atomically selecting a release.
+
+The daemon launches applicable runners as owned child processes through
+`world-runner`. Readiness is authenticated over a random-token loopback
+channel; frames, callbacks, and request time are bounded. The process describes
+its reviewed `WorldImplementationId`, which commits its descriptor, schemas,
+policy table, and artifact identity. The host refuses a runner that answers for
+another World, release, protocol, or preferred implementation. A crashed child
+is restored from the same immutable release before the next call; a call that
+may already have reached it is never replayed.
+
+The outer runner protocol is version 1. Its length-delimited, token-bearing
+control frames use Postcard and have a 64 MiB hard ceiling. The typed
+`world-sdk` payload carried inside those frames is ABI 3 and uses the
+JSON-compatible CBOR data model: SDK types normalize through
+`serde_json::Value` before CBOR encoding, so tagged/flattened Runtime DTOs and
+arbitrary JSON values retain one representation on both sides. Changing either
+encoding or meaning requires a protocol/ABI bump; a release manifest declares
+compatible host ranges for both.
 
 A World receives only a bounded, Manifest-pinned view and immutable principal
 facts. It cannot access storage, Loro, transport, custody secrets, or authority
@@ -363,40 +382,61 @@ active Space. It owns the reviewed implementation identity and the Sessions
 docked for local identities. A WorldRouter maps `WorldId` to distinct
 host objects; a Session can never be reused across Worlds.
 
-The application composition root supplies one compile-time `WorldPackages` set
-to daemon::Daemon. Each `WorldPackage` keeps a Runtime registration, semantic World
-implementation, reviewed implementation identity, and optional
-`WorldCallHandler` together. The same immutable package set is carried through
-orbits::Router placement into every StationHost; daemon routing validates the
-addressed World against that injected set and never names IssuesWorld.
+At daemon launch, `world::installed` passively enumerates each selected release,
+launches its declared runners, and adapts the runner ABI into one
+`WorldPackages`/`WorldClientRegistry` generation. The root package has no
+production dependency on a product crate. The same immutable generation is
+carried through `orbits::Router` placement into every StationHost; daemon
+routing validates the addressed World against that injected set and never
+names Issues or Signage.
+
+Native iOS is the deliberate platform exception. Apple does not permit the app
+to spawn helper executables or install new native code after signing, so
+`astrolabe-ios` links only the reviewed first-party implementations included in
+that signed application and adapts them to the same generic package/client
+interfaces. This adapter is confined to the iOS crate; it is never a fallback
+for a process-capable host and does not make independently downloaded native
+World code executable on iOS.
 
 The `runtime::world::call` namespace is the application-call boundary shared by a product
 and its host. `WorldCall { world, operation, version, payload }` and its bound
 `WorldReply` leave the payload opaque to daemon::Daemon and StationHost. The
-registered handler—not the client—decodes the call and classifies it as a query
+runner-owned handler—not the client—decodes the call and classifies it as a query
 or command before host policy runs. It owns product reference resolution, local
-id/time minting, transient retry, and product response construction. This is a
-compile-time package seam, not a promise of dynamic library loading or process
-isolation.
+id/time minting, transient retry, and product response construction.
+`world-sdk` carries the same product-neutral semantic, application, client,
+display, and Exec ABI over the supervised process boundary. Host capabilities
+are explicit callbacks; Worlds do not receive storage, transport, custody keys,
+or ambient host access.
 
 For an owned Station placement, orbits::Router invokes the in-process
-StationHost directly. The per-Orbit socket is not part of that World call stack.
+StationHost directly; StationHost invokes the selected World process through
+the ABI. The per-Orbit socket is not part of that World call stack.
 If daemon::Daemon attaches to a standalone StationHost, the same opaque
 `WorldClientRequest` crosses the socket and the receiving host invokes its
-registered handler. Protocol v5 deliberately retired v4 application-call adapters and typed
+selected handler. Protocol v5 deliberately retired v4 application-call adapters and typed
 product requests; protocol v6 removed the last product projection from root
 control, so every placement now has the same product-neutral boundary.
 
-IssuesWorld's semantic package lives at `products/issues` with no dependency on
+Issues' semantic package lives at `products/issues` with no dependency on
 the `lait` application crate, local control protocol, daemon, filesystem, or
-process lifecycle. The root composes `lait::world`; product DTOs and identifiers
-remain under their owning `issues` package. Moving that package to another
-repository changes the dependency locator, not Runtime or host ownership.
+process lifecycle. Its executable adapter lives at `products/issues-runner`;
+product DTOs and identifiers remain under their owning packages. Moving those
+packages to another repository changes the release producer, not Runtime or
+host ownership.
 The outer `world::lifecycle` adapter owns only generic Orbit/Station
 materialization and invokes package lifecycle hooks with a docked Session.
 `issues-app` supplies the reviewed implementation policy, founder grants,
 initial-project policy, and crash-resumable signed `InitializeTracker` record.
 `orbital` contains no Issues bootstrap implementation.
+
+World updates cross a deliberate generation boundary. Consent and progress are
+durable. The old generation downloads and verifies the new immutable release,
+records `relaunching`, drains the daemon and all owned runners, then spawns a
+fresh daemon from the selected release set. Only the new World implementation
+performs bounded per-Space migration and activation. This prevents a staged
+pointer from making old code assess new semantics, and preserves the invariant
+that every Runtime Catalog is immutable for its process generation.
 
 The sibling `products/issues-app` package owns the `issues.control` v1 codec,
 query/command classification, `IssueRouter` execution adapter, product response
@@ -453,7 +493,7 @@ Role assignment is split at that boundary: Issues resolves `(role, project)`
 into a package-owned `AccessPlan`; root control can only commit generic
 `(World, capability, resource)` Mechanics assignments. Reviewed implementation
 activation likewise carries an explicit World id. Neither root verb names an
-Issues role, project, or singleton bundled product.
+Issues role, project, or singleton first-party product.
 
 The client package also owns reply decoding and may compile a friendly
 product-level read into Runtime's typed Find DAG. `ClientInvocation::Find` still
@@ -479,8 +519,10 @@ parent-Manifest availability, quotas, and the authority-approved implementation
 identity. Nodes without a supported World or schema may retain and forward
 legitimate protected material opaquely.
 
-IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
-architectural path unavailable to another conforming World.
+IssuesWorld (`com.lait.issues`) is the first-party reference World. On
+process-capable hosts it has no private architectural path unavailable to
+another conforming selected release. Its signed-iOS inclusion is the explicit
+first-party platform exception described above.
 
 Root control contains no issue command or response variants. The viewer and MCP
 construct the Issues-owned application protocol and carry it in an opaque

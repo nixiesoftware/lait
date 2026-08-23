@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -27,7 +28,6 @@ use comms::policy::Network;
 use comms::{Transport, TransportFactory};
 use lait::control::{request, Request, Response};
 use lait::diagnose::{DiagnosisView, GateState};
-use lait::orbital::run_station_process_with;
 use lait::orbits::{Entry, Origin};
 
 const FOUNDER_SEED: [u8; 32] = [161u8; 32];
@@ -144,7 +144,7 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
     // Founder forms a space (found_space seeds a default project, so the
     // synced gate has something to converge once the joiner is in).
     let founder_home = unique("life-a");
-    lait::orbital::found_space(&founder_home, &FOUNDER_SEED, "Engineering").unwrap();
+    crate::world_fixture::found_space(&founder_home, &FOUNDER_SEED, "Engineering").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -155,6 +155,7 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
         &rt,
         &founder_home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -163,7 +164,7 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
         panic!("expected an invite link");
     };
     let joiner_home = unique("life-b");
-    lait::orbital::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
     let joiner_handle = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
     wait_online(&rt, &joiner_home);
 
@@ -241,7 +242,7 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
 fn diagnose_flags_expected_space_mismatch() {
     let net = MemNet::new();
     let home = unique("mm-a");
-    lait::orbital::found_space(&home, &FOUNDER_SEED, "Mismatch Space").unwrap();
+    crate::world_fixture::found_space(&home, &FOUNDER_SEED, "Mismatch Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -288,7 +289,7 @@ fn diagnose_flags_expected_space_mismatch() {
 fn stop_kills_the_daemon_even_with_a_live_subscriber() {
     let net = MemNet::new();
     let home = unique("stop-a");
-    lait::orbital::found_space(&home, &FOUNDER_SEED, "Stop Space").unwrap();
+    crate::world_fixture::found_space(&home, &FOUNDER_SEED, "Stop Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -448,7 +449,7 @@ fn the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none() 
     let cfg = unique("solo-cfg");
     let cwd = unique("solo-cwd");
     let store = unique("solo-store");
-    lait::orbital::found_space(&store, &FOUNDER_SEED, "Solo").unwrap();
+    crate::world_fixture::found_space(&store, &FOUNDER_SEED, "Solo").unwrap();
 
     let entry = Entry {
         space: "ws_01JSOLOORBITTESTSPACEX".into(),
@@ -604,7 +605,8 @@ fn entering_refuses_a_directory_bound_to_another_space() {
     // A real orbital space A, whose founder-signed Coordinates link we mint
     // in-process (no daemon needed — the guard fires before any Contact).
     let a_home = unique("bind-a");
-    let (_mech_a, coords_a) = lait::orbital::form_space(&a_home, &FOUNDER_SEED, "Space A").unwrap();
+    let (_mech_a, coords_a) =
+        crate::world_fixture::form_space(&a_home, &FOUNDER_SEED, "Space A").unwrap();
     let link = coords_a.render();
 
     // …and a directory already bound to a different orbital space C.
@@ -614,7 +616,7 @@ fn entering_refuses_a_directory_bound_to_another_space() {
         data_encoding::HEXLOWER.encode(&JOINER_SEED),
     )
     .unwrap();
-    lait::orbital::found_space(&c_home, &JOINER_SEED, "Space C").unwrap();
+    crate::world_fixture::found_space(&c_home, &JOINER_SEED, "Space C").unwrap();
 
     let join_cfg = unique("bind-cfg-join");
     let head = crate::head::Head::start(&join_cfg, Some(&c_home));

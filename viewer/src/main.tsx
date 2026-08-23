@@ -56,9 +56,9 @@ window.lait = { contribute, registry };
  *
  * `import.meta.env.DEV` is replaced with a literal `false` at build time, so
  * this branch — and the dynamic import inside it — are eliminated before the
- * bundle reaches `src/serve/assets/` and gets embedded in the binary. A shipped
- * `lait` has no debug surface; the type is `Partial` because that absence is
- * the truth about the shipped object, not a convenience.
+ * bundle reaches `products/issues-app/assets/web/` and enters the immutable
+ * Issues release. A shipped release has no debug surface; the type is `Partial`
+ * because that absence is the truth about the shipped object, not a convenience.
  *
  * Why they live here at all: driving this app from outside means either taking
  * pictures of it or asking it questions, and pictures cost about four hundred

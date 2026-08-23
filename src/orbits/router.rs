@@ -214,7 +214,7 @@ impl Placement {
         blocking: Arc<Semaphore>,
     ) -> Result<Self> {
         let mode = match control::probe(&resolved.home).await {
-            control::Probe::Healthy => PlacementMode::Attached,
+            control::Probe::Healthy { .. } => PlacementMode::Attached,
             control::Probe::Foreign { why, replaceable } => {
                 return Err(crate::control::ForeignDaemon {
                     home: resolved.home.clone(),
@@ -232,7 +232,7 @@ impl Placement {
                         // winner; otherwise preserve our own startup diagnosis.
                         for _ in 0..20 {
                             match control::probe(&resolved.home).await {
-                                control::Probe::Healthy => {
+                                control::Probe::Healthy { .. } => {
                                     return Self::observe(
                                         resolved,
                                         PlacementMode::Attached,
@@ -666,6 +666,11 @@ impl Router {
         &self.catalog
     }
 
+    /// The immutable World generation snapshot future placements receive.
+    pub fn packages(&self) -> WorldPackages {
+        self.packages.clone()
+    }
+
     pub(crate) fn book(&self) -> Result<&crate::daemon::address_book::AddressBookService, String> {
         self.book.as_ref().map(Arc::as_ref).map_err(Clone::clone)
     }
@@ -708,6 +713,13 @@ impl Router {
     /// before it places an Orbit or asks product code to render anything.
     pub fn reviewed_world_implementation(&self, world: &WorldId) -> Option<[u8; 32]> {
         self.packages.reviewed_implementation(world)
+    }
+
+    /// Immutable World distribution release running in this daemon
+    /// generation. Staging may select a newer release on disk; it cannot
+    /// change this fact until the daemon deliberately crosses a generation.
+    pub(crate) fn world_release_version(&self, world: &WorldId) -> Option<&str> {
+        self.packages.release_version(world)
     }
 
     pub(crate) fn lifecycle_world_ids(&self) -> impl Iterator<Item = &WorldId> {
@@ -1156,7 +1168,9 @@ mod tests {
             std::env::temp_dir().join(format!("lait-router-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let (mechanics, _) = crate::orbital::form_space(&home, seed, "Router Test").unwrap();
+        let (mechanics, _) =
+            crate::orbital::form_space(&crate::world::packages(), &home, seed, "Router Test")
+                .unwrap();
         std::fs::write(
             home.join("secret.key"),
             data_encoding::HEXLOWER.encode(seed),

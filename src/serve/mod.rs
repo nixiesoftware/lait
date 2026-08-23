@@ -74,6 +74,7 @@ fn cookie_name(port: u16) -> String {
 }
 
 struct App {
+    registry: Arc<world_interface::WorldClientRegistry>,
     guard: Guard,
     /// The one World mount this head answers for.
     ///
@@ -82,9 +83,8 @@ struct App {
     /// running" a question about a shared process — and every control built on
     /// the answer, including stopping, a statement about the wrong thing.
     world: String,
-    /// Where this head's web bundle is read from: an activated World bundle
-    /// when one is staged and matches this build's runtime version, and the
-    /// compiled-in floor otherwise.
+    /// Where this head's web bundle is read from: the selected immutable World
+    /// release, with no compiled product fallback.
     head: head::Source,
     directory: Catalog,
     daemon: Client,
@@ -220,6 +220,63 @@ pub async fn run_until(
     announce: impl FnOnce(&Ready) + Send,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let identity = selection.identity_dir()?;
+    let worlds = head::worlds_root(&identity);
+    crate::world::installed::seed_carried(&identity)?;
+    let registry = Arc::new(crate::world::installed::load(&worlds)?.clients);
+    run_until_with_registry(
+        port,
+        open,
+        selection,
+        world,
+        registry,
+        move |selected| head::activate(&worlds, selected.as_str()),
+        announce,
+        shutdown,
+    )
+    .await
+}
+
+/// Run an embedded head with a platform-supplied first-party client registry.
+///
+/// Native iOS cannot spawn or dynamically install executable code. Its signed
+/// application therefore adapts the reviewed first-party Worlds in-process,
+/// while desktop uses [`run_until`] and independently selected runner
+/// processes. Keeping this exception at the platform boundary avoids reviving
+/// a product dependency in the host crate.
+pub async fn run_embedded_until(
+    port: u16,
+    open: bool,
+    selection: crate::config::Selection,
+    world: Option<String>,
+    registry: world_interface::WorldClientRegistry,
+    head: head::Source,
+    announce: impl FnOnce(&Ready) + Send,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    run_until_with_registry(
+        port,
+        open,
+        selection,
+        world,
+        Arc::new(registry),
+        move |_| head,
+        announce,
+        shutdown,
+    )
+    .await
+}
+
+async fn run_until_with_registry(
+    port: u16,
+    open: bool,
+    selection: crate::config::Selection,
+    world: Option<String>,
+    registry: Arc<world_interface::WorldClientRegistry>,
+    head_for: impl FnOnce(&replica::body::WorldId) -> head::Source,
+    announce: impl FnOnce(&Ready) + Send,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     // Resolved before the listener binds. A build that cannot say which World
     // this head is refuses to be one, rather than coming up, announcing an
     // address, and answering for whatever mount a request happens to name.
@@ -234,20 +291,27 @@ pub async fn run_until(
     // typing `lait`, and refusing them because the build ships two Worlds is not
     // a safety property, it is the documented entry point declining to start.
     //
-    // So this ladder ends one rung further down, at the composition's declared
+    // So this ladder ends one rung further down, at the selected install set's
     // primary. `--world` still selects any World, which is what gives each one
     // its own head; the default only decides which one bare `lait` opens.
-    let registry = crate::world::client_packages();
+    let identity = selection.identity_dir()?;
     let requested = world.as_deref().or_else(|| {
-        (registry.packages().count() > 1).then_some(crate::composition::PRODUCT_WORLD_MOUNT)
+        (registry.packages().count() > 1)
+            .then(|| {
+                registry
+                    .packages()
+                    .next()
+                    .map(world_interface::WorldClientPackage::mount)
+            })
+            .flatten()
     });
     let pinned = registry
         .pin(requested)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let pinned_mount = pinned.mount().to_owned();
+    let pinned_world = pinned.world().clone();
     // Identity scoping, resolved once at startup from the invocation's own
     // selection rather than from a process-wide environment.
-    let identity = selection.identity_dir()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&crate::config::config_root()?);
 
@@ -270,18 +334,16 @@ pub async fn run_until(
     // Created before anything that has to watch it. Every long-lived response
     // and every background task selects on this one channel.
     let (stop, _) = tokio::sync::watch::channel(false);
-    // The head serves the compiled-in floor unless a payload is staged for
-    // the World this build presents. Resolved once at start: a payload that
+    // The head serves only the selected payload for its World. Resolved once
+    // at start: a payload that
     // arrives later becomes live at the next head, which is the same
     // "applied at a boundary" rule the client tree follows.
     // This head's own World, not the build's first one. A Signage head serving
     // the Issues bundle would be the staging equivalent of the bug the pin
     // exists to close.
-    let head = selection
-        .identity_dir()
-        .map(|identity| head::activate(&head::worlds_root(&identity), pinned.world().as_str()))
-        .unwrap_or_default();
+    let head = head_for(&pinned_world);
     let app = Arc::new(App {
+        registry,
         head,
         world: pinned_mount.clone(),
         // The named form rides on the mount this head resolved above, so a World
@@ -801,7 +863,7 @@ async fn index(
     shell::index(launched_by_client(&app, &headers), &app.head)
 }
 
-/// Any non-`/api` path: an embedded asset, or the SPA entry.
+/// Any non-`/api` path: an asset from the selected World release, or its SPA entry.
 async fn static_asset(
     State(app): State<Arc<App>>,
     headers: axum::http::HeaderMap,
@@ -954,7 +1016,7 @@ async fn world_rpc(
                 .into_response();
         }
     };
-    let registry = crate::world::client_packages();
+    let registry = &app.registry;
     let package = registry.package_for_mount(&world).or_else(|| {
         replica::body::WorldId::parse(&world).and_then(|world| registry.package_for_world(&world))
     });
@@ -1376,9 +1438,16 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
 
+    fn released_head() -> head::Source {
+        head::Source::activated(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("products/issues-app/assets/web"),
+        )
+    }
+
     /// The real HTTP router, over an Orbit directory with no spaces.
     ///
-    /// Every case below is refused (or served) by `gate` and the embedded-asset
+    /// Every case below is refused (or served) by `gate` and the World-asset
     /// fallback, neither of which touches a daemon or the registry — so these run
     /// with no port, no store, and no process-wide env.
     fn app(token: &str) -> Router {
@@ -1386,8 +1455,9 @@ mod tests {
         router(Arc::new(App {
             // Tests pin the build's own product World; the pin under test
             // is the refusal, not the choice.
-            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
-            head: head::Source::embedded(),
+            world: crate::world::ISSUES_MOUNT.to_owned(),
+            registry: Arc::new(crate::world::client_packages().clone()),
+            head: released_head(),
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
@@ -1408,8 +1478,9 @@ mod tests {
         let state = Arc::new(App {
             // Tests pin the build's own product World; the pin under test
             // is the refusal, not the choice.
-            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
-            head: head::Source::embedded(),
+            world: crate::world::ISSUES_MOUNT.to_owned(),
+            registry: Arc::new(crate::world::client_packages().clone()),
+            head: released_head(),
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
@@ -1484,7 +1555,7 @@ mod tests {
         );
     }
 
-    /// `GET /app.js` — the embedded bundle. Chosen because it proves the gate let
+    /// `GET /app.js` — the selected World bundle. Chosen because it proves the gate let
     /// the request *through* without needing a daemon behind it.
     fn req(headers: &[(&str, &str)], uri: &str) -> HttpRequest<Body> {
         let mut b = HttpRequest::builder().uri(uri);
@@ -1679,8 +1750,9 @@ mod tests {
         let router = router(Arc::new(App {
             // Tests pin the build's own product World; the pin under test
             // is the refusal, not the choice.
-            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
-            head: head::Source::embedded(),
+            world: crate::world::ISSUES_MOUNT.to_owned(),
+            registry: Arc::new(crate::world::client_packages().clone()),
+            head: head::Source::unavailable(),
             guard: Guard::new(HOSTED_TOKEN.into(), 7717),
             directory,
             daemon: Client::at(std::path::PathBuf::from("/nonexistent-for-tests")),
@@ -1749,7 +1821,8 @@ mod tests {
     async fn declaring_presence_on_a_hosted_identitys_station_is_refused() {
         let (router, orbit) = hosted_identity_server();
         let body = serde_json::to_string(&Request::Watching {
-            issues: vec!["iss_deadbeef".into()],
+            world: "com.lait.issues".into(),
+            bodies: vec![[1; 16]],
             carets: vec![],
             typing: vec![],
             previews: vec![],
@@ -1879,8 +1952,9 @@ mod gate_coverage {
         router(Arc::new(App {
             // Tests pin the build's own product World; the pin under test
             // is the refusal, not the choice.
-            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
-            head: head::Source::embedded(),
+            world: crate::world::ISSUES_MOUNT.to_owned(),
+            registry: Arc::new(crate::world::client_packages().clone()),
+            head: head::Source::unavailable(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
@@ -2047,8 +2121,9 @@ mod gate_coverage {
         let app = Arc::new(App {
             // Tests pin the build's own product World; the pin under test
             // is the refusal, not the choice.
-            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
-            head: head::Source::embedded(),
+            world: crate::world::ISSUES_MOUNT.to_owned(),
+            registry: Arc::new(crate::world::client_packages().clone()),
+            head: head::Source::unavailable(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),

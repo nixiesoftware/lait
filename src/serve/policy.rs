@@ -401,6 +401,7 @@ mod tests {
     fn writes_are_not() {
         assert!(!is_read(&Request::KeyRotate));
         assert!(!is_read(&Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: None,

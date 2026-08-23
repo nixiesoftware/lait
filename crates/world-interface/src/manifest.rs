@@ -11,11 +11,8 @@
 //!
 //! Every field here is one this crate must support forever: the format
 //! version makes *adding* one a non-event and removing one a breaking change,
-//! so the set starts at what is actually consulted. A catalog kind, a mount, a
-//! tagline, an icon and an accent were all drafted and cut — nothing read
-//! them. A World's artwork in particular is a separate problem, since a
-//! fetched bundle would carry image bytes rather than the compiled-in glyph a
-//! Library row draws today. They return when something reads them.
+//! so the set stays limited to what is actually consulted: identity,
+//! presentation, compatibility, native runners, and typed launch entries.
 //!
 //! ## The shape is borrowed, not invented
 //!
@@ -78,6 +75,12 @@ pub struct WorldManifest {
     pub id: String,
     /// This release's version.
     pub version: String,
+    /// Stable namespace mounted by HTTP and MCP heads.
+    ///
+    /// Older format-1 bundles may omit it and fall back to the final id
+    /// segment; new publishers should always state it.
+    #[serde(default)]
+    pub mount: Option<String>,
     /// What to call it in a list.
     ///
     /// Absent falls back to the last segment of the id — which is at least a
@@ -85,11 +88,16 @@ pub struct WorldManifest {
     /// bothered to name itself deserves to be called.
     #[serde(default)]
     pub name: Option<String>,
+    /// One-line Library description.
+    #[serde(default)]
+    pub tagline: Option<String>,
+    /// Preferred semantic implementation version, for passive Library rows.
+    #[serde(default)]
+    pub implementation_version: Option<u32>,
     /// The square mark a Library row draws, as a path into the bundle.
     ///
-    /// Held to the same bounds a compiled-in World's artwork is held to —
-    /// a real PNG, square, and within the size a client draws — but at
-    /// staging rather than at parse, because that is where the bytes are.
+    /// Held to the common artwork bounds — a real PNG, square, and within the
+    /// size a client draws — at staging, because that is where the bytes are.
     #[serde(default)]
     pub mark: Option<String>,
     /// The frame drawn behind this World's title on a detail surface, as a
@@ -109,6 +117,13 @@ pub struct WorldManifest {
     /// What the host must offer for this World to run at all.
     #[serde(default)]
     pub requires: Vec<Requirement>,
+    /// The independently executable service implementations in this release.
+    ///
+    /// Kept separate from `launch`: this is how the host runs the World, while
+    /// launch entries are the surfaces a person or agent can enter. A web
+    /// surface is not a process and a process is not presentation.
+    #[serde(default)]
+    pub runners: Vec<Runner>,
     /// Everything a person or an agent can start.
     ///
     /// May be empty, and that is a statement rather than an omission: a World
@@ -124,6 +139,44 @@ impl WorldManifest {
         self.name
             .as_deref()
             .unwrap_or_else(|| self.id.rsplit('.').next().unwrap_or(&self.id))
+    }
+
+    pub fn mount(&self) -> &str {
+        self.mount
+            .as_deref()
+            .unwrap_or_else(|| self.id.rsplit('.').next().unwrap_or(&self.id))
+    }
+}
+
+/// One platform-specific World service executable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Runner {
+    /// Whether this implementation is selected for newly formed Spaces.
+    ///
+    /// Historical implementations may remain in the same immutable release so
+    /// retained publications and explicit migrations can resolve their exact
+    /// code. Exactly one applicable runner must be preferred; the host refuses
+    /// ambiguity instead of choosing by declaration order.
+    #[serde(default)]
+    pub preferred: bool,
+    /// Where this executable applies. Absent means everywhere.
+    #[serde(default)]
+    pub when: Option<When>,
+    /// Path to the executable, relative to the immutable release root.
+    pub program: String,
+    /// Arguments passed directly, never through a shell.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory relative to the release root. Absent uses the root.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+impl Runner {
+    pub fn admits(&self, os: &str, arch: &str) -> bool {
+        self.when
+            .as_ref()
+            .is_none_or(|condition| condition.admits(os, arch))
     }
 }
 
@@ -305,6 +358,28 @@ impl WorldManifest {
                 manifest.id
             ));
         }
+        if manifest.mount().is_empty()
+            || !manifest.mount().bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'-' | b'_')
+            })
+        {
+            return Err(format!(
+                "world.json mount {:?} is invalid",
+                manifest.mount()
+            ));
+        }
+        if manifest
+            .tagline
+            .as_ref()
+            .is_some_and(|tagline| tagline.trim().is_empty() || tagline.chars().count() > 96)
+        {
+            return Err("world.json tagline must be 1..=96 characters".to_string());
+        }
+        if manifest.implementation_version == Some(0) {
+            return Err("world.json implementation_version must be non-zero".to_string());
+        }
         for (kind, path) in [("mark", &manifest.mark), ("hero", &manifest.hero)] {
             let Some(path) = path else { continue };
             if path.is_empty() || path.starts_with('/') || path.contains("..") {
@@ -313,6 +388,23 @@ impl WorldManifest {
                      the bundle"
                 ));
             }
+        }
+        for runner in &manifest.runners {
+            validate_bundle_path("runner program", &runner.program)?;
+            if let Some(cwd) = &runner.cwd {
+                validate_bundle_path("runner working directory", cwd)?;
+            }
+        }
+        let applicable = manifest
+            .runners
+            .iter()
+            .filter(|runner| runner.admits(std::env::consts::OS, std::env::consts::ARCH));
+        let preferred = applicable.clone().filter(|runner| runner.preferred).count();
+        let total = applicable.count();
+        if total > 0 && preferred != 1 {
+            return Err(format!(
+                "world.json declares {preferred} preferred runners for this platform; exactly one is required"
+            ));
         }
         let mut seen = BTreeMap::new();
         for entry in &manifest.launch {
@@ -387,6 +479,20 @@ impl WorldManifest {
         });
         entries
     }
+}
+
+fn validate_bundle_path(kind: &str, path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains("..")
+        || std::path::Path::new(path).is_absolute()
+    {
+        return Err(format!(
+            "world.json declares {kind} {path:?}, which is not a path inside the bundle"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -521,6 +627,26 @@ mod tests {
         assert_eq!(names("windows", "x86_64"), vec!["win", "web"]);
         assert_eq!(names("linux", "x86_64"), vec!["nix", "web"]);
         assert_eq!(names("macos", "aarch64"), vec!["nix", "web"]);
+    }
+
+    #[test]
+    fn one_applicable_runner_must_be_the_formation_default() {
+        let mut doc = minimal();
+        doc["runners"] = serde_json::json!([
+            { "program": "bin/current" },
+            { "program": "bin/migrator" }
+        ]);
+        let error = manifest(doc).expect_err("an ambiguous runner set must refuse");
+        assert!(error.contains("exactly one"), "{error}");
+
+        let mut doc = minimal();
+        doc["runners"] = serde_json::json!([
+            { "program": "bin/current", "preferred": true },
+            { "program": "bin/migrator" }
+        ]);
+        let parsed = manifest(doc).expect("one preferred runner is unambiguous");
+        assert_eq!(parsed.runners.len(), 2);
+        assert!(parsed.runners[0].preferred);
     }
 
     #[test]

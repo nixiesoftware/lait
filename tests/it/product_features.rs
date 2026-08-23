@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -17,7 +18,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [241u8; 32];
 const MEMBER_SEED: [u8; 32] = [242u8; 32];
@@ -233,7 +233,7 @@ fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, project: &str, title: &s
 fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let net = MemNet::new();
     let home = temp_home("solo");
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Feature Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Feature Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &home);
@@ -1058,7 +1058,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
 fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     let net = MemNet::new();
     let founder_home = temp_home("f");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Follow Space").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Follow Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -1077,6 +1077,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
         &client,
         &founder_home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -1085,7 +1086,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
         panic!("expected an invite");
     };
     let member_home = temp_home("m");
-    lait::orbital::enter_space(&member_home, &MEMBER_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&member_home, &MEMBER_SEED, &invite).unwrap();
     let member_handle = spawn_daemon(member_home.clone(), MEMBER_SEED, net.clone());
     wait_online(&client, &member_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();

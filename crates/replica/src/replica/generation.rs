@@ -361,17 +361,45 @@ pub struct PriorReplicaSource {
     keys: Arc<dyn BodyKeySource>,
 }
 
+/// Decode an indexed prior store's caller metadata, from either generation
+/// that carries one.
+///
+/// Version 3 differs only by a generation index root, which a rebuild derives
+/// fresh, so it normalizes onto the version-2 shape the migration reads. Both
+/// are required to be canonical.
+fn decode_prior_indexed_meta(bytes: &[u8]) -> Result<PriorIndexedStoreMeta, Failure> {
+    if let Ok(meta) = postcard::from_bytes::<super::PriorGenerationStoreMeta>(bytes) {
+        if meta.format_version == 3
+            && postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?
+                == bytes
+        {
+            return Ok(PriorIndexedStoreMeta {
+                format_version: 2,
+                space: meta.space,
+                frontier: meta.frontier,
+                quota: meta.quota,
+                body_index_root: meta.body_index_root,
+                manifest_body_root: meta.manifest_body_root,
+                content_index_root: meta.content_index_root,
+                receipt_index_root: meta.receipt_index_root,
+                manifest_root: meta.manifest_root,
+            });
+        }
+    }
+    let meta: PriorIndexedStoreMeta =
+        postcard::from_bytes(bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    if meta.format_version != 2
+        || postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))? != bytes
+    {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    Ok(meta)
+}
+
 impl PriorReplicaSource {
     pub fn open(path: impl AsRef<Path>, keys: Arc<dyn BodyKeySource>) -> Result<Self, Failure> {
         let source = journal::GenerationSource::open(path.as_ref()).map_err(map_journal)?;
-        let meta: PriorIndexedStoreMeta = postcard::from_bytes(source.meta())
-            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
-        if meta.format_version != 2
-            || postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?
-                != source.meta()
-        {
-            return Err(Failure::Integrity(Defect::Encoding));
-        }
+        let meta = decode_prior_indexed_meta(source.meta())?;
         let committed: BTreeSet<([u8; 32], u64)> =
             source.caller_index_roots().into_iter().collect();
         for root in [

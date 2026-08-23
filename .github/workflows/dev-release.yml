@@ -29,7 +29,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: namespace-profile-nixiesoftware, target: x86_64-unknown-linux-gnu }
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu }
           # arm64 Linux builds natively on GitHub's hosted arm64 runner, matching
           # the stable dist matrix (which ships aarch64-unknown-linux-gnu). Without
           # this, arm64 Linux had no nightly channel.
@@ -60,8 +60,8 @@ jobs:
         with:
           key: dev-${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build host and first-party World runners
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait -p lait-issues-runner -p lait-signage-runner
 
       - name: Package
         shell: bash
@@ -73,6 +73,7 @@ jobs:
           mkdir -p "$stage"
           cp "target/$target/release/$bin" "$stage/"
           cp README.md LICENSE "$stage/"
+          bash .github/scripts/stage-worlds.sh "$target" "$stage"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$stage.zip" "$stage" >/dev/null
             asset="$stage.zip"
@@ -122,7 +123,7 @@ jobs:
           {
             echo "Rolling **development** build from the latest \`main\` (commit \`$sha\`, built $built)."
             echo
-            echo "⚠️ **Not a stable release** — bleeding edge, for testing only. For stable, use the [latest release](https://github.com/nixiesoftware/lait/releases/latest) or a package manager (\`brew install nixiesoftware/tap/lait\`, \`cargo binstall lait\`, …)."
+            echo "⚠️ **Not a stable release** — bleeding edge, for colleague testing only. Canonical installs and updates come from the signed first-party feed."
             echo
             echo "The binary reports its version as \`X.Y.Z-dev+$sha\`. Grab an asset below, or:"
             echo '```'

@@ -942,7 +942,7 @@ impl Build {
 ///
 /// The binding is descriptive metadata used during package composition. It is
 /// not durable Exec state and it cannot select a different Build at call time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandlerBinding {
     pub spec: SchemaRef,
     pub build: BuildId,
@@ -958,7 +958,7 @@ pub struct HandlerBinding {
 pub trait Handler: std::marker::Send + Sync {
     fn binding(&self) -> &HandlerBinding;
 
-    fn handle(&self, context: &mut Context<'_>) -> Result<Candidate, Failure>;
+    fn handle(&self, context: &mut dyn HandlerContext) -> Result<Candidate, Failure>;
 }
 
 /// The executable half of one installed World package.
@@ -1364,7 +1364,7 @@ impl std::fmt::Display for PackageInvalid {
 impl std::error::Error for PackageInvalid {}
 
 /// Handler-produced output before Runtime attributes and commits it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub output: SchemaRef,
     pub inline: Vec<u8>,
@@ -1468,6 +1468,133 @@ pub struct Context<'a> {
     /// entry carries its minted coordinates with a placeholder ContentRef
     /// that binding replaces once the host has sealed the blob.
     checkpoint_blobs: Vec<(CheckpointRef, Vec<u8>)>,
+}
+
+/// The exact bounded capability available to one Exec handler.
+///
+/// Runtime's native [`Context`] and a generation-pinned World process expose
+/// the same surface. Admission, content containment, and Find grants remain
+/// host-authoritative; moving product code out of process does not move those
+/// decisions with it.
+pub trait HandlerContext {
+    fn resume_checkpoint(&self) -> Option<&CheckpointRef>;
+    fn read_content(
+        &self,
+        content: &ContentRef,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, Failure>;
+    fn query(&mut self, query: crate::find::Query) -> Result<crate::find::Answer, Failure>;
+    fn world(&self) -> &WorldId;
+    fn run(&self) -> RunId;
+    fn attempt(&self) -> AttemptId;
+    fn spec(&self) -> &SchemaRef;
+    fn build(&self) -> BuildId;
+    fn input_schema(&self) -> &SchemaRef;
+    fn input_inline(&self) -> &[u8];
+    fn input_content(&self) -> &[ContentRef];
+    fn accepted_resources(&self) -> &[Resource];
+    fn enforcement_evidence(&self) -> Option<ContentRef>;
+    fn limits(&self) -> AttemptLimits;
+    fn links(&self) -> &[LinkSpec];
+    fn cancel_asked(&self) -> bool;
+    /// Number of checkpoints already committed before this handler turn.
+    fn committed_checkpoint_count(&self) -> u32;
+    fn save_checkpoint(&mut self, checkpoint: CheckpointRef) -> Result<(), Failure>;
+    fn save_checkpoint_bytes(&mut self, bytes: Vec<u8>) -> Result<(), Failure>;
+    fn start_child(&mut self, child: Start) -> Result<(), Failure>;
+    fn stage_output(&mut self, bytes: Vec<u8>) -> Result<(), Failure>;
+}
+
+impl HandlerContext for Context<'_> {
+    fn resume_checkpoint(&self) -> Option<&CheckpointRef> {
+        Context::resume_checkpoint(self)
+    }
+
+    fn read_content(
+        &self,
+        content: &ContentRef,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        Context::read_content(self, content, offset, len)
+    }
+
+    fn query(&mut self, query: crate::find::Query) -> Result<crate::find::Answer, Failure> {
+        Context::query(self, query)
+    }
+
+    fn world(&self) -> &WorldId {
+        Context::world(self)
+    }
+
+    fn run(&self) -> RunId {
+        Context::run(self)
+    }
+
+    fn attempt(&self) -> AttemptId {
+        Context::attempt(self)
+    }
+
+    fn spec(&self) -> &SchemaRef {
+        Context::spec(self)
+    }
+
+    fn build(&self) -> BuildId {
+        Context::build(self)
+    }
+
+    fn input_schema(&self) -> &SchemaRef {
+        Context::input_schema(self)
+    }
+
+    fn input_inline(&self) -> &[u8] {
+        Context::input_inline(self)
+    }
+
+    fn input_content(&self) -> &[ContentRef] {
+        Context::input_content(self)
+    }
+
+    fn accepted_resources(&self) -> &[Resource] {
+        Context::accepted_resources(self)
+    }
+
+    fn enforcement_evidence(&self) -> Option<ContentRef> {
+        Context::enforcement_evidence(self)
+    }
+
+    fn limits(&self) -> AttemptLimits {
+        Context::limits(self)
+    }
+
+    fn links(&self) -> &[LinkSpec] {
+        Context::links(self)
+    }
+
+    fn cancel_asked(&self) -> bool {
+        Context::cancel_asked(self)
+    }
+
+    fn committed_checkpoint_count(&self) -> u32 {
+        u32::try_from(self.attempt.checkpoints.len()).unwrap_or(u32::MAX)
+    }
+
+    fn save_checkpoint(&mut self, checkpoint: CheckpointRef) -> Result<(), Failure> {
+        Context::save_checkpoint(self, checkpoint)
+    }
+
+    fn save_checkpoint_bytes(&mut self, bytes: Vec<u8>) -> Result<(), Failure> {
+        Context::save_checkpoint_bytes(self, bytes)
+    }
+
+    fn start_child(&mut self, child: Start) -> Result<(), Failure> {
+        Context::start_child(self, child)
+    }
+
+    fn stage_output(&mut self, bytes: Vec<u8>) -> Result<(), Failure> {
+        Context::stage_output(self, bytes)
+    }
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -2107,7 +2234,7 @@ impl Handler for Subprocess {
         &self.binding
     }
 
-    fn handle(&self, context: &mut Context<'_>) -> Result<Candidate, Failure> {
+    fn handle(&self, context: &mut dyn HandlerContext) -> Result<Candidate, Failure> {
         use std::io::{Read, Write};
         if context.cancel_asked() {
             return Err(Failure::Cancelled);
@@ -5290,7 +5417,7 @@ mod tests {
             &self.binding
         }
 
-        fn handle(&self, _context: &mut Context<'_>) -> Result<Candidate, Failure> {
+        fn handle(&self, _context: &mut dyn HandlerContext) -> Result<Candidate, Failure> {
             Ok(Candidate {
                 output: spec().output.schema,
                 inline: vec![1, 2, 3],
@@ -5354,7 +5481,7 @@ mod tests {
             &self.binding
         }
 
-        fn handle(&self, _context: &mut Context<'_>) -> Result<Candidate, Failure> {
+        fn handle(&self, _context: &mut dyn HandlerContext) -> Result<Candidate, Failure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.behavior {
                 BackendBehavior::Panic => panic!("contained handler panic"),

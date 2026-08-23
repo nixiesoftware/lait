@@ -45,8 +45,8 @@ const cardChip = "border-line text-dim flex h-ctl-sm items-center gap-1 rounded-
  *
  * Native HTML5 drag-and-drop, not a library. The board is four columns of one card
  * shape, the platform already owns the drag image, the cursor, and the escape key —
- * and this bundle is committed into the binary (`src/serve/assets`), so a 40KB drag
- * engine is 40KB every `lait` install carries forever. The keyboard path (`J`/`K`,
+ * and this bundle is committed into the Issues release, so a 40KB drag engine
+ * is 40KB every Issues install carries. The keyboard path (`J`/`K`,
  * `H`/`L`) is separate and primary; this is the mouse affordance for the same verbs.
  */
 export function Board({

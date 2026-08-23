@@ -1,0 +1,160 @@
+name: Publish first-party Worlds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-worlds.yml
+      - .github/scripts/stage-worlds.sh
+      - ci/publish-world.sh
+      - tools/feed/**
+      - crates/world-interface/**
+      - crates/world-runner/**
+      - crates/world-sdk/**
+      - crates/runtime/**
+      - products/issues/**
+      - products/issues-app/**
+      - products/issues-runner/**
+      - products/signage/**
+      - products/signage-app/**
+      - products/signage-runner/**
+      - products/issues-app/assets/web/**
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+    inputs:
+      stable:
+        description: Also promote the exact published releases to stable
+        required: true
+        default: false
+        type: boolean
+
+# Channel pointers are the only mutable objects. Never let two commits race to
+# decide which complete release is current.
+concurrency:
+  group: first-party-world-channels
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+
+jobs:
+  build:
+    name: build World runners (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15, target: x86_64-apple-darwin }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: world-${{ matrix.target }}
+      - name: Build independent runners
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait-issues-runner -p lait-signage-runner
+      - name: Assemble immutable release trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/stage-worlds.sh "${{ matrix.target }}" stage
+          tar czf "world-bundles-${{ matrix.target }}.tar.gz" -C stage worlds
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: world-bundles-${{ matrix.target }}
+          path: world-bundles-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: seal and publish World channels
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: world-bundles-*
+          path: dist
+          merge-multiple: true
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - name: Build the feed sealer
+        run: cargo build --release --locked -p lait-feed
+      - name: Authenticate to the distribution bucket
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_WORLD_PUBLISHER_SERVICE_ACCOUNT }}
+      - name: Install gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          version: '>= 416.0.0'
+      - name: Publish test, then promote when explicitly requested
+        shell: bash
+        env:
+          WORLD_FEED_SIGNING_SEED: ${{ secrets.WORLD_FEED_SIGNING_SEED }}
+          PROMOTE_STABLE: ${{ inputs.stable }}
+        run: |
+          set -euo pipefail
+          [ -n "$WORLD_FEED_SIGNING_SEED" ] || {
+            echo "WORLD_FEED_SIGNING_SEED is not configured" >&2
+            exit 1
+          }
+          seed="$RUNNER_TEMP/world-feed-signing.seed"
+          printf '%s\n' "$WORLD_FEED_SIGNING_SEED" > "$seed"
+          chmod 600 "$seed"
+
+          targets=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            x86_64-pc-windows-msvc
+          )
+          for target in "${targets[@]}"; do
+            mkdir -p "dist/$target"
+            tar xzf "dist/world-bundles-$target.tar.gz" -C "dist/$target"
+          done
+
+          publish_world() {
+            local world="$1" manifest="$2" version args=()
+            version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
+            [ -n "$version" ] || { echo "$manifest has no version" >&2; exit 1; }
+            for target in "${targets[@]}"; do
+              args+=(--bundle "$target=$PWD/dist/$target/worlds/$world/$version")
+            done
+            FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
+              --world "$world" --version "$version" "${args[@]}" \
+              --channel test --seed "$seed"
+            if [ "$PROMOTE_STABLE" = "true" ]; then
+              FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
+                --world "$world" --version "$version" --channel stable \
+                --promote --seed "$seed"
+            fi
+          }
+
+          publish_world com.lait.issues products/issues/Cargo.toml
+          publish_world com.lait.signage products/signage/Cargo.toml

@@ -22,7 +22,12 @@ use issues::ids::{DocId, LabelId, SystemUlidSource, UlidSource};
 use runtime::world::call::{Access, Call, Code, Context, Failure, Handler, Nudge, Reply};
 use runtime::world::{Conflict as SessionConflict, Failure as SessionFailure};
 use runtime::{
-    world::DeniedCause, world::Intent, world::Query, world::Rejection, world::RequestId, Session,
+    world::call::{IdentityAccess, SessionAccess},
+    world::DeniedCause,
+    world::Intent,
+    world::Query,
+    world::Rejection,
+    world::RequestId,
 };
 use serde::de::DeserializeOwned;
 
@@ -231,7 +236,7 @@ impl Handler for IssuesCallHandler {
 /// Find, Geometry, live invalidation, and agent search. It owns no aggregate
 /// product state and cannot become a second tracker selectors.
 struct Selectors<'a> {
-    session: &'a Session,
+    session: &'a dyn SessionAccess,
 }
 
 impl Selectors<'_> {
@@ -351,16 +356,16 @@ fn assemble(detail: issues::contract::IssueDetailProjection) -> IssueView {
 }
 
 pub struct IssueRouter<'a> {
-    session: &'a Session,
-    identity: &'a runtime::world::LocalIdentity,
+    session: &'a dyn SessionAccess,
+    identity: &'a dyn IdentityAccess,
     clock: &'a dyn UlidSource,
     accepted: std::cell::RefCell<Option<crate::OperationReceipt>>,
 }
 
 impl<'a> IssueRouter<'a> {
     pub fn new(
-        session: &'a Session,
-        identity: &'a runtime::world::LocalIdentity,
+        session: &'a dyn SessionAccess,
+        identity: &'a dyn IdentityAccess,
         clock: &'a dyn UlidSource,
     ) -> Self {
         Self {

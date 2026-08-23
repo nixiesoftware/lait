@@ -31,6 +31,8 @@
 //! carried through as themselves, and a machine that has never completed a
 //! check has no standing at all — which is a fourth thing, and not zero.
 
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use lait::update::watch::Standing;
@@ -40,7 +42,6 @@ use lait::update::watch::Standing;
 /// inventing different evidence.
 const INSISTENT_AFTER: Duration = Duration::from_secs(4 * 24 * 60 * 60);
 const URGENT_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const QUIET_UNTIL: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 
 /// How hard to ask. Ordered, so a surface can compare without matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -111,14 +112,35 @@ pub enum Intent {
         /// What happened, in the words the feed used.
         why: String,
     },
+    /// This build is below the published floor and must move.
+    ///
+    /// The only case that restarts without being asked. Declared work is
+    /// drained first and shown while it drains — the floor overrides the
+    /// *question*, never the work — and the restart is taken once `holding`
+    /// is empty.
+    Forced {
+        /// The version that becomes live on restart.
+        version: String,
+        /// What is still draining. Empty means take the restart now.
+        holding: Vec<String>,
+    },
 }
 
 /// The whole decision, as a pure function of what is known.
 ///
-/// `now` and `in_flight` are arguments rather than ambient reads so the
-/// policy is testable across every axis without a clock or a running client —
-/// which is the point of it being separate from the surface that draws it.
-pub fn intent(standing: Option<&Standing>, now: u64, in_flight: &[String]) -> Intent {
+/// `now`, `in_flight`, `running_version`, and `relaunched_for` are arguments
+/// rather than ambient reads so the policy is testable across every axis
+/// without a clock or a running client — which is the point of it being
+/// separate from the surface that draws it. `relaunched_for` is the version a
+/// relaunch already answered for this process ([`RELAUNCHED_ENV`]), read once
+/// at the boundary.
+pub fn intent(
+    standing: Option<&Standing>,
+    now: u64,
+    in_flight: &[String],
+    running_version: Option<&str>,
+    relaunched_for: Option<&str>,
+) -> Intent {
     let Some(standing) = standing else {
         // No check has ever completed here. Not "up to date", not "could not
         // ask" — nothing is known, and saying anything would be inventing it.
@@ -138,6 +160,34 @@ pub fn intent(standing: Option<&Standing>, now: u64, in_flight: &[String]) -> In
         Standing::Refused { why } | Standing::Stale { why } => {
             Intent::Attention { why: why.clone() }
         }
+        // The macOS daemon can exchange the bundle while this process is
+        // alive, so its durable standing remains Staged until the new bundle
+        // actually launches. Once that version is this process, the standing
+        // has served its purpose; restarting again would loop on a successful
+        // apply while waiting for the next daemon sample.
+        Standing::Staged { version, .. } if running_version == Some(version.as_str()) => {
+            Intent::Nothing
+        }
+        // The same release came back from its own window: asking again would
+        // boot-loop, so the loop is cut here, by naming the failure.
+        Standing::Staged {
+            version,
+            below_floor: true,
+            ..
+        } if relaunched_for == Some(version.as_str()) => Intent::Attention {
+            why: format!(
+                "{version} is required and staged, and a relaunch did not apply it; \
+                 the stub's log names the refusal"
+            ),
+        },
+        Standing::Staged {
+            version,
+            below_floor: true,
+            ..
+        } => Intent::Forced {
+            version: version.clone(),
+            holding: in_flight.to_vec(),
+        },
         Standing::Staged { version, .. } => {
             let waited = standing.staged_for(now).unwrap_or_default();
             if !in_flight.is_empty() {
@@ -156,6 +206,67 @@ pub fn intent(standing: Option<&Standing>, now: u64, in_flight: &[String]) -> In
     }
 }
 
+// --- The stub seam ---------------------------------------------------------
+//
+// The install-root vocabulary below is mirrored in `astrolabe-stub` rather
+// than shared through a dependency — the same discipline as the stage
+// manifest — and the staged-swap chain test welds the halves by running the
+// real pair against these spellings.
+
+/// Where a relaunch request is written, relative to the install root.
+pub const RELAUNCH_REQUEST: &str = "relaunch.requested";
+/// Carries the requested version into the launch that answers it.
+pub const RELAUNCHED_ENV: &str = "ASTROLABE_RELAUNCHED";
+
+static RUNNING_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Identify the version of the desktop bundle hosting this core.
+///
+/// Tauri owns the distribution version and can override it at build time, so
+/// the core cannot infer it from its own Cargo package version. The host calls
+/// this once before starting the runtime.
+pub fn identify_running_version(version: String) {
+    let _ = RUNNING_VERSION.set(version);
+}
+
+pub(crate) fn running_version() -> Option<&'static str> {
+    RUNNING_VERSION.get().map(String::as_str)
+}
+
+/// The stub that owns this executable's relaunch, when there is one.
+///
+/// `None` — a developer's build or a macOS bundle — means this process's
+/// own relaunch is the apply window.
+pub fn managing_stub_of(executable: &Path) -> Option<PathBuf> {
+    let live = executable.parent()?;
+    if live.file_name()? != "current" {
+        return None;
+    }
+    let stub = live.parent()?.join(if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    });
+    stub.is_file().then_some(stub)
+}
+
+/// Ask the managing stub for the apply window on behalf of `version`.
+///
+/// `false` — no managing stub, or the root refused the write — means the
+/// caller's own relaunch is the best remaining move.
+pub fn request_relaunch(version: &str) -> bool {
+    let Some(stub) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| managing_stub_of(&exe))
+    else {
+        return false;
+    };
+    let Some(root) = stub.parent() else {
+        return false;
+    };
+    std::fs::write(root.join(RELAUNCH_REQUEST), version).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +281,7 @@ mod tests {
         Standing::Staged {
             version: "0.9.0".into(),
             at: STAGED_AT,
+            below_floor: false,
         }
     }
 
@@ -179,7 +291,7 @@ mod tests {
 
     #[test]
     fn a_machine_that_has_never_checked_says_nothing_rather_than_up_to_date() {
-        assert_eq!(intent(None, now_after(0), &[]), Intent::Nothing);
+        assert_eq!(intent(None, now_after(0), &[], None, None), Intent::Nothing);
     }
 
     #[test]
@@ -196,7 +308,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                intent(Some(&standing), now_after(0), &[]),
+                intent(Some(&standing), now_after(0), &[], None, None),
                 Intent::Nothing,
                 "{standing:?} drew something a person had to read"
             );
@@ -215,7 +327,8 @@ mod tests {
                 why: "feed answered with a stale pointer: older than believed".into(),
             },
         ] {
-            let Intent::Attention { why } = intent(Some(&standing), now_after(0), &[]) else {
+            let Intent::Attention { why } = intent(Some(&standing), now_after(0), &[], None, None)
+            else {
                 panic!("{standing:?} was not surfaced");
             };
             assert!(!why.is_empty());
@@ -238,7 +351,7 @@ mod tests {
             (30, Urgency::Urgent),
         ] {
             let Intent::RestartRequested { urgency, version } =
-                intent(Some(&staged), now_after(days), &[])
+                intent(Some(&staged), now_after(days), &[], None, None)
             else {
                 panic!("a staged release did not ask for a restart at {days} days");
             };
@@ -247,7 +360,7 @@ mod tests {
         }
         // Ordered, so a surface may compare rather than match.
         assert!(Urgency::Quiet < Urgency::Insistent && Urgency::Insistent < Urgency::Urgent);
-        assert!(QUIET_UNTIL < INSISTENT_AFTER && INSISTENT_AFTER < URGENT_AFTER);
+        assert!(INSISTENT_AFTER < URGENT_AFTER);
     }
 
     /// Declared work holds the restart, and the answer says so rather than
@@ -259,6 +372,8 @@ mod tests {
             Some(&staged),
             now_after(9),
             &["an unsent comment".to_string()],
+            None,
+            None,
         ) else {
             panic!("in-flight work did not hold the restart");
         };
@@ -277,9 +392,131 @@ mod tests {
             Some(&staged),
             now_after(90),
             &["an unsent comment".to_string()],
+            None,
+            None,
         ) else {
             panic!("a long wait overrode declared work");
         };
+    }
+
+    /// A build below the floor must move, and moving is not a question. It
+    /// still drains: the floor overrides the *asking*, never the work, and
+    /// what it waits for stays visible while it waits.
+    #[test]
+    fn below_the_floor_the_restart_is_taken_rather_than_asked_for() {
+        let forced = Standing::Staged {
+            version: "0.9.0".into(),
+            at: STAGED_AT,
+            below_floor: true,
+        };
+
+        // Nothing in flight: take it now, at any age — the escalation does not
+        // apply to a restart nobody is being asked about.
+        for day in [0, 90] {
+            let Intent::Forced { version, holding } =
+                intent(Some(&forced), now_after(day), &[], None, None)
+            else {
+                panic!("a build below the floor asked instead of moving");
+            };
+            assert_eq!(version, "0.9.0");
+            assert!(
+                holding.is_empty(),
+                "nothing was in flight, so nothing holds"
+            );
+        }
+
+        // Work in flight is drained and named, not discarded.
+        let Intent::Forced { holding, .. } = intent(
+            Some(&forced),
+            now_after(0),
+            &["an unsent comment".to_string()],
+            None,
+            None,
+        ) else {
+            panic!("the floor discarded declared work");
+        };
+        assert_eq!(holding, vec!["an unsent comment".to_string()]);
+    }
+
+    /// A forced restart that already had its window and came back on the
+    /// same release did not apply. Asking again would boot-loop the pair;
+    /// this is the one place the loop is cut, by naming the failure instead.
+    /// A *different* staged release is a new window and forces normally.
+    #[test]
+    fn a_relaunch_that_did_not_apply_escalates_instead_of_asking_again() {
+        let forced = Standing::Staged {
+            version: "0.9.0".into(),
+            at: STAGED_AT,
+            below_floor: true,
+        };
+
+        let Intent::Attention { why } =
+            intent(Some(&forced), now_after(0), &[], None, Some("0.9.0"))
+        else {
+            panic!("a fruitless relaunch was asked for again, which is the boot loop");
+        };
+        assert!(
+            why.contains("0.9.0"),
+            "the refusal did not name the release: {why}"
+        );
+
+        let Intent::Forced { version, .. } =
+            intent(Some(&forced), now_after(0), &[], None, Some("0.8.0"))
+        else {
+            panic!("a relaunch for an older release blocked a newer one's window");
+        };
+        assert_eq!(version, "0.9.0");
+    }
+
+    /// The staged record deliberately survives a successful macOS bundle
+    /// exchange so the old process still takes its restart. The new process
+    /// identifies itself as that staged release and must not take another.
+    #[test]
+    fn the_applied_version_does_not_restart_again_on_stale_staged_standing() {
+        for below_floor in [false, true] {
+            let staged = Standing::Staged {
+                version: "0.9.0".into(),
+                at: STAGED_AT,
+                below_floor,
+            };
+            assert_eq!(
+                intent(Some(&staged), now_after(30), &[], Some("0.9.0"), None),
+                Intent::Nothing,
+                "the applied release looped with below_floor={below_floor}"
+            );
+        }
+    }
+
+    /// The stub seam, from the client's side: the entry inside `current/`
+    /// resolves to the stub at the root, and nothing else does. The spelling
+    /// agreement with the stub itself is held by the staged-swap chain test,
+    /// which runs the real pair.
+    #[test]
+    fn only_the_installed_shape_has_a_managing_stub() {
+        let root = tempfile::tempdir().expect("a scratch root");
+        let name = if cfg!(windows) {
+            "astrolabe.exe"
+        } else {
+            "astrolabe"
+        };
+
+        let current = root.path().join("current");
+        std::fs::create_dir(&current).expect("the live tree");
+        let entry = current.join(name);
+        std::fs::write(&entry, b"the entry").expect("the entry");
+
+        // No stub at the root yet: half the shape is no shape.
+        assert_eq!(managing_stub_of(&entry), None);
+
+        let stub = root.path().join(name);
+        std::fs::write(&stub, b"the stub").expect("the stub");
+        assert_eq!(managing_stub_of(&entry), Some(stub));
+
+        // A developer's build tree resolves to nothing.
+        assert_eq!(
+            managing_stub_of(&root.path().join("target").join("debug").join(name)),
+            None
+        );
     }
 
     /// A clock that has gone backwards must not produce a negative age and a
@@ -288,7 +525,8 @@ mod tests {
     #[test]
     fn a_clock_behind_the_staging_time_is_quiet_rather_than_urgent() {
         let staged = staged();
-        let Intent::RestartRequested { urgency, .. } = intent(Some(&staged), 0, &[]) else {
+        let Intent::RestartRequested { urgency, .. } = intent(Some(&staged), 0, &[], None, None)
+        else {
             panic!("a staged release did not ask for a restart");
         };
         assert_eq!(urgency, Urgency::Quiet);

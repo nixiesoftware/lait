@@ -970,7 +970,7 @@ impl GeometryArtifact {
 ///
 /// The default registry is shared process-wide so installed package versions
 /// cannot multiply worker pools or caches. Production artifact and working
-/// bytes are additionally admitted by the source Runtime's composition-owned
+/// bytes are additionally admitted by the source Runtime's host-owned
 /// memory governor; these limits bound only the shared product cache shape.
 /// Operators embedding Issues may choose a smaller isolated registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -13,7 +13,7 @@ describe("the operational bar's rules", () => {
     // A degraded device degrades the identity even when nothing is stale.
     expect(identityStatus({
       ...settled,
-      devices: [{ id: "d", label: "D", state: "running", owned: true, degraded: "sampling failed", home: "/h", pid: null, canForceStop: false, lastError: null }],
+      devices: [{ id: "d", label: "D", state: "running", owned: true, degraded: "sampling failed", home: "/h", pid: null, canForceStop: false, lastError: null, imageFingerprint: null }],
     }).label).toBe("Local identity degraded");
     expect(identityStatus({ ...settled, host: null }).label).toBe("Local identity unavailable");
     expect(identityStatus(settled)).toEqual({ label: "Local identity online", tone: "ok" });

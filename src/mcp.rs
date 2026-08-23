@@ -62,10 +62,11 @@ pub fn shell_tool_names() -> Vec<String> {
 }
 
 /// The declared MCP surface for a pin: shell names plus that World's public tools.
-pub fn declared_tool_names(world: Option<&str>) -> Result<Vec<String>> {
-    let package = crate::world::client_packages()
-        .pin(world)
-        .map_err(pin_failure)?;
+pub fn declared_tool_names(
+    registry: &world_interface::WorldClientRegistry,
+    world: Option<&str>,
+) -> Result<Vec<String>> {
+    let package = registry.pin(world).map_err(pin_failure)?;
     let mut names = shell_tool_names();
     names.extend(
         package
@@ -153,11 +154,12 @@ pub struct LaitMcp {
     tool_router: ToolRouter<LaitMcp>,
     /// Mount of the one World this session speaks. Teaching text comes from
     /// that package; the shell does not name another product's verbs.
-    world_mount: &'static str,
-    world_instructions: &'static str,
+    world_mount: String,
+    world_instructions: String,
     /// Reverse-domain id of the pin. `world_upgrade` names this World, and
     /// an invocation for any other is refused rather than routed.
     world_id: String,
+    registry: std::sync::Arc<world_interface::WorldClientRegistry>,
 }
 
 #[tool_router]
@@ -179,8 +181,21 @@ impl LaitMcp {
         act_as: Option<String>,
         world: Option<String>,
     ) -> Result<Self> {
+        let identity = selection.identity_dir()?;
+        let registry = std::sync::Arc::new(
+            crate::world::installed::load(&crate::serve::head::worlds_root(&identity))?.clients,
+        );
+        Self::from_registry(home, selection, act_as, world, registry)
+    }
+
+    fn from_registry(
+        home: PathBuf,
+        selection: crate::config::Selection,
+        act_as: Option<String>,
+        world: Option<String>,
+        registry: std::sync::Arc<world_interface::WorldClientRegistry>,
+    ) -> Result<Self> {
         let scope = scope_for_home(&home);
-        let registry = crate::world::client_packages();
         let package = registry.pin(world.as_deref()).map_err(pin_failure)?;
         let shell = Self::tool_router();
         // Only the pin is composed, so only the pin is checked. A collision
@@ -192,15 +207,19 @@ impl LaitMcp {
             .map_err(pin_failure)?;
         let mut tool_router = shell;
         tool_router.merge(Self::world_tool_router(package));
+        let world_mount = package.mount().to_owned();
+        let world_instructions = package.mcp_instructions().to_owned();
+        let world_id = package.world().as_str().to_owned();
         Ok(Self {
             home,
             scope,
             act_as,
             selection,
             tool_router,
-            world_mount: package.mount(),
-            world_instructions: package.mcp_instructions(),
-            world_id: package.world().as_str().to_owned(),
+            world_mount,
+            world_instructions,
+            world_id,
+            registry,
         })
     }
 
@@ -281,7 +300,8 @@ impl LaitMcp {
                 None,
             ));
         }
-        let package = crate::world::client_packages()
+        let package = self
+            .registry
             .package_for_world(invocation.world_id())
             .cloned()
             .ok_or_else(|| {
@@ -435,6 +455,7 @@ impl LaitMcp {
     )]
     async fn invite_ticket(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::Invite {
+            world: Some(self.world_id.clone()),
             role: None,
             reusable: false,
             ttl_hours: None,
@@ -585,16 +606,27 @@ mod scope_tests {
     use crate::control::OrbitAddress;
     use mechanics::ids::SpaceId;
 
+    fn mcp(home: &str, world: &str) -> Result<LaitMcp> {
+        LaitMcp::from_registry(
+            PathBuf::from(home),
+            crate::config::Selection::default(),
+            None,
+            Some(world.into()),
+            std::sync::Arc::new(crate::world::client_packages()),
+        )
+    }
+
     #[test]
     fn an_mcp_server_is_pinned_to_the_home_it_was_constructed_for() {
         let home = PathBuf::from("/tmp/lait-mcp-a");
         let sibling = PathBuf::from("/tmp/lait-mcp-b");
         let space = SpaceId::from_digest([9; 16]);
-        let mcp = LaitMcp::from_pins(
+        let mcp = LaitMcp::from_registry(
             home.clone(),
             crate::config::Selection::default(),
             None,
             Some("issues".into()),
+            std::sync::Arc::new(crate::world::client_packages()),
         )
         .expect("issues is hosted");
         let own = OrbitAddress::for_store(&home, space.clone());
@@ -606,20 +638,15 @@ mod scope_tests {
 
     #[test]
     fn the_live_router_composes_shell_and_namespaced_world_tools() {
-        let mcp = LaitMcp::from_pins(
-            PathBuf::from("/tmp/lait-mcp-tools"),
-            crate::config::Selection::default(),
-            None,
-            Some("issues".into()),
-        )
-        .expect("issues is hosted");
+        let mcp = mcp("/tmp/lait-mcp-tools", "issues").expect("issues is hosted");
         let names: Vec<_> = mcp
             .tool_router
             .list_all()
             .into_iter()
             .map(|tool| tool.name.into_owned())
             .collect();
-        let declared = declared_tool_names(Some("issues")).expect("issues is hosted");
+        let declared = declared_tool_names(&crate::world::client_packages(), Some("issues"))
+            .expect("issues is hosted");
         for expected in &declared {
             assert!(names.iter().any(|name| name == expected), "{expected}");
         }
@@ -629,13 +656,7 @@ mod scope_tests {
 
     #[test]
     fn world_upgrade_names_the_pinned_world() {
-        let mcp = LaitMcp::from_pins(
-            PathBuf::from("/tmp/lait-mcp-upgrade"),
-            crate::config::Selection::default(),
-            None,
-            Some("issues".into()),
-        )
-        .expect("issues is hosted");
+        let mcp = mcp("/tmp/lait-mcp-upgrade", "issues").expect("issues is hosted");
         assert_eq!(mcp.world_id, crate::world::contract::world_id().as_str());
         assert_eq!(mcp.world_mount, "issues");
     }
@@ -644,12 +665,7 @@ mod scope_tests {
     fn an_unknown_world_pin_is_refused_rather_than_served_empty() {
         // "signage" stopped being the example the day it became hosted; the
         // mount here must stay one no build carries.
-        let error = match LaitMcp::from_pins(
-            PathBuf::from("/tmp/lait-mcp-world"),
-            crate::config::Selection::default(),
-            None,
-            Some("atlas".into()),
-        ) {
+        let error = match mcp("/tmp/lait-mcp-world", "atlas") {
             Ok(_) => panic!("an unhosted World was mounted"),
             Err(error) => error,
         };
@@ -658,13 +674,7 @@ mod scope_tests {
 
     #[test]
     fn the_issues_mount_is_a_legal_explicit_pin() {
-        let mcp = LaitMcp::from_pins(
-            PathBuf::from("/tmp/lait-mcp-issues"),
-            crate::config::Selection::default(),
-            None,
-            Some("issues".into()),
-        )
-        .expect("issues is hosted");
+        let mcp = mcp("/tmp/lait-mcp-issues", "issues").expect("issues is hosted");
         assert!(mcp
             .tool_router
             .list_all()

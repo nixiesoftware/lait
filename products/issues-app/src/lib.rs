@@ -25,6 +25,7 @@
 //! no dependency on any particular head: it answers in values, and whoever
 //! composed it decides what a person sees.
 
+pub mod application;
 pub mod decorate;
 pub mod display;
 pub mod document;
@@ -87,13 +88,16 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
             .with_web_parser(host::parse_web)
             .with_confirmation(host::confirmation)
             .with_decorator(decorate::decorate_reply)
+            .with_transient_body(
+                |document| Ok(issues::contract::issue_body_id(document).as_bytes()),
+            )
             // What a client draws, and where `Open` lands. The display name is
             // the product's name, not the mount: `issues` is a namespace key
             // that prefixes tool names and route segments, and a person reading
             // a list should see what the thing is called.
             .with_display(DISPLAY_NAME, Some("📋"), Some("/"))?
             .with_tagline("Plans, issues, and the Specs that govern them")?
-            // This World's own artwork, compiled in. The mark is the whorl
+            // This release's own artwork. The mark is the whorl
             // alone, because the full print at the size a row draws a mark is
             // a smudge; the hero is the whole print, which is what it was
             // composed to be.

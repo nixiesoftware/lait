@@ -1,0 +1,23 @@
+[package]
+name = "lait-issues-runner"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Independent process runner for LAIT's first-party Issues World"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[[bin]]
+name = "lait-world-issues"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+issues = { package = "lait-issues", path = "../issues" }
+issues-app = { package = "lait-issues-app", path = "../issues-app" }
+world-runner = { path = "../../crates/world-runner" }
+world-sdk = { path = "../../crates/world-sdk" }
+runtime = { path = "../../crates/runtime" }
+
+[lints]
+workspace = true

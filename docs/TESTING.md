@@ -250,9 +250,12 @@ tests — and is unrelated to any of this.
 ## Running a tier
 
 The nextest profiles in `.config/nextest.toml` **are** the tier definitions, so
-CI is reproducible locally with one command:
+CI is reproducible locally after building the executable subjects and assembling
+the carried World releases a native application bundle supplies:
 
 ```sh
+cargo build --workspace --locked --all-targets --all-features
+bash ci/stage-test-worlds.sh
 cargo nextest run --workspace --profile pr                     # what CI runs on Linux
 cargo nextest run --workspace --profile pr-platform $(bash ci/platform-seam-targets.sh)
 cargo nextest run --workspace --profile nightly                # everything

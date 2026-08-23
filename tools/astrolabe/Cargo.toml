@@ -38,14 +38,16 @@ data-encoding = "2.6"
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+world-interface = { path = "../../crates/world-interface" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+interprocess = { version = "2", features = ["tokio"] }
 
-# The bridge to the Dart interface. `MIT`, so lait's dual offer is untouched.
-# The generated Dart and the generated Rust are both checked in, and CI fails on
-# drift — the boundary revision 7 reintroduced is only safe if a stale binding
-# cannot pass review.
-flutter_rust_bridge = "=2.12.0"
+[target.'cfg(unix)'.dependencies]
+# Unix has no logon-session namespace equivalent to Windows' `Local\\` mutex.
+# The effective uid scopes both the advisory lock and its handoff socket to the
+# OS login without trusting mutable environment variables.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # The single-instance mutex, the tray icon and the browser handoff. All three

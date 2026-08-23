@@ -541,6 +541,11 @@ impl ReferenceReceiver {
     ) -> Result<()> {
         match change {
             ProgramChange::Snapshot { program } => {
+                // A synchronized cursor is sampled before this receiver fetches,
+                // decodes, flushes, and commits the assets it names. Preserve the
+                // local receipt instant so first presentation can account for
+                // that staging time without consulting an untrusted wall clock.
+                let snapshot_received_at = Instant::now();
                 validate_program(&program).context("validate display program")?;
                 if runtime
                     .as_ref()
@@ -558,7 +563,7 @@ impl ReferenceReceiver {
                 let staged = self.stage_program(session, &program)?;
                 let media = self.stage_media(session, &program)?;
                 let previous = runtime.take();
-                let mut next = Runtime::new(program, staged, media);
+                let mut next = Runtime::new(program, staged, media, snapshot_received_at);
                 present_runtime(&mut next, &mut self.presenter)?;
                 if let Some(previous) = previous {
                     cleanup_retired(previous.staged(), next.staged());

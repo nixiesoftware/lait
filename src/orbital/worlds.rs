@@ -2,8 +2,8 @@
 //!
 //! [`runtime::world::Catalog`] owns the immutable semantic implementations used
 //! by a Station. This module owns the application-side half of that boundary:
-//! a compile-time [`WorldPackage`] for each product, and one [`WorldHost`] per
-//! package inside an active Space. A package carries the reviewed semantic
+//! a process-backed [`WorldPackage`] for each selected release, and one
+//! [`WorldHost`] per package inside an active Space. A package carries the reviewed semantic
 //! implementation plus its optional product-neutral call handler and its
 //! Runtime-validated Exec package; orbital code never needs to name the
 //! product behind any of them.
@@ -13,10 +13,8 @@
 
 use runtime::poison::LockRecovering;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use mechanics::authorization::{PolicyCapability, Resource};
 use mechanics::ids::{DeviceId, SpaceId};
 use replica::body::WorldId;
 use runtime::world::Refusal as RegistrationRefusal;
@@ -35,12 +33,11 @@ use runtime::world::call::{Context, Reply};
 /// depending on this shell.
 pub use runtime::world::{Invalidation, RoutedInvalidation};
 
-pub struct StatusProjection {
-    pub items: usize,
-    pub scopes: usize,
-    pub name: String,
-    pub description: String,
-}
+pub use world_sdk::{
+    BootstrapContext, FounderGrant, InitialScope, ReviewedImplementation, StatusProjection,
+    WorldApplication as WorldLifecycle, WorldUpgradeAssessment, WorldUpgradeContext,
+    WorldUpgradeProgress,
+};
 
 /// A World package's Observation projector. Implementations own their own
 /// baselines; the Station host only fans generic observations out.
@@ -60,99 +57,7 @@ pub trait ObservationProjector: Send + Sync {
     ) -> Invalidation;
 }
 
-/// One founder capability declared by a World package.
-///
-/// The shell installs these generic Mechanics facts without knowing the
-/// product role or policy that produced them.
-#[derive(Debug, Clone)]
-pub struct FounderGrant {
-    pub capability: PolicyCapability,
-    pub resource: Resource,
-    pub salt: [u8; 16],
-}
-
-/// A human-facing container a World wants created with a new Space.
-///
-/// `kind` is World-owned vocabulary. `key` and `name` are carried back to the
-/// navigation catalog; the lifecycle host never interprets either one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InitialScope {
-    pub kind: String,
-    pub key: String,
-    pub name: String,
-}
-
-/// The generic resources supplied to one World's formation hook.
-pub struct BootstrapContext<'a> {
-    pub store_root: &'a Path,
-    pub space: &'a SpaceId,
-    pub session: &'a Session,
-    pub identity: &'a LocalIdentity,
-    pub device: &'a str,
-    pub display_name: &'a str,
-    pub initial_scope: Option<&'a InitialScope>,
-}
-
-/// One exact reviewed World implementation named by a lifecycle transition.
-///
-/// The pair is deliberately carried together: an implementation digest without
-/// its monotonic declaration cannot be ordered, while a version without the
-/// digest is not an authority coordinate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReviewedImplementation {
-    pub id: [u8; 32],
-    pub version: u32,
-}
-
-/// A product's pure assessment of the active implementation.
-///
-/// Only `Direct` permits the host's ordinary newer-version reconciliation.
-/// Every migration state is inert until the launcher has durably recorded user
-/// consent; opening a Space is never consent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorldUpgradeAssessment {
-    Current,
-    Direct,
-    ConsentRequired { migrator: ReviewedImplementation },
-    InProgress { migrator: ReviewedImplementation },
-    Unsupported { reason: String },
-}
-
-/// The generic resources supplied to one bounded lifecycle migration step.
-///
-/// `record` is product-authored opaque state but host-owned storage. The host
-/// bounds and atomically persists the replacement returned by
-/// [`WorldUpgradeProgress`] before it schedules another step or activates the
-/// preferred implementation.
-pub struct WorldUpgradeContext<'a> {
-    pub space: &'a SpaceId,
-    pub session: &'a Session,
-    pub identity: &'a LocalIdentity,
-    pub device: &'a str,
-    pub active: ReviewedImplementation,
-    pub migrator: ReviewedImplementation,
-    pub preferred: ReviewedImplementation,
-    /// Exact frozen source admitted by Runtime for this deterministic plan.
-    /// The host persists its portable publication and frontier; the local
-    /// materialization is reacquired on each activation.
-    pub source: &'a runtime::world::LifecycleSourceCoordinate,
-    pub record: Option<&'a [u8]>,
-}
-
-/// Result of one bounded, idempotent lifecycle step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorldUpgradeProgress {
-    Pending {
-        completed: u64,
-        remaining: Option<u64>,
-        record: Vec<u8>,
-    },
-    Verified {
-        record: Vec<u8>,
-    },
-}
-
-/// Host-visible result of one composition-owned lifecycle turn.
+/// Host-visible result of one daemon-owned lifecycle turn.
 ///
 /// Product record bytes never cross this boundary: the Station host persists
 /// them before returning one of these bounded progress facts to its daemon.
@@ -177,55 +82,26 @@ pub enum WorldUpgradeStep {
     },
 }
 
-/// Product-owned policy invoked by the generic Space lifecycle.
-///
-/// Implementations are bound in the application composition root. The host
-/// forms the Space, applies the returned Mechanics grants, docks the package's
-/// own World, and supplies that Session here; it never names the product or
-/// constructs one of its DTOs.
-pub trait WorldLifecycle: Send + Sync {
-    fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>>;
-    fn initial_scope(&self, display_name: &str) -> Option<InitialScope>;
-    fn bootstrap(&self, context: BootstrapContext<'_>) -> anyhow::Result<()>;
-
-    /// Decide whether moving `active` to this package's preferred
-    /// implementation is a direct activation or requires explicit lifecycle
-    /// consent. The default preserves the pre-migration behavior for Worlds
-    /// whose package has no data upgrade.
-    fn assess_upgrade(
-        &self,
-        active: Option<ReviewedImplementation>,
-        preferred: ReviewedImplementation,
-    ) -> anyhow::Result<WorldUpgradeAssessment> {
-        Ok(if active.is_some_and(|active| active.id == preferred.id) {
-            WorldUpgradeAssessment::Current
-        } else {
-            WorldUpgradeAssessment::Direct
-        })
+impl<T: WorldLifecycle> ObservationProjector for T {
+    fn status(&self, session: &Session) -> Option<StatusProjection> {
+        WorldLifecycle::status(self, session)
     }
 
-    /// Optional exact migrator used to re-verify a World that is already on
-    /// preferred after a later explicit consent operation. This is what lets a
-    /// causally valid legacy Contact delivered after activation remain durable
-    /// and be migrated by the next user-requested update without granting an
-    /// ambient auto-migration authority.
-    fn verification_migrator(
-        &self,
-        _preferred: ReviewedImplementation,
-    ) -> Option<ReviewedImplementation> {
-        None
+    fn start(&self, session: &Session, space: &SpaceId) {
+        WorldLifecycle::start_projector(self, session, space);
     }
 
-    /// Advance one bounded lifecycle step after durable user consent.
-    fn upgrade_step(
+    fn project(
         &self,
-        _context: WorldUpgradeContext<'_>,
-    ) -> anyhow::Result<WorldUpgradeProgress> {
-        anyhow::bail!("this World package has no lifecycle upgrade step")
+        session: &Session,
+        space: &SpaceId,
+        observation: &runtime::world::Observation,
+    ) -> Invalidation {
+        WorldLifecycle::project(self, session, space, observation)
     }
 }
 
-/// One product package available to the application build.
+/// One exact World implementation available to this daemon generation.
 #[derive(Clone)]
 pub struct WorldPackage {
     world: WorldId,
@@ -235,6 +111,9 @@ pub struct WorldPackage {
     exec: runtime::exec::Package,
     projector: Option<Arc<dyn ObservationProjector>>,
     lifecycle: Option<Arc<dyn WorldLifecycle>>,
+    /// Immutable distribution release this package was launched from. Tests
+    /// and Runtime-only embedders may construct packages without one.
+    release_version: Option<String>,
     /// The package an unformed Space activates by default. Historical exact
     /// packages remain installed for retained publication reads and existing
     /// Spaces whose authority still selects them.
@@ -266,6 +145,7 @@ impl WorldPackage {
             exec: runtime::exec::Package::new(),
             projector: None,
             lifecycle: None,
+            release_version: None,
             preferred: true,
         }
     }
@@ -301,6 +181,12 @@ impl WorldPackage {
         self
     }
 
+    /// Pin the independently distributed release this process came from.
+    pub fn with_release_version(mut self, version: impl Into<String>) -> Self {
+        self.release_version = Some(version.into());
+        self
+    }
+
     /// Install this exact implementation for historical/authority-selected
     /// use without making it the formation default for its World.
     pub fn historical(mut self) -> Self {
@@ -313,11 +199,11 @@ impl WorldPackage {
     }
 }
 
-/// Compile-time composition of the Worlds bundled by one application build.
+/// The selected process generations installed for one daemon launch.
 ///
 /// The package set is cloned down the Daemon → Station placement →
 /// StationHost call stack. Each Space freezes its own Runtime registry and
-/// host objects from the same reviewed set.
+/// host objects from that exact reviewed generation.
 #[derive(Clone, Default)]
 pub struct WorldPackages {
     packages: Vec<WorldPackage>,
@@ -366,6 +252,14 @@ impl WorldPackages {
             .iter()
             .find(|package| package.world_id() == world && package.preferred)
             .map(|package| package.reviewed_implementation)
+    }
+
+    /// Distribution release actually running in this daemon generation.
+    pub fn release_version(&self, world: &WorldId) -> Option<&str> {
+        self.packages
+            .iter()
+            .find(|package| package.world_id() == world && package.preferred)
+            .and_then(|package| package.release_version.as_deref())
     }
 
     /// The reviewed id *and* the version its descriptor declares — the pair a
@@ -772,6 +666,83 @@ impl WorldRouter {
             .verification_migrator(preferred.reviewed_state())
     }
 
+    /// Ask one exact preferred World generation to expand a role selector.
+    ///
+    /// With no explicit World, exactly one installed generation must claim the
+    /// selector. This preserves a convenient default without making install
+    /// order or a host-compiled product name into policy.
+    pub fn admission_evidence(
+        &self,
+        world: Option<&WorldId>,
+        role: &str,
+        parent_manifest_root: [u8; 32],
+    ) -> anyhow::Result<mechanics::authorization::WorldAssignmentEvidence> {
+        if let Some(world) = world {
+            let lifecycle = self
+                .preferred_host(world)
+                .and_then(WorldHost::lifecycle)
+                .ok_or_else(|| anyhow::anyhow!("World '{world}' defines no admission roles"))?;
+            return lifecycle
+                .admission_evidence(role, parent_manifest_root)?
+                .ok_or_else(|| anyhow::anyhow!("World '{world}' defines no admission roles"));
+        }
+
+        let mut claimed = Vec::new();
+        for world in self.world_ids() {
+            let Some(lifecycle) = self.preferred_host(world).and_then(WorldHost::lifecycle) else {
+                continue;
+            };
+            if let Some(evidence) = lifecycle.admission_evidence(role, parent_manifest_root)? {
+                claimed.push((world.clone(), evidence));
+            }
+        }
+        match claimed.len() {
+            0 => anyhow::bail!("unknown role '{role}': no installed World defines it"),
+            1 => Ok(claimed.remove(0).1),
+            _ => anyhow::bail!(
+                "admission role '{role}' is ambiguous across installed Worlds; name a World"
+            ),
+        }
+    }
+
+    /// Expand a conventional membership role across every installed World
+    /// that claims it. Root membership remains product-neutral; each World
+    /// supplies the exact scoped assignments that make that membership useful
+    /// in its own namespace.
+    pub fn membership_assignments(
+        &self,
+        role: &str,
+        parent_manifest_root: [u8; 32],
+    ) -> anyhow::Result<
+        Vec<(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )>,
+    > {
+        let mut assignments = Vec::new();
+        for world in self.world_ids() {
+            let Some(lifecycle) = self.preferred_host(world).and_then(WorldHost::lifecycle) else {
+                continue;
+            };
+            let Some(evidence) = lifecycle.admission_evidence(role, parent_manifest_root)? else {
+                continue;
+            };
+            evidence.validate().map_err(|error| {
+                anyhow::anyhow!("World '{world}' returned invalid role evidence: {error}")
+            })?;
+            if evidence.world != world.as_str() {
+                anyhow::bail!(
+                    "World '{world}' returned membership evidence for '{}'",
+                    evidence.world
+                );
+            }
+            assignments.extend(evidence.assignments);
+        }
+        assignments.sort();
+        assignments.dedup();
+        Ok(assignments)
+    }
+
     pub fn has_reviewed_implementation(
         &self,
         world: &WorldId,
@@ -865,7 +836,7 @@ impl WorldRouter {
             };
             let session = host.primary_session.lock_recovering();
             // A host with nothing to say is skipped, never propagated: with a
-            // second bundled World this loop visits hosts that hold no session
+            // second selected World this loop visits hosts that hold no session
             // on this Space at all (Signage on a board-only Space), and an
             // early `?` here let that silence erase the answer of the World
             // that had one — the joiner's board synced and its status still
@@ -1080,7 +1051,7 @@ mod tests {
 
         fn handle(
             &self,
-            _context: &mut runtime::exec::Context<'_>,
+            _context: &mut dyn runtime::exec::HandlerContext,
         ) -> Result<runtime::exec::Candidate, runtime::exec::Failure> {
             Ok(runtime::exec::Candidate {
                 output: runtime::exec::SchemaRef {

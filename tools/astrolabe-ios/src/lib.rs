@@ -1,14 +1,18 @@
 //! The Swift boundary of the native iOS client.
 //!
-//! One model, two shells: the Rust core owns client state, and this crate is
-//! the second generated bridge over it — UniFFI to Swift, as
-//! flutter_rust_bridge is to Dart on desktop. The generated Swift is checked
-//! in beside the application and CI fails on drift; exactly one Swift file may
-//! call through it.
+//! One model, two shells: the Rust core owns client state, and this crate is a
+//! generated bridge over it — UniFFI to Swift. It is the only generated
+//! boundary left; the desktop one (flutter_rust_bridge to Dart) went with the
+//! deprecated Flutter client, and Tauri's host links the core directly and
+//! destructures its view exhaustively instead. The generated Swift is checked
+//! in beside the application and exactly one Swift file may call through it.
+//! (`build-core.sh` says CI fails on drift; that check is still unwired.)
 //!
 //! The view below is the interface design's shape rendered honestly at this
-//! build's capability: the bundled World list is compile-time truth — the
-//! Library, as on desktop — and the link state says *why* it is absent.
+//! platform's capability. iOS cannot spawn or dynamically install native World
+//! executables, so the signed app carries reviewed first-party adapters while
+//! desktop reads independently selected releases. The link state says *why*
+//! content is absent.
 //! Chats and the Inbox render from nothing at all yet: correspondence rides
 //! the mailbox primitive (a payload sealed once, unlocked per device), and
 //! until that contract is issued their surfaces say so rather than carrying
@@ -17,9 +21,9 @@
 uniffi::setup_scaffolding!();
 
 mod node;
+mod worlds;
 pub use node::*;
 
-use lait::composition;
 use lait::orbits;
 
 /// Whole immutable projection out — the only thing a surface may render.
@@ -29,7 +33,7 @@ pub struct IosView {
     pub core_version: String,
     /// This phone's standing in the identity's linked-device set.
     pub link: LinkState,
-    /// What this signed build bundles — the Library facts, compiled in.
+    /// Reviewed first-party Worlds carried by this signed iOS application.
     pub bundled_worlds: Vec<BundledWorld>,
     /// One row per joined Space, from the Orbit registry — advisory
     /// navigation state, never truth.
@@ -52,7 +56,7 @@ pub enum LinkState {
     Linked { device_name: String, did: String },
 }
 
-/// A World this build carries, drawn from the compiled-in registry.
+/// A reviewed first-party World this signed iOS application carries.
 #[derive(uniffi::Record)]
 pub struct BundledWorld {
     /// The published namespace key — machine input, never renamed.
@@ -113,7 +117,7 @@ pub struct SpaceWorldRow {
 /// The one read. Whole view out; no partial asks.
 #[uniffi::export]
 pub fn client_view() -> IosView {
-    let registry = composition::bundled_client_packages();
+    let registry = worlds::client_packages().unwrap_or_default();
     let bundled_worlds: Vec<BundledWorld> = registry
         .packages()
         .map(|package| {

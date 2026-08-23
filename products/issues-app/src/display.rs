@@ -89,12 +89,12 @@ pub fn board_wall_surface() -> Result<DisplaySurface, Failure> {
         outputs: BTreeSet::from([DisplayOutputKind::Frame]),
     };
     descriptor.contract_digest = descriptor.expected_contract_digest(&world);
-    Ok(DisplaySurface {
+    Ok(DisplaySurface::local(
         descriptor,
         canonicalize_input,
         prepare,
-        renderer: Arc::new(BoardRenderer),
-    })
+        Arc::new(BoardRenderer),
+    ))
 }
 
 /// The package's own reading of its input, once.

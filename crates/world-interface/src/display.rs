@@ -223,15 +223,93 @@ pub trait DisplayRenderer: Send + Sync {
         -> DisplayProjectFuture<'a>;
 }
 
+/// Dynamic display behavior supplied by an independently launched World.
+///
+/// The descriptor remains locally enumerable. Input interpretation, query
+/// preparation, and rendering stay with the exact runner generation that
+/// declared it.
+pub trait DisplayAdapter: Send + Sync {
+    fn canonicalize_input(
+        &self,
+        surface: &DisplaySurfaceId,
+        value: Value,
+    ) -> Result<CanonicalDisplayInput, Failure>;
+    fn prepare(&self, request: &DisplayRequest) -> Result<ClientInvocation, Failure>;
+    fn project<'a>(&'a self, value: Value, request: &'a DisplayRequest)
+        -> DisplayProjectFuture<'a>;
+}
+
+#[derive(Clone)]
+enum DisplayBackend {
+    Local {
+        canonicalize_input: DisplayCanonicalizeInput,
+        prepare: DisplayPrepare,
+        renderer: Arc<dyn DisplayRenderer>,
+    },
+    Remote(Arc<dyn DisplayAdapter>),
+}
+
 #[derive(Clone)]
 pub struct DisplaySurface {
     pub descriptor: DisplaySurfaceDescriptor,
-    pub canonicalize_input: DisplayCanonicalizeInput,
-    pub prepare: DisplayPrepare,
-    pub renderer: Arc<dyn DisplayRenderer>,
+    backend: DisplayBackend,
 }
 
-#[derive(Debug, Clone)]
+impl DisplaySurface {
+    pub fn local(
+        descriptor: DisplaySurfaceDescriptor,
+        canonicalize_input: DisplayCanonicalizeInput,
+        prepare: DisplayPrepare,
+        renderer: Arc<dyn DisplayRenderer>,
+    ) -> Self {
+        Self {
+            descriptor,
+            backend: DisplayBackend::Local {
+                canonicalize_input,
+                prepare,
+                renderer,
+            },
+        }
+    }
+
+    pub fn remote(descriptor: DisplaySurfaceDescriptor, adapter: Arc<dyn DisplayAdapter>) -> Self {
+        Self {
+            descriptor,
+            backend: DisplayBackend::Remote(adapter),
+        }
+    }
+
+    pub fn canonicalize_input(&self, value: Value) -> Result<CanonicalDisplayInput, Failure> {
+        match &self.backend {
+            DisplayBackend::Local {
+                canonicalize_input, ..
+            } => canonicalize_input(value),
+            DisplayBackend::Remote(adapter) => {
+                adapter.canonicalize_input(&self.descriptor.id, value)
+            }
+        }
+    }
+
+    pub fn prepare(&self, request: &DisplayRequest) -> Result<ClientInvocation, Failure> {
+        match &self.backend {
+            DisplayBackend::Local { prepare, .. } => prepare(request),
+            DisplayBackend::Remote(adapter) => adapter.prepare(request),
+        }
+    }
+
+    pub fn project<'a>(
+        &'a self,
+        value: Value,
+        request: &'a DisplayRequest,
+    ) -> DisplayProjectFuture<'a> {
+        match &self.backend {
+            DisplayBackend::Local { renderer, .. } => renderer.project(value, request),
+            DisplayBackend::Remote(adapter) => adapter.project(value, request),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayProjection {
     pub program: RenderedProgram,
     pub assessment: DisplayAssessment,
@@ -323,14 +401,14 @@ fn bounded_summary(summary: Option<&str>) -> Result<(), Failure> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedProgram {
     pub items: Vec<RenderedProgramItem>,
     pub cycle: ProgramCycle,
     pub refresh_after_ms: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedProgramItem {
     pub id: String,
     pub duration_ms: Option<u32>,
@@ -348,7 +426,7 @@ pub enum ProgramCycle {
     BlankAtEnd,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DisplayAssessment {
     Current,
     Partial(BTreeSet<DisplayPartialReason>),
@@ -364,14 +442,14 @@ pub enum DisplayPartialReason {
     DegradedSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RenderedScene {
     Frame(RenderedFrame),
     Media(RenderedMedia),
     Blank(BlankReason),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedFrame {
     pub media_type: FrameMediaType,
     pub width: u32,
@@ -387,7 +465,7 @@ pub enum FrameMediaType {
     WebP,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMedia {
     pub protocol: MediaProtocol,
     pub origin: MediaOrigin,
@@ -403,7 +481,7 @@ pub struct RenderedMedia {
 /// return `live: true` naming a content id, `derive_asset_id` gave a stored and
 /// a live manifest of the same name the same id, and the compiler consulted the
 /// receiver's tier on one branch only.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MediaOrigin {
     /// A rendition on the coordinator's live plane.
     Live(DisplayResourceId),
@@ -426,7 +504,7 @@ pub enum MediaProtocol {
     Dash,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayResourceId(String);
 
 impl DisplayResourceId {
@@ -450,7 +528,7 @@ impl DisplayResourceId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlankReason {
     SourceUnavailable,
     Unsupported,

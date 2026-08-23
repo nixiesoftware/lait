@@ -222,6 +222,21 @@ impl BuildFingerprint {
     pub fn supersedes(&self, other: &Self) -> bool {
         self.exe == other.exe && self.built > other.built
     }
+
+    /// Whether this build's release version is ahead of `other`'s.
+    ///
+    /// Path-blind, unlike [`supersedes`] — the managed pair can never
+    /// path-match. An unparseable version is never ahead: eviction needs a
+    /// reason.
+    pub fn version_ahead_of(&self, other: &Self) -> bool {
+        match (
+            semver::Version::parse(&self.version),
+            semver::Version::parse(&other.version),
+        ) {
+            (Ok(ours), Ok(theirs)) => ours > theirs,
+            _ => false,
+        }
+    }
 }
 
 /// The oldest control protocol a client still talks to. Raising this retires a
@@ -293,7 +308,7 @@ pub struct AssignmentSpec {
 /// transient and is never journaled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchingCaret {
-    pub issue: String,
+    pub body: [u8; 16],
     pub field: String,
     pub anchor: u64,
     #[serde(default)]
@@ -303,7 +318,7 @@ pub struct WatchingCaret {
 /// One cumulative optimistic text preview from a browser's durable base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchingPreview {
-    pub issue: String,
+    pub body: [u8; 16],
     pub field: String,
     pub base: String,
     pub result: String,
@@ -319,7 +334,7 @@ pub struct WatchingPreview {
 /// One coarse browser typing declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchingTyping {
-    pub issue: String,
+    pub body: [u8; 16],
     pub field: String,
 }
 
@@ -944,6 +959,10 @@ pub enum Request {
     /// the joiner's explicit acceptance IS the approval, and redemption is
     /// automatic over Contact — there is no approval queue.
     Invite {
+        /// World that owns the role selector. When absent, exactly one
+        /// installed World must claim it.
+        #[serde(default)]
+        world: Option<String>,
         /// The role the invite admits as (`viewer` | `contributor` |
         /// `administrator`); defaults to `contributor`. The capability carries
         /// the role's exact expanded assignments in its signed evidence.
@@ -1000,11 +1019,11 @@ pub enum Request {
     /// lossy by nature — a declaration that does not arrive is corrected by the
     /// next one — and a read that silently returned a stale table would not be.
     Watching {
-        /// The `iss_` doc ids, never project aliases. The Body id is derived
-        /// from the string as given, so an alias publishes presence on a Body
-        /// nothing reads and nobody sees a face.
+        /// World namespace for every Body in this replace-all declaration.
+        world: String,
+        /// Exact Body identities resolved by the World client process.
         #[serde(default)]
-        issues: Vec<String>,
+        bodies: Vec<[u8; 16]>,
         /// Current browser selections, aggregated across this server's tabs.
         #[serde(default)]
         carets: Vec<WatchingCaret>,
@@ -1016,6 +1035,8 @@ pub enum Request {
         previews: Vec<WatchingPreview>,
     },
     Live {
+        /// World namespace of the transient table being queried.
+        world: String,
         /// The generation the caller already holds. When it still stands the
         /// answer is [`Response::LiveUnchanged`], so a poll that finds nothing
         /// new costs a `u64` comparison instead of a re-serialised table.
@@ -1026,7 +1047,7 @@ pub enum Request {
         /// "unchanged" about a view it has never seen.
         #[serde(default)]
         since_generation: Option<u64>,
-        /// Narrow to one issue, by its `iss_` doc id.
+        /// Narrow to one exact World-resolved Body.
         ///
         /// Every scope about that issue's Body and not the viewing one alone:
         /// who is looking at it, where their carets are, who is typing. Those
@@ -1047,7 +1068,7 @@ pub enum Request {
         /// anything anywhere moves. That costs a wasted read and never a missed
         /// one, which is the right way round for a surface about who is here.
         #[serde(default)]
-        issue: Option<String>,
+        body: Option<[u8; 16]>,
     },
     /// Stream the current Live view and every superseding generation.
     ///
@@ -1055,9 +1076,11 @@ pub enum Request {
     /// same narrowing and response vocabulary while removing the adapter's
     /// polling interval from cursor and optimistic-text delivery.
     LiveSubscribe {
-        /// Narrow to one issue by its `iss_` doc id; `None` streams the table.
+        /// World namespace of the transient table being streamed.
+        world: String,
+        /// Narrow to one exact Body; `None` streams this World's table.
         #[serde(default)]
-        issue: Option<String>,
+        body: Option<[u8; 16]>,
     },
     /// Take every signal delivered since the last call, and leave the queue
     /// empty.
@@ -1992,6 +2015,7 @@ pub fn representative_requests() -> Vec<Request> {
         Request::SponsorWatch { heads: vec![] },
         Request::Sync,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: None,
@@ -2004,10 +2028,14 @@ pub fn representative_requests() -> Vec<Request> {
         Request::Log { since: 0 },
         Request::Who,
         Request::Live {
+            world: "com.example.world".into(),
             since_generation: None,
-            issue: None,
+            body: None,
         },
-        Request::LiveSubscribe { issue: None },
+        Request::LiveSubscribe {
+            world: "com.example.world".into(),
+            body: None,
+        },
         Request::Signals,
         Request::ConfigReload,
         Request::Stop,
@@ -2446,7 +2474,7 @@ pub enum HostReply {
         /// This machine's device id in the new Space.
         device: String,
         name: String,
-        /// The initial scope the bundled World seeded, so a caller can name
+        /// The initial scope the selected World seeded, so a caller can name
         /// where the first item will land.
         project_key: String,
         project_name: String,
@@ -3053,8 +3081,9 @@ pub struct StatusInfo {
 /// spawns a doomed second daemon over a held lock and waits out the full timeout.
 #[derive(Debug)]
 pub enum Probe {
-    /// Answered, and we understood the answer.
-    Healthy,
+    /// Answered, and we understood the answer. Carries the daemon's own
+    /// fingerprint when it offered one, for callers with a stricter stake.
+    Healthy { build: Option<BuildFingerprint> },
     /// Nothing is listening: no daemon for this home. Safe to spawn.
     Absent,
     /// Something is listening, but we can't talk to it — a daemon from a
@@ -3238,8 +3267,10 @@ async fn probe_inner(home: &Path) -> Probe {
                         // Same build, a newer one, or one that does not say:
                         // reuse it. Talking works, and evicting a daemon we are
                         // not ahead of is how two binaries run in turn come to
-                        // kill each other's on every start.
-                        _ => Probe::Healthy,
+                        // kill each other's on every start. A caller that
+                        // manages the daemon's own executable judges further
+                        // with the fingerprint carried here.
+                        build => Probe::Healthy { build },
                     }
                 }
                 Err(e) => Probe::Foreign {
@@ -4129,14 +4160,15 @@ pub async fn subscribe_routed(
 pub async fn subscribe_live_routed(
     home: &Path,
     route: ControlRoute,
-    issue: Option<String>,
+    world: String,
+    body: Option<[u8; 16]>,
 ) -> Result<LiveSubscription> {
     let mut stream = connect_bounded(home).await?;
     let envelope = ClientRequest {
         route: Some(route),
         if_running: false,
         act_as: None,
-        request: Request::LiveSubscribe { issue },
+        request: Request::LiveSubscribe { world, body },
     };
     let mut line = serde_json::to_string(&envelope).context("encode Live subscribe")?;
     line.push('\n');
@@ -4180,6 +4212,7 @@ mod tests {
         // scalar fields must survive a JSON round trip.
         for req in [
             Request::Invite {
+                world: None,
                 role: Some("contributor".into()),
                 reusable: true,
                 ttl_hours: Some(48),
@@ -4357,6 +4390,44 @@ mod tests {
         assert!(!b.supersedes(&a));
     }
 
+    /// A release ahead displaces across *any* pair of executables — the rule
+    /// the managed pair depends on, since the client probing its daemon can
+    /// never match its path. One-directional like `supersedes`: only the
+    /// newer version ever acts, so two builds of one version cannot ping-pong,
+    /// and a version that does not parse gives nobody a licence to evict.
+    #[test]
+    fn a_release_ahead_displaces_and_nothing_else_does() {
+        let daemon = build("0.9.0", "/install/current/lait", 0);
+        let client = build("0.9.1", "/install/current/astrolabe", 500);
+        assert!(
+            client.version_ahead_of(&daemon),
+            "the updated pair's client must retire the old daemon"
+        );
+        assert!(
+            !daemon.version_ahead_of(&client),
+            "an older build must never evict a newer"
+        );
+
+        let rebuilt = build("0.9.0", "/t/other", 900);
+        assert!(
+            !rebuilt.version_ahead_of(&daemon),
+            "two builds of one version keep the path-and-age rules"
+        );
+
+        let test_channel = build("0.9.1-test.1", "/t/a", 0);
+        assert!(
+            client.version_ahead_of(&build("0.9.1-test.1", "/t/b", 0)),
+            "a release outranks its own prereleases"
+        );
+        assert!(!test_channel.version_ahead_of(&client));
+
+        assert!(
+            !build("not-a-version", "/t/a", 900).version_ahead_of(&daemon),
+            "an unparseable version is never ahead"
+        );
+        assert!(!client.version_ahead_of(&build("also-not", "/t/b", 0)));
+    }
+
     /// A client is not always the binary it would spawn.
     ///
     /// The integration-test harness is its own executable and spawns `lait` as
@@ -4452,30 +4523,38 @@ mod tests {
     #[test]
     fn a_first_live_read_carries_no_generation_at_all() {
         let json = serde_json::to_value(Request::Live {
+            world: "com.example.world".into(),
             since_generation: None,
-            issue: None,
+            body: None,
         })
         .unwrap();
         assert_eq!(json["cmd"], "live");
         assert!(json["since_generation"].is_null());
 
         let held = serde_json::to_value(Request::Live {
+            world: "com.example.world".into(),
             since_generation: Some(0),
-            issue: Some("iss_01".into()),
+            body: Some([1; 16]),
         })
         .unwrap();
         assert_eq!(held["since_generation"], 0);
-        assert_eq!(held["issue"], "iss_01");
+        assert_eq!(held["body"], serde_json::json!(vec![1; 16]));
 
         // And absence decodes back to absence rather than to zero.
-        let decoded: Request = serde_json::from_value(serde_json::json!({"cmd": "live"})).unwrap();
+        let decoded: Request = serde_json::from_value(serde_json::json!({
+            "cmd": "live",
+            "world": "com.example.world"
+        }))
+        .unwrap();
         match decoded {
             Request::Live {
+                world,
                 since_generation,
-                issue,
+                body,
             } => {
+                assert_eq!(world, "com.example.world");
                 assert!(since_generation.is_none());
-                assert!(issue.is_none());
+                assert!(body.is_none());
             }
             other => panic!("decoded as {other:?}"),
         }

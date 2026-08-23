@@ -140,20 +140,23 @@ impl Client {
             // now. Only asked where Who answered — a Space that could not be
             // asked stays wholly unmeasured rather than half-measured.
             if map.asked.contains(&orbit.space) {
-                match daemon
-                    .request_if_running(
-                        route,
-                        &Request::Live {
-                            since_generation: None,
-                            issue: None,
-                        },
-                    )
-                    .await
-                {
-                    Ok(Response::Live { entries, .. }) => {
-                        map.absorb_live(&orbit.space, entries);
+                for world in self.installed_world_ids() {
+                    match daemon
+                        .request_if_running(
+                            route.clone(),
+                            &Request::Live {
+                                world,
+                                since_generation: None,
+                                body: None,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(Response::Live { entries, .. }) => {
+                            map.absorb_live(&orbit.space, entries);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }

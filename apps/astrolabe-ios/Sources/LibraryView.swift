@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The Library: the install list, exactly as on desktop. One row per World
-/// this signed build carries, drawn from the compiled-in registry — name,
+/// this signed build carries, drawn from its reviewed first-party registry — name,
 /// tagline, accent, and whether `Open` has anywhere to land. No probe runs to
 /// draw it, and nothing here says which Spaces serve a World or whether any
 /// is up: those are the destination's facts, and a row whose kind depends on

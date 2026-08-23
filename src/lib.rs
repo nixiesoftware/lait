@@ -19,8 +19,8 @@
 
 //! lait: an orbital shell for local-first, peer-to-peer collaboration.
 //!
-//! One binary, three processes — and no command surface. Everything a verb used
-//! to do is a request one of these carries:
+//! The shell has three host modes and independently supervised World processes.
+//! Everything a verb used to do is a request one of the host modes carries:
 //!   * `lait daemon` is the identity-scoped host: one local process endpoint,
 //!     an Orbit directory/router, identity-keyed transport hubs, and zero or
 //!     more in-process StationHosts.
@@ -38,8 +38,8 @@
 //!   * **The substrate** (`mechanics`, `fabric`, `replica`, `comms`,
 //!     `runtime`): authority, convergence, the Body graph, transport, and the
 //!     orbital lifecycle, each behind its own crate boundary.
-//!   * **Bundled products** ([`world`]): the composition root that docks
-//!     independently packaged Worlds and mounts their client interfaces.
+//!   * **Installed Worlds** ([`world`]): signed immutable releases launched
+//!     behind the runner ABI; the host has no production product dependency.
 //!   * **Layer B — control protocol** ([`control`]): a stable,
 //!     versioned, hand-maintained projection over the local socket. Never a
 //!     dump of storage internals.
@@ -53,7 +53,6 @@
 pub const VERSION: &str = env!("LAIT_VERSION_LONG");
 
 pub mod client_action;
-pub mod composition;
 pub mod config;
 pub mod control;
 pub mod daemon;

@@ -1,6 +1,6 @@
 /// The front page: a passive Library rail and one selected World.
 ///
-/// One row per installed World — the install list, compiled into the binary.
+/// One row per installed World — the passively read selected install list.
 /// Which Spaces serve a World is the destination's fact: the head's own front
 /// page carries the Space selector, and this surface deliberately does not
 /// pre-ask it. Steam supplies the durable library spine; GOG supplies the
@@ -167,8 +167,8 @@ class _Empty extends StatelessWidget {
           Text('This build installs no Worlds.', style: context.bodyStyle),
           t.gap.y(Space.xs),
           Text(
-            // The Library is the install list, compiled into this binary. An
-            // empty one is a build with no client packages — a builder's
+            // The Library is the selected install list. An empty one is an
+            // identity with no selected client packages — a builder's
             // situation, not a person's, and nothing on this machine can
             // change it.
             'A World ships inside the client. This binary was built without '

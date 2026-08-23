@@ -246,7 +246,7 @@ against its `ClientScope`, the daemon::Daemon resolves it through its own
 The allowed set is never accepted as a claim in the request.
 
 A missing route is accepted only by the historical per-home adapter: its socket
-identifies one Orbit and the uniquely claiming bundled World package is
+identifies one Orbit and the uniquely claiming installed World package is
 selected. An absent or ambiguous package claim rejects. The identity-scoped
 daemon::Daemon endpoint requires an explicit route. A version handshake precedes
 requests. The production request classifier assigns every historical typed

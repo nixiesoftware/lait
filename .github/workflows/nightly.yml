@@ -72,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [namespace-profile-nixiesoftware, macos-latest, blacksmith-4vcpu-windows-2025]
+        os: [blacksmith-4vcpu-ubuntu-2404, macos-latest, blacksmith-4vcpu-windows-2025]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -101,6 +101,10 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
+
+      - name: Stage first-party Worlds for process tests
+        shell: bash
+        run: bash ci/stage-test-worlds.sh
 
       # The `nightly` profile runs everything and gives the heavy gates their
       # own slow-timeout budget, plus a retry on the real-network group — a
