@@ -1073,7 +1073,7 @@ impl Daemon {
         // addressed by endpoint id, no port, no inbound hole. A failure here
         // is a degradation — the LAN listener is already up — never a reason
         // for the daemon not to exist.
-        let overlay_task = match comms::policy::Network::from_env() {
+        let overlay_task = match crate::config::Settings::load(Some(home)).network() {
             Ok(network) => {
                 let seed = self.device_seed;
                 let state = crate::display::DisplayHttpState {

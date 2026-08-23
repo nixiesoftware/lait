@@ -697,6 +697,44 @@ mod tests {
         }
     }
 
+    /// Named relays are lait's own rendezvous; none is the public mesh. The
+    /// explicit `LAIT_NETWORK` semantics stay whole above both.
+    #[test]
+    fn the_network_follows_the_relay_list_and_debug_defaults_public() {
+        let with_relays = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("relay.urls", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+        match with_relays("https://relay.example, https://second.example/").network() {
+            Ok(comms::policy::Network::Local(local)) => assert_eq!(
+                local.relays,
+                vec!["https://relay.example", "https://second.example"],
+                "a comma list, trimmed, trailing slash dropped"
+            ),
+            other => panic!("named relays are Local: {other:?}"),
+        }
+        assert!(
+            matches!(
+                with_relays("not-a-url").network(),
+                Ok(comms::policy::Network::Public)
+            ),
+            "nothing usable falls back to the public mesh rather than half a Local"
+        );
+        if cfg!(debug_assertions) {
+            assert!(
+                matches!(
+                    Settings::default().network(),
+                    Ok(comms::policy::Network::Public)
+                ),
+                "the development default is the public mesh; the Foundation relay rides built_in in release"
+            );
+        }
+    }
+
     /// A coordinator answers where it is told to, and a typo does not cost a
     /// daemon that will not start.
     #[test]
@@ -994,6 +1032,10 @@ pub struct KeySpec {
 /// `/registry`), so they share one base and one default.
 pub const FOUNDATION_SERVICES: &str = "https://post.foundation.pub";
 
+/// The Foundation relay — lait's own rendezvous, `lait-relay` behind a name.
+/// `relay` is on the registry's RESERVED list for exactly this.
+pub const FOUNDATION_RELAY: &str = "https://relay.foundation.pub";
+
 /// The cloud default for a hosted-service endpoint.
 ///
 /// Present only in release builds — the product connects out of the box, and
@@ -1056,6 +1098,13 @@ pub const KEYS: &[KeySpec] = &[
         daemon_read: false,
         help: "Hosted Post correspondence is carried over (applies at next daemon start; LAIT_POST_URL overrides; release default is the Foundation cloud, empty opts out).",
         built_in: || cloud_default(FOUNDATION_SERVICES),
+    },
+    KeySpec {
+        name: "relay.urls",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Comma-separated relay URLs the overlay rendezvouses through (applies at next daemon start; LAIT_RELAY overrides, LAIT_NETWORK overrides everything; release default is the Foundation relay, empty falls back to the public mesh).",
+        built_in: || cloud_default(FOUNDATION_RELAY),
     },
     KeySpec {
         name: "directory.url",
@@ -1213,6 +1262,47 @@ impl Settings {
     /// The identity directory addresses publish and resolve against, if any.
     pub fn directory_url(&self) -> Option<String> {
         self.service_url("directory.url", "LAIT_DIRECTORY_URL")
+    }
+
+    /// The relays this identity's overlay rendezvouses through, if it names
+    /// its own. Same chain as every service endpoint — `LAIT_RELAY` override
+    /// (present-but-empty falls back to the public mesh), then the key, then
+    /// the Foundation relay release builds carry — parsed as a comma list
+    /// with the same tolerance `LocalNet::parse` extends.
+    pub fn relay_urls(&self) -> Option<Vec<String>> {
+        let candidate = match std::env::var("LAIT_RELAY") {
+            Ok(value) => Some(value),
+            Err(_) => self
+                .get("relay.urls")
+                .map(str::to_string)
+                .or_else(|| (key_spec("relay.urls").ok()?.built_in)()),
+        }?;
+        let relays: Vec<String> = candidate
+            .split(',')
+            .map(str::trim)
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+            .map(|url| url.trim_end_matches('/').to_string())
+            .collect();
+        (!relays.is_empty()).then_some(relays)
+    }
+
+    /// The transport environment this identity's daemon builds against.
+    ///
+    /// `LAIT_NETWORK` stays the explicit override with its exact old
+    /// semantics — `public`, `isolated`, and `local` (which reads
+    /// `LAIT_RELAY`) all mean what they always meant. Absent it, the fleet
+    /// question is the relay list's: named relays are `Local` — lait's own
+    /// rendezvous, no third-party discovery, the PeerBook as the whole
+    /// resolution story — and no relays is the public mesh, which is the
+    /// development default and the pre-consolidation behavior.
+    pub fn network(&self) -> anyhow::Result<comms::policy::Network> {
+        if std::env::var_os("LAIT_NETWORK").is_some() {
+            return comms::policy::Network::from_env();
+        }
+        Ok(match self.relay_urls() {
+            Some(relays) => comms::policy::Network::Local(comms::policy::LocalNet { relays }),
+            None => comms::policy::Network::Public,
+        })
     }
 
     /// The identity's public label and the registry it publishes routes to.
