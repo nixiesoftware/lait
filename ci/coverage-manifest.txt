@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2600
-pr-platform    2120
-nightly        2628
+pr             2603
+pr-platform    2123
+nightly        2631
 mutants        106
 
 [gates]
@@ -112,6 +112,7 @@ astrolabe client::http::tests::a_refusal_is_not_retryable_and_a_server_fault_is
 astrolabe client::http::tests::a_request_and_its_reply_survive_a_real_socket
 astrolabe client::launch::tests::a_launch_with_nowhere_to_land_is_refused_before_anything_is_placed
 astrolabe client::launch::tests::the_composed_url_lands_on_the_declared_entry_carrying_the_ticket
+astrolabe client::library::tests::a_catalog_row_is_uninstalled_until_a_selected_release_replaces_it
 astrolabe client::library::tests::a_launch_url_carries_the_ticket_to_the_declared_entry
 astrolabe client::library::tests::a_mount_resolves_to_the_world_id_updates_are_scoped_by
 astrolabe client::library::tests::an_undeclared_entry_path_is_carried_as_absent_not_guessed
@@ -242,6 +243,7 @@ astrolabe::packaging the_linux_package_carries_the_pair_and_notices
 astrolabe::packaging the_linux_package_names_its_target_and_refuses_unresolved_libraries
 astrolabe::packaging the_linux_package_ships_the_licence
 astrolabe::packaging the_macos_update_tree_is_built_from_the_app_sealed_for_the_dmg
+astrolabe::packaging the_native_client_stages_a_catalog_without_world_payloads
 astrolabe::packaging the_notices_say_they_are_generated_and_name_what_generates_them
 astrolabe::packaging uninstalling_removes_the_program_and_never_the_persons_data
 comms iroh::tests::framing_golden_bytes
@@ -871,6 +873,7 @@ lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bo
 lait update::world::tests::old_releases_are_never_replaced_and_can_be_selected_without_a_download
 lait update::world::tests::only_a_known_newer_bundle_this_build_can_run_is_behind
 lait update::world::tests::republishing_an_old_version_never_overwrites_its_release
+lait update::world::tests::retirement_moves_only_the_legacy_directory_digest_and_preserves_its_bytes
 lait update::world::tests::the_standing_is_recorded_beside_the_served_tree_and_never_within_it
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
