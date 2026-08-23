@@ -157,7 +157,7 @@ test("web adapters reproduce pairing completion proof", async () => {
 test("web adapters reproduce the human confirmation phrase", async () => {
   const phrase = fixture.confirmation_phrase;
   assert.deepEqual(
-    await confirmationPhrase(phrase.fingerprint, phrase.pairing, phrase.receiver_nonce),
+    await confirmationPhrase(phrase.profile, phrase.pairing, phrase.receiver_nonce),
     phrase.words,
   );
 });

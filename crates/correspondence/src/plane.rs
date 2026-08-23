@@ -171,6 +171,24 @@ impl ReachPlane {
         Self::restore(seeds, None, now)
     }
 
+    /// The profile these seeds name, without founding a plane.
+    ///
+    /// The one derivation, shared with [`ReachPlane::restore`]: same seeds,
+    /// same fixed genesis, same id on every call. It exists so a component
+    /// that needs only the identity's address — the display coordinator
+    /// anchoring receivers on it — does not stand up a whole reach plane, and
+    /// cannot drift from the plane's own derivation by re-implementing it.
+    pub fn profile_for(seeds: &[[u8; 32]]) -> Result<mechanics::kinship::ProfileId, Failure> {
+        let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
+            return Err(Failure::TooFewDevices);
+        };
+        let genesis = DeviceLink::seal(first, second, GENESIS_NONCE, GENESIS_EPOCH)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        let log = mechanics::kinship::KinshipLog::found(genesis)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        Ok(log.profile().clone())
+    }
+
     /// Found the plane, reusing durable state when there is any.
     ///
     /// The genesis is recomputed from the seeds either way — it is deterministic,
@@ -1010,6 +1028,21 @@ mod tests {
     const BOB_A: [u8; 32] = [40u8; 32];
     const BOB_B: [u8; 32] = [41u8; 32];
     const NOW: u64 = 1_800_000_000;
+
+    /// The standalone derivation and the plane agree on the address, or a
+    /// receiver anchored by one is unreachable through the other.
+    #[test]
+    fn profile_for_is_the_plane_own_derivation() {
+        let seeds = vec![ALICE_A, ALICE_B];
+        let derived = ReachPlane::profile_for(&seeds).expect("derive");
+        let plane = ReachPlane::restore(seeds, None, NOW).expect("found");
+        assert_eq!(&derived, plane.profile());
+        assert!(derived.as_str().starts_with("prf_"));
+        assert!(
+            ReachPlane::profile_for(&[ALICE_A]).is_err(),
+            "one seed is no circle"
+        );
+    }
 
     /// **A device outside the genesis pair cannot publish**, and this is the
     /// constraint device-join has to design around.

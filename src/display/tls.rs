@@ -46,7 +46,12 @@ pub struct DisplayTlsIdentity {
 }
 
 impl DisplayTlsIdentity {
-    pub fn load_or_create(root: &Path, label: &str, port: u16) -> Result<Self> {
+    pub fn load_or_create(
+        root: &Path,
+        label: &str,
+        profile: display_protocol::ids::CoordinatorProfile,
+        port: u16,
+    ) -> Result<Self> {
         if port == 0 {
             return Err(anyhow!("display coordinator port must be non-zero"));
         }
@@ -94,6 +99,7 @@ impl DisplayTlsIdentity {
             protocol_major: display_protocol::PROTOCOL_MAJOR,
             instance: stored.instance,
             label: stored.label,
+            profile,
             trust: CoordinatorTrust::PinnedCertificate {
                 origin: served_origin(port),
                 sha256: fingerprint.clone(),
@@ -219,6 +225,10 @@ fn random_hex<const N: usize>() -> Result<String> {
 mod tests {
     use super::*;
 
+    fn test_profile() -> display_protocol::ids::CoordinatorProfile {
+        display_protocol::ids::CoordinatorProfile::parse(format!("prf_{}", "6".repeat(26))).unwrap()
+    }
+
     #[test]
     fn tls_identity_is_stable_and_private() {
         let root = std::env::temp_dir().join(format!(
@@ -226,8 +236,12 @@ mod tests {
             std::process::id(),
             mechanics::wallclock::now_millis()
         ));
-        let first = DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", 7443).unwrap();
-        let second = DisplayTlsIdentity::load_or_create(&root, "Ignored rename", 7443).unwrap();
+        let first =
+            DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", test_profile(), 7443)
+                .unwrap();
+        let second =
+            DisplayTlsIdentity::load_or_create(&root, "Ignored rename", test_profile(), 7443)
+                .unwrap();
         assert_eq!(first.instance(), second.instance());
         assert_eq!(first.fingerprint(), second.fingerprint());
         assert_eq!(first.certificate_pem(), second.certificate_pem());
@@ -256,8 +270,12 @@ mod tests {
             std::process::id(),
             mechanics::wallclock::now_millis()
         ));
-        let first = DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", 7443).unwrap();
-        let moved = DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", 8443).unwrap();
+        let first =
+            DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", test_profile(), 7443)
+                .unwrap();
+        let moved =
+            DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", test_profile(), 8443)
+                .unwrap();
 
         assert_eq!(
             first.fingerprint(),
@@ -269,7 +287,8 @@ mod tests {
 
         let route = |identity: &DisplayTlsIdentity| match &identity.instance().trust {
             CoordinatorTrust::PinnedCertificate { origin, .. } => origin.clone(),
-            CoordinatorTrust::WebPkiOrigin { origin } => origin.clone(),
+            CoordinatorTrust::WebPkiOrigin { origin }
+            | CoordinatorTrust::Profile { origin, .. } => origin.clone(),
         };
         assert!(route(&first).ends_with(":7443"));
         assert!(route(&moved).ends_with(":8443"), "only the route moved");

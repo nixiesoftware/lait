@@ -986,12 +986,14 @@ impl Daemon {
         clients: world_interface::WorldClientRegistry,
         home: &Path,
         device_seed: &[u8; 32],
+        profile: mechanics::kinship::ProfileId,
     ) -> Result<Self> {
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
             clients,
             device_seed,
+            profile,
             crate::config::Settings::load(Some(home)).display_port(),
         )?);
         Ok(Self {
@@ -1509,9 +1511,10 @@ impl Runner {
         router: Arc<Router>,
         clients: world_interface::WorldClientRegistry,
         device_seed: [u8; 32],
+        profile: mechanics::kinship::ProfileId,
     ) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let daemon = Arc::new(Daemon::new(router, clients, &home, &device_seed)?);
+        let daemon = Arc::new(Daemon::new(router, clients, &home, &device_seed, profile)?);
         Ok(Self {
             home,
             daemon,
@@ -1563,6 +1566,9 @@ pub async fn run_lait_daemon(
     // address book's author path is load-only by design).
     std::fs::create_dir_all(&identity)?;
     let device_seed = crate::config::load_or_create_identity(&identity)?;
+    // The identity's address, derived once beside its seed for the same
+    // reason the seed is: a value threaded down, never re-read to disagree.
+    let profile = crate::config::identity_profile(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
@@ -1571,7 +1577,7 @@ pub async fn run_lait_daemon(
         Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = Runner::start(home, router, clients, device_seed)?;
+    let runner = Runner::start(home, router, clients, device_seed, profile)?;
     let relaunch_requested = runner.relaunch_requested();
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
@@ -1949,7 +1955,16 @@ pub(crate) fn runner_with_factory(
         )),
         crate::world::client_packages().clone(),
         [0x5a; 32],
+        test_profile(),
     )
+}
+
+/// A fixed, valid profile for lifecycle tests — the derivation the daemon
+/// itself uses, over throwaway seeds.
+#[cfg(test)]
+pub(crate) fn test_profile() -> mechanics::kinship::ProfileId {
+    correspondence::plane::ReachPlane::profile_for(&[[0x5a; 32], [0x5b; 32]])
+        .expect("derive test profile")
 }
 
 #[cfg(test)]

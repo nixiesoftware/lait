@@ -831,6 +831,19 @@ fn kinship_key_path(home: &Path) -> PathBuf {
 /// Order is not rank: which device composes is [`ReachPlane::canonical`], and it
 /// moves. The profile is the hash of the link, which names no primary, so a
 /// handover leaves the address alone.
+/// The identity's own profile — the address everything anchors on.
+///
+/// One derivation for the whole daemon: the kinship seeds name a fixed genesis
+/// and the profile is its content address, so this answers the same id on
+/// every call and on every machine holding the same identity. The reach plane
+/// and the display coordinator both anchor here, which is what makes a
+/// receiver paired to the coordinator a receiver paired to the *identity*.
+pub fn identity_profile(home: &Path) -> Result<mechanics::kinship::ProfileId> {
+    let seeds = load_or_create_kinship_seeds(home)?;
+    correspondence::plane::ReachPlane::profile_for(&seeds)
+        .map_err(|error| anyhow!("derive identity profile: {error}"))
+}
+
 pub fn load_or_create_kinship_seeds(home: &Path) -> Result<Vec<[u8; 32]>> {
     let identity = load_identity(home)?;
     let path = kinship_key_path(home);

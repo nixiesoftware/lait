@@ -6,9 +6,11 @@ import {
   bytesToHex,
   confirmationPhrase,
   isLowerHex,
+  isProfileId,
   PROTOCOL_MAJOR,
   ProtocolError,
   randomHex,
+  requireProfile,
   sha256,
   verifyProgram,
 } from "./protocol.mjs";

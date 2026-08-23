@@ -558,13 +558,28 @@ export async function authenticatePairingComplete(proofKey, pairing, device, cha
   return hmacSha256(proofKey, pairingCompleteTranscript(pairing, device, challenge));
 }
 
-export async function confirmationPhrase(fingerprint, pairing, receiverNonce) {
-  requireId(fingerprint, 64, "coordinator fingerprint");
+export function isProfileId(value) {
+  return typeof value === "string"
+    && value.startsWith("prf_")
+    && value.length === 30
+    && [...value.slice(4)].every((c) => (c >= "0" && c <= "9") || (c >= "A" && c <= "V"));
+}
+
+export function requireProfile(value, name) {
+  if (!isProfileId(value)) refuse("invalid_identifier", `${name} is not a profile id`);
+  return value;
+}
+
+// v2: the phrase commits the *identity*, not a placement's certificate — the
+// words a person compares stay the same when the coordinator moves machines
+// or rotates a certificate.
+export async function confirmationPhrase(profile, pairing, receiverNonce) {
+  requireProfile(profile, "coordinator profile");
   requireId(pairing, 32, "pairing id");
   requireId(receiverNonce, 64, "receiver nonce");
-  const transcript = new Transcript("astrolabe-display/confirmation-phrase/v1");
+  const transcript = new Transcript("astrolabe-display/confirmation-phrase/v2");
   transcript.u32(PROTOCOL_MAJOR);
-  transcript.text(fingerprint);
+  transcript.text(profile);
   transcript.text(pairing);
   transcript.text(receiverNonce);
   const digest = hexToBytes(await sha256(transcript.finish()), 32);
