@@ -196,7 +196,7 @@ astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_synchronized_snapshot_keeps_advancing_while_assets_are_staged
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::an_unsynchronized_snapshot_begins_when_it_is_activated
-astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
+astrolabe-ios node::tests::the_product_free_embedded_node_starts_without_a_world_head
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
 astrolabe-stub tests::a_live_tree_that_cannot_start_falls_back_to_the_previous_tree
 astrolabe-stub tests::a_manifest_that_does_not_carry_its_own_entry_is_refused
