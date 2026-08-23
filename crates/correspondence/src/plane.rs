@@ -179,14 +179,22 @@ impl ReachPlane {
     /// anchoring receivers on it — does not stand up a whole reach plane, and
     /// cannot drift from the plane's own derivation by re-implementing it.
     pub fn profile_for(seeds: &[[u8; 32]]) -> Result<mechanics::kinship::ProfileId, Failure> {
+        let log = mechanics::kinship::KinshipLog::found(Self::genesis_for(seeds)?)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        Ok(log.profile().clone())
+    }
+
+    /// The fixed genesis these seeds name — the artifact [`profile_for`]'s id
+    /// is the hash of, exposed for the caller that must *carry* it: a route
+    /// publication anchors on the genesis, not on its digest.
+    ///
+    /// [`profile_for`]: ReachPlane::profile_for
+    pub fn genesis_for(seeds: &[[u8; 32]]) -> Result<DeviceLink, Failure> {
         let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
             return Err(Failure::TooFewDevices);
         };
-        let genesis = DeviceLink::seal(first, second, GENESIS_NONCE, GENESIS_EPOCH)
-            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
-        let log = mechanics::kinship::KinshipLog::found(genesis)
-            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
-        Ok(log.profile().clone())
+        DeviceLink::seal(first, second, GENESIS_NONCE, GENESIS_EPOCH)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))
     }
 
     /// Found the plane, reusing durable state when there is any.

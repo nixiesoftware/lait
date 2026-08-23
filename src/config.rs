@@ -954,6 +954,24 @@ pub const KEYS: &[KeySpec] = &[
         help: "Project key issue-creating commands fall back to when -p is omitted.",
         built_in: || None,
     },
+    // The identity's public label on the deployment root — `acme` answering
+    // at acme.<root>. Read at daemon start beside the registry URL; both set
+    // is what turns route self-publication on, and neither has a built-in
+    // because a default label is somebody else's.
+    KeySpec {
+        name: "identity.label",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Public label this identity answers at (applies at next daemon start).",
+        built_in: || None,
+    },
+    KeySpec {
+        name: "registry.url",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Registry base URL routes publish to (applies at next daemon start).",
+        built_in: || None,
+    },
     // Not `daemon_read`: the port is spent at bind, so a live daemon cannot
     // honour a change without dropping the listener every receiver is on. The
     // help says so rather than a reload pretending otherwise.
@@ -1072,6 +1090,15 @@ impl Settings {
     /// The configured default project key, if any.
     pub fn default_project(&self) -> Option<String> {
         self.get("project.default").map(str::to_string)
+    }
+
+    /// The identity's public label and the registry it publishes routes to.
+    /// Both or nothing: a label with nowhere to publish is a hope, and a
+    /// registry with no label has nothing to say.
+    pub fn route_publication(&self) -> Option<(String, String)> {
+        let label = self.get("identity.label")?.trim().to_string();
+        let registry = self.get("registry.url")?.trim().to_string();
+        (!label.is_empty() && !registry.is_empty()).then_some((label, registry))
     }
 
     /// The port the display coordinator serves on.

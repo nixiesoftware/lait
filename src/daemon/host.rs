@@ -1081,6 +1081,11 @@ impl Daemon {
                     pairing: self.display.pairing.clone(),
                 };
                 let overlay_stop = self.endpoint.subscribe_stop();
+                let publication = crate::config::Settings::load(Some(home)).route_publication();
+                let identity_home = home
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| home.to_path_buf());
                 Some(tokio::spawn(async move {
                     let transport = match comms::DefaultTransport::new(
                         &seed,
@@ -1101,6 +1106,36 @@ impl Daemon {
                             return;
                         }
                     };
+                    // Say where this identity answers, when it has a label and
+                    // a registry to say it to. Publication is evidence signed
+                    // by this device; a refusal is logged and serving goes on,
+                    // because a coordinator that cannot announce is degraded,
+                    // not absent — LAN receivers never needed the registry.
+                    if let Some((label, registry)) = publication {
+                        let endpoint = comms::Transport::my_id(transport.as_ref())
+                            .as_str()
+                            .to_string();
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            crate::display::publish_route(
+                                &identity_home,
+                                &label,
+                                &registry,
+                                &endpoint,
+                            )
+                        })
+                        .await;
+                        match outcome {
+                            Ok(Ok(resolved)) => {
+                                tracing::info!(label = %resolved.label.as_str(), "route published");
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "route publication refused; serving anyway");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "route publication task failed");
+                            }
+                        }
+                    }
                     if let Err(error) = crate::display::overlay::serve_display_overlay(
                         transport,
                         crate::display::display_http_router(state),

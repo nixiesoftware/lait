@@ -301,6 +301,19 @@ pub fn router<S: RegistryStore + Send + 'static>(
         .with_state(store)
 }
 
+/// Publish a route over the registry's HTTP surface, as a client.
+///
+/// Blocking, like every network call in this tree — callers on an async
+/// runtime hop through `spawn_blocking`. The coarse error carries no more
+/// than an operator log needs.
+pub fn publish_over_http(base: &str, publish: &RoutePublish) -> anyhow::Result<Resolved> {
+    let response = ureq::post(&format!("{}/registry/route", base.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(10))
+        .send_json(serde_json::to_value(publish)?)
+        .map_err(|error| anyhow::anyhow!("registry refused the route: {error}"))?;
+    Ok(response.into_json()?)
+}
+
 /// In-memory store, enforcing the same rules a backing store must.
 #[derive(Debug, Default)]
 pub struct MemRegistry {
@@ -461,6 +474,54 @@ mod tests {
             Err(Refusal::NotAvailable),
             "a valid identity cannot route a label bound to another"
         );
+    }
+
+    /// The wire round trip: sign, publish over HTTP, resolve over HTTP — the
+    /// same path the daemon and the reach router take, against the mounted
+    /// axum surface on a real listener.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_route_publishes_and_resolves_over_the_wire() {
+        let (announcement, profile) = identity();
+        let store = std::sync::Arc::new(std::sync::Mutex::new(MemRegistry::default()));
+        {
+            let mut held = store.lock().unwrap();
+            held.bind(&Label::parse("acme").unwrap(), &profile).unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, router(store)).await.ok();
+        });
+
+        let publish = RoutePublish::sign(
+            Label::parse("acme").unwrap(),
+            announcement.encode().expect("encode"),
+            endpoint(),
+            5,
+            &SEED_A,
+        );
+        let published = tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || publish_over_http(&base, &publish)
+        })
+        .await
+        .expect("join")
+        .expect("publish");
+        assert_eq!(published.endpoint, endpoint());
+
+        let resolved: Resolved = tokio::task::spawn_blocking(move || {
+            ureq::get(&format!("{base}/registry/acme"))
+                .call()
+                .expect("resolve")
+                .into_json()
+                .expect("decode")
+        })
+        .await
+        .expect("join");
+        assert_eq!(resolved.profile, profile.as_str());
+        assert_eq!(resolved.epoch, 5);
     }
 
     #[test]

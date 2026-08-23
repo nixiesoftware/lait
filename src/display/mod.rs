@@ -20,6 +20,7 @@ pub(crate) use http::{bind_display, is_port_taken};
 mod live;
 pub mod overlay;
 mod pairing;
+mod publish;
 mod runtime;
 mod store;
 mod tls;
@@ -40,6 +41,7 @@ pub use mediabox::{
 pub use pairing::{
     AuthorizationRefusal, AuthorizedDevice, DisplayPairingService, PendingPairingView,
 };
+pub use publish::publish_route;
 pub use runtime::DisplayRuntime;
 pub use store::{
     AssignmentRecord, AssignmentSync, CoordinatorPolicy, CoordinatorSecrets, CoordinatorStore,
