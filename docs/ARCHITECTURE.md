@@ -51,7 +51,7 @@ lait mcp (pinned agent head)
 
 astrolabe (library / launcher / identity)
   └─ tools/astrolabe core -> host / Space / World planes
-       └─ Flutter (apps/astrolabe) draws ClientView; never a World
+       └─ Tauri (apps/astrolabe-web) draws ClientView; never a World
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -219,7 +219,7 @@ issues-app Issues application protocol plus its web and MCP client interfaces
 lait       launcher, identity-scoped daemon, HTTP head, MCP head,
            host-capability adapters, viewer, and application composition
 astrolabe  identity-scoped library client: reach, one model of client
-           state, Flutter drawing. Never a World head; authors MCP bindings
+           state, Tauri drawing. Never a World head; authors MCP bindings
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as

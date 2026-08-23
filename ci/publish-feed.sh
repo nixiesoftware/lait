@@ -15,28 +15,23 @@
 # forge. This is the publish half of that, and `packaging/build-astrolabe.sh`
 # is the build half — it emits exactly the names read below.
 #
-# Usage (the path to use):
-#   packaging/build-astrolabe.sh --version 0.9.0 --out target/distrib \
-#     --identity "Developer ID Application: … (TEAMID)" --notarize <profile>
-#   ci/publish-feed.sh --version 0.9.0 --channel test \
-#     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed \
-#     [--floor 0.7.0] [--astrolabe 0.9.0]   (--astrolabe is read off the
-#     installers in --artifacts-dir when omitted; --lait-only skips the client)
-#
-# DEPRECATED path:
-#   ci/publish-feed.sh --from-release v0.8.0-test.1 --channel test \
+# Canonical release path (the run id is printed by the Release workflow):
+#   ci/publish-feed.sh --from-run 123456789 --version 0.9.1 --channel test \
 #     --seed ~/.lait-feed-signing.seed [--floor 0.7.0]
 #
-# `--from-release` downloads a tag's artifacts from a GitHub release. It is
-# kept for republishing an already-released tag, and it is not how anything is
-# shipped now: the workflow that attached Astrolabe installers to releases
-# built the deprecated Flutter client and is itself unwired
-# (`apps/astrolabe/DEPRECATED.md`), so on any recent tag this path finds lait
-# archives and no client, and refuses unless you pass --lait-only. Build
-# locally and pass --artifacts-dir instead.
+# `--from-run` downloads the complete native release artifact assembled by our
+# Release workflow. GitHub Actions is transient build transport only; the
+# signed GCS release and channel pointer created below are the distribution.
+#
+# Local/recovery path:
+#   packaging/build-astrolabe.sh --version 0.9.1 --out target/distrib \
+#     --identity "Developer ID Application: … (TEAMID)" --notarize <profile>
+#   ci/publish-feed.sh --version 0.9.1 --channel test \
+#     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed
 #
 # Requires: gcloud (authenticated with write access to the bucket), curl, gh
-# (for --from-release), and a built `lait-feed` (cargo build -p lait-feed).
+# (for --from-run or historical --from-release), and a built `lait-feed`
+# (cargo build -p lait-feed).
 #
 # The seed never leaves the machine invoking this script. CI runs will replace
 # the gcloud user credential with Workload Identity Federation (SUB-13, open);
@@ -47,7 +42,7 @@ set -euo pipefail
 BUCKET="gs://the-foundation-dist"
 BASE_URL="https://storage.googleapis.com/the-foundation-dist"
 
-VERSION="" CHANNEL="" ARTIFACTS="" SEED="" FLOOR="" ASTROLABE="" FROM_RELEASE="" LAIT_ONLY=""
+VERSION="" CHANNEL="" ARTIFACTS="" SEED="" FLOOR="" ASTROLABE="" FROM_RUN="" FROM_RELEASE="" LAIT_ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -56,6 +51,7 @@ while [ $# -gt 0 ]; do
     --seed) SEED="$2"; shift 2 ;;
     --floor) FLOOR="$2"; shift 2 ;;
     --astrolabe) ASTROLABE="$2"; shift 2 ;;
+    --from-run) FROM_RUN="$2"; shift 2 ;;
     --from-release) FROM_RELEASE="$2"; shift 2 ;;
     --lait-only) LAIT_ONLY=1; shift ;;
     *) echo "publish-feed: unknown argument $1" >&2; exit 1 ;;
@@ -101,6 +97,24 @@ detect_astrolabe() { # $1 = where the artifacts came from, for the refusal
   fi
 }
 
+if [ -n "$FROM_RUN" ] && [ -n "$FROM_RELEASE" ]; then
+  echo "publish-feed: --from-run and --from-release are mutually exclusive" >&2
+  exit 1
+fi
+
+if [ -n "$FROM_RUN" ]; then
+  [ -n "$VERSION" ] || {
+    echo "publish-feed: --from-run also requires --version" >&2
+    exit 1
+  }
+  ARTIFACTS="$WORK/run-artifacts"
+  mkdir -p "$ARTIFACTS"
+  gh run download "$FROM_RUN" --repo nixiesoftware/lait \
+    --name "release-$VERSION" --dir "$ARTIFACTS"
+  detect_astrolabe "Actions run $FROM_RUN"
+fi
+
+# Historical recovery path for releases made before our own build workflow.
 if [ -n "$FROM_RELEASE" ]; then
   VERSION="${FROM_RELEASE#v}"
   ARTIFACTS="$WORK/release-assets"
@@ -127,18 +141,18 @@ if [ -n "$FROM_RELEASE" ]; then
 fi
 
 [ -n "$VERSION" ] && [ -n "$CHANNEL" ] && [ -n "$ARTIFACTS" ] && [ -n "$SEED" ] || {
-  echo "publish-feed: --channel and --seed, plus either --from-release or --version + --artifacts-dir, are required" >&2
+  echo "publish-feed: --channel and --seed, plus --from-run + --version, --from-release, or --version + --artifacts-dir, are required" >&2
   exit 1
 }
 
-# The primary documented path: build-astrolabe.sh dropped installers into the
+# The local artifact path: build-astrolabe.sh dropped installers into the
 # artifacts dir, and the pair rule makes their version $VERSION — so pin to
 # it rather than trusting a listing over a directory nothing ever cleans,
 # where `head -1` would happily publish LAST release's client. An installer
 # for another version is refused by name, not skipped. An explicit
 # --astrolabe still wins; --from-release keeps listing-detection because old
 # tags predate the pair rule and legitimately carry another client version.
-if [ -z "$ASTROLABE" ] && [ -z "$FROM_RELEASE" ]; then
+if [ -z "$ASTROLABE" ] && [ -z "$FROM_RELEASE" ] && [ -z "$FROM_RUN" ]; then
   if [ -n "$LAIT_ONLY" ]; then
     detect_astrolabe "$ARTIFACTS"
   elif [ -f "$ARTIFACTS/astrolabe-$VERSION-setup.exe" ] \

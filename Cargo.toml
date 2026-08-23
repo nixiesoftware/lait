@@ -57,7 +57,7 @@ resolver = "2"
 
 [package]
 name = "lait"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 # MSRV: driven by typst 0.15.1 (via products/issues-app), which requires rustc
 # 1.92. iroh 1.0.0-rc.1 held the floor at 1.91 before that; it is no longer the
@@ -92,28 +92,10 @@ exclude = [
     ".githooks/",
     ".claude/",
     ".claude-plugin/",
-    "dist-workspace.toml",
     "Dockerfile",
     "docker-compose.yml",
     ".dockerignore",
 ]
-
-# `cargo binstall lait` — fetch the prebuilt cargo-dist release archive from
-# GitHub instead of compiling. The URL/layout below matches what cargo-dist
-# **actually** publishes (verified against the released v0.4.8 assets), which is
-# per-OS, NOT flat everywhere: the unix `.tar.gz` archives nest the binary under
-# a `lait-<target-triple>/` directory, while the Windows `.zip` is flat with
-# `lait.exe` at the archive root. `bin-dir` must reflect that per-OS shape — the
-# same layout the self-updater encodes in `update_bin_path_in_archive` (app.rs).
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
-pkg-fmt = "tgz"
-bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
-
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-fmt = "zip"
-# Windows `.zip` is flat: `lait.exe` at the root, no nesting directory.
-bin-dir = "{ bin }{ binary-ext }"
 
 [lib]
 name = "lait"
@@ -241,7 +223,7 @@ schemars = "1"
 # pieces are owned directly instead of through `self_update`'s GitHub backend:
 # `ureq` + rustls fetches (pure Rust, no reqwest/native-tls/OpenSSL C dep),
 # `semver` orders releases (and lets a `-dev.<sha>` build heal onto stable),
-# flate2/tar/zip open exactly the archive shapes cargo-dist publishes, and
+# flate2/tar/zip open exactly the archive shapes the first-party feed publishes, and
 # `self-replace` performs the rename-out-of-the-way swap that works on a live
 # executable. Envelope verification is `mechanics::actor` — the feed signature
 # is an ordinary ed25519 detached signature, and the kernel stays the only
@@ -251,7 +233,7 @@ semver = "1"
 self-replace = "1"
 flate2 = "1"
 tar = "0.4"
-# `deflate` only — the codec every cargo-dist zip uses. The default feature set
+# `deflate` only — the codec every Windows feed archive uses. The default feature set
 # drags in aes/bzip2/zstd/lzma for codecs no release archive contains.
 zip = { version = "6", default-features = false, features = ["deflate"] }
 
@@ -347,7 +329,7 @@ tower = { version = "0.5", features = ["util"] }
 # archives itself now that `self_update` is gone. The `#[ignore]`d
 # `update_bin_path_is_a_real_entry_in_the_published_archives` still reads the
 # REAL published release archives in CI's `updater-contract` job — the model of
-# cargo-dist's layout is what was wrong in v0.4.8/v0.5.0.)
+# the published layout is what was wrong in v0.4.8/v0.5.0.)
 # `zip::write` is used by the updater's own extraction tests to build
 # archive fixtures; it ships in the same crate feature set.
 
@@ -368,7 +350,7 @@ strip = "symbols"
 debug = "line-tables-only"
 incremental = false
 
-# The profile that 'dist' will build with
+# Release binaries and native packaging use this profile.
 # Tests build with the `test` profile, which inherits `dev` — i.e. unoptimized.
 # That is fine for our own code and almost every dependency, but brutal at two
 # measured runtime boundaries: curve25519/FROST ceremony work, and the
@@ -467,10 +449,6 @@ opt-level = 3
 
 [profile.dev.package.simd-adler32]
 opt-level = 3
-
-[profile.dist]
-inherits = "release"
-lto = "thin"
 
 # The single definition of the workspace lint policy. Every member inherits it
 # with `[lints] workspace = true`; the block used to be copy-pasted into all
@@ -606,16 +584,6 @@ from_iter_instead_of_collect = "allow"      # 1
 for_kv_map = "allow"                        # 1
 equatable_if_let = "allow"                  # 1
 enum_variant_names = "allow"                # 1
-
-# `publish = false` above is Cargo's switch AND cargo-dist's signal that a
-# package is not an App to release — so setting it emptied the release plan
-# ("This workspace doesn't have anything for dist to Release!"), which fails
-# ci.yml's `release-dry-run`, produces no archives or installers on a tag, and
-# leaves every `workflow_run` publisher (homebrew, scoop, winget, sbom, and the
-# whole Astrolabe bundle job) waiting on a Release that never succeeded. This
-# is the opt-in dist's own diagnostic prescribes: not published, still shipped.
-[package.metadata.dist]
-dist = true
 
 [lints]
 workspace = true

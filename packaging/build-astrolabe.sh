@@ -77,7 +77,7 @@ case "$TARGET" in *-windows-*) EXE=".exe" ;; *) EXE="" ;; esac
 # The installed pair carries its own C runtime on Windows: the stub-managed
 # layout ships no msvcp/vcruntime DLLs (the old Flutter bundle staged them),
 # and a clean machine must not die in the loader over one. Scoped to this
-# vehicle — cargo-dist keeps its own posture for the bare lait release.
+# vehicle — the bare host archive keeps its own portability posture.
 case "$TARGET" in
   *-windows-*) export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" ;;
 esac

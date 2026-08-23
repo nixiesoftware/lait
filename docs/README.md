@@ -19,7 +19,7 @@ contract or operate a deployment.
 | Run the local web application | [`UI.md`](./UI.md#3-web) |
 | Diagnose joining and onboarding | [`UI.md`](./UI.md#7-joining) |
 | Give an agent its own identity | [`AGENT-EXPERIENCE.md`](./AGENT-EXPERIENCE.md) |
-| Reach Worlds this device serves | Astrolabe (`apps/astrolabe`) — library, launcher, identity; never a World |
+| Reach Worlds this device serves | Astrolabe (`apps/astrolabe-web`) — Tauri client, launcher, identity; never a World |
 
 The normal product model is deliberately small:
 

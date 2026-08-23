@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.9.1 — the client is Tauri and Worlds stand alone
+
+Astrolabe's canonical desktop client is now the Tauri application. It bundles
+the matching `lait` sidecar and first-party World runners from one tagged tree,
+ships native installers for Windows, macOS, and Linux, and updates through the
+signed first-party feed rather than through a forge-facing client mechanism.
+
+Issues and Signage are now independently versioned executable World bundles.
+The host resolves signed World channels, installs immutable releases, launches
+one supervised runner per World, and routes UI and RPC traffic through the
+runner protocol. A host release tag no longer republishes or promotes Worlds;
+first-party World promotion is its own explicit channel operation.
+
+The desktop release workflow now builds the Tauri pair on native runners after
+the bare-host release succeeds. macOS output is Developer ID signed, notarized,
+and stapled before the updater tree is packed from that same app bundle.
+
 ## v0.9.0 — the client updates itself
 
 > **Upgrading:** install v0.9.0 by hand — this is the release that teaches the

@@ -18,41 +18,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # NOTE: the Astrolabe interface job (`flutter analyze` + the widget suite) is
-  # not here yet, and it is one secret away.
-  #
-  # `apps/astrolabe` now takes covalence, lit_ui and covalence_lints from git at
-  # pinned commits rather than by relative path, so a clean checkout can resolve
-  # them. Both repositories are **private** (gitlab.com/onnixi/…), so a runner
-  # needs a credential before `pub get` will do anything but ask for a username.
-  #
-  # To turn it on: add a GitLab token with read_repository as a secret, then a
-  # job with these steps —
-  #
-  #   - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
-  #     with: { flutter-version: '3.41.6', channel: stable, cache: true }
-  #   - run: git config --global url."https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/".insteadOf "https://gitlab.com/"
-  #   - run: flutter pub get      # working-directory: apps/astrolabe
-  #   - run: flutter analyze      # working-directory: apps/astrolabe
-  #   - run: flutter test         # working-directory: apps/astrolabe
-  #
-  # and add it to orbital-complete's needs. The suite is green — 58 tests and a
-  # clean analyze — and it is cheap: the widget tests press real controls against
-  # `Client.canned`, so they need the Flutter SDK and nothing else.
-  #
-  # Left as a comment rather than a disabled job on purpose. A job that cannot
-  # pass trains people to ignore red, which costs more than the check catches.
-  #
-  # That same secret — not an oversight — is what keeps `ci/bridge-drift.sh` and
-  # `ci/dart-licences.sh` out of this file, and it is worth naming because both
-  # read as merely "not wired yet". `bridge-drift` runs
-  # `flutter_rust_bridge_codegen generate` inside `apps/astrolabe`, and
-  # `dart-licences` runs `flutter pub deps` there; each needs that project to
-  # resolve, so each needs the credential above. Wiring them today would add two
-  # more jobs that cannot pass. Until then they are hand-run, and the drift they
-  # catch — a `tools/astrolabe/src/api/mod.rs` change with no regeneration,
-  # producing a binding that compiles, runs and disagrees with the model — has
-  # no machine watching for it.
+  # The retired Flutter desktop client has no CI or release path. The canonical
+  # Tauri interface is gated below as both frontend and native host.
   #
   # The iOS boundary is a third, and it is a *cost* decision rather than a
   # credential one. `apps/astrolabe-ios/build-core.sh` says CI's drift check is
@@ -565,7 +532,7 @@ jobs:
       # reported. The App push re-runs CI, the manifest is then current, and the
       # second run agrees and pushes nothing.
       # `secrets` is not available in a step `if`, so the App's presence is
-      # read into an output first — the same shape `publish-scoop` uses.
+      # read into an output first before gating the next step.
       - name: Can this run push the fix?
         id: pushable
         if: >-
@@ -747,30 +714,33 @@ jobs:
         with:
           command: check
 
-  # Release dry-run: `dist plan` must succeed for every configured target
-  # (including the Windows target added now that the control channel is
-  # portable). This gates release-engineering drift on every PR, long before a
-  # tag is pushed. It only PLANS — it never builds or publishes.
-  release-dry-run:
-    name: release dry-run (dist plan)
+  # Release contract: our native builders and feed publisher must retain every
+  # platform the signed manifest declares. This is intentionally a repository
+  # check; no third-party release planner sits between source and the feed.
+  release-contract:
+    name: release contract (native feed)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Install dist
-        shell: bash
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
-      - name: dist plan (all targets, incl. Windows)
+      - name: Validate scripts and declared targets
         shell: bash
         run: |
           set -euo pipefail
-          dist plan --output-format=json > plan.json
-          cat plan.json
-          # Assert the Windows target is present in the plan so it can't silently
-          # regress back out of the release matrix.
-          grep -q 'x86_64-pc-windows-msvc' plan.json \
-            || { echo "::error::Windows target missing from dist plan"; exit 1; }
+          bash -n .github/scripts/archive-unix.sh
+          bash -n .github/scripts/archive-windows.sh
+          bash -n packaging/build-astrolabe.sh
+          bash -n ci/publish-feed.sh
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            grep -q "$target" .github/workflows/build-binaries.yml \
+              || { echo "::error::$target missing from host builder"; exit 1; }
+            grep -q "$target" .github/workflows/release.yml \
+              || { echo "::error::$target missing from release completeness gate"; exit 1; }
+          done
+          grep -q -- '--from-run' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
 
-  # The self-updater's in-archive binary path is a claim about cargo-dist's
+  # The self-updater's in-archive binary path is a claim about our feed's
   # layout, and the unit tests can only check it against our MODEL of that
   # layout. The model was wrong twice — v0.4.8 and v0.5.0 shipped a Windows path
   # of `lait.exe.exe`, so self-update was dead on Windows for every user, and
@@ -778,9 +748,8 @@ jobs:
   # the loop against reality: it downloads the archives users actually download
   # and asserts the path self_update would extract is really in them.
   #
-  # It validates the CURRENT tree's updater against the LATEST release — exactly
-  # the operation `Request::HostUpdate` performs — so a cargo-dist layout change breaks
-  # CI here rather than stranding users on a binary that cannot update itself.
+  # It validates the CURRENT tree's updater against the LIVE stable release —
+  # exactly the operation `Request::HostUpdate` performs.
   updater-contract:
     name: self-updater archive contract
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -800,19 +769,20 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Fetch the latest release's archives
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch the stable feed's declared host archives
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-archives
-          gh release download --repo "$GITHUB_REPOSITORY" -D release-archives --clobber \
-            -p 'lait-x86_64-pc-windows-msvc.zip' \
-            -p 'lait-aarch64-apple-darwin.tar.gz' \
-            -p 'lait-x86_64-apple-darwin.tar.gz' \
-            -p 'lait-aarch64-unknown-linux-gnu.tar.gz' \
-            -p 'lait-x86_64-unknown-linux-gnu.tar.gz'
+          base=https://storage.googleapis.com/the-foundation-dist
+          curl -fsSL "$base/channels/stable" -o pointer.json
+          jq -r .payload pointer.json | base64 --decode > pointer-payload.json
+          manifest="$(jq -er .manifest pointer-payload.json)"
+          curl -fsSL "$manifest" -o manifest.json
+          jq -r .payload manifest.json | base64 --decode > manifest-payload.json
+          jq -er '.artifacts.lait[].url' manifest-payload.json | while read -r url; do
+            curl -fsSL "$url" -o "release-archives/${url##*/}"
+          done
           ls -l release-archives
       - name: Assert the updater's path resolves inside them
         shell: bash
@@ -826,62 +796,6 @@ jobs:
       # `Request::HostUpdate` does on an installed machine. This couples CI to
       # the feed host being up, deliberately: a feed nobody can resolve is an
       # outage for every installed machine, and this is where it gets loud.
-      # (The archive-entry assertion above stays on the GitHub mirror until the
-      # feed carries its first real release; then LAIT_RELEASE_ARCHIVES can be
-      # fetched from the feed instead and the mirror dependency goes.)
       - name: Assert the live feed resolves with the pinned key
         shell: bash
         run: cargo test --lib -- --ignored --exact update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
-
-  # Packaging manifests (Scoop + winget) are hand-maintained templates that the
-  # release CD (publish-scoop / publish-winget) stamps with each release's real
-  # version + hash. CI can't check the version/hash (they don't exist until a
-  # release builds them), so it gates *structure* only: the manifests must parse
-  # and carry the identifiers/URLs the CD relies on, so a typo can't reach main
-  # and silently break a publish job weeks later at release time.
-  packaging:
-    name: packaging manifests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Validate Scoop manifest (JSON + required keys)
-        shell: bash
-        run: |
-          set -euo pipefail
-          f=packaging/scoop/lait.json
-          jq empty "$f"
-          # Required fields the bucket + autoupdate rely on.
-          for path in '.version' '.architecture."64bit".url' '.architecture."64bit".bin' \
-                      '.checkver' '.autoupdate.architecture."64bit".url' '.autoupdate.hash.url'; do
-            v=$(jq -er "$path" "$f") \
-              || { echo "::error file=$f::missing Scoop field $path"; exit 1; }
-          done
-          # The download host must be the canonical GitHub release path.
-          jq -er '.architecture."64bit".url' "$f" | grep -q 'github.com/nixiesoftware/lait/releases' \
-            || { echo "::error file=$f::Scoop url is not a nixiesoftware/lait GitHub release"; exit 1; }
-          echo "Scoop manifest OK"
-
-      - name: Validate winget manifests (YAML + cross-file identifier)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # venv, not system pip: PEP-668 images refuse bare `pip install`.
-          python3 -m venv .pkg-venv
-          .pkg-venv/bin/pip install --quiet "PyYAML>=6"
-          .pkg-venv/bin/python - <<'PY'
-          import glob, sys, yaml
-          files = sorted(glob.glob("packaging/winget/*.yaml"))
-          assert files, "no winget manifests found"
-          ids, types = set(), set()
-          for f in files:
-              doc = yaml.safe_load(open(f, encoding="utf-8"))
-              assert doc.get("PackageIdentifier"), f"{f}: missing PackageIdentifier"
-              assert doc.get("PackageVersion"), f"{f}: missing PackageVersion"
-              ids.add(doc["PackageIdentifier"])
-              types.add(doc.get("ManifestType"))
-          assert len(ids) == 1, f"PackageIdentifier differs across manifests: {ids}"
-          for req in ("version", "installer", "defaultLocale"):
-              assert req in types, f"missing a '{req}' manifest (have {types})"
-          print(f"winget manifests OK — {sorted(ids)[0]}, {len(files)} files")
-          PY

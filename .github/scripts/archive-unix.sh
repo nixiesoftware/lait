@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Build the unix release archive for one target, matching cargo-dist's layout:
-# a `.tar.gz` whose contents are nested under `lait-<target>/` (binary + the misc
-# docs cargo-dist auto-includes), plus a `<archive>.sha256` sidecar.
+# Build the canonical feed archive for one Unix target: a `.tar.gz` whose
+# contents are nested under `lait-<target>/`, plus a `.sha256` sidecar.
 #
 # Usage: archive-unix.sh <target-triple>   (run from the repo root)
 set -euo pipefail
@@ -16,8 +15,7 @@ ARCHIVE="${NAME}.tar.gz"
 rm -rf "$NAME" "$ARCHIVE" "${ARCHIVE}.sha256"
 mkdir -p "$NAME"
 cp "$BIN" "$NAME/lait"
-# The docs cargo-dist auto-includes in each archive (lait does NOT set
-# auto-includes=false). Keep this set in sync with the release plan.
+# Keep this documented payload in sync with the release contract.
 cp CHANGELOG.md LICENSE README.md "$NAME/"
 bash .github/scripts/stage-worlds.sh "$TARGET" "$NAME"
 

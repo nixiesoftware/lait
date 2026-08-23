@@ -28,7 +28,7 @@ that pin first, and then everything under "What was unwired" below.
 | `api::watch(StreamSink<ClientView>)` | Removed. `api::subscribe` — the native callback path Tauri uses — is the only way to watch the view stream. |
 | `ci/bridge-drift.sh` | Deleted. There is no generated binding left to drift. |
 | `ci/dart-licences.sh` | Kept, unwired, and marked deprecated in its own header. |
-| `.github/workflows/build-astrolabe.yml` | Automatic `workflow_run: ["Release"]` trigger removed; `workflow_dispatch` only. **No release ships from it.** |
+| The Flutter jobs in `.github/workflows/build-astrolabe.yml` | Replaced by native Tauri jobs. The workflow again follows a successful tagged host release. |
 
 The generated Dart under `lib/src/bridge/` is left exactly as it was on the day
 this was written. It is now a snapshot of a boundary that has since moved: the
@@ -47,7 +47,8 @@ by running the bundled sidecar and comparing its version to the release. macOS
 is proven end to end: `.app`, `.dmg`, and the `astrolabe-tree-…` artifact that
 `packaging/make-tree.sh` accepted from the Tauri bundle unchanged.
 
-Two things this file still records that the new path has not re-proved:
+The replacement path keeps the two release properties the Flutter pipeline once
+proved:
 
 - **Windows.** ~~Reconciling Tauri's NSIS target with the stub layout is a
   decision, not a port.~~ Decided: the evergreen design forbids Tauri's
@@ -55,17 +56,14 @@ Two things this file still records that the new path has not re-proved:
   layout is the only installed shape, Tauri's bundler installers never ship,
   and `astrolabe.nsi` — first install only — was ported to carry the Tauri
   pair. `build-astrolabe.sh` builds it.
-- **CI-side release building.** The quarantined workflow holds the Developer ID
-  signing and notarization arrangement (its five repository secrets) and the
-  SLSA provenance attestation. `build-astrolabe.sh` takes `--identity` and
-  `--notarize` and does the signing half locally; a runner-side equivalent
-  would inherit the rest from that file.
+- **CI-side release building.** Native Tauri jobs call the same script on
+  Windows, Apple Silicon macOS, and Linux. The macOS job imports the existing
+  Developer ID and notarization credentials; all three attach provenance for
+  the installer built from the release tag.
 
-The one downstream consequence is already safe, and deliberately so:
-`ci/publish-feed.sh --from-release <tag>` finds no `astrolabe-*` asset on a
-release now, and **refuses** rather than quietly publishing an engine-only
-feed — it makes you pass `--lait-only` to say you meant it. Nothing was changed
-there; it was already built to fail loudly at exactly this.
+`ci/publish-feed.sh --from-release <tag>` is consequently the canonical feed
+promotion path again. It still refuses an incomplete release rather than
+quietly publishing an engine-only feed.
 
 ## Why Flutter was left behind
 

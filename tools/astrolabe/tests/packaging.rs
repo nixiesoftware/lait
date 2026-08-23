@@ -755,12 +755,6 @@ fn the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs() {
 // not announce itself: nothing errors, the install simply lacks a file, and
 // the omission is invisible until someone asks what terms they hold.
 
-fn build_workflow() -> String {
-    let path = repo_root().join(".github/workflows/build-astrolabe.yml");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
-}
-
 /// Windows ships the terms and shows them before anything is installed. A
 /// person installing a noncommercial-licensed client on a work machine is
 /// precisely who needs to read them at that moment rather than discover them
@@ -829,8 +823,9 @@ fn the_linux_package_ships_the_licence() {
     );
 }
 
-/// The one that actually regressed, and the reason it is asserted against the
-/// workflow rather than against any packaging script.
+/// The one that actually regressed. The shared client builder now owns this
+/// staging, so the assertion follows the packaging boundary rather than one CI
+/// caller.
 ///
 /// `make-tree.sh` packs the *bundle directory*, and the tree it produces is
 /// what a self-update swaps into `current/`. So a file added afterwards by an
@@ -843,26 +838,20 @@ fn the_linux_package_ships_the_licence() {
 /// must appear before the `make-tree` call that consumes the directory.
 #[test]
 fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
-    let workflow = build_workflow();
+    let build = client_build_script();
 
     let at = |needle: &str| -> usize {
-        workflow
+        build
             .find(needle)
-            .unwrap_or_else(|| panic!("the workflow no longer contains {needle:?}"))
+            .unwrap_or_else(|| panic!("the client builder no longer contains {needle:?}"))
     };
 
-    // Windows and Linux both pack a plain bundle directory, so both must place
-    // the terms in it first.
+    // Windows and Linux share this branch and pack the same `current/` tree.
+    // The terms must be in that tree before it is sealed.
     assert!(
-        at("Copy-Item LICENSE $stage")
-            < at(r#"--stage "apps/astrolabe/build/windows/x64/runner/Release""#),
-        "Windows packs its update tree before staging the terms into the bundle"
-    );
-    assert!(
-        at("cp THIRD-PARTY-NOTICES.md LICENSE")
-            < at("--stage apps/astrolabe/build/linux/x64/release/bundle"),
-        "Linux packs its update tree before staging the terms into the bundle — \
-         the tarball would carry them and the first upgrade would drop them"
+        at(r#"cp "$REPO/LICENSE" "$REPO/THIRD-PARTY-NOTICES.md" "$STAGE/$LIVE_DIR/""#)
+            < at(r#"--stage "$STAGE/$LIVE_DIR""#),
+        "the plain update tree is sealed before its terms are staged"
     );
 
     // macOS stages by a different route and is correct for a different reason:
@@ -870,8 +859,8 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
     // that staged copy rather than from the raw build output. Packing the build
     // output instead would reintroduce exactly the Linux defect.
     assert!(
-        workflow.contains(r#"--stage "$RUNNER_TEMP/dmg/Astrolabe.app""#),
-        "the macOS tree is packed from the build output, which has neither the \
-         notices nor the terms staged into it"
+        at(r#"bash "$REPO/packaging/macos/make-dmg.sh""#) < at(r#"--stage "$TREE_APP""#)
+            && build.contains(r#"TREE_APP="$SIGNED_APP""#),
+        "the macOS tree is not packed from the signed app carrying the terms"
     );
 }

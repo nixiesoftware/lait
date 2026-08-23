@@ -3,8 +3,6 @@ name: Publish first-party Worlds
 on:
   push:
     branches: [main]
-    tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
     paths:
       - .github/workflows/publish-worlds.yml
       - .github/scripts/stage-worlds.sh
@@ -114,11 +112,11 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
           version: '>= 416.0.0'
-      - name: Publish test, then promote tagged or requested releases
+      - name: Publish test, then promote when explicitly requested
         shell: bash
         env:
           WORLD_FEED_SIGNING_SEED: ${{ secrets.WORLD_FEED_SIGNING_SEED }}
-          PROMOTE_STABLE: ${{ startsWith(github.ref, 'refs/tags/') || inputs.stable }}
+          PROMOTE_STABLE: ${{ inputs.stable }}
         run: |
           set -euo pipefail
           [ -n "$WORLD_FEED_SIGNING_SEED" ] || {

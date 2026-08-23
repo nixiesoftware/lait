@@ -123,7 +123,7 @@ jobs:
           {
             echo "Rolling **development** build from the latest \`main\` (commit \`$sha\`, built $built)."
             echo
-            echo "⚠️ **Not a stable release** — bleeding edge, for testing only. For stable, use the [latest release](https://github.com/nixiesoftware/lait/releases/latest) or a package manager (\`brew install nixiesoftware/tap/lait\`, \`cargo binstall lait\`, …)."
+            echo "⚠️ **Not a stable release** — bleeding edge, for colleague testing only. Canonical installs and updates come from the signed first-party feed."
             echo
             echo "The binary reports its version as \`X.Y.Z-dev+$sha\`. Grab an asset below, or:"
             echo '```'

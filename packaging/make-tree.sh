@@ -23,7 +23,7 @@
 #   packaging/make-tree.sh --stage <dir> --version <x.y.z> \
 #     --target <triple> --out <dir>
 #
-# where --stage is the Flutter release bundle (windows, linux) or the .app
+# where --stage is the Tauri release tree (Windows, Linux) or the .app
 # (macos).
 
 set -euo pipefail
