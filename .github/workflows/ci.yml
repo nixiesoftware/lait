@@ -739,6 +739,10 @@ jobs:
           done
           grep -q -- '--from-run' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
+          if grep -q -- '--from-release' ci/publish-feed.sh; then
+            echo "::error::feed publisher still depends on GitHub Release assets"
+            exit 1
+          fi
 
   # The self-updater's in-archive binary path is a claim about our feed's
   # layout, and the unit tests can only check it against our MODEL of that

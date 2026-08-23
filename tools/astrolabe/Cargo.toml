@@ -14,10 +14,10 @@ workspace = true
 [lib]
 name = "astrolabe"
 path = "src/lib.rs"
-# `cdylib` is what the Flutter runner links; `rlib` is what the workspace's own
-# tests link. Both, because the core is one thing with two consumers and
-# building it twice would let them disagree.
-crate-type = ["cdylib", "rlib"]
+# Tauri's Rust host and the workspace tests link the core directly. The retired
+# Flutter interface was the only `cdylib` consumer; emitting that unused library
+# kept an old distribution boundary alive in every build.
+crate-type = ["rlib"]
 
 [dependencies]
 # The correspondence plane: the mailbox, the letter, and the arrival watch. The

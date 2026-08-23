@@ -13,14 +13,18 @@ markdown.
 ## What to run
 
 ```sh
-cd apps/astrolabe && flutter run -d windows   # the drawing client
-cargo test -p astrolabe                       # Rust core: client/model/runtime + launch + packaging
-cd apps/astrolabe && flutter test             # widget tests over canned ClientView
+cd apps/astrolabe-web
+npm ci && npm run tauri dev   # canonical Tauri interface + same-tree Rust host
+npm run check && npm test     # TypeScript contract and interface tests
+cd ../..
+cargo test -p astrolabe       # core: client/model/runtime + launch + packaging
 ```
 
-The Rust crate (`tools/astrolabe`) is the core. Flutter (`apps/astrolabe`)
-draws a `ClientView` and dispatches `ActionRequest`. There is one model of
-client state; Dart holds nothing but drafts.
+The Rust crate (`tools/astrolabe`) is the core. Tauri
+(`apps/astrolabe-web`, React/TypeScript over `src-tauri`) draws a `ClientView`
+and dispatches `ActionRequest`. There is one model of client state; the
+interface holds nothing but drafts. Flutter (`apps/astrolabe`) is deprecated,
+unwired, and does not build or ship.
 
 Kill `astrolabe.exe` before the Rust suite: the runner holds the
 single-instance mutex.

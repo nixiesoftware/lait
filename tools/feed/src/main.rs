@@ -36,8 +36,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Every target the release pipeline ships, with the archive extension
-/// cargo-dist gives it. The publish step refuses an artifacts directory that is
+/// Every target the repository-owned release pipeline ships, with the archive
+/// extension our native builders emit. The publish step refuses a directory that is
 /// missing any of these: a release that quietly dropped a platform would strand
 /// that platform's installed base on the previous version with no error
 /// anywhere.
@@ -277,7 +277,7 @@ fn manifest(args: &[String]) -> Result<()> {
 
     if let Some(astrolabe_version) = arg(args, "--astrolabe") {
         // One artifact per supported platform: NSIS on Windows, a signed DMG
-        // on Apple silicon, and Flutter's relocatable bundle on Linux x64.
+        // on Apple silicon, and Tauri's relocatable bundle on Linux x64.
         // Each is included when the directory holds it; an absent platform is
         // a loud note rather than a refusal, because the jobs can succeed
         // independently and a publisher must be able to ship the half that

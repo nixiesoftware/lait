@@ -30,8 +30,7 @@
 #     --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed
 #
 # Requires: gcloud (authenticated with write access to the bucket), curl, gh
-# (for --from-run or historical --from-release), and a built `lait-feed`
-# (cargo build -p lait-feed).
+# (for --from-run), and a built `lait-feed` (cargo build -p lait-feed).
 #
 # The seed never leaves the machine invoking this script. CI runs will replace
 # the gcloud user credential with Workload Identity Federation (SUB-13, open);
@@ -42,7 +41,7 @@ set -euo pipefail
 BUCKET="gs://the-foundation-dist"
 BASE_URL="https://storage.googleapis.com/the-foundation-dist"
 
-VERSION="" CHANNEL="" ARTIFACTS="" SEED="" FLOOR="" ASTROLABE="" FROM_RUN="" FROM_RELEASE="" LAIT_ONLY=""
+VERSION="" CHANNEL="" ARTIFACTS="" SEED="" FLOOR="" ASTROLABE="" FROM_RUN="" LAIT_ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -52,7 +51,6 @@ while [ $# -gt 0 ]; do
     --floor) FLOOR="$2"; shift 2 ;;
     --astrolabe) ASTROLABE="$2"; shift 2 ;;
     --from-run) FROM_RUN="$2"; shift 2 ;;
-    --from-release) FROM_RELEASE="$2"; shift 2 ;;
     --lait-only) LAIT_ONLY=1; shift ;;
     *) echo "publish-feed: unknown argument $1" >&2; exit 1 ;;
   esac
@@ -97,11 +95,6 @@ detect_astrolabe() { # $1 = where the artifacts came from, for the refusal
   fi
 }
 
-if [ -n "$FROM_RUN" ] && [ -n "$FROM_RELEASE" ]; then
-  echo "publish-feed: --from-run and --from-release are mutually exclusive" >&2
-  exit 1
-fi
-
 if [ -n "$FROM_RUN" ]; then
   [ -n "$VERSION" ] || {
     echo "publish-feed: --from-run also requires --version" >&2
@@ -114,34 +107,8 @@ if [ -n "$FROM_RUN" ]; then
   detect_astrolabe "Actions run $FROM_RUN"
 fi
 
-# Historical recovery path for releases made before our own build workflow.
-if [ -n "$FROM_RELEASE" ]; then
-  VERSION="${FROM_RELEASE#v}"
-  ARTIFACTS="$WORK/release-assets"
-  mkdir -p "$ARTIFACTS"
-  gh release download "$FROM_RELEASE" -D "$ARTIFACTS" \
-    -p 'lait-*.zip' -p 'lait-*.tar.gz' -p 'astrolabe-*-setup.exe' \
-    -p 'astrolabe-tree-*.tar.gz' \
-    -p 'astrolabe-*.dmg' -p 'astrolabe-*.tar.gz'
-  detect_astrolabe "$FROM_RELEASE"
-
-  # The stable pointer never moves at a release GitHub still calls a prerelease.
-  # The release page is the record of whether every declared bundle actually
-  # arrived; disagreeing with it here would make the feed the more optimistic of
-  # two accounts of the same release.
-  if [ "$CHANNEL" = "stable" ]; then
-    prerelease="$(gh release view "$FROM_RELEASE" --json isPrerelease --jq .isPrerelease 2>/dev/null || echo unknown)"
-    if [ "$prerelease" != "false" ]; then
-      echo "publish-feed: $FROM_RELEASE is marked isPrerelease=$prerelease on GitHub." >&2
-      echo "  The stable pointer is what every installed machine follows by default." >&2
-      echo "  Promote the release first, or publish to --channel test." >&2
-      exit 1
-    fi
-  fi
-fi
-
 [ -n "$VERSION" ] && [ -n "$CHANNEL" ] && [ -n "$ARTIFACTS" ] && [ -n "$SEED" ] || {
-  echo "publish-feed: --channel and --seed, plus --from-run + --version, --from-release, or --version + --artifacts-dir, are required" >&2
+  echo "publish-feed: --channel and --seed, plus --from-run + --version or --version + --artifacts-dir, are required" >&2
   exit 1
 }
 
@@ -150,9 +117,8 @@ fi
 # it rather than trusting a listing over a directory nothing ever cleans,
 # where `head -1` would happily publish LAST release's client. An installer
 # for another version is refused by name, not skipped. An explicit
-# --astrolabe still wins; --from-release keeps listing-detection because old
-# tags predate the pair rule and legitimately carry another client version.
-if [ -z "$ASTROLABE" ] && [ -z "$FROM_RELEASE" ] && [ -z "$FROM_RUN" ]; then
+# --astrolabe still wins; a complete release run was already inspected above.
+if [ -z "$ASTROLABE" ] && [ -z "$FROM_RUN" ]; then
   if [ -n "$LAIT_ONLY" ]; then
     detect_astrolabe "$ARTIFACTS"
   elif [ -f "$ARTIFACTS/astrolabe-$VERSION-setup.exe" ] \

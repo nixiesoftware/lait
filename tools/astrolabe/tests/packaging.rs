@@ -318,14 +318,14 @@ fn the_installer_is_written_where_the_caller_asked() {
     );
 }
 
-/// The interface stays in `apps/astrolabe`, and the core stays out of it.
+/// The interface stays in `apps/astrolabe-web`, and the core stays out of it.
 ///
-/// This test used to assert that no Flutter or Dart artifact existed *anywhere*
-/// in the tree, which was revision 6's rule and is now false — the interface is
-/// Dart. What survives is the boundary underneath it: `tools/astrolabe` is the
-/// Rust core, `packaging/` is the installer, and a `.dart` file or a pubspec
-/// appearing in either means the two halves have started to merge. The
-/// directory list below is the whole assertion; it is deliberately not `apps/`.
+/// The deprecated Flutter snapshot still exists under `apps/astrolabe`; what
+/// survives here is the boundary underneath either interface: `tools/astrolabe`
+/// is the Rust core and `packaging/` is the installer. A Dart artifact or
+/// pubspec appearing in either means the retired stack leaked back into the live
+/// build. The directory list below is the whole assertion; it deliberately does
+/// not inspect `apps/`.
 #[test]
 fn no_interface_artifacts_leak_into_the_core_or_the_packaging() {
     let root = repo_root();
@@ -351,7 +351,7 @@ fn no_interface_artifacts_leak_into_the_core_or_the_packaging() {
     }
     assert!(
         found.is_empty(),
-        "interface artifacts have leaked out of apps/astrolabe: {found:?}"
+        "retired Flutter artifacts have leaked into the core or packaging: {found:?}"
     );
 }
 

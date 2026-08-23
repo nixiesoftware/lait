@@ -74,16 +74,27 @@ libraries — which is why it needs a job of its own rather than none.
 
 ### Tauri is the installer, and the feed is the distribution
 
-Nothing ships through a git forge. Installed machines follow a **signed channel
-pointer on the dist host** (`src/update/feed.rs`, SUB-13) and never read a
-release page. Two halves, both local:
+No canonical install or update ships through Cargo, a package registry, or a
+git-forge release page. Installed machines follow a **signed channel pointer on the dist host**
+(`src/update/feed.rs`, SUB-13) and download immutable artifacts from the same
+GCS bucket. Cargo compiles Rust during a build; it is not an install or update
+channel.
+
+A `vX.Y.Z` tag runs `.github/workflows/release.yml`, which calls the
+repository-owned native host and Tauri builders and assembles one short-lived
+Actions artifact. That artifact is build transport only. Promotion seals and
+publishes those bytes through our feed:
 
 ```sh
-packaging/build-astrolabe.sh --version 0.9.0 --out target/distrib \
-  --identity "Developer ID Application: … (TEAMID)" --notarize <profile>
-ci/publish-feed.sh --version 0.9.0 --channel test \
-  --artifacts-dir target/distrib --seed ~/.lait-feed-signing.seed
+ci/publish-feed.sh --from-run <run-id> --version 0.9.1 --channel test \
+  --seed ~/.lait-feed-signing.seed
+# after verifying the test channel, publish the same run to stable
+ci/publish-feed.sh --from-run <run-id> --version 0.9.1 --channel stable \
+  --seed ~/.lait-feed-signing.seed
 ```
+
+`--version ... --artifacts-dir ...` is the local recovery path. There is no
+`--from-release`: GitHub Releases are not an artifact source or an authority.
 
 The build emits what the feed serves, named the way it names things: the
 `.dmg` a person installs, and `astrolabe-tree-<version>-<target>.tar.gz`, which
@@ -99,15 +110,16 @@ runs the bundled sidecar and compares its version to the release, because "the
 pair ships together by construction" is a claim and this is where claims get
 checked.
 
-macOS is complete and proven end to end. **Windows is not carried yet** and
-needs a decision rather than a script: `packaging/windows/astrolabe.nsi`
-installs `astrolabe.exe` as the *update stub* with the real client beside it,
-and Tauri's own NSIS target has no such shape. `build-astrolabe.sh` refuses
-there rather than emitting something unpublishable.
+The client matrix is deliberate: Windows x64 ships a per-user NSIS installer
+whose stable launcher owns the swappable `current/` tree; Apple Silicon macOS
+ships a Developer ID-signed, notarized, and stapled DMG; Linux x64 ships a
+relocatable Tauri tarball. Each platform also emits the update tree an installed
+client consumes. Intel macOS has a bare host archive but no Astrolabe client.
 
-The old `build-astrolabe.yml` built the Flutter bundles and is quarantined to
-`workflow_dispatch`; `apps/astrolabe/DEPRECATED.md` lists what it still records
-that a CI-side Tauri pipeline would need (signing secrets, provenance).
+`.github/workflows/build-astrolabe.yml` is the live native Tauri builder. Its
+Windows and Linux artifacts receive build-provenance attestations; macOS signs
+every nested executable inside-out before sealing, notarizing, stapling, and
+attesting the DMG. `apps/astrolabe/` is only a deprecated historical snapshot.
 
 ```sh
 cd apps/astrolabe-web           # the canonical client
