@@ -10,14 +10,21 @@ TARGET="${1:?usage: archive-windows.sh <target-triple>}"
 NAME="lait-${TARGET}"
 BIN="target/${TARGET}/release/lait.exe"
 ARCHIVE="${NAME}.zip"
+STAGE="target/archive-windows/${NAME}"
 
 [ -f "$BIN" ] || { echo "::error::binary not found: $BIN"; exit 1; }
 
-rm -rf "$ARCHIVE" "${ARCHIVE}.sha256" lait.exe worlds
+rm -rf "$ARCHIVE" "${ARCHIVE}.sha256" "$STAGE"
+mkdir -p "$STAGE"
+trap 'rm -rf "$STAGE"' EXIT
 # Flat archive: binary + misc docs at the zip root (matches the published layout).
-cp "$BIN" lait.exe
-bash .github/scripts/stage-worlds.sh "$TARGET" .
-7z a "$ARCHIVE" lait.exe worlds CHANGELOG.md LICENSE README.md >/dev/null
+cp "$BIN" "$STAGE/lait.exe"
+cp CHANGELOG.md LICENSE README.md "$STAGE/"
+bash .github/scripts/stage-worlds.sh "$TARGET" "$STAGE"
+(
+  cd "$STAGE"
+  7z a "../../../$ARCHIVE" lait.exe worlds CHANGELOG.md LICENSE README.md >/dev/null
+)
 sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
 
 echo "built $ARCHIVE"
