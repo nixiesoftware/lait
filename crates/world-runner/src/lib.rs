@@ -710,8 +710,10 @@ impl ProcessGroup {
     #[cfg(unix)]
     fn force(&self, child: &Child) {
         if let Ok(pid) = i32::try_from(child.id()) {
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
+            if let Some(process_group) = pid.checked_neg() {
+                unsafe {
+                    libc::kill(process_group, libc::SIGKILL);
+                }
             }
         }
     }
