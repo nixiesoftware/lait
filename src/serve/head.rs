@@ -88,10 +88,9 @@ fn read_under(root: &Path, relative: &str) -> Option<Vec<u8>> {
 
 /// Where independently installed World bundles live.
 ///
-/// The versioned namespace is the compatibility boundary. Pre-independent
-/// clients wrote `worlds/*/current.json`; this host never reads that namespace,
-/// so every old selection is inert and each World must reinstall from its
-/// signed channel.
+/// The versioned namespace is the compatibility boundary. This host never
+/// reads installation records from any prior namespace, so retired selections
+/// remain inert and every World must reinstall from its signed channel.
 pub fn installations_root(identity: &Path) -> PathBuf {
     identity.join("world-bundles-v1")
 }

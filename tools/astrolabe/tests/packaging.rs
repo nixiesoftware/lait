@@ -532,7 +532,7 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
     );
     assert!(
         !script.contains("WORLD_ROOT") && !script.contains("$runner"),
-        "the macOS host package still enumerates bundled World executables"
+        "the macOS host package still enumerates World product executables"
     );
     assert!(
         script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
