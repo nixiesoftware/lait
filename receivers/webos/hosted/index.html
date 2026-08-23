@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <meta name="theme-color" content="#0b1016">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://nixiesoftware.com wss://nixiesoftware.com; img-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://*.signage.foundation.pub wss://*.signage.foundation.pub; img-src 'self' blob:; media-src blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
     <title>Astrolabe — Nixie Solutions LLC</title>
     <link rel="stylesheet" href="styles.css">
   </head>
@@ -31,6 +31,34 @@
           <p class="eyebrow">Astrolabe Display</p>
           <h1>Starting this receiver…</h1>
           <p>Opening protected device state and contacting the approved coordinator.</p>
+        </section>
+
+        <section class="state-panel provisioning-panel" id="provisioning-panel" hidden>
+          <p class="eyebrow">Connect this display</p>
+          <h1>Enter this location's site code</h1>
+          <p>
+            Astrolabe gives each location a short code. This display will only ever
+            reach that location's coordinator, and nothing is enrolled until the
+            confirmation words match.
+          </p>
+          <form class="site-entry" id="site-entry">
+            <input
+              id="site-code"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              maxlength="32"
+              aria-label="Site code"
+              aria-describedby="site-preview"
+            >
+            <button class="primary-action" id="site-submit" type="submit">
+              <span class="key">OK</span>
+              Connect
+            </button>
+          </form>
+          <p class="pairing-state" id="site-preview" aria-live="polite"></p>
         </section>
 
         <section class="state-panel pairing-panel" id="pairing-panel" hidden>
@@ -73,6 +101,9 @@
           <button class="primary-action" id="retry-action" type="button" hidden>
             <span class="key">OK</span>
             Try again
+          </button>
+          <button class="secondary-action" id="change-site-action" type="button" hidden>
+            Change this display's site
           </button>
         </section>
       </main>

@@ -1,6 +1,23 @@
 import { DisplayReceiverClient } from "./runtime/client.mjs";
+import { CredentialVault } from "./runtime/vault.mjs";
+import {
+  ProvisioningStore,
+  coordinatorParent,
+  normalizeSiteCode,
+  siteOrigin,
+  validSiteCode,
+  webPkiBootstrap,
+} from "./runtime/provisioning.mjs";
 
-const panels = ["booting-panel", "pairing-panel", "unassigned-panel", "frame-panel", "media-panel", "message-panel"];
+const panels = [
+  "booting-panel",
+  "provisioning-panel",
+  "pairing-panel",
+  "unassigned-panel",
+  "frame-panel",
+  "media-panel",
+  "message-panel",
+];
 
 class WebOsReceiverUi {
   constructor() {
@@ -8,6 +25,8 @@ class WebOsReceiverUi {
     this.detailsVisible = false;
     this.confirmButton = document.getElementById("confirm-pairing");
     this.retryButton = document.getElementById("retry-action");
+    this.changeSiteButton = document.getElementById("change-site-action");
+    this.canChangeSite = false;
     this.confirmButton.addEventListener("click", () => this.client && this.client.confirmPairing());
     this.retryButton.addEventListener("click", () => window.location.reload());
   }
@@ -20,6 +39,44 @@ class WebOsReceiverUi {
   }
 
   showBooting() { this.show("booting-panel"); }
+
+  /// Ask which location this display belongs to, and resolve once it is
+  /// stored. The origin is never compiled in: one package serves every site,
+  /// and the site is a fact about where the television is standing.
+  askForSite(store, parent) {
+    return new Promise((resolve) => {
+      this.show("provisioning-panel");
+      const form = document.getElementById("site-entry");
+      const input = document.getElementById("site-code");
+      const preview = document.getElementById("site-preview");
+      const render = () => {
+        const code = normalizeSiteCode(input.value);
+        if (!code) {
+          preview.textContent = "Enter the code printed on this location's setup card.";
+        } else if (validSiteCode(code)) {
+          preview.textContent = `This display will reach ${siteOrigin(code, parent).slice("https://".length)}`;
+        } else {
+          preview.textContent = "A site code is up to 32 letters, digits and hyphens.";
+        }
+      };
+      input.addEventListener("input", render);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const code = normalizeSiteCode(input.value);
+        if (!validSiteCode(code)) {
+          render();
+          return;
+        }
+        preview.textContent = "Storing this display's site…";
+        store.save(code, parent).then(resolve, (error) => {
+          preview.textContent = `This display could not store its site: ${error.message || error}`;
+        });
+      });
+      input.value = "";
+      render();
+      input.focus();
+    });
+  }
   showConnecting() { this.message("Astrolabe Display", "Connecting…", "Authenticating this receiver and requesting its complete current program."); }
 
   showPairing({ phrase, fingerprint, confirmed }) {
@@ -91,7 +148,25 @@ class WebOsReceiverUi {
     document.getElementById("message-title").textContent = title;
     document.getElementById("message-body").textContent = body;
     this.retryButton.hidden = !retry;
+    this.changeSiteButton.hidden = !this.canChangeSite;
     if (retry) this.retryButton.focus();
+  }
+
+  /// A mistyped site code is a display that reaches a coordinator nobody
+  /// deployed, and every refusal after that names the wrong thing. Offer the
+  /// way back — but only while nothing is enrolled, because after enrollment
+  /// the site is not a typo to correct, it is a credential to revoke, and that
+  /// decision belongs to Astrolabe rather than to whoever holds the remote.
+  allowChangeSite(unenrolled, forget) {
+    this.canChangeSite = unenrolled;
+    if (!unenrolled) return;
+    this.changeSiteButton.addEventListener("click", () => {
+      this.changeSiteButton.disabled = true;
+      forget().then(() => window.location.reload(), (error) => {
+        document.getElementById("message-body").textContent = `This display could not forget its site: ${error.message || error}`;
+        this.changeSiteButton.disabled = false;
+      });
+    });
   }
 
   setTransportState(state) {
@@ -154,33 +229,48 @@ const capabilities = {
   },
 };
 
-const client = new DisplayReceiverClient({
-  bootstrap: {
-    protocol_major: 1,
-    trust: { kind: "web_pki_origin", origin: "https://nixiesoftware.com" },
-    certificate_pem: null,
-    rendezvous: null,
-  },
-  capabilities,
-  ui,
-});
-ui.bind(client);
+let client = null;
 
 window.addEventListener("keydown", (event) => {
   const keyCode = event.keyCode;
+  const pairing = client && !document.getElementById("pairing-panel").hidden;
   if (event.key === "Enter" || keyCode === 13) {
-    if (!document.getElementById("pairing-panel").hidden) {
+    if (pairing) {
       event.preventDefault();
       client.confirmPairing();
     }
   } else if (event.key === "Info" || keyCode === 457) {
     event.preventDefault();
     ui.toggleDetails();
-  } else if ((event.key === "Escape" || keyCode === 461) && !document.getElementById("pairing-panel").hidden) {
+  } else if ((event.key === "Escape" || keyCode === 461) && pairing) {
     event.preventDefault();
     client.cancelPairing();
   }
 });
 
-window.addEventListener("pagehide", () => client.stop());
-client.start();
+window.addEventListener("pagehide", () => client && client.stop());
+
+// The origin is resolved before the client exists, because the client takes
+// its coordinator as a constructor argument and has no notion of not having
+// one yet. A stored site starts silently; an unprovisioned display asks.
+async function boot() {
+  ui.showBooting();
+  const parent = coordinatorParent(window.location.hostname);
+  const store = await ProvisioningStore.open();
+  const site = (await store.read(parent)) || (await ui.askForSite(store, parent));
+
+  const vault = await CredentialVault.open();
+  const enrolled = Boolean(await vault.load().catch(() => null));
+  vault.close();
+  ui.allowChangeSite(!enrolled, () => store.clear());
+
+  client = new DisplayReceiverClient({
+    bootstrap: webPkiBootstrap(site.origin),
+    capabilities,
+    ui,
+  });
+  ui.bind(client);
+  client.start();
+}
+
+boot().catch((error) => ui.showFailure(error.code || "provisioning_failed", error.message || String(error)));

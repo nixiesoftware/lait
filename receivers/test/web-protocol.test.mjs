@@ -14,6 +14,13 @@ import {
   verifyProgram,
 } from "../shared/web/protocol.mjs";
 import { DisplayReceiverClient, parseLiveMediaPacket } from "../shared/web/client.mjs";
+import {
+  coordinatorParent,
+  normalizeSiteCode,
+  siteOrigin,
+  validSiteCode,
+  webPkiBootstrap,
+} from "../shared/web/provisioning.mjs";
 
 const fixtureUrl = new URL("../../crates/display-protocol/fixtures/v1/conformance.json", import.meta.url);
 const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -278,4 +285,56 @@ test("fresh delivery atomically replaces a stale-sensitive blank", async () => {
   assert.ok(events.some(([kind]) => kind === "frame"));
   assert.deepEqual(events.find(([kind]) => kind === "stale"), ["stale", false]);
   clearTimeout(receiver.playbackTimer);
+});
+
+// ─── Site provisioning ──────────────────────────────────────────────────────
+//
+// The doorbell, not the credential. These are the rules that decide which
+// coordinator a web receiver will ever speak to, and they run in Node because
+// nothing about them needs a television.
+
+test("a site code is one DNS label, and case and padding are the operator's", () => {
+  for (const good of ["acme", "acme-lobby", "a", "site-2", "a".repeat(32)]) {
+    assert.equal(validSiteCode(good), true, `${good} is a site code`);
+  }
+  for (const bad of ["", "-acme", "acme-", "acme.lobby", "Acme", "acme lobby", "a".repeat(33), "acme/x"]) {
+    assert.equal(validSiteCode(bad), false, `${bad} is not a site code`);
+  }
+  assert.equal(normalizeSiteCode("  ACME-Lobby \n"), "acme-lobby");
+  assert.equal(normalizeSiteCode(null), "");
+});
+
+test("a coordinator is a subdomain of whatever served the receiver", () => {
+  assert.equal(siteOrigin("acme", "signage.example.pub"), "https://acme.signage.example.pub");
+  assert.equal(coordinatorParent("Signage.Example.Pub"), "signage.example.pub");
+});
+
+test("a host that cannot name a site refuses rather than inventing one", () => {
+  // An IP literal, a bare label or a port has no subdomain to hand a site, and
+  // guessing one would produce a coordinator nobody deployed.
+  for (const host of ["localhost", "127.0.0.1", "192.168.1.10", "signage.example.pub:8443", "example.pub."]) {
+    assert.throws(() => coordinatorParent(host), ProtocolError, `${host} is unprovisionable`);
+  }
+});
+
+test("an invalid site code never becomes an origin", () => {
+  assert.throws(() => siteOrigin("acme.lobby", "signage.example.pub"), ProtocolError);
+  assert.throws(() => siteOrigin("", "signage.example.pub"), ProtocolError);
+});
+
+test("the provisioned bootstrap is Web-PKI and carries no pinned material", () => {
+  const bootstrap = webPkiBootstrap("https://acme.signage.example.pub");
+  assert.deepEqual(bootstrap, {
+    protocol_major: 1,
+    trust: { kind: "web_pki_origin", origin: "https://acme.signage.example.pub" },
+    certificate_pem: null,
+    rendezvous: null,
+  });
+  // The client is the authority on bootstrap shape; this is what it accepts.
+  assert.doesNotThrow(() => new DisplayReceiverClient({
+    bootstrap,
+    capabilities: fixture.capabilities ?? {},
+    ui: {},
+    vaultFactory: async () => ({}),
+  }));
 });

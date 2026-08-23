@@ -49,7 +49,7 @@ test('mandatory app art has the exact webOS dimensions', () => {
 test('the store stub redirects only to the named HTTPS host', () => {
   const html = read('package/index.html');
 
-  assert.match(html, /https:\/\/nixiesoftware\.com\/astrolabe\/display\//);
+  assert.match(html, /https:\/\/signage\.foundation\.pub\/astrolabe\/display\//);
   assert.doesNotMatch(html, /http:\/\//);
 });
 
@@ -69,7 +69,7 @@ test('the hosted receiver uses granted MSE live media', () => {
   const source = `${read('hosted/index.html')}\n${read('hosted/app.mjs')}\n${read('hosted/runtime/client.mjs')}`;
   assert.match(source, /tier: mseCapable \? "mse_live"/);
   assert.match(source, /\/head\/v1\/live\/tickets/);
-  assert.match(source, /connect-src https:\/\/nixiesoftware\.com wss:\/\/nixiesoftware\.com/);
+  assert.match(source, /connect-src https:\/\/\*\.signage\.foundation\.pub wss:\/\/\*\.signage\.foundation\.pub/);
   assert.match(source, /new MediaSource\(\)/);
   assert.match(source, /new WebSocket\(/);
 });
@@ -95,11 +95,54 @@ test('the receiver implements the closed authenticated protocol without a produc
 });
 
 test('the hosted copy exactly matches the shared conformance-tested runtime', () => {
-  for (const name of ['client.mjs', 'protocol.mjs', 'transport.mjs', 'vault.mjs']) {
+  // Enumerated rather than listed: a module added to the shared runtime must
+  // not be able to escape the sync guard by not being named here.
+  const modules = (directory) =>
+    fs.readdirSync(directory).filter((name) => name.endsWith('.mjs')).sort();
+  const shared = modules(sharedRuntimeDir);
+
+  assert.ok(shared.length >= 5, 'the shared runtime has modules to synchronize');
+  assert.deepEqual(
+    modules(path.join(hostedDir, 'runtime')),
+    shared,
+    'every shared module is copied, and no stale copy remains'
+  );
+  for (const name of shared) {
     assert.deepEqual(
       fs.readFileSync(path.join(hostedDir, 'runtime', name)),
       fs.readFileSync(path.join(sharedRuntimeDir, name)),
       `${name} is synchronized`
     );
   }
+});
+
+test('no coordinator origin is compiled into the receiver', () => {
+  // One package serves every site. The origin is a fact about where the
+  // television is standing, resolved at runtime from the host that served the
+  // app, so a new location never needs a new build.
+  assert.doesNotMatch(read('hosted/app.mjs'), /https:\/\/[a-z0-9]/i);
+  assert.doesNotMatch(read('hosted/runtime/provisioning.mjs'), /https:\/\/[a-z0-9]/i);
+  assert.match(read('hosted/app.mjs'), /coordinatorParent\(window\.location\.hostname\)/);
+  assert.match(read('hosted/index.html'), /id="site-entry"/);
+});
+
+test('a mistyped site is recoverable only before anything is enrolled', () => {
+  // After enrollment the site is not a typo to correct but a credential to
+  // revoke, and that belongs to Astrolabe rather than to whoever holds the
+  // remote. Before it, an unreachable coordinator must not be a dead display.
+  const source = read('hosted/app.mjs');
+
+  assert.match(read('hosted/index.html'), /id="change-site-action"/);
+  assert.match(source, /allowChangeSite\(!enrolled, \(\) => store\.clear\(\)\)/);
+  assert.match(source, /this\.canChangeSite = unenrolled;/);
+  assert.match(source, /if \(!unenrolled\) return;/);
+});
+
+test('the content policy admits the media this receiver actually plays', () => {
+  // MSE attaches `URL.createObjectURL(mediaSource)` to the video element, so a
+  // policy without `media-src blob:` refuses the receiver's own live playback.
+  // Node conformance runs without a CSP, which is why this is asserted here.
+  const html = read('hosted/index.html');
+  assert.match(html, /img-src 'self' blob:/);
+  assert.match(html, /media-src blob:/);
 });
