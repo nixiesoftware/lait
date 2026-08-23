@@ -60,8 +60,8 @@ jobs:
         with:
           key: dev-${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build host and first-party World runners
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait -p lait-issues-runner -p lait-signage-runner
 
       - name: Package
         shell: bash
@@ -73,6 +73,7 @@ jobs:
           mkdir -p "$stage"
           cp "target/$target/release/$bin" "$stage/"
           cp README.md LICENSE "$stage/"
+          bash .github/scripts/stage-worlds.sh "$target" "$stage"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$stage.zip" "$stage" >/dev/null
             asset="$stage.zip"

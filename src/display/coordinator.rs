@@ -198,18 +198,25 @@ impl DisplayCoordinator {
             input: want.input.clone(),
         };
         request.validate().map_err(adapter_failure)?;
-        let invocation = (surface.prepare)(&request).map_err(adapter_failure)?;
+        let invocation = surface.prepare(&request).map_err(adapter_failure)?;
         package
             .validate_invocation(&invocation)
             .map_err(adapter_failure)?;
+        // Process-backed packages keep their parsed operation opaque, so a
+        // legitimate World/Find query arrives as `Remote`. It is still bounded
+        // by `QueryOnlyHost` below: cross-World calls, Runtime Work, control,
+        // content, and every mutation-capable facility are refused at the
+        // callback boundary rather than trusted to the runner's classification.
         if invocation.access() != ClientAccess::Query
             || !matches!(
                 invocation.kind(),
-                ClientInvocationKind::World(_) | ClientInvocationKind::Find { .. }
+                ClientInvocationKind::World(_)
+                    | ClientInvocationKind::Find { .. }
+                    | ClientInvocationKind::Remote(_)
             )
         {
             return Err(anyhow!(
-                "display surface did not prepare a read-only World or Find invocation"
+                "display surface did not prepare a read-only World, Find, or remote invocation"
             ));
         }
 
@@ -238,7 +245,6 @@ impl DisplayCoordinator {
             .await
             .map_err(adapter_failure)?;
         let projection = surface
-            .renderer
             .project(value, &request)
             .await
             .map_err(adapter_failure)?;
@@ -1138,12 +1144,12 @@ mod tests {
             expires_at_unix_ms: None,
             revoked_at_unix_ms: None,
         };
-        let surface = world_interface::display::DisplaySurface {
+        let surface = world_interface::display::DisplaySurface::local(
             descriptor,
-            canonicalize_input: |_| unreachable!(),
-            prepare: |_| unreachable!(),
-            renderer: Arc::new(UnusedRenderer),
-        };
+            |_| unreachable!(),
+            |_| unreachable!(),
+            Arc::new(UnusedRenderer),
+        );
         validate_source_pin(&assignment, &surface).unwrap();
         let mut drifted = assignment;
         drifted.source.surface_contract_version = 2;

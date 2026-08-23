@@ -51,12 +51,12 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
         outputs: BTreeSet::from([DisplayOutputKind::Frame, DisplayOutputKind::Media]),
     };
     descriptor.contract_digest = descriptor.expected_contract_digest(&world);
-    Ok(DisplaySurface {
+    Ok(DisplaySurface::local(
         descriptor,
         canonicalize_input,
         prepare,
-        renderer: Arc::new(SignageRenderer),
-    })
+        Arc::new(SignageRenderer),
+    ))
 }
 
 fn canonicalize_input(value: Value) -> Result<CanonicalDisplayInput, Failure> {

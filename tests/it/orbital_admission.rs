@@ -33,7 +33,7 @@ fn temp_root(tag: &str) -> PathBuf {
 fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
     let root = temp_root(tag);
     let (mech, _c) = SpaceAuthority::form(&root, &FOUNDER_SEED, "Adm", vec![]).unwrap();
-    lait::orbital::seed_founder_policy(&mech).unwrap();
+    crate::world_fixture::seed_founder_policy(&mech).unwrap();
     (root, mech)
 }
 
@@ -76,7 +76,13 @@ fn accepting_an_invite_automatically_admits_over_contact() {
     let (_rf, mech_f) = founder("auto");
     let now = now_secs();
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, false, now, "contributor", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            false,
+            now,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Adm", vec![], Some(admission))
@@ -102,8 +108,7 @@ fn exact_replay_of_a_redemption_is_idempotent() {
             3600,
             false,
             now_secs(),
-            "contributor",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
         .unwrap();
     let invite = mech_f
@@ -126,8 +131,7 @@ fn a_substituted_acceptance_proof_is_refused() {
             3600,
             false,
             now_secs(),
-            "contributor",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
         .unwrap();
     let invite = mech_f
@@ -182,7 +186,13 @@ fn an_expired_capability_is_refused_at_redemption() {
     let (_rf, mech_f) = founder("expiry");
     // A capability whose window is already in the past (issued far earlier).
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 1, false, 1, "contributor", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            1,
+            false,
+            1,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Adm", vec![], Some(admission))
@@ -200,7 +210,13 @@ fn a_single_use_capability_admits_at_most_one_of_two_candidates() {
     let (_rf, mech_f) = founder("single");
     let now = now_secs();
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, false, now, "contributor", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            false,
+            now,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Adm", vec![], Some(admission))
@@ -225,7 +241,13 @@ fn a_reusable_capability_admits_multiple_candidates() {
     let (_rf, mech_f) = founder("reuse");
     let now = now_secs();
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, true, now, "contributor", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            true,
+            now,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Adm", vec![], Some(admission))
@@ -253,8 +275,7 @@ fn persistence_before_dial_survives_a_restart() {
             3600,
             false,
             now_secs(),
-            "contributor",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
         .unwrap();
     let invite = mech_f
@@ -308,7 +329,13 @@ fn now_secs() -> u64 {
 fn a_viewer_invite_installs_exactly_the_read_baseline() {
     let (_rf, mech_f) = founder("viewer");
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, false, now_secs(), "viewer", [7u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            false,
+            now_secs(),
+            crate::world_fixture::role_evidence("viewer", [7u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Adm", vec![], Some(admission))
@@ -339,8 +366,7 @@ fn a_contributor_invite_installs_the_expansion_atomically() {
             3600,
             false,
             now_secs(),
-            "contributor",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
         .unwrap();
     let invite = mech_f
@@ -370,8 +396,7 @@ fn an_administrator_invite_installs_policy_administration() {
             3600,
             false,
             now_secs(),
-            "administrator",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("administrator", [0u8; 32]),
         )
         .unwrap();
     let invite = mech_f
@@ -394,9 +419,9 @@ fn an_administrator_invite_installs_policy_administration() {
 /// Unknown and tombstoned roles reject at issuance.
 #[test]
 fn an_unknown_role_is_refused_at_issuance() {
-    let (_rf, mech_f) = founder("unknown-role");
-    let err = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, false, now_secs(), "warlord", [0u8; 32])
+    let (_, worlds) = crate::world_fixture::packages().build().unwrap();
+    let err = worlds
+        .admission_evidence(None, "warlord", [0u8; 32])
         .unwrap_err();
     assert!(err.to_string().contains("unknown role"), "{err}");
 }
@@ -416,8 +441,7 @@ fn a_non_delegating_issuer_cannot_escalate() {
             3600,
             false,
             now_secs(),
-            "contributor",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
         .unwrap();
     let invite = mech_f
@@ -438,8 +462,7 @@ fn a_non_delegating_issuer_cannot_escalate() {
             3600,
             false,
             now_secs(),
-            "administrator",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("administrator", [0u8; 32]),
         )
         .unwrap_err();
     assert!(
@@ -450,8 +473,8 @@ fn a_non_delegating_issuer_cannot_escalate() {
     // Bypass the gate: the contributor hand-signs an administrator capability
     // directly. It is structurally valid, but redemption re-proves issuer
     // authority over every assignment and refuses the whole expansion.
-    let revision = lait::world::roles::built_in("lait.administrator").unwrap();
-    let evidence = lait::world::roles::role_admission_evidence(&revision, [0u8; 32]);
+    let revision = issues::roles::built_in("lait.administrator").unwrap();
+    let evidence = issues::roles::role_admission_evidence(&revision, [0u8; 32]);
     let now = now_secs();
     let forged = runtime::coordinates::AdmissionCapability::sign(
         &mech_f.space(),
@@ -482,7 +505,13 @@ fn a_non_delegating_issuer_cannot_escalate() {
 fn tampered_role_evidence_breaks_the_capability_signature() {
     let (_rf, mech_f) = founder("tamper-ev");
     let mut admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, false, now_secs(), "viewer", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            false,
+            now_secs(),
+            crate::world_fixture::role_evidence("viewer", [0u8; 32]),
+        )
         .unwrap();
     // Escalate the evidence post-hoc: append the admin capability.
     admission.evidence.assignments.push((

@@ -739,7 +739,7 @@ fn mime_for(name: &str) -> String {
 /// Expand one pinned Issues role into the exact authority assignments that the
 /// Space host must commit.
 pub fn plan_access_grant(
-    session: &runtime::Session,
+    session: &dyn runtime::world::call::SessionAccess,
     role: &str,
     project: Option<&str>,
 ) -> Result<AccessGrantPlan, AccessRefusal> {

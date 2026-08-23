@@ -61,6 +61,15 @@ impl Client {
     /// holding its stream would have a window in which events vanish.
     pub async fn start(config: Config) -> ClientResult<(Self, Signals)> {
         let selection = selection_for(config.identity.as_deref());
+        if let Some(bundled) = config.bundled_worlds.as_deref() {
+            let identity = selection.identity_dir().map_err(|error| {
+                ClientError::internal(format!("resolve identity for bundled Worlds: {error:#}"))
+            })?;
+            lait::update::world::seed_bundled(bundled, &lait::serve::head::worlds_root(&identity))
+                .map_err(|error| {
+                    ClientError::internal(format!("install bundled Worlds: {error:#}"))
+                })?;
+        }
         // The supervisor first: starting it spawns nothing, and it is what
         // stages the image everything else runs from. The daemon below is
         // then spawned from the *staged* copy, so no long-lived process holds
@@ -280,6 +289,8 @@ pub struct Config {
     pub staging: lait_workbench::Staging,
     /// `None` selects the ordinary per-user identity.
     pub identity: Option<PathBuf>,
+    /// Trusted first-party immutable releases carried by this client bundle.
+    pub bundled_worlds: Option<PathBuf>,
     /// Do not spawn or wait for the identity daemon (the `lait` sidecar).
     ///
     /// The client comes up standalone: the Library, the correspondence desk and
@@ -322,6 +333,7 @@ impl Config {
             observation_interval: lait_workbench::OBSERVATION_INTERVAL,
             staging,
             identity: None,
+            bundled_worlds: None,
             skip_sidecar: false,
             correspondence_demo: false,
             post_url: None,

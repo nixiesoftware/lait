@@ -1,0 +1,21 @@
+[package]
+name = "world-semantic-fixture"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[[bin]]
+name = "world-semantic-fixture"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+replica = { path = "../../crates/replica" }
+runtime = { path = "../../crates/runtime" }
+world-runner = { path = "../../crates/world-runner" }
+world-sdk = { path = "../../crates/world-sdk" }
+
+[lints]
+workspace = true

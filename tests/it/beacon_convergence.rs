@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -31,7 +32,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, subscribe, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [221u8; 32];
 const MEMBER_A_SEED: [u8; 32] = [222u8; 32];
@@ -177,6 +177,7 @@ fn admit(client: &tokio::runtime::Runtime, home: &Path, seed: &[u8; 32], founder
         client,
         founder_home,
         Request::Invite {
+            world: None,
             // These convergence exits require each surviving member to author
             // after the founder is gone. Pin that authority in the fixture;
             // an unstated role is intentionally allowed to become view-only.
@@ -187,7 +188,7 @@ fn admit(client: &tokio::runtime::Runtime, home: &Path, seed: &[u8; 32], founder
     ) else {
         panic!("expected an invite link");
     };
-    lait::orbital::enter_space(home, seed, &invite).unwrap();
+    crate::world_fixture::enter_space(home, seed, &invite).unwrap();
 }
 
 fn drive_admission(client: &tokio::runtime::Runtime, joiner_home: &Path, founder_device: &str) {
@@ -224,7 +225,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("f");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -394,7 +395,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
     let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("ring-f");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -538,7 +539,7 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
     let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("acl-f");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "ACL Space").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "ACL Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -636,7 +637,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
     let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("hub");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Dead Hub Space").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Dead Hub Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);

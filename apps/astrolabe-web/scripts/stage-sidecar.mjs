@@ -21,7 +21,7 @@
 // without privileges.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,7 +48,13 @@ const [targetDir, targetName] = bundle
   : [resolve(here, "..", "src-tauri", "target", "debug"), exe];
 const target = join(targetDir, targetName);
 
-const buildArgs = ["build", "--bin", "lait", "--locked"];
+const buildArgs = [
+  "build",
+  "-p", "lait",
+  "-p", "lait-issues-runner",
+  "-p", "lait-signage-runner",
+  "--locked",
+];
 if (bundle) buildArgs.push("--release");
 console.log(`staging the lait sidecar for ${bundle ? "bundling" : "development"} (cargo ${buildArgs.join(" ")})…`);
 execFileSync("cargo", buildArgs, { cwd: repo, stdio: "inherit" });
@@ -74,3 +80,52 @@ try {
   }
 }
 console.log(`staged ${targetName} at ${target}`);
+
+// Trusted first-party Worlds enter through the same immutable-release loader
+// as every later update. The client bundle is only their bootstrap vehicle:
+// after first launch each follows its own signed channel and cadence.
+const bundledWorlds = resolve(here, "..", "src-tauri", "bundled-worlds");
+rmSync(bundledWorlds, { recursive: true, force: true });
+
+function packageVersion(relativeManifest) {
+  const manifest = readFileSync(join(repo, relativeManifest), "utf8");
+  const match = manifest.match(/^version\s*=\s*"([^"]+)"/m);
+  if (match === null) throw new Error(`${relativeManifest} has no package version`);
+  return match[1];
+}
+
+function stageWorld({ id, version, template, runner, web, art }) {
+  const root = join(bundledWorlds, id, version);
+  mkdirSync(join(root, "bin"), { recursive: true });
+  copyFileSync(join(repo, "target", profile, `${runner}${process.platform === "win32" ? ".exe" : ""}`),
+    join(root, "bin", `${runner}${process.platform === "win32" ? ".exe" : ""}`));
+  if (web !== undefined) cpSync(join(repo, web), root, { recursive: true });
+  for (const [from, to] of art ?? []) {
+    const destination = join(root, to);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(join(repo, from), destination);
+  }
+  const declaration = readFileSync(join(repo, template), "utf8")
+    .replaceAll("${VERSION}", version)
+    .replaceAll("${EXE}", process.platform === "win32" ? ".exe" : "");
+  writeFileSync(join(root, "world.json"), declaration);
+}
+
+stageWorld({
+  id: "com.lait.issues",
+  version: packageVersion("products/issues/Cargo.toml"),
+  template: "products/issues-runner/world.json.template",
+  runner: "lait-world-issues",
+  web: "products/issues-app/assets/web",
+  art: [
+    ["products/issues-app/assets/mark.png", "art/mark.png"],
+    ["products/issues-app/assets/hero.png", "art/hero.png"],
+  ],
+});
+stageWorld({
+  id: "com.lait.signage",
+  version: packageVersion("products/signage/Cargo.toml"),
+  template: "products/signage-runner/world.json.template",
+  runner: "lait-world-signage",
+});
+console.log(`staged first-party World releases at ${bundledWorlds}`);

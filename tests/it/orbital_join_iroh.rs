@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use issues::contract::{self, IssueIntent, IssueQuery};
 use issues::dto::IssueView;
+use issues::IssuesWorld;
 use lait::orbital::SpaceAuthority;
-use lait::world::contract::{self, IssueIntent, IssueQuery};
-use lait::world::IssuesWorld;
 use replica::convergence::AuthorityIncorporator;
 use runtime::{
     plane::contact::Authority, plane::Activation, plane::CommsOptions, plane::GossipOptions,
@@ -194,7 +194,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     let root_f = temp_root("founder");
     let (mech_f, _coords) =
         SpaceAuthority::form(root_f.as_path(), &FOUNDER_SEED, "Iroh Space", vec![]).unwrap();
-    lait::orbital::seed_founder_policy(&mech_f).unwrap();
+    crate::world_fixture::seed_founder_policy(&mech_f).unwrap();
     let coords_f = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Iroh Space", vec![], None)
         .unwrap();
@@ -213,7 +213,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     submit(
         &session_f,
         &FOUNDER_SEED,
-        &lait::world::contract::initialize_tracker_intent(
+        &issues::contract::initialize_tracker_intent(
             "Iroh Space",
             1,
             issues::ids::ProjectId::mint(&issues::ids::SystemUlidSource).as_str(),
@@ -231,7 +231,13 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
         .unwrap()
         .as_secs();
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, true, now, "contributor", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            true,
+            now,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(

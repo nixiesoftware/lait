@@ -4,14 +4,14 @@ lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crate
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-811 crates, under 42 distinct licence expressions.
+809 crates, under 42 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
 | `MIT OR Apache-2.0` | 379 |
-| `MIT` | 151 |
+| `MIT` | 149 |
 | `Apache-2.0 OR MIT` | 75 |
 | `MIT/Apache-2.0` | 39 |
 | `Unicode-3.0` | 25 |
@@ -353,8 +353,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | imagesize | 0.14.0 | `MIT` | <https://github.com/Roughsketch/imagesize> |
 | imbl | 7.0.1 | `MPL-2.0+` | <https://github.com/jneem/imbl> |
 | imbl-sized-chunks | 0.1.3 | `MPL-2.0+` | <https://github.com/jneem/imbl-sized-chunks> |
-| include_dir | 0.7.4 | `MIT` | <https://github.com/Michael-F-Bryan/include_dir> |
-| include_dir_macros | 0.7.4 | `MIT` | <https://github.com/Michael-F-Bryan/include_dir> |
 | indexmap | 2.14.0 | `Apache-2.0 OR MIT` | <https://github.com/indexmap-rs/indexmap> |
 | inout | 0.1.4 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
 | interprocess | 2.4.2 | `0BSD OR Apache-2.0` | <https://github.com/kotauskas/interprocess> |

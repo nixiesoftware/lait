@@ -219,7 +219,7 @@ impl Call {
 ///
 /// The registered handler derives this from the decoded product request. A host
 /// never trusts a client-supplied read/write claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Access {
     Query,
     Command,
@@ -420,9 +420,164 @@ impl Reply {
 /// This is deliberately smaller than [`runtime::world::Context`]. The handler
 /// can resolve user-facing input and sign through the supplied Session, but it
 /// receives no Mechanics, Replica, transport, or storage handle.
+pub trait SessionAccess: Send + Sync {
+    fn principal_facts(&self) -> Result<crate::world::PrincipalFacts, crate::world::Rejection>;
+    fn space_id(&self) -> &mechanics::ids::SpaceId;
+    fn world_id(&self) -> &WorldId;
+    fn submit(
+        &self,
+        action: crate::world::SignedWorldAction,
+    ) -> Result<crate::world::CommittedEffect, crate::world::Failure>;
+    fn submit_lifecycle_from(
+        &self,
+        action: crate::world::SignedWorldAction,
+        source: crate::world::LifecycleSourceCoordinate,
+    ) -> Result<crate::world::CommittedEffect, crate::world::Failure>;
+    fn query(
+        &self,
+        query: crate::world::Query,
+    ) -> Result<crate::world::Projection, crate::world::Failure>;
+    fn query_at(
+        &self,
+        publication: crate::publication::WorldPublicationId,
+        query: crate::world::Query,
+    ) -> Result<crate::world::Projection, crate::world::Failure>;
+    fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure>;
+    fn find_at(
+        &self,
+        publication: crate::publication::WorldPublicationId,
+        query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure>;
+    fn operation_status_for(
+        &self,
+        operation: crate::world::RequestId,
+        intent: &crate::world::Intent,
+    ) -> Result<crate::world::OperationStatus, crate::world::Failure>;
+    fn with_lifecycle_source(
+        &self,
+        source: &crate::world::LifecycleSourceCoordinate,
+        prepare: &mut dyn FnMut(
+            &crate::world::Context<'_>,
+        ) -> Result<Vec<u8>, crate::world::Rejection>,
+    ) -> Result<Result<Vec<u8>, crate::world::Rejection>, crate::world::Failure>;
+
+    /// The concrete in-process Session, available only to Runtime's own
+    /// identity adapter. An independently hosted context returns `None`; its
+    /// identity signs by asking the authoritative host over the runner seam.
+    #[doc(hidden)]
+    fn local_session(&self) -> Option<&Session> {
+        None
+    }
+}
+
+impl SessionAccess for Session {
+    fn principal_facts(&self) -> Result<crate::world::PrincipalFacts, crate::world::Rejection> {
+        self.fresh_principal()
+    }
+    fn space_id(&self) -> &mechanics::ids::SpaceId {
+        self.space_id()
+    }
+
+    fn world_id(&self) -> &WorldId {
+        self.world_id()
+    }
+
+    fn submit(
+        &self,
+        action: crate::world::SignedWorldAction,
+    ) -> Result<crate::world::CommittedEffect, crate::world::Failure> {
+        self.submit(action)
+    }
+
+    fn submit_lifecycle_from(
+        &self,
+        action: crate::world::SignedWorldAction,
+        source: crate::world::LifecycleSourceCoordinate,
+    ) -> Result<crate::world::CommittedEffect, crate::world::Failure> {
+        self.submit_lifecycle_from(action, source)
+    }
+
+    fn query(
+        &self,
+        query: crate::world::Query,
+    ) -> Result<crate::world::Projection, crate::world::Failure> {
+        self.query(query)
+    }
+
+    fn query_at(
+        &self,
+        publication: crate::publication::WorldPublicationId,
+        query: crate::world::Query,
+    ) -> Result<crate::world::Projection, crate::world::Failure> {
+        self.query_at(publication, query)
+    }
+
+    fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure> {
+        self.find(query)
+    }
+
+    fn find_at(
+        &self,
+        publication: crate::publication::WorldPublicationId,
+        query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure> {
+        self.find_at(publication, query)
+    }
+
+    fn operation_status_for(
+        &self,
+        operation: crate::world::RequestId,
+        intent: &crate::world::Intent,
+    ) -> Result<crate::world::OperationStatus, crate::world::Failure> {
+        self.operation_status_for(operation, intent)
+    }
+
+    fn with_lifecycle_source(
+        &self,
+        source: &crate::world::LifecycleSourceCoordinate,
+        prepare: &mut dyn FnMut(
+            &crate::world::Context<'_>,
+        ) -> Result<Vec<u8>, crate::world::Rejection>,
+    ) -> Result<Result<Vec<u8>, crate::world::Rejection>, crate::world::Failure> {
+        self.with_lifecycle_source(source, prepare)
+    }
+
+    fn local_session(&self) -> Option<&Session> {
+        Some(self)
+    }
+}
+
+pub trait IdentityAccess: Send + Sync {
+    fn device(&self) -> &mechanics::ids::DeviceId;
+    fn sign_action(
+        &self,
+        session: &dyn SessionAccess,
+        request: crate::world::RequestId,
+        intent: crate::world::Intent,
+    ) -> Result<crate::world::SignedWorldAction, crate::world::Rejection>;
+}
+
+impl IdentityAccess for LocalIdentity {
+    fn device(&self) -> &mechanics::ids::DeviceId {
+        self.device()
+    }
+
+    fn sign_action(
+        &self,
+        session: &dyn SessionAccess,
+        request: crate::world::RequestId,
+        intent: crate::world::Intent,
+    ) -> Result<crate::world::SignedWorldAction, crate::world::Rejection> {
+        let session = session
+            .local_session()
+            .ok_or(crate::world::Rejection::ContractViolation)?;
+        self.sign_action(session, request, intent)
+    }
+}
+
 pub struct Context<'a> {
-    pub session: &'a Session,
-    pub identity: &'a LocalIdentity,
+    pub session: &'a dyn SessionAccess,
+    pub identity: &'a dyn IdentityAccess,
     pub actor: &'a str,
     pub device: &'a str,
 }
@@ -434,7 +589,7 @@ pub struct Context<'a> {
 /// knew who was connected would be a World holding a delivery plane, and a host
 /// that knew assigning means telling the assignee would be a host holding
 /// product rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nudge {
     /// The actor to tell, canonical.
     pub actor: String,

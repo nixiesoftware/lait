@@ -41,8 +41,8 @@ the rollback.
 - A World declares what it is — name, artwork, accent, entry path — and names the
   host facts it depends on as a version range rather than a fingerprint of the
   whole build.
-- A World's head serves from a staged bundle over the embedded floor, so a World
-  updates without the engine updating.
+- A World's head serves only from its selected immutable release; there is no
+  compiled-in product shadow, so a World updates without the engine updating.
 - Publishing a World is one act; promoting it is a pointer flip that rebuilds
   nothing.
 

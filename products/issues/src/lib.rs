@@ -24,6 +24,9 @@
 //! substrate and has no CLI, MCP, viewer, daemon, local-control, filesystem, or
 //! process-lifecycle dependency.
 
+/// Immutable release version carried by this product package.
+pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod contract;
 pub mod dto;
 pub mod find;

@@ -1,0 +1,30 @@
+[package]
+name = "world-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Typed Runtime bridge for independently shipped LAIT World processes"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+ciborium = "0.2"
+futures-lite = "2"
+tokio = { version = "1", features = ["macros", "sync"] }
+fabric = { path = "../fabric" }
+mechanics = { path = "../mechanics" }
+replica = { path = "../replica" }
+runtime = { path = "../runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+world-interface = { path = "../world-interface" }
+world-runner = { path = "../world-runner" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+fabric = { path = "../fabric" }
+mechanics = { path = "../mechanics" }
+tempfile = "3"

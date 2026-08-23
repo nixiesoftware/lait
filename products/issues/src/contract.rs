@@ -282,11 +282,11 @@ pub fn verify_limits() -> runtime::exec::Limits {
     }
 }
 
-/// Bundled in-process verifier Build for `issue.verify/v1`.
+/// First-party runner-local verifier Build for `issue.verify/v1`.
 ///
 /// Build publication is identity, not a dispatch gate. Runtime binds the
 /// exact caller-selected Build id into the Run and still refuses to imply
-/// that the Build was published or attested. The bundled handler is selected
+/// that the Build was published or attested. The runner-local handler is selected
 /// from the application package. Callers of `issues_verify` may name this id
 /// explicitly or omit it so the application package fills it in.
 pub fn verify_build(world_build: [u8; 32]) -> runtime::exec::Build {
@@ -1206,8 +1206,8 @@ pub enum IssueIntent {
     /// creates the deterministic Catalog with the captured display name,
     /// initialization timestamp, initial project, the built-in role
     /// definitions, the capability-registry commitment, and the default
-    /// workflow revision. The composition root persists the complete signed
-    /// action before submission and replays the exact bytes after a crash;
+    /// workflow revision. The World lifecycle adapter persists the complete
+    /// signed action before submission and replays the exact bytes after a crash;
     /// the World is a deterministic pure validator/stager (no clock, no id
     /// generator). Joiners adopt the Catalog through Manifest synchronization
     /// and never synthesize it locally.
@@ -1219,7 +1219,7 @@ pub enum IssueIntent {
         project_key: String,
         device: String,
         /// `(role_id, revision_id hex, definition digest hex)` for the three
-        /// built-ins — validated against the golden compiled-in definitions.
+        /// built-ins — validated against this release's reviewed definitions.
         built_in_roles: Vec<(String, String, String)>,
         /// Hex of [`capability_registry_commitment`].
         capability_registry_commitment: String,
@@ -1233,7 +1233,7 @@ pub enum IssueIntent {
     /// 1-MiB transaction ceiling and is not exposed as product truth.
     V4Migrate {
         /// Compact deterministic coordinate prepared against one exact frozen
-        /// source publication by the composition-owned lifecycle. Migrated
+        /// source publication by the launcher-owned lifecycle. Migrated
         /// Bodies and text remain in the frozen source rather than inflating
         /// the host's opaque lifecycle record.
         plan: V4MigrationPlan,
@@ -1898,7 +1898,7 @@ pub enum IssueIntent {
 
 /// Build the canonical `InitializeTracker` intent from captured formation
 /// facts; the golden role/registry/workflow commitments come from this
-/// build's compiled-in definitions. The composition root captures the inputs
+/// release's reviewed definitions. The lifecycle adapter captures the inputs
 /// ONCE and persists the signed action before submission.
 pub fn initialize_tracker_intent(
     name: &str,

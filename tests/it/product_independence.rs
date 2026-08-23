@@ -5,13 +5,12 @@
 //! place where the engine has been taught a product's vocabulary, and each one
 //! is a thing a second World would have to impersonate.
 //!
-//! This is a ratchet, not a snapshot. A checked-in allowlist
-//! (`tests/product_independence_allowlist.tsv`) names every reference that is
-//! *known and owned by a decoupling phase*. The gate fails for any reference
-//! that is not allowlisted, **and** for any allowlist entry that no longer
-//! matches — so the list can only shrink. When it reaches zero the shell is
-//! product-free and [`allowlist_is_empty_when_composition_is_injected`] holds
-//! it there.
+//! The historical allowlist is now empty. The gate fails for any production
+//! reference and also proves the root package has no production dependency
+//! edge to a product crate. Test fixtures remain allowed to name products. The
+//! sole production exception is iOS's named composition root: Apple platforms
+//! cannot install or spawn native World executables, so that application links
+//! its reviewed first-party adapters there and nowhere else.
 //!
 //! It parses rather than greps, for the same reason `semantic_type_names.rs`
 //! does: `#[cfg(test)]` fixtures legitimately name the bundled product (a test
@@ -28,6 +27,10 @@ use syn::visit::Visit;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn platform_composition_roots() -> [PathBuf; 1] {
+    [workspace_root().join("tools/astrolabe-ios/src/worlds.rs")]
 }
 
 /// The production Rust that hosts Worlds without being one: the shell
@@ -58,6 +61,9 @@ fn shell_sources() -> Vec<PathBuf> {
     ] {
         walk(&workspace_root().join(scope), &mut out);
     }
+    let test_fixture = workspace_root().join("src/world/test.rs");
+    let composition_roots = platform_composition_roots();
+    out.retain(|path| path != &test_fixture && !composition_roots.contains(path));
     out.sort();
     out
 }
@@ -493,7 +499,8 @@ fn no_unallowlisted_product_references() {
             "NEW product references in the shell (not in \
              tests/product_independence_allowlist.tsv).\n\
              The shell hosts Worlds; it must not name one. Inject it through the \
-             composition root, or move the shared type into an engine crate:"
+             installed-package boundary, the reviewed iOS composition root, or \
+             move the shared type into an engine crate:"
         );
         for (path, rule) in &new {
             let _ = writeln!(msg, "  {path}\t{rule}");
@@ -512,31 +519,52 @@ fn no_unallowlisted_product_references() {
     assert!(msg.is_empty(), "\n{msg}");
 }
 
-/// Once the shell package stops depending on the products, the allowlist must
-/// be empty and stay empty.
-///
-/// Keyed on the **dependency edge in `Cargo.toml`**, which is the actual end
-/// state — not on a source substring. The first version looked for
-/// `"IssuesWorld"` in `src/world/mod.rs`, a string that also appears in three
-/// doc comments there. Phase C1 removes the code but nobody scrubs prose, so
-/// this test would have silently disarmed itself at the exact moment it started
-/// mattering. A manifest edge cannot hide in a comment.
+/// The root production dependency graph is product-free. Dev dependencies are
+/// permitted solely for explicit test fixtures.
 #[test]
 fn allowlist_is_empty_when_the_shell_stops_depending_on_products() {
     let manifest = std::fs::read_to_string(workspace_root().join("Cargo.toml"))
         .expect("read the workspace manifest");
-    let still_depends = product_crates()
-        .iter()
-        .any(|name| manifest.contains(&name.replace('_', "-")));
-    if !still_depends {
-        let allowed = allowlist();
-        assert!(
-            allowed.is_empty(),
-            "the shell package no longer depends on any product, but {} \
-             allowlist entries remain — it should now be product-free",
-            allowed.len()
-        );
-    }
+    let production = manifest
+        .split_once("[dependencies]")
+        .map(|(_, rest)| rest.split("\n[").next().unwrap_or(rest))
+        .expect("root manifest has a dependencies section");
+    let edges: Vec<_> = product_crates()
+        .into_iter()
+        .filter(|name| production.contains(&name.replace('_', "-")))
+        .collect();
+    assert!(
+        edges.is_empty(),
+        "root production product edges remain: {edges:?}"
+    );
+    let allowed = allowlist();
+    assert!(
+        allowed.is_empty(),
+        "the production shell is product-free, but {} allowlist entries remain",
+        allowed.len()
+    );
+}
+
+/// Native code cannot be dynamically installed or spawned on iOS. Keep that
+/// platform's first-party linkage visible, exact, and outside the generic
+/// product-blind scan instead of growing a symbol allowlist that could absorb
+/// new references throughout the client.
+#[test]
+fn ios_has_exactly_one_reviewed_product_composition_root() {
+    let roots = platform_composition_roots();
+    assert_eq!(roots.len(), 1);
+    assert!(
+        roots[0].is_file(),
+        "the reviewed iOS World composition root moved or disappeared"
+    );
+    assert_eq!(
+        roots[0]
+            .strip_prefix(workspace_root())
+            .expect("composition root remains inside the workspace")
+            .to_string_lossy()
+            .replace('\\', "/"),
+        "tools/astrolabe-ios/src/worlds.rs"
+    );
 }
 
 /// The rule fires. A gate that cannot fail is not a gate.

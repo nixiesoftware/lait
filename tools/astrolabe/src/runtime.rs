@@ -429,8 +429,8 @@ pub enum Update {
     Library(Vec<LibraryEntry>),
     /// What the daemon has learned about each World's channel, keyed by World
     /// id. Separate from `Library` because the two are different kinds of
-    /// fact: the list is compiled in and cannot go stale, this is measured and
-    /// can.
+    /// fact: the list is read passively from selected manifests, while this is
+    /// measured and can go stale.
     WorldStandings(std::collections::BTreeMap<String, crate::client::library::WorldStanding>),
     Storage(Vec<StorageFacts>),
     Heads(Vec<HeadFacts>),
@@ -679,7 +679,7 @@ async fn serve(
         Ok(started) => started,
         Err(error) => {
             // The window still owes the person what is true without a process
-            // behind it: the compiled-in Library, and the end of "loading" —
+            // behind it: the passively readable Library, and the end of "loading" —
             // a system that is not there must not be drawn as one still
             // arriving. The failure itself rides beside them.
             send(
@@ -847,8 +847,8 @@ impl Worker {
             self.client.supervisor().snapshot().await,
         )));
         self.send(Update::Heads(self.client.heads()));
-        // The Library is compiled in — the install list — so reading it can
-        // neither fail nor go stale against a daemon.
+        // The Library is the selected install list. Reading it launches no
+        // runner and cannot go stale against a daemon.
         self.send(Update::Library(self.client.get_library()));
         match self.client.get_storage().await {
             Ok(facts) => self.send(Update::Storage(facts)),
@@ -1178,7 +1178,13 @@ impl Worker {
                 // that knows which build this is, and the supervisor's key
                 // cannot be built without an answer: an `Option` here is how one
                 // World ended up with two heads.
-                let head = client.head(lait::composition::PRODUCT_WORLD_MOUNT).await?;
+                let mount = client
+                    .get_library()
+                    .into_iter()
+                    .next()
+                    .map(|world| world.world_mount)
+                    .ok_or_else(|| ClientError::refused("no World is installed"))?;
+                let head = client.head(&mount).await?;
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
             }
             Action::StopHead(id) => {

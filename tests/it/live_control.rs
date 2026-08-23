@@ -17,13 +17,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
 use comms::policy::Network;
 use comms::{Transport, TransportFactory};
 use lait::control::{request, Request, Response};
-use lait::orbital::run_station_process;
 
 const FOUNDER_SEED: [u8; 32] = [113u8; 32];
 
@@ -87,7 +87,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
     let net = MemNet::new();
     std::fs::create_dir_all(&home).unwrap();
     write_identity(&home, &FOUNDER_SEED);
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Live Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Live Space").unwrap();
 
     let daemon_home = home.clone();
     let daemon_net = net.clone();
@@ -112,8 +112,9 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
+            world: issues::PRODUCT_WORLD.into(),
             since_generation: None,
-            issue: None,
+            body: None,
         },
     );
     let Response::Live {
@@ -135,8 +136,9 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
+            world: issues::PRODUCT_WORLD.into(),
             since_generation: Some(generation),
-            issue: None,
+            body: None,
         },
     );
     assert!(
@@ -152,8 +154,11 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
+            world: issues::PRODUCT_WORLD.into(),
             since_generation: None,
-            issue: Some("iss_01jz0000000000000000000000".into()),
+            body: Some(
+                issues::contract::issue_body_id("iss_01jz0000000000000000000000").as_bytes(),
+            ),
         },
     );
     assert!(
@@ -188,7 +193,10 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            issues: vec!["iss_01jz0000000000000000000000".into()],
+            world: issues::PRODUCT_WORLD.into(),
+            bodies: vec![
+                issues::contract::issue_body_id("iss_01jz0000000000000000000000").as_bytes(),
+            ],
             carets: Vec::new(),
             typing: Vec::new(),
             previews: Vec::new(),
@@ -209,7 +217,8 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            issues: vec!["not-a-doc-id".into(), String::new()],
+            world: issues::PRODUCT_WORLD.into(),
+            bodies: vec![[1; 16], [2; 16]],
             carets: Vec::new(),
             typing: Vec::new(),
             previews: Vec::new(),
@@ -227,7 +236,8 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            issues: Vec::new(),
+            world: issues::PRODUCT_WORLD.into(),
+            bodies: Vec::new(),
             carets: Vec::new(),
             typing: Vec::new(),
             previews: Vec::new(),

@@ -725,6 +725,16 @@ fn reconcile_live_streams(
 }
 
 async fn stream_live(app: Arc<App>, question: Watch) {
+    let Some(package) = app.registry.package_for_mount(&app.world) else {
+        return;
+    };
+    let Some(document) = question.issue.as_deref() else {
+        return;
+    };
+    let Ok(body) = package.transient_body(document) else {
+        return;
+    };
+    let world = package.world().as_str().to_string();
     let mut backoff = Duration::from_millis(100);
     loop {
         let Ok(resolved) = app.directory.resolve(&question.space) else {
@@ -733,7 +743,7 @@ async fn stream_live(app: Arc<App>, question: Watch) {
         let route = crate::control::station_route(resolved.address);
         match app
             .daemon
-            .subscribe_live(route, question.issue.clone())
+            .subscribe_live(route, world.clone(), Some(body))
             .await
         {
             Ok(mut subscription) => {
@@ -803,11 +813,25 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
     if !app.directory.signs_with_own_seed(&resolved) {
         return;
     }
-    let issues: Vec<String> = watched
+    let Some(package) = app.registry.package_for_mount(&app.world) else {
+        return;
+    };
+    let world = package.world().as_str().to_string();
+    let documents: Vec<String> = watched
         .iter()
         .filter(|question| question.space == space)
         .filter_map(|question| question.issue.clone())
         .collect();
+    let body_by_document: BTreeMap<String, [u8; 16]> = documents
+        .iter()
+        .filter_map(|document| {
+            package
+                .transient_body(document)
+                .ok()
+                .map(|body| (document.clone(), body))
+        })
+        .collect();
+    let bodies: Vec<[u8; 16]> = body_by_document.values().copied().collect();
     let mut carets = Vec::new();
     let mut typing = Vec::new();
     let mut previews = Vec::new();
@@ -815,9 +839,12 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
         let Some(issue) = awareness.watch.issue else {
             continue;
         };
+        let Some(body) = body_by_document.get(&issue).copied() else {
+            continue;
+        };
         if let Some(cursor) = awareness.cursor {
             carets.push(crate::control::WatchingCaret {
-                issue: issue.clone(),
+                body,
                 field: cursor.field.clone(),
                 anchor: cursor.anchor,
                 focus: cursor.focus,
@@ -825,13 +852,13 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
         }
         if awareness.typing {
             typing.push(crate::control::WatchingTyping {
-                issue: issue.clone(),
+                body,
                 field: "description".into(),
             });
         }
         if let Some(preview) = awareness.preview {
             previews.push(crate::control::WatchingPreview {
-                issue,
+                body,
                 field: preview.field,
                 base: preview.base,
                 result: preview.result,
@@ -852,7 +879,8 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
         .request(
             route,
             &Request::Watching {
-                issues,
+                world,
+                bodies,
                 carets,
                 typing,
                 previews,

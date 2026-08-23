@@ -24,9 +24,6 @@ mechanics = { path = "../../crates/mechanics" }
 # The World declaration is checked at publish time, against the same type the
 # client parses — one definition, so a publisher and a machine cannot disagree.
 world-interface = { path = "../../crates/world-interface" }
-# `--declare` writes the declaration this build would ship for its own Worlds,
-# which only the composition root can answer.
-lait = { path = "../.." }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

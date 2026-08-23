@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -23,7 +24,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [201u8; 32];
 const JOINER_SEED: [u8; 32] = [202u8; 32];
@@ -133,7 +133,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
 
     // -- Founder: form the Space, seed a project + a sealed issue, then serve. --
     let founder_home = temp_home("founder");
-    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Two Node Space").unwrap();
+    crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Two Node Space").unwrap();
 
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
 
@@ -192,6 +192,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         &client,
         &founder_home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -203,7 +204,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
 
     // -- Joiner: bootstrap the store from the invite link, then serve. --
     let joiner_home = temp_home("joiner");
-    lait::orbital::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
 
     let joiner_handle = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
     wait_online(&client, &joiner_home);
@@ -378,7 +379,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
     let net = MemNet::new();
 
     let founder_home = temp_home("recip-founder");
-    lait::orbital::found_space(&founder_home, &F_SEED, "Reciprocal Space").unwrap();
+    crate::world_fixture::found_space(&founder_home, &F_SEED, "Reciprocal Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
 
     let client = tokio::runtime::Runtime::new().unwrap();
@@ -388,6 +389,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
         &client,
         &founder_home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -398,7 +400,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
 
     // Joiner bootstraps from the link and serves.
     let joiner_home = temp_home("recip-joiner");
-    lait::orbital::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
     let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
 
@@ -441,7 +443,7 @@ fn members_promote_and_demote_over_the_socket() {
     let net = MemNet::new();
 
     let founder_home = temp_home("role-founder");
-    lait::orbital::found_space(&founder_home, &F_SEED, "Role Space").unwrap();
+    crate::world_fixture::found_space(&founder_home, &F_SEED, "Role Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -450,6 +452,7 @@ fn members_promote_and_demote_over_the_socket() {
         &client,
         &founder_home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -458,7 +461,7 @@ fn members_promote_and_demote_over_the_socket() {
         panic!("expected an invite link");
     };
     let joiner_home = temp_home("role-joiner");
-    lait::orbital::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
     let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
     let approach = mechanics::actor::device_from_seed(&F_SEED).to_string();
@@ -533,6 +536,7 @@ fn members_promote_and_demote_over_the_socket() {
             &client,
             &joiner_home,
             Request::Invite {
+                world: None,
                 role: Some("contributor".into()),
                 reusable: false,
                 ttl_hours: Some(24),
@@ -576,6 +580,7 @@ fn members_promote_and_demote_over_the_socket() {
             &client,
             &joiner_home,
             Request::Invite {
+                world: None,
                 role: Some("contributor".into()),
                 reusable: false,
                 ttl_hours: Some(24),

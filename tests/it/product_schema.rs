@@ -7,8 +7,8 @@
 //! change). The canonical examples decode through the Rust contract and are
 //! replayed by a NON-Rust validator in CI (`ci/validate-dto-schema.py`).
 
-use lait::world::roles::{RoleBody, ScopeKind};
-use lait::world::workflow::{
+use issues::roles::{RoleBody, ScopeKind};
+use issues::workflow::{
     DemandTemplate, ResourceTemplate, WorkflowBody, WorkflowState, WorkflowTransition,
 };
 

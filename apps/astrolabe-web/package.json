@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite",
     "stage-sidecar": "node scripts/stage-sidecar.mjs",
+    "stage-bundle": "node scripts/stage-sidecar.mjs --bundle",
     "tauri": "tauri",
     "build": "tsc -b && vite build",
     "check": "tsc -b --noEmit",

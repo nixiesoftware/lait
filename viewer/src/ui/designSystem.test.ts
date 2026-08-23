@@ -631,7 +631,10 @@ describe("our menu row and Astryx's", () => {
  */
 describe("cascade layers land in the intended order", () => {
   it("orders reset below Astryx below our theme below Tailwind's utilities", () => {
-    const css = readFileSync(join(SRC_DIR, "../../src/serve/assets/index.css"), "utf8");
+    const css = readFileSync(
+      join(SRC_DIR, "../../products/issues-app/assets/web/index.css"),
+      "utf8",
+    );
     const seen: string[] = [];
     for (const m of css.matchAll(/@layer\s+([a-z-]+)\s*\{/g)) {
       const name = m[1]!;

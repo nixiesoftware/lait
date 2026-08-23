@@ -122,6 +122,17 @@ fn arg(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+fn values(args: &[String], flag: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            (value == flag)
+                .then(|| args.get(index + 1).cloned())
+                .flatten()
+        })
+        .collect()
+}
+
 fn required(args: &[String], flag: &str) -> Result<String> {
     arg(args, flag).ok_or_else(|| anyhow!("missing {flag}"))
 }
@@ -459,13 +470,14 @@ fn verify(args: &[String]) -> Result<()> {
 // invalidated every published bundle whenever any unrelated host fact moved.
 // A World now states named requirements in its own `world.json` — which rides
 // inside the payload, under the artifact digest, under the feed signature —
-// and the client decides after proving the bytes. One artifact per release,
-// filed under `any`.
+// and the client decides after proving the bytes. One signed release manifest
+// names every native target built from the same source release.
 
 /// Publish a World's web head in one act, or promote one that is already
 /// published.
 ///
-/// Ordinary form: pack the bundle, seal a manifest for it, seal the channel
+/// Ordinary form: pack every `--bundle <target>=<directory>`, seal one manifest
+/// for them, then seal the channel
 /// pointer that names it. Promotion (`--promote`) omits `--bundle` and seals
 /// only a pointer at a version already on the host — the one-file rewrite that
 /// makes a test release stable with no rebuild.
@@ -507,76 +519,74 @@ fn world(args: &[String]) -> Result<()> {
     let pointer_path = out.join("pointer");
 
     if arg(args, "--promote").is_none() {
-        let bundle = PathBuf::from(required(args, "--bundle")?);
-        if !bundle.is_dir() {
-            bail!("--bundle {} is not a directory", bundle.display());
-        }
-        // `--declare` writes the declaration this build would ship for one of
-        // its own Worlds, from the consts the composition root already holds:
-        // name, artwork, accent, entry path, and the facts its head depends
-        // on. A third-party World writes its own `world.json` and does not
-        // pass this; the file that results is the same shape either way,
-        // which is the point — a compiled-in World must not quietly be the
-        // only first-class kind.
-        if arg(args, "--declare").is_some() {
-            let Some((declaration, art)) = lait::composition::world_declaration(&world, &version)
-            else {
-                bail!("this build hosts no {world}, so it cannot declare one");
-            };
-            for (path, bytes) in art {
-                let at = bundle.join(&path);
-                if let Some(parent) = at.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("create {}", parent.display()))?;
-                }
-                fs::write(&at, bytes).with_context(|| format!("write {}", at.display()))?;
-            }
-            let encoded =
-                serde_json::to_vec_pretty(&declaration).context("encode the World declaration")?;
-            fs::write(bundle.join("world.json"), encoded)
-                .with_context(|| format!("write {}/world.json", bundle.display()))?;
-            println!("declared {world} {version} into {}", bundle.display());
-        }
-        // The declaration is what makes a directory of files a World, and it
-        // is checked here rather than discovered by a machine that already
-        // downloaded it. A publisher learns at publish time.
-        let declared = fs::read(bundle.join("world.json")).with_context(|| {
-            format!(
-                "--bundle {} carries no world.json at its root — a World must declare what it is \
-                 and how to reach it",
-                bundle.display()
-            )
-        })?;
-        let declaration = world_interface::manifest::WorldManifest::parse(&declared)
-            .map_err(|error| anyhow!("{error}"))?;
-        if declaration.id != world {
-            bail!(
-                "publishing {world} but the bundle declares itself {} — a World may not answer \
-                 for another",
-                declaration.id
-            );
-        }
-        if declaration.version != version {
-            bail!(
-                "publishing {version} but the bundle declares {} — the declaration is what a \
-                 client believes",
-                declaration.version
-            );
-        }
-        let name = format!("world-{world}-{version}.tar.gz");
-        let archive = out.join(&name);
-        pack_world(&bundle, &archive, &format!("world-{world}-{version}"))?;
-        let (digest, size) = hash_file(&archive)?;
-
         let mut targets = BTreeMap::new();
-        targets.insert(
-            "any".to_string(),
-            Artifact {
-                url: format!("{base}/{release_prefix}/{name}"),
-                blake3: digest,
-                size,
-            },
-        );
+        let mut requirements = None;
+        for spec in values(args, "--bundle") {
+            let (target, bundle) = spec
+                .split_once('=')
+                .ok_or_else(|| anyhow!("--bundle must be <target>=<directory>, got {spec}"))?;
+            if target.is_empty() || bundle.is_empty() {
+                bail!("--bundle must be <target>=<directory>, got {spec}");
+            }
+            let bundle = PathBuf::from(bundle);
+            if !bundle.is_dir() {
+                bail!("--bundle {} is not a directory", bundle.display());
+            }
+            let declared = fs::read(bundle.join("world.json")).with_context(|| {
+                format!(
+                    "--bundle {} carries no world.json at its root — a World must declare what it is and how to reach it",
+                    bundle.display()
+                )
+            })?;
+            let declaration = world_interface::manifest::WorldManifest::parse(&declared)
+                .map_err(|error| anyhow!("{error}"))?;
+            if declaration.id != world {
+                bail!(
+                    "publishing {world} but the bundle declares itself {} — a World may not answer for another",
+                    declaration.id
+                );
+            }
+            if declaration.version != version {
+                bail!(
+                    "publishing {version} but the bundle declares {} — the declaration is what a client believes",
+                    declaration.version
+                );
+            }
+            let declared_requirements = declaration
+                .requires
+                .iter()
+                .map(|requirement| (requirement.name.clone(), requirement.range.clone()))
+                .collect::<Vec<_>>();
+            if requirements
+                .as_ref()
+                .is_some_and(|expected| expected != &declared_requirements)
+            {
+                bail!("World target {target} declares different host requirements");
+            }
+            requirements = Some(declared_requirements);
+
+            let name = format!("world-{world}-{version}-{target}.tar.gz");
+            let archive = out.join(&name);
+            pack_world(&bundle, &archive, &format!("world-{world}-{version}"))?;
+            let (digest, size) = hash_file(&archive)?;
+            if targets
+                .insert(
+                    target.to_string(),
+                    Artifact {
+                        url: format!("{base}/{release_prefix}/{name}"),
+                        blake3: digest,
+                        size,
+                    },
+                )
+                .is_some()
+            {
+                bail!("duplicate World bundle target {target}");
+            }
+            println!("packed {} ({size} bytes)", archive.display());
+        }
+        if targets.is_empty() {
+            bail!("at least one --bundle <target>=<directory> is required");
+        }
         let mut bundles = BTreeMap::new();
         bundles.insert(world.clone(), version.clone());
         let mut artifacts = BTreeMap::new();
@@ -590,20 +600,17 @@ fn world(args: &[String]) -> Result<()> {
         };
         fs::write(&manifest_path, seal(&manifest, &seed)?)
             .with_context(|| format!("write {}", manifest_path.display()))?;
-        let requires = if declaration.requires.is_empty() {
+        let requires = if requirements.as_ref().is_none_or(Vec::is_empty) {
             "no host requirements".to_string()
         } else {
-            declaration
-                .requires
+            requirements
+                .unwrap_or_default()
                 .iter()
-                .map(|r| format!("{} {}", r.name, r.range))
+                .map(|(name, range)| format!("{name} {range}"))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        println!(
-            "packed {} ({size} bytes) and sealed its manifest — {requires}",
-            archive.display()
-        );
+        println!("sealed the multi-target manifest — {requires}");
     } else if !manifest_path.is_file() {
         bail!(
             "--promote needs the sealed manifest of the release being promoted at {}; \
@@ -647,7 +654,7 @@ fn world(args: &[String]) -> Result<()> {
         pointer_path.display()
     );
     println!("upload, in this order — the pointer LAST:");
-    println!("  {release_prefix}/world-{world}-{version}.tar.gz");
+    println!("  {release_prefix}/world-{world}-{version}-<target>.tar.gz");
     println!("  {release_prefix}/manifest.json");
     println!("  channels/worlds/{world}/{channel}");
     Ok(())
@@ -679,7 +686,11 @@ fn pack_world(bundle: &Path, archive: &Path, root: &str) -> Result<()> {
         let contents = fs::read(&source).with_context(|| format!("read {}", source.display()))?;
         let mut header = tar::Header::new_gnu();
         header.set_size(contents.len() as u64);
-        header.set_mode(0o644);
+        header.set_mode(if relative.starts_with("bin/") {
+            0o755
+        } else {
+            0o644
+        });
         header.set_mtime(0);
         header.set_uid(0);
         header.set_gid(0);
@@ -751,7 +762,7 @@ mod tests {
         bundle.display().to_string()
     }
 
-    fn publish(dir: &Path, args: &[&str]) -> Result<()> {
+    fn publish(_dir: &Path, args: &[&str]) -> Result<()> {
         let owned: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
         world(&owned)
     }
@@ -781,6 +792,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let seed = seeded(dir.path());
         let source = bundle(dir.path());
+        let linux = format!("x86_64-unknown-linux-gnu={source}");
+        let windows = format!("x86_64-pc-windows-msvc={source}");
         let out = dir.path().join("out");
         publish(
             dir.path(),
@@ -789,10 +802,10 @@ mod tests {
                 "com.lait.issues",
                 "--version",
                 "0.1.0",
-                "--runtime",
-                "rt-abc",
                 "--bundle",
-                &source,
+                &linux,
+                "--bundle",
+                &windows,
                 "--channel",
                 "test",
                 "--base-url",
@@ -810,15 +823,14 @@ mod tests {
         let payload = open(&sealed, &pubkey).expect("the manifest opens under its own key");
         let manifest: serde_json::Value = serde_json::from_slice(&payload).expect("it parses");
         assert_eq!(manifest["bundles"]["com.lait.issues"], "0.1.0");
-        // One artifact per release. What a bundle runs against is stated in
-        // its own declaration, inside the payload and under the digest —
-        // never encoded in where the artifact is filed.
-        assert!(
-            manifest["artifacts"]["com.lait.issues"]["any"]["size"]
-                .as_u64()
-                .is_some_and(|size| size > 0),
-            "the manifest does not name one artifact for the release: {manifest}"
-        );
+        for target in ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"] {
+            assert!(
+                manifest["artifacts"]["com.lait.issues"][target]["size"]
+                    .as_u64()
+                    .is_some_and(|size| size > 0),
+                "the manifest does not name {target}: {manifest}"
+            );
+        }
     }
 
     #[test]
@@ -826,6 +838,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let seed = seeded(dir.path());
         let source = bundle_declaring(dir.path(), "com.lait.issues", "0.2.0-test.1");
+        let bundle = format!("x86_64-unknown-linux-gnu={source}");
         let error = publish(
             dir.path(),
             &[
@@ -833,10 +846,8 @@ mod tests {
                 "com.lait.issues",
                 "--version",
                 "0.2.0-test.1",
-                "--runtime",
-                "rt-abc",
                 "--bundle",
-                &source,
+                &bundle,
                 "--channel",
                 "stable",
                 "--base-url",
@@ -888,6 +899,7 @@ mod tests {
         let bare = dir.path().join("bare");
         fs::create_dir_all(&bare).expect("a bundle tree");
         fs::write(bare.join("index.html"), b"<html/>").expect("an entry document");
+        let bundle = format!("x86_64-unknown-linux-gnu={}", bare.display());
         let error = publish(
             dir.path(),
             &[
@@ -896,7 +908,7 @@ mod tests {
                 "--version",
                 "0.1.0",
                 "--bundle",
-                &bare.display().to_string(),
+                &bundle,
                 "--channel",
                 "test",
                 "--base-url",
@@ -917,6 +929,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let seed = seeded(dir.path());
         let source = bundle_declaring(dir.path(), "com.someone.else", "0.1.0");
+        let bundle = format!("x86_64-unknown-linux-gnu={source}");
         let error = publish(
             dir.path(),
             &[
@@ -925,7 +938,7 @@ mod tests {
                 "--version",
                 "0.1.0",
                 "--bundle",
-                &source,
+                &bundle,
                 "--channel",
                 "test",
                 "--base-url",

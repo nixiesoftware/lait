@@ -17,7 +17,7 @@
     )
 )]
 
-//! The launcher. lait is not a command surface — it is three processes.
+//! The host launcher. Product Worlds run as separately supervised processes.
 //!
 //! `lait daemon` is the identity-scoped host; `lait mcp` is the stdio head for
 //! an agent; bare `lait` starts the daemon and serves the HTTP head a browser
@@ -85,7 +85,7 @@ enum Mode {
     },
 }
 
-const USAGE: &str = "lait is not a command surface — it is three processes:\n\
+const USAGE: &str = "lait is not a command surface — it has three host modes:\n\
      \x20 lait daemon [--home <dir>]      the identity-scoped host\n\
      \x20 lait mcp                        the stdio head for an agent\n\
      \x20 lait [--json] [--port <n>] [--orbit <sel>] [--open] [--home <dir>]\n\
@@ -205,7 +205,16 @@ impl Mode {
                     identity: home.map(std::path::PathBuf::from),
                     store: None,
                 };
-                lait::daemon::run_lait_daemon(lait::world::packages(), selection).await
+                let identity = selection.identity_dir()?;
+                lait::world::installed::seed_carried(&identity)?;
+                let installation =
+                    lait::world::installed::load(&lait::serve::head::worlds_root(&identity))?;
+                lait::daemon::run_lait_daemon(
+                    installation.packages,
+                    installation.clients,
+                    selection,
+                )
+                .await
             }
             Mode::Mcp => {
                 let selection = Selection::default();
@@ -221,6 +230,8 @@ impl Mode {
                         Some(_) => anyhow::anyhow!(lait::host_client::no_store_here()),
                         None => error,
                     })?;
+                let identity = selection.identity_dir()?;
+                lait::world::installed::seed_carried(&identity)?;
                 lait::mcp::run_mcp(&home, selection).await
             }
             Mode::Serve {

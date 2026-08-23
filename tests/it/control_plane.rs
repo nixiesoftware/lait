@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -25,7 +26,6 @@ use issues::ids::SpaceId;
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, request_routed, subscribe, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [113u8; 32];
 
@@ -139,7 +139,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
 fn explicit_routes_cannot_cross_space_or_world_boundaries() {
     let net = MemNet::new();
     let home = temp_home("routes");
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
     let space = lait::orbital::discover_space(&home).single().unwrap();
     let address = OrbitAddress::for_store(&home, space.clone());
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
@@ -309,7 +309,7 @@ fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
 fn stale_since_after_restart_yields_reset() {
     let net = MemNet::new();
     let home = temp_home("stale");
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -390,7 +390,7 @@ fn stale_since_after_restart_yields_reset() {
 fn doorbell_names_the_dirty_project_and_doc() {
     let net = MemNet::new();
     let home = temp_home("dirty");
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -520,7 +520,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
 fn every_subscriber_sees_the_same_frame_for_one_commit() {
     let net = MemNet::new();
     let home = temp_home("fanout");
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -577,7 +577,7 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
 fn validate_then_commit_rings_no_doorbell() {
     let net = MemNet::new();
     let home = temp_home("reject");
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();

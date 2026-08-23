@@ -1,8 +1,9 @@
 //! Local `issue.verify/v1` handler.
 //!
-//! The first backend is trusted in-process Rust. It does not compile a
-//! repository. It records that the pinned source was present at Start and
-//! emits a self-describing report Runtime ingests as ordinary content.
+//! The first backend is trusted Rust running inside the supervised Issues
+//! runner. It does not compile a repository. It records that the pinned source
+//! was present at Start and emits a self-describing report Runtime ingests as
+//! ordinary content.
 
 use std::sync::Arc;
 
@@ -34,7 +35,10 @@ impl Handler for VerifyHandler {
         &self.binding
     }
 
-    fn handle(&self, context: &mut runtime::exec::Context<'_>) -> Result<Candidate, Failure> {
+    fn handle(
+        &self,
+        context: &mut dyn runtime::exec::HandlerContext,
+    ) -> Result<Candidate, Failure> {
         let input =
             VerifyInput::from_json(context.input_inline()).ok_or(Failure::InvalidOutcome)?;
         let source = context
@@ -54,7 +58,7 @@ impl Handler for VerifyHandler {
             build: hex(&context.build().as_bytes()),
             run: hex(&context.run().as_bytes()),
             attempt: hex(&context.attempt().as_bytes()),
-            note: "local in-process verifier bound the pinned source",
+            note: "runner-local verifier bound the pinned source",
         })
         .map_err(|_| Failure::InvalidOutcome)?;
         context.stage_output(report)?;

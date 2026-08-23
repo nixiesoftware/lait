@@ -7,11 +7,10 @@ import path from 'path';
 /**
  * The Signage application, served by a lait head (`lait --world signage`).
  *
- * Unlike the tracker viewer, this bundle is not compiled into the binary: a
- * head serves it from `<identity>/worlds/<world-id>/current/`, activated
- * ahead of the embedded floor (src/serve/head.rs), and it ships on the
- * World's own update channel. `npm run build` emits `dist/`; staging that
- * into a head's worlds directory is the dev loop.
+ * Like every World web client, this bundle is not compiled into the host. A
+ * head serves it only from the selected immutable Signage release, and it
+ * ships on the World's own update channel. `npm run build` emits `dist/`;
+ * staging that into a release directory is the dev loop.
  *
  * Dev runs two origins — vite on :3000, the engine on its own port — which
  * is exactly what `serve::auth` refuses. The proxy adapts (Host, Origin,

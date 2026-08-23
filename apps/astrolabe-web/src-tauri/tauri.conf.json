@@ -6,7 +6,7 @@
   "identifier": "dev.lait.astrolabe",
   "build": {
     "beforeDevCommand": "npm run stage-sidecar && npm run dev",
-    "beforeBuildCommand": "npm run stage-sidecar -- --bundle && npm run build",
+    "beforeBuildCommand": "npm run stage-bundle && npm run build",
     "devUrl": "http://127.0.0.1:5180",
     "frontendDist": "../dist"
   },
@@ -34,7 +34,8 @@
     "externalBin": ["binaries/lait"],
     "resources": {
       "../../../LICENSE": "LICENSE",
-      "../../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md"
+      "../../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+      "bundled-worlds/": "worlds/"
     },
     "icon": [
       "icons/32x32.png",

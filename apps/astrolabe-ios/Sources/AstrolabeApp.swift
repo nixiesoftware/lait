@@ -183,7 +183,7 @@ struct RootView: View {
     }
 }
 
-/// The per-World accent, derived locally from the compiled-in 0xRRGGBB seed.
+/// The per-World accent, derived locally from the signed declaration's 0xRRGGBB seed.
 extension Color {
     init(accent packed: UInt32?) {
         guard let packed else {

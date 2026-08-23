@@ -1836,7 +1836,17 @@ fn main() {
             astrolabe::client::update::identify_running_version(
                 app.package_info().version.to_string(),
             );
-            api::start(None, None).map_err(std::io::Error::other)?;
+            let worlds = app
+                .path()
+                .resource_dir()
+                .map_err(std::io::Error::other)?
+                .join("worlds");
+            api::start_with_worlds(
+                None,
+                None,
+                Some(worlds.to_string_lossy().into_owned()),
+            )
+            .map_err(std::io::Error::other)?;
             // Window creation hops to the main thread; every platform makes
             // windows there.
             let presenter = app.handle().clone();

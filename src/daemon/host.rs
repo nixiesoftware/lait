@@ -14,6 +14,7 @@
 //! enters through this endpoint first.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -140,9 +141,10 @@ impl Client {
     pub async fn subscribe_live(
         &self,
         route: ControlRoute,
-        issue: Option<String>,
+        world: String,
+        body: Option<[u8; 16]>,
     ) -> Result<control::LiveSubscription> {
-        control::subscribe_live_routed(&self.home, route, issue).await
+        control::subscribe_live_routed(&self.home, route, world, body).await
     }
 }
 
@@ -704,8 +706,8 @@ impl Listener {
                 self.stream_space(write_half, route, since).await;
                 Flow::Close
             }
-            (route @ ControlRoute::Orbit { .. }, Request::LiveSubscribe { issue }) => {
-                self.stream_live(write_half, route, issue).await;
+            (route @ ControlRoute::Orbit { .. }, Request::LiveSubscribe { world, body }) => {
+                self.stream_live(write_half, route, world, body).await;
                 Flow::Close
             }
             (ControlRoute::World { .. }, Request::Subscribe { .. }) => {
@@ -921,7 +923,8 @@ impl Listener {
         &self,
         mut write_half: tokio::io::WriteHalf<LocalStream>,
         route: ControlRoute,
-        issue: Option<String>,
+        world: String,
+        body: Option<[u8; 16]>,
     ) {
         let ControlRoute::Orbit { address } = &route else {
             return;
@@ -934,7 +937,7 @@ impl Listener {
             }
         };
         let mut subscription =
-            match control::subscribe_live_routed(&resolved.home, route, issue).await {
+            match control::subscribe_live_routed(&resolved.home, route, world, body).await {
                 Ok(subscription) => subscription,
                 Err(error) => {
                     let _ = write_line(&mut write_half, &Response::err(format!("{error:#}"))).await;
@@ -974,19 +977,27 @@ pub struct Daemon {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
     display: Arc<crate::display::DisplayRuntime>,
+    relaunch_requested: Arc<AtomicBool>,
 }
 
 impl Daemon {
-    fn new(router: Arc<Router>, home: &Path, device_seed: &[u8; 32]) -> Result<Self> {
+    fn new(
+        router: Arc<Router>,
+        clients: world_interface::WorldClientRegistry,
+        home: &Path,
+        device_seed: &[u8; 32],
+    ) -> Result<Self> {
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
+            clients,
             device_seed,
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
             display,
             router,
+            relaunch_requested: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1117,7 +1128,11 @@ impl Daemon {
         let router = self.router.clone();
         let worlds = crate::serve::head::worlds_root(router.catalog().identity());
         let stop = self.endpoint.subscribe_stop();
-        tokio::spawn(serve_world_upgrades(router, worlds, stop))
+        let relaunch = GenerationRelaunch {
+            requested: self.relaunch_requested.clone(),
+            endpoint: self.endpoint.clone(),
+        };
+        tokio::spawn(serve_world_upgrades(router, worlds, stop, relaunch))
     }
 
     /// Wait for the staging watcher to notice the stop signal, bounded so a
@@ -1146,10 +1161,30 @@ impl Daemon {
     }
 }
 
+#[derive(Clone)]
+struct GenerationRelaunch {
+    requested: Arc<AtomicBool>,
+    endpoint: Arc<Endpoint>,
+}
+
+impl GenerationRelaunch {
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.endpoint.begin_stop();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorldUpgradeAdvance {
+    Progressed,
+    Relaunch,
+}
+
 async fn serve_world_upgrades(
     router: Arc<Router>,
     worlds: PathBuf,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    relaunch: GenerationRelaunch,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1161,15 +1196,24 @@ async fn serve_world_upgrades(
                 }
             }
             _ = interval.tick() => {
-                if let Err(error) = advance_one_world_upgrade(router.clone(), worlds.clone()).await {
-                    tracing::warn!(%error, "could not advance a consented World update");
+                match advance_one_world_upgrade(router.clone(), worlds.clone()).await {
+                    Ok(WorldUpgradeAdvance::Relaunch) => {
+                        tracing::info!("World release staged; crossing the daemon generation boundary");
+                        relaunch.request();
+                        break;
+                    }
+                    Ok(WorldUpgradeAdvance::Progressed) => {}
+                    Err(error) => tracing::warn!(%error, "could not advance a consented World update"),
                 }
             }
         }
     }
 }
 
-async fn advance_one_world_upgrade(router: Arc<Router>, worlds: PathBuf) -> Result<()> {
+async fn advance_one_world_upgrade(
+    router: Arc<Router>,
+    worlds: PathBuf,
+) -> Result<WorldUpgradeAdvance> {
     let world_ids: Vec<_> = router.lifecycle_world_ids().cloned().collect();
     for world in world_ids {
         let world_name = world.as_str().to_owned();
@@ -1187,7 +1231,7 @@ async fn advance_one_world_upgrade(router: Arc<Router>, worlds: PathBuf) -> Resu
         };
         return advance_world_upgrade_job(router, worlds, world, job).await;
     }
-    Ok(())
+    Ok(WorldUpgradeAdvance::Progressed)
 }
 
 async fn advance_world_upgrade_job(
@@ -1195,13 +1239,45 @@ async fn advance_world_upgrade_job(
     worlds: PathBuf,
     world: replica::body::WorldId,
     mut job: crate::update::consent::Job,
-) -> Result<()> {
+) -> Result<WorldUpgradeAdvance> {
     use crate::update::consent::Phase;
+
+    // `current.json` can move while this daemon is running, but every Runtime
+    // Catalog and client adapter in this process is pinned to the release it
+    // launched. Only a fresh daemon may interpret the new descriptor. The
+    // durable phase is written before the old generation drains; the new
+    // generation recognizes its own release here and begins migrations from
+    // the first Space under the new implementation.
+    if job.phase == Phase::Relaunching {
+        let Some(staged) = job.staged_version.as_deref() else {
+            anyhow::bail!("World update entered relaunching without a staged release")
+        };
+        if router.world_release_version(&world) != Some(staged) {
+            return Ok(WorldUpgradeAdvance::Relaunch);
+        }
+        job.phase = Phase::Migrating;
+        job.current_orbit = None;
+        job.after_orbit = None;
+        job.completed_spaces = 0;
+        job.total_spaces = 0;
+        job.completed_records = 0;
+        job.remaining_records = None;
+        job.message = Some(format!(
+            "release {staged} is running; verifying every Space"
+        ));
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+            .await?;
+        return Ok(WorldUpgradeAdvance::Progressed);
+    }
 
     if job.staged_version.is_none() {
         let worlds_for_fetch = worlds.clone();
         let world_name = world.as_str().to_owned();
         let operation = job.operation;
+        let running_version = router.world_release_version(&world).map(str::to_owned);
         job = router
             .run_blocking(move || {
                 let Some(mut current) =
@@ -1232,8 +1308,15 @@ async fn advance_world_upgrade_job(
                         match outcome {
                             crate::update::world::Outcome::Staged { version }
                             | crate::update::world::Outcome::Current { version } => {
-                                current.staged_version = Some(version);
-                                current.phase = Phase::Migrating;
+                                current.staged_version = Some(version.clone());
+                                if running_version.as_deref() == Some(version.as_str()) {
+                                    current.phase = Phase::Migrating;
+                                } else {
+                                    current.phase = Phase::Relaunching;
+                                    current.message = Some(format!(
+                                        "release {version} selected; relaunching its daemon generation"
+                                    ));
+                                }
                             }
                             crate::update::world::Outcome::Unmet { version, why } => {
                                 current.phase = Phase::Refused;
@@ -1263,7 +1346,11 @@ async fn advance_world_upgrade_job(
                 Ok(current)
             })
             .await?;
-        return Ok(());
+        return Ok(if job.phase == Phase::Relaunching {
+            WorldUpgradeAdvance::Relaunch
+        } else {
+            WorldUpgradeAdvance::Progressed
+        });
     }
 
     let bindings = router.visible_orbit_ids_blocking().await?;
@@ -1287,7 +1374,7 @@ async fn advance_world_upgrade_job(
         router
             .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
             .await?;
-        return Ok(());
+        return Ok(WorldUpgradeAdvance::Progressed);
     };
     if job.current_orbit.is_none() {
         job.current_orbit = Some(orbit.clone());
@@ -1320,7 +1407,7 @@ async fn advance_world_upgrade_job(
             router
                 .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
                 .await?;
-            return Ok(());
+            return Ok(WorldUpgradeAdvance::Progressed);
         }
     };
     match step {
@@ -1366,7 +1453,7 @@ async fn advance_world_upgrade_job(
     router
         .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
         .await?;
-    Ok(())
+    Ok(WorldUpgradeAdvance::Progressed)
 }
 
 /// Reconcile a persisted cursor with the current exact set of World-bound
@@ -1416,9 +1503,14 @@ impl Runner {
     /// rather than re-read here: the daemon is the identity singleton, and a
     /// second read is a second chance to disagree about which identity is
     /// running.
-    pub(crate) fn start(home: PathBuf, router: Arc<Router>, device_seed: [u8; 32]) -> Result<Self> {
+    pub(crate) fn start(
+        home: PathBuf,
+        router: Arc<Router>,
+        clients: world_interface::WorldClientRegistry,
+        device_seed: [u8; 32],
+    ) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let daemon = Arc::new(Daemon::new(router, &home, &device_seed)?);
+        let daemon = Arc::new(Daemon::new(router, clients, &home, &device_seed)?);
         Ok(Self {
             home,
             daemon,
@@ -1430,6 +1522,10 @@ impl Runner {
         Stop {
             daemon: Arc::downgrade(&self.daemon),
         }
+    }
+
+    fn relaunch_requested(&self) -> Arc<AtomicBool> {
+        self.daemon.relaunch_requested.clone()
     }
 
     pub(crate) async fn run(self) -> Result<()> {
@@ -1457,6 +1553,7 @@ impl Runner {
 /// call.
 pub async fn run_lait_daemon(
     packages: WorldPackages,
+    clients: world_interface::WorldClientRegistry,
     selection: crate::config::Selection,
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
@@ -1473,7 +1570,8 @@ pub async fn run_lait_daemon(
         Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = Runner::start(home, router, device_seed)?;
+    let runner = Runner::start(home, router, clients, device_seed)?;
+    let relaunch_requested = runner.relaunch_requested();
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -1492,6 +1590,16 @@ pub async fn run_lait_daemon(
     // teardown, a blocking task that has not noticed — stays interruptible the
     // ordinary way.
     crate::process::restore_default_termination_signals();
+    if result.is_ok() && relaunch_requested.load(Ordering::Acquire) {
+        let executable =
+            std::env::current_exe().context("locate daemon executable for relaunch")?;
+        let home = selection.daemon_home()?;
+        let log = std::fs::File::create(crate::host_client::daemon_log_path(&home)).ok();
+        let identity = selection.self_contained_home();
+        crate::daemon_spawn::spawn(&executable, log, identity.as_deref())
+            .context("spawn the next World daemon generation")?
+            .reap();
+    }
     result
 }
 
@@ -1515,7 +1623,8 @@ enum Phase {
     Done = 3,
 }
 
-static SHUTDOWN_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static SHUTDOWN_PHASE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(Phase::Serving as u8);
 
 impl Phase {
     fn enter(self) {
@@ -1837,6 +1946,7 @@ pub(crate) fn runner_with_factory(
             factory,
             crate::world::packages(),
         )),
+        crate::world::client_packages().clone(),
         [0x5a; 32],
     )
 }
@@ -1908,7 +2018,9 @@ mod tests {
         let daemon_home = base.join("daemon");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&daemon_home).unwrap();
-        let (mechanics, _) = crate::orbital::form_space(&home, seed, "Host Test").unwrap();
+        let (mechanics, _) =
+            crate::orbital::form_space(&crate::world::packages(), &home, seed, "Host Test")
+                .unwrap();
         std::fs::write(
             home.join("secret.key"),
             data_encoding::HEXLOWER.encode(seed),

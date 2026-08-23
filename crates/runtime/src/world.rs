@@ -39,7 +39,7 @@ pub use crate::session::{
 /// A World-owned semantic rejection. These values are deterministic decisions
 /// about a well-bounded request or the World's declared contract; Runtime
 /// persistence, shutdown, and callback containment failures do not belong here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rejection {
     InvalidRequest,
     UnsupportedSchema,
@@ -75,7 +75,7 @@ pub enum Rejection {
 /// remedies differ: syncing, asking an admin for a grant, retrying, and
 /// widening a scoped grant are four different actions, and only a cause that
 /// survives to the rendering surface can name the right one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeniedCause {
     /// This device does not resolve to a member at the evaluated view —
     /// admission not yet converged to this node, membership revoked, or a
@@ -474,7 +474,7 @@ pub struct Query {
     /// extractor contract named here and never reinterprets the root with the
     /// ambient package. Callers reconciling an acknowledged local read image
     /// pass its full `WorldPublicationId` separately to `Session::query_at`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub publication: Option<crate::publication::PublicationId>,
 }
 
@@ -573,7 +573,7 @@ pub struct Projection {
     /// Runtime stamps the exact immutable read image after the World callback.
     /// Worlds return `None`; a Projection returned by Session always carries
     /// `Some`, including implementation, extractor, and local materialization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub publication: Option<crate::publication::WorldPublicationId>,
     /// The canonical read demand this query required (mandatory, non-empty).
     /// Runtime evaluates it at the pinned frontier and returns no projection
@@ -671,7 +671,7 @@ pub struct RoutedInvalidation {
 
 /// What a World may know about one content: enough to render it, and nothing
 /// that would let it reach the bytes without asking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentStatus {
     pub plaintext_len: u64,
     pub chunk_count: u32,
@@ -686,7 +686,7 @@ pub struct ContentStatus {
 /// output bytes or a handle to Runtime-owned Bodies. `Context::outcome` returns
 /// this only when the named Run and Attempt exist in the callback's pinned
 /// snapshot and the Attempt has exactly one valid `Returned` fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutcomeFacts {
     pub run: crate::exec::RunId,
     pub attempt: crate::exec::AttemptId,
@@ -711,7 +711,7 @@ impl ContentStatus {
 /// Safe coordinates for a failed exact Body read. The material digest is a
 /// one-way identity over the signed causal closure; no ArtifactRef, key epoch,
 /// opening key, plaintext, or store location crosses the World boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BodyReadCoordinate {
     pub body: BodyKey,
     pub material: Option<[u8; 32]>,
@@ -731,7 +731,7 @@ impl BodyReadCoordinate {
 /// create a new materialization (never make this exact publication silently
 /// readable), and corrupt authenticated material is an integrity fault rather
 /// than a missing domain record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BodyReadFailure {
     /// This callback was deliberately constructed without a Body projection
@@ -1025,9 +1025,9 @@ pub trait BodyReader {
 /// one World callback. Implementations never receive a Corpus or authority
 /// object: the capability is already pinned to an immutable publication and
 /// its principal gates, and every call re-enters Runtime's bounded evaluator.
-pub(crate) trait FindLease: Send + Sync {}
+pub trait FindLease: Send + Sync {}
 
-pub(crate) trait FindReader: Send + Sync {
+pub trait FindReader: Send + Sync {
     fn publication(&self) -> crate::publication::WorldPublicationId;
     fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure>;
     fn acquire_deferred(&self) -> Result<Arc<dyn FindLease>, crate::find::Failure>;
@@ -1041,8 +1041,22 @@ pub(crate) trait FindReader: Send + Sync {
 /// work. Product workers must acquire this before queueing or scanning facts;
 /// successful artifacts convert it into a retained lease.
 pub struct AnalyticalMemoryReservation {
-    inner: Option<crate::session::AnalyticalBuildReservation>,
+    inner: Option<AnalyticalReservationInner>,
 }
+
+enum AnalyticalReservationInner {
+    Runtime(crate::session::AnalyticalBuildReservation),
+    Hosted(Box<dyn HostedAnalyticalMemoryReservation>),
+}
+
+pub trait HostedAnalyticalMemoryReservation: Send {
+    fn retain(
+        self: Box<Self>,
+        retained_bytes: u64,
+    ) -> Result<Box<dyn HostedAnalyticalMemoryLease>, crate::find::Failure>;
+}
+
+pub trait HostedAnalyticalMemoryLease: Send + Sync {}
 
 impl std::fmt::Debug for AnalyticalMemoryReservation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1054,7 +1068,16 @@ impl std::fmt::Debug for AnalyticalMemoryReservation {
 
 impl AnalyticalMemoryReservation {
     pub(crate) fn new(inner: crate::session::AnalyticalBuildReservation) -> Self {
-        Self { inner: Some(inner) }
+        Self {
+            inner: Some(AnalyticalReservationInner::Runtime(inner)),
+        }
+    }
+
+    /// Construct a reservation backed by an out-of-process host capability.
+    pub fn hosted(inner: Box<dyn HostedAnalyticalMemoryReservation>) -> Self {
+        Self {
+            inner: Some(AnalyticalReservationInner::Hosted(inner)),
+        }
     }
 
     /// Convert transient worker capacity into exact retained artifact bytes.
@@ -1064,19 +1087,41 @@ impl AnalyticalMemoryReservation {
         mut self,
         retained_bytes: u64,
     ) -> Result<AnalyticalMemoryLease, crate::find::Failure> {
-        self.inner
+        match self
+            .inner
             .take()
             .ok_or(crate::find::Failure::CursorCapacityExceeded)?
-            .retain(retained_bytes)
-            .map(|inner| AnalyticalMemoryLease { _inner: inner })
-            .map_err(|_| crate::find::Failure::CursorCapacityExceeded)
+        {
+            AnalyticalReservationInner::Runtime(inner) => inner
+                .retain(retained_bytes)
+                .map(|inner| AnalyticalMemoryLease {
+                    _inner: AnalyticalLeaseInner::Runtime(inner),
+                })
+                .map_err(|_| crate::find::Failure::CursorCapacityExceeded),
+            AnalyticalReservationInner::Hosted(inner) => {
+                inner
+                    .retain(retained_bytes)
+                    .map(|inner| AnalyticalMemoryLease {
+                        _inner: AnalyticalLeaseInner::Hosted(inner),
+                    })
+            }
+        }
     }
 }
 
 /// Physical-memory authority retained beside one immutable analytical artifact.
 /// Clone the artifact, not this lease; the cache entry is its single owner.
 pub struct AnalyticalMemoryLease {
-    _inner: crate::session::AnalyticalRetainedLease,
+    _inner: AnalyticalLeaseInner,
+}
+
+#[allow(
+    dead_code,
+    reason = "both variants are RAII guards retained until the lease drops"
+)]
+enum AnalyticalLeaseInner {
+    Runtime(crate::session::AnalyticalRetainedLease),
+    Hosted(Box<dyn HostedAnalyticalMemoryLease>),
 }
 
 impl std::fmt::Debug for AnalyticalMemoryLease {
@@ -1115,6 +1160,11 @@ impl FindHandle {
             reader,
             _deferred_lease: None,
         }
+    }
+
+    /// Construct a handle backed by a runner-owned capability adapter.
+    pub fn hosted(reader: Arc<dyn FindReader>) -> Self {
+        Self::new(reader)
     }
 
     fn deferred(&self) -> Result<Self, crate::find::Failure> {
@@ -1168,6 +1218,16 @@ impl<'a> ExtractionContext<'a> {
             world,
             publication,
         }
+    }
+
+    /// Reconstruct a principal-neutral extraction capability in a trusted
+    /// first-party World runner.
+    pub fn from_runner(
+        reads: &'a dyn BodyReader,
+        world: &'a WorldId,
+        publication: crate::publication::WorldPublicationId,
+    ) -> Self {
+        Self::new(reads, world, publication)
     }
 
     pub fn manifest_root(&self) -> [u8; 32] {
@@ -1239,13 +1299,22 @@ pub struct Context<'a> {
     lifecycle_source: Option<LifecycleSourceCoordinate>,
 }
 
+/// Which callback capabilities a host placed in a Context. This reveals only
+/// presence, never the underlying authority-bearing handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerCapabilities {
+    pub reads: bool,
+    pub lifecycle_reads: bool,
+    pub find: bool,
+}
+
 /// Exact, immutable source admitted for one composition-owned lifecycle step.
 ///
 /// `publication.publication` is portable across Station activations; the full
 /// `publication` coordinate pins one local materialization for this callback.
 /// `frontier` lets the product bind its deterministic plan to the same causal
 /// cut instead of silently scanning a moving current snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleSourceCoordinate {
     pub publication: crate::publication::WorldPublicationId,
     pub frontier: replica::frontier::ReplicaFrontier,
@@ -1289,6 +1358,43 @@ impl<'a> Context<'a> {
             find: None,
             lifecycle_upgrade: false,
             lifecycle_source: None,
+        }
+    }
+
+    /// Reconstruct the exact capability envelope a host supplied to a trusted
+    /// first-party World runner. Authority and commit remain in the host; this
+    /// constructor only restores the read/query facade on the process side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_runner(
+        principal: &'a PrincipalFacts,
+        reads: Option<&'a dyn BodyReader>,
+        lifecycle_reads: Option<&'a dyn BodyReader>,
+        world: Option<&'a WorldId>,
+        request: Option<crate::action::RequestId>,
+        manifest_root: [u8; 32],
+        world_publication: Option<crate::publication::WorldPublicationId>,
+        find: Option<FindHandle>,
+        lifecycle_source: Option<LifecycleSourceCoordinate>,
+    ) -> Self {
+        Self {
+            principal,
+            reads,
+            lifecycle_reads,
+            outcome_world: world,
+            request,
+            manifest_root,
+            world_publication,
+            find,
+            lifecycle_upgrade: lifecycle_source.is_some(),
+            lifecycle_source,
+        }
+    }
+
+    pub fn runner_capabilities(&self) -> RunnerCapabilities {
+        RunnerCapabilities {
+            reads: self.reads.is_some(),
+            lifecycle_reads: self.lifecycle_reads.is_some(),
+            find: self.find.is_some(),
         }
     }
 

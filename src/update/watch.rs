@@ -341,7 +341,9 @@ fn below_floor(resolved: &feed::Resolved, current: &semver::Version) -> bool {
 /// is the same "applied at a boundary" rule the client tree follows.
 fn check_worlds(identity: &Path, channel: feed::Channel) {
     let worlds = crate::serve::head::worlds_root(identity);
-    for (world, _, _) in crate::composition::bundled_world_surfaces() {
+    let installed = crate::world::installed::declarations(&worlds).unwrap_or_default();
+    for declaration in installed {
+        let world = declaration.manifest.id;
         match super::world::check(&world, &worlds, channel) {
             Ok(outcome) => {
                 // Recorded, not only logged. A World is published in seconds

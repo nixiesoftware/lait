@@ -123,8 +123,7 @@ jobs:
         run: npm test
         working-directory: receivers/roku
 
-  # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
-  # src/serve/assets because `include_dir!` embeds it at compile time and
+  # Astrolabe's TypeScript client is independent of the World web clients.
   # The Astrolabe client. It had no gate at all — 19k lines, and neither half
   # was compiled, typechecked or tested by anything. What that cost was visible:
   # `src-tauri` is not a workspace member, so `cargo check --workspace` never
@@ -252,10 +251,10 @@ jobs:
         run: npm run build
         working-directory: viewer
 
-      - name: Assert the committed bundle is what viewer/ builds
+      - name: Assert the committed Issues bundle is what viewer/ builds
         run: |
-          if ! git diff --exit-code --stat -- src/serve/assets; then
-            echo "::error::src/serve/assets is stale — run 'npm run build' in viewer/ and commit the result."
+          if ! git diff --exit-code --stat -- products/issues-app/assets/web; then
+            echo "::error::the Issues web release is stale — run 'npm run build' in viewer/ and commit the result."
             exit 1
           fi
 

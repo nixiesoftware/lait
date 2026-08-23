@@ -832,7 +832,13 @@ mod end_to_end {
         let dir = std::env::temp_dir().join(format!("lait-serve-content-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        crate::orbital::form_space(&dir, &FOUNDER_SEED, "Serve Content").unwrap();
+        crate::orbital::form_space(
+            &crate::world::packages(),
+            &dir,
+            &FOUNDER_SEED,
+            "Serve Content",
+        )
+        .unwrap();
         let space = crate::orbital::discover_space(&dir).single().unwrap();
 
         let net = comms::mem::MemNet::new();
@@ -844,6 +850,7 @@ mod end_to_end {
                     station_home,
                     FOUNDER_SEED,
                     &MemFactory(net),
+                    crate::world::packages(),
                 )
                 .await;
             });
@@ -868,8 +875,9 @@ mod end_to_end {
             last_opened: 0,
         };
         let app = Arc::new(App {
-            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
-            head: crate::serve::head::Source::embedded(),
+            world: crate::world::ISSUES_MOUNT.to_owned(),
+            registry: Arc::new(crate::world::client_packages().clone()),
+            head: crate::serve::head::Source::unavailable(),
             selection: crate::config::Selection::default(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::with_entries(dir.clone(), dir.clone(), true, vec![entry]),

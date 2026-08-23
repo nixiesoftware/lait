@@ -1574,12 +1574,12 @@ export type Request =
   | { cmd: "seed_list" }
   | { cmd: "log"; since: number }
   | { cmd: "who" }
-  /** Who is doing what right now. `since_generation` is the generation the
+  /** Product-neutral transient state. `since_generation` is the generation the
    *  caller already holds — the reply is `live_unchanged` while it stands.
    *  Omit it on the first read: generation starts at zero, so sending zero is
-   *  indistinguishable from holding an empty table. `issue` is an `iss_` doc
-   *  id and narrows to that issue's presence. */
-  | { cmd: "live"; since_generation?: number | null; issue?: string | null }
+   *  indistinguishable from holding an empty table. World clients resolve
+   *  product coordinates to the optional 128-bit Body id. */
+  | { cmd: "live"; world: string; since_generation?: number | null; body?: number[] | null }
   /** Drains. Every signal is answered once, so two callers on one space take
    *  half each — a browser and an agent must not both poll it. */
   | { cmd: "signals" };

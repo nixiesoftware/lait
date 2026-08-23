@@ -33,11 +33,7 @@ fn world_registry(packages: &WorldPackages) -> Result<Catalog> {
 
 /// Apply the product-supplied founder policy through the generic Mechanics
 /// authority host.
-pub fn seed_founder_policy(mechanics: &SpaceAuthority) -> Result<()> {
-    seed_founder_policies(mechanics, &crate::world::packages())
-}
-
-fn seed_founder_policies(mechanics: &SpaceAuthority, packages: &WorldPackages) -> Result<()> {
+pub fn seed_founder_policy(mechanics: &SpaceAuthority, packages: &WorldPackages) -> Result<()> {
     for (world, implementation, version, grants) in packages.founder_policies()? {
         mechanics.activate_implementation(world.as_str(), implementation, version)?;
         for grant in grants {
@@ -56,16 +52,18 @@ pub fn read_bootstrap_record(
 }
 
 pub fn form_space(
+    packages: &WorldPackages,
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
 ) -> Result<(SpaceAuthority, runtime::coordinates::SignedCoordinates)> {
-    form_space_with_scopes(home, device_seed, display_name, Vec::new())
+    form_space_with_scopes(packages, home, device_seed, display_name, Vec::new())
 }
 
 /// Form or resume the generic orbital footprint, then hand each package its
 /// own docked Session for product bootstrap.
 fn form_space_with_scopes(
+    packages: &WorldPackages,
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
@@ -86,12 +84,11 @@ fn form_space_with_scopes(
         SpaceStore::Several => return Err(ambiguous_home(home)),
     };
 
-    let packages = crate::world::packages();
-    seed_founder_policies(&mechanics, &packages)?;
+    seed_founder_policy(&mechanics, packages)?;
 
     let runtime = Runtime::open(
         root.clone(),
-        world_registry(&packages)?,
+        world_registry(packages)?,
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
@@ -155,10 +152,11 @@ fn form_space_with_fault(
         SpaceStore::Several => return Err(ambiguous_home(home)),
     };
 
-    seed_founder_policy(&mechanics)?;
+    let packages = crate::world::packages();
+    seed_founder_policy(&mechanics, &packages)?;
     let runtime = Runtime::open(
         root.clone(),
-        world_registry(&crate::world::packages())?,
+        world_registry(&packages)?,
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
@@ -188,16 +186,18 @@ fn form_space_with_fault(
 }
 
 pub fn found_space(
+    packages: &WorldPackages,
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
 ) -> Result<(mechanics::ids::SpaceId, crate::orbits::ProjectBrief)> {
-    let initial_scopes = crate::world::packages().initial_scopes(display_name);
+    let initial_scopes = packages.initial_scopes(display_name);
     let primary = initial_scopes
         .first()
         .map(|(_, scope)| scope.clone())
-        .ok_or_else(|| anyhow::anyhow!("no bundled World declares an initial scope"))?;
-    let (mechanics, _) = form_space_with_scopes(home, device_seed, display_name, initial_scopes)?;
+        .ok_or_else(|| anyhow::anyhow!("no selected World declares an initial scope"))?;
+    let (mechanics, _) =
+        form_space_with_scopes(packages, home, device_seed, display_name, initial_scopes)?;
     Ok((
         mechanics.space(),
         crate::orbits::ProjectBrief {
@@ -210,6 +210,7 @@ pub fn found_space(
 /// Enter and materialize an Orbit. No Issues bootstrap runs for a joiner; its
 /// product state arrives through convergence after admission.
 pub fn enter_space(
+    packages: &WorldPackages,
     home: &Path,
     device_seed: &[u8; 32],
     invite_link: &str,
@@ -223,7 +224,7 @@ pub fn enter_space(
     let mechanics = SpaceAuthority::enter(&root, device_seed, &coordinates)?;
     let runtime = Runtime::open(
         root,
-        world_registry(&crate::world::packages())?,
+        world_registry(packages)?,
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
@@ -325,7 +326,13 @@ mod tests {
                 }
             }
 
-            let (mechanics, _) = form_space(&home, &FOUNDER_SEED, "Fault Space").expect("resume");
+            let (mechanics, _) = form_space(
+                &crate::world::packages(),
+                &home,
+                &FOUNDER_SEED,
+                "Fault Space",
+            )
+            .expect("resume");
             let complete = read_bootstrap_record(&home, &space).expect("complete record");
             assert_eq!(complete.phase, BootstrapPhase::Complete);
             if let Some(record) = interrupted {
@@ -337,8 +344,13 @@ mod tests {
                 );
             }
             assert_eq!(snapshot_projects(&home, &mechanics), 1);
-            let (reopened, _) =
-                form_space(&home, &FOUNDER_SEED, "Fault Space").expect("idempotent resume");
+            let (reopened, _) = form_space(
+                &crate::world::packages(),
+                &home,
+                &FOUNDER_SEED,
+                "Fault Space",
+            )
+            .expect("idempotent resume");
             assert_eq!(snapshot_projects(&home, &reopened), 1);
             let _ = std::fs::remove_dir_all(home);
         }

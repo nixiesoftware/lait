@@ -202,7 +202,8 @@ pub struct App {
     stale: Option<StaleReason>,
     /// The background half said no snapshot is ever coming. Ends "loading"
     /// without pretending anything was read: a window over a system that is
-    /// not there draws what is compiled in, plus the failure that says why.
+    /// not there draws the passively read install list, plus the failure that
+    /// says why.
     unstartable: bool,
     /// The staged image this client spawns from, when one was staged. Carries
     /// whether the source was rebuilt since — the fact behind the
@@ -801,7 +802,7 @@ mod tests {
 
     /// A start that failed is not a slow start. The background half says no
     /// snapshot is ever coming, and loading ends — with the failure standing
-    /// beside whatever is compiled in — instead of a skeleton that waits
+    /// beside whatever signed manifests were read — instead of a skeleton that waits
     /// forever on a system that is not there.
     #[test]
     fn a_start_that_failed_stops_reading_as_loading() {

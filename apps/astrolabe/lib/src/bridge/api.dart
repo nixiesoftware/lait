@@ -1937,7 +1937,7 @@ class SuggestionRow {
           handles == other.handles;
 }
 
-/// The artwork one World ships, as PNG bytes compiled into this build.
+/// The artwork one selected World release ships, as bounded PNG bytes.
 ///
 /// Not part of [`LibraryRow`], and the omission is the design: see
 /// [`world_artwork`]. Both halves are optional and their absence is a real
@@ -2021,12 +2021,12 @@ class WorldPersonRow {
 
 /// A World's channel, as this machine last found it.
 ///
-/// Separate from the row's compiled-in fields because the two are different
-/// kinds of fact: the list is the install list and cannot go stale, this is
-/// measured and can. Keeping them apart is what stops the Library becoming a
-/// surface that probes to draw itself.
+/// Separate from the row's signed declaration because the two are different
+/// kinds of fact: the list is the selected install list, while this is measured
+/// and can. Keeping them apart is what stops the Library becoming a surface
+/// that probes to draw itself.
 class WorldUpdateRow {
-  /// The bundle version serving now. `None` is the embedded floor.
+  /// The bundle version serving now. `None` means no valid release is selected.
   final String? serving;
 
   /// The version the channel named when it was last asked.

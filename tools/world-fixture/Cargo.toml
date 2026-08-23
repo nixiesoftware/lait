@@ -1,0 +1,11 @@
+[package]
+name = "world-fixture"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+world-runner = { path = "../../crates/world-runner" }

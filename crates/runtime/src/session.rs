@@ -43,7 +43,7 @@ use crate::world::{
 };
 
 /// A concurrency or idempotency conflict observed while a Session commits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Conflict {
     AuthorityChanged,
     Request,
@@ -55,7 +55,7 @@ pub enum Conflict {
 /// World-owned decisions remain visibly nested under `Rejected`; host
 /// interruption, concurrency, callback containment, and durability are not
 /// allowed to masquerade as World decisions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Failure {
     Rejected(Rejection),
     Conflict(Conflict),
@@ -63,7 +63,7 @@ pub enum Failure {
     Persistence,
     /// Durable derived state failed with a concrete operation and cause.
     PersistenceCause {
-        operation: &'static str,
+        operation: String,
         reason: String,
     },
     /// The authoritative journal commit crossed a point where durability could
@@ -207,7 +207,7 @@ pub struct AffectedWorldPublication {
 /// An identical replay of the same request returns the identical
 /// `CommittedEffect` without reapplying anything; invalidation delivery is the
 /// job of [`Session::observe`], not of this return value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedEffect {
     /// The signed persistent operation coordinate whose durable receipt this
     /// effect represents. Human and agent access paths receive this same value,
@@ -225,7 +225,7 @@ pub struct CommittedEffect {
 /// Durable result material recovered by the read-only operation-status path.
 /// It is authoritative even when this activation cannot currently construct
 /// the exact World read image needed to render it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableOperationReceipt {
     pub operation: [u8; 16],
     pub payload_hash: [u8; 32],
@@ -238,7 +238,7 @@ pub struct DurableOperationReceipt {
 
 /// Local readiness of the semantic publication named by a durable receipt.
 /// Only `Ready` supplies an address that may be passed to `query_at`/`find_at`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationPublication {
     Ready(crate::publication::WorldPublicationId),
     Building,
@@ -261,7 +261,7 @@ pub enum LifecycleSourceStatus {
 }
 
 /// Read-only reconciliation of one persistent idempotency coordinate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationStatus {
     Absent,
     Found {
@@ -3635,7 +3635,7 @@ fn read_failure(failure: crate::exec::ReadFailure) -> Failure {
     match failure {
         crate::exec::ReadFailure::Invalid(invalid) => Failure::Rejected(exec_invalid(invalid)),
         crate::exec::ReadFailure::Body(body) => Failure::PersistenceCause {
-            operation: "read reserved Exec state",
+            operation: "read reserved Exec state".into(),
             reason: format!("{body:?}"),
         },
     }
@@ -4544,10 +4544,13 @@ fn commit_failure(error: replica::transaction::commit::Failure) -> Failure {
         }
         replica::transaction::commit::Failure::IntegrityCause {
             operation, reason, ..
-        } => Failure::PersistenceCause { operation, reason },
+        } => Failure::PersistenceCause {
+            operation: operation.into(),
+            reason,
+        },
         replica::transaction::commit::Failure::NeedsSemanticMigration { bodies } => {
             Failure::PersistenceCause {
-                operation: "open exact Body generation",
+                operation: "open exact Body generation".into(),
                 reason: format!(
                     "{bodies} legacy Body image(s) require the composition-owned migration step"
                 ),
@@ -4582,7 +4585,7 @@ fn query_publication_failure(error: crate::find::Failure) -> Failure {
         }
         crate::find::Failure::CursorCapacityExceeded => Failure::ReadCapacity,
         other => Failure::PersistenceCause {
-            operation: "resolve exact World query publication",
+            operation: "resolve exact World query publication".into(),
             reason: format!("{other:?}"),
         },
     }
@@ -4623,7 +4626,7 @@ fn session_publication_failure(error: PublicationFailure, operation: &'static st
         } => Failure::Rejected(Rejection::BodyRead(failure)),
         cause @ (PublicationFailure::Extractor { .. } | PublicationFailure::Corpus) => {
             Failure::PersistenceCause {
-                operation,
+                operation: operation.into(),
                 reason: format!("{cause:?}"),
             }
         }
@@ -5868,7 +5871,7 @@ impl Session {
     /// frontier are re-resolved through the mechanics view, so dock-time facts
     /// never outlive the authority state. Denied when the device no longer
     /// resolves.
-    fn fresh_principal(&self) -> Result<PrincipalFacts, Rejection> {
+    pub(crate) fn fresh_principal(&self) -> Result<PrincipalFacts, Rejection> {
         let resolution = self
             .authority
             .resolve(&self.principal.device)
@@ -9968,7 +9971,7 @@ impl Session {
             inner
                 .lease_world_publication(self.world_id.clone(), publication.clone())
                 .map_err(|_| Failure::PersistenceCause {
-                    operation: "retain World query Find cursor publication",
+                    operation: "retain World query Find cursor publication".into(),
                     reason: "Station cursor retention capacity exceeded".into(),
                 })?;
         }

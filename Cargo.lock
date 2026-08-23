@@ -348,6 +348,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+ "world-interface",
 ]
 
 [[package]]
@@ -371,11 +372,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lait",
+ "lait-issues",
+ "lait-issues-app",
+ "lait-signage",
+ "lait-signage-app",
  "runtime",
  "tempfile",
  "tokio",
  "tracing",
  "uniffi",
+ "world-interface",
 ]
 
 [[package]]
@@ -3202,25 +3208,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3740,7 +3727,6 @@ dependencies = [
  "getrandom 0.3.4",
  "hyper",
  "hyper-util",
- "include_dir",
  "interprocess",
  "lait-directory",
  "lait-issues",
@@ -3780,6 +3766,8 @@ dependencies = [
  "ureq",
  "windows-sys 0.61.2",
  "world-interface",
+ "world-runner",
+ "world-sdk",
  "zip",
 ]
 
@@ -3809,7 +3797,6 @@ dependencies = [
  "blake3",
  "data-encoding",
  "flate2",
- "lait",
  "mechanics",
  "semver",
  "serde",
@@ -3857,6 +3844,19 @@ dependencies = [
  "typst",
  "typst-html",
  "world-interface",
+ "world-sdk",
+]
+
+[[package]]
+name = "lait-issues-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lait-issues",
+ "lait-issues-app",
+ "runtime",
+ "world-runner",
+ "world-sdk",
 ]
 
 [[package]]
@@ -3909,6 +3909,7 @@ dependencies = [
 name = "lait-signage-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "font8x8",
  "image",
  "lait-signage",
@@ -3920,6 +3921,18 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "world-interface",
+ "world-sdk",
+]
+
+[[package]]
+name = "lait-signage-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lait-signage",
+ "lait-signage-app",
+ "world-runner",
+ "world-sdk",
 ]
 
 [[package]]
@@ -8887,6 +8900,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "world-fixture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "world-runner",
+]
+
+[[package]]
 name = "world-interface"
 version = "0.7.8"
 dependencies = [
@@ -8898,6 +8919,51 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tracing",
+]
+
+[[package]]
+name = "world-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "libc",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "world-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ciborium",
+ "fabric",
+ "futures-lite",
+ "mechanics",
+ "replica",
+ "runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "world-interface",
+ "world-runner",
+]
+
+[[package]]
+name = "world-semantic-fixture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "replica",
+ "runtime",
+ "world-runner",
+ "world-sdk",
 ]
 
 [[package]]

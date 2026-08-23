@@ -29,7 +29,7 @@ use std::time::Duration;
 use lait::config::{self, Selection};
 use lait::control::{self, OrbitAddress, Probe, Request, Response};
 use lait::daemon::Client;
-use lait::{orbital, serve, world};
+use lait::{orbital, serve};
 use runtime::coordinates::SignedCoordinates;
 
 pub(crate) struct Node {
@@ -207,8 +207,12 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
     {
         let sel = selection.clone();
         let failure = daemon_failure.clone();
+        let installation = crate::worlds::installation()?;
         rt.spawn(async move {
-            if let Err(error) = lait::daemon::run_lait_daemon(world::packages(), sel).await {
+            if let Err(error) =
+                lait::daemon::run_lait_daemon(installation.packages, installation.clients, sel)
+                    .await
+            {
                 *failure.lock().expect("daemon failure slot") = Some(format!("{error:#}"));
             }
         });
@@ -250,6 +254,7 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
 fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Result<HeadUp> {
     let (tx, rx) = mpsc::channel();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let registry = crate::worlds::client_packages()?;
     let drained = rt.spawn(async move {
         let announce = move |ready: &serve::Ready| {
             let _ = tx.send(ready.clone());
@@ -266,7 +271,7 @@ fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Res
         //
         // One World at a time is the deliberate mobile shape, and pinning it to
         // this one is safe *only while nothing on the phone can ask for
-        // another*: the shell already lists every bundled World, and opening
+        // another*: the shell already lists every platform-supplied World, and opening
         // them is CLIENT-58, still unbuilt. When that lands, this constant
         // becomes a shell that offers a World its head refuses.
         //
@@ -275,8 +280,19 @@ fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Res
         // re-authenticate against a new announcement. Serving a different World
         // is that same transition with a different pin — still one head, still
         // one at a time.
-        let world = Some(lait::composition::PRODUCT_WORLD_MOUNT.to_owned());
-        if let Err(error) = serve::run_until(0, false, selection, world, announce, shutdown).await {
+        let world = Some(crate::worlds::primary_mount().to_owned());
+        if let Err(error) = serve::run_embedded_until(
+            0,
+            false,
+            selection,
+            world,
+            registry,
+            serve::head::Source::unavailable(),
+            announce,
+            shutdown,
+        )
+        .await
+        {
             tracing::error!(%error, "in-process head exited");
         }
     });
@@ -606,6 +622,7 @@ pub fn mint_invite(space_path: String) -> InviteOutcome {
     };
     let route = control::station_route(OrbitAddress::for_store(&path, space_id));
     let request = Request::Invite {
+        world: None,
         role: None,
         reusable: false,
         ttl_hours: None,

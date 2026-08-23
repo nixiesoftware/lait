@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use issues::contract::{self, IssueIntent, IssueQuery};
 use issues::dto::IssueView;
+use issues::IssuesWorld;
 use lait::orbital::SpaceAuthority;
-use lait::world::contract::{self, IssueIntent, IssueQuery};
-use lait::world::IssuesWorld;
 use replica::convergence::AuthorityIncorporator;
 use runtime::{
     plane::contact::Authority, plane::Activation, plane::CommsOptions, world::Builder,
@@ -160,7 +160,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     // The founder product-authority bootstrap the CLI composition root runs:
     // activate the IssuesWorld implementation + grant the founder Space caps,
     // so its own admin/contributor submits are authorized.
-    lait::orbital::seed_founder_policy(&mech_f).unwrap();
+    crate::world_fixture::seed_founder_policy(&mech_f).unwrap();
     assert!(mech_f.am_i_member(), "the founder holds standing at birth");
     let (_rt_f, station_f) = activate(&root_f, FOUNDER_SEED, &mech_f, &coords, t_founder);
     let session_f = dock(&station_f, &FOUNDER_SEED);
@@ -171,7 +171,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     submit(
         &session_f,
         &FOUNDER_SEED,
-        &lait::world::contract::initialize_tracker_intent(
+        &issues::contract::initialize_tracker_intent(
             "Joined Space",
             1,
             &project,
@@ -239,7 +239,13 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
         .unwrap()
         .as_secs();
     let admission = mech_f
-        .mint_admission(&FOUNDER_SEED, 3600, true, now, "contributor", [0u8; 32])
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            true,
+            now,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
         .unwrap();
     let invite = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Joined Space", vec![], Some(admission))

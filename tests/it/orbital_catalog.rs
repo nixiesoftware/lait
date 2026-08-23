@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lait::world::contract;
+use issues::contract;
 use runtime::{world::Context, world::Query, world::Rejection, world::World};
 
 const FOUNDER_SEED: [u8; 32] = [71u8; 32];
@@ -26,8 +26,8 @@ fn temp_home(tag: &str) -> PathBuf {
 fn the_catalog_identity_is_deterministic_per_space() {
     let home_a = temp_home("det-a");
     let home_b = temp_home("det-b");
-    let (mech_a, _c) = lait::orbital::form_space(&home_a, &FOUNDER_SEED, "A").unwrap();
-    let (mech_b, _c) = lait::orbital::form_space(&home_b, &[72u8; 32], "B").unwrap();
+    let (mech_a, _c) = crate::world_fixture::form_space(&home_a, &FOUNDER_SEED, "A").unwrap();
+    let (mech_b, _c) = crate::world_fixture::form_space(&home_b, &[72u8; 32], "B").unwrap();
     let key_a = contract::catalog_key(&mech_a.space());
     // Recomputation is stable.
     assert_eq!(key_a, contract::catalog_key(&mech_a.space()));
@@ -109,7 +109,7 @@ fn principal(space: &mechanics::ids::SpaceId) -> runtime::world::PrincipalFacts 
     }
 }
 
-fn structure_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result<(), Rejection> {
+fn structure_query(world: &issues::IssuesWorld, ctx: &Context<'_>) -> Result<(), Rejection> {
     world
         .query(
             ctx,
@@ -126,7 +126,7 @@ fn structure_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Resul
 #[test]
 fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     let space = mechanics::ids::SpaceId::mint(&mechanics::ids::SystemUlidSource);
-    let world = lait::world::IssuesWorld::migrator();
+    let world = issues::IssuesWorld::migrator();
     let facts = principal(&space);
     let right = contract::catalog_key(&space);
     let wrong = replica::body::BodyKey::new(

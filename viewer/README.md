@@ -1,7 +1,8 @@
 # lait's web client
 
 A keyboard-first board over the local control plane. This directory builds into
-`../src/serve/assets`, which the binary embeds and serves.
+`../products/issues-app/assets/web`, which is packaged with the independently
+shipped Issues World release.
 
 If you are extending lait — a theme, extra commands, a different frontend against the
 same control plane — this is the reference. The whole client is a **projection of a
@@ -56,36 +57,29 @@ stop meaning anything.
 So the guard never relaxes. The **dev proxy** adapts instead
 (`vite.config.ts`): it strips the browser's `Origin`, and presents the run's token as
 a bearer credential the cross-origin cookie jar cannot supply. Production ships with
-no dev flag in the binary at all — the client is same-origin because the engine serves
-it, which is the precondition for the whole guard.
+no dev flag in the release at all — the client is same-origin because the World head
+serves it, which is the precondition for the whole guard.
 
 ## The production path
 
-`npm run build` writes the bundle straight into `../src/serve/assets`, and **that
-directory is committed to git.** This looks wrong until three facts line up:
-
-- `Cargo.toml` excludes `viewer/` from the published crate.
-- `build.rs` never shells out to a JS toolchain, so `cargo install lait` stays
-  reproducible with only Rust.
-- `src/serve/shell.rs` embeds the bundle with `include_dir!` at **compile time**.
-
-So the bundle cannot be built during `cargo build` (that would need npm) and cannot
-live in `viewer/` (that never reaches crates.io). Committing the built output under
-`src/` is what keeps `lait` a single self-contained binary for people who
-install from source. CI diffs a fresh rebuild against the committed one, so a stale
-bundle fails the build rather than shipping silently.
+`npm run build` writes the bundle straight into
+`../products/issues-app/assets/web`, and **that directory is committed to git.**
+The generic `lait` host embeds none of it. The desktop bootstrap packager and
+the World publication workflow copy the generated tree into the immutable
+Issues release beside `world.json` and `lait-world-issues`; subsequent Issues
+updates replace that release independently of the host. CI diffs a fresh
+rebuild against the committed tree, so stale product bytes fail before publish.
 
 **After editing `src/`, a change is visible three ways, in increasing cost:**
 
 | You want | Do |
 |---|---|
 | Fast iteration with HMR | `npm run dev` (nothing else) |
-| The change inside a real head | `npm run build && cargo build && lait` |
-| CI to accept the branch | commit the rebuilt `../src/serve/assets` |
+| The change inside a real head | `npm run build`, stage the Issues release, then launch the head |
+| CI to accept the branch | commit the rebuilt `../products/issues-app/assets/web` |
 
-`cargo build` picks up an asset change on its own now — `build.rs` tells cargo the
-bundle is a source input. (Older docs told you to `touch src/serve/shell.rs` first;
-that ritual is gone.)
+`cargo build` does not consume the web tree. The staging scripts do, which keeps
+the host's Rust build product-blind and lets the World ship on its own cadence.
 
 ## Layout
 

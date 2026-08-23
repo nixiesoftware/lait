@@ -566,7 +566,7 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 /**
- * A World this build carries, drawn from the compiled-in registry.
+ * A reviewed first-party World this signed iOS application carries.
  */
 public struct BundledWorld: Equatable, Hashable {
     /**

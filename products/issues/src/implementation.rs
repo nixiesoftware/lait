@@ -760,7 +760,7 @@ impl Staging {
     /// Declarations ride ONLY the transaction that may create a Body.
     ///
     /// A Body's `(schema, version)` binding is immutable once recorded, and a
-    /// later declaration must equal it exactly — so declaring the compiled-in
+    /// later declaration must equal it exactly — so declaring the release's
     /// version on every write would turn the first schema-version bump into a
     /// `ContractViolation` against every pre-existing Body. An existing Body
     /// resolves its own binding without any declaration; only creation needs
@@ -8654,7 +8654,7 @@ impl World for IssuesWorld {
                 default_workflow_commitment,
             } => {
                 // A deterministic pure validator/stager: every captured value
-                // arrives in the intent (the composition root persisted the
+                // arrives in the intent (the lifecycle adapter persisted the
                 // signed bytes); the World calls no clock and mints no id.
                 let project_key = project_key.trim().to_ascii_uppercase();
                 if !contract::valid_name(&name)
@@ -8668,7 +8668,7 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 }
                 // The golden commitments must match this implementation's
-                // compiled-in definitions exactly.
+                // reviewed release definitions exactly.
                 let registry_hex =
                     data_encoding::HEXLOWER.encode(&contract::capability_registry_commitment());
                 if capability_registry_commitment != registry_hex {

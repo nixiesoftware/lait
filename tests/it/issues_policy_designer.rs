@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -18,7 +19,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, AssignmentSpec, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [111u8; 32];
 
@@ -157,7 +157,7 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     let net = MemNet::new();
     std::fs::create_dir_all(&home).unwrap();
     write_identity(&home, &FOUNDER_SEED);
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Policy Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Policy Space").unwrap();
 
     let daemon_home = home.clone();
     let daemon_net = net.clone();

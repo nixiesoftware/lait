@@ -6,8 +6,8 @@
  * stored bytes stay exactly what the author typed (and what the CLI prints).
  *
  * Hand-rolled rather than a dependency, deliberately. This bundle is committed
- * into the `lait` binary (`src/serve/assets`), so a full CommonMark engine is
- * dead weight every install carries; and the safety argument wants to be short:
+ * into the Issues release, so a full CommonMark engine is dead weight every
+ * install carries; and the safety argument wants to be short:
  * the parser emits a typed AST, the renderer builds React elements from it, and
  * no string is ever handed to `innerHTML` — XSS is unrepresentable rather than
  * escaped. The grammar is the subset people actually type into a tracker:

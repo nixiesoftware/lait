@@ -188,10 +188,11 @@ pub enum Staleness {
 
 /// One row of the Library: an installed World.
 ///
-/// Everything here is declared by the bundled package and compiled in — no
-/// probe ran to produce it, and no daemon can make it stale. Which Spaces
-/// serve the World is the destination's fact: the head's own front page
-/// carries the Space selector, and this row deliberately does not pre-ask it.
+/// Everything here is declared by the selected immutable release. No runner or
+/// daemon probe produces it, so listing cannot make a World execute and cannot
+/// go stale against a daemon. Which Spaces serve the World is the destination's
+/// fact: the head's own front page carries the Space selector, and this row
+/// deliberately does not pre-ask it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryRow {
     /// Stable across re-reads: the mount. A selection keyed by index would
@@ -223,13 +224,13 @@ pub struct LibraryRow {
 
 /// A World's channel, as this machine last found it.
 ///
-/// Separate from the row's compiled-in fields because the two are different
-/// kinds of fact: the list is the install list and cannot go stale, this is
+/// Separate from the row's signed declaration because the two are different
+/// kinds of fact: the list is the selected install list, while this is
 /// measured and can. Keeping them apart is what stops the Library becoming a
 /// surface that probes to draw itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldUpdateRow {
-    /// The bundle version serving now. `None` is the embedded floor.
+    /// The bundle version serving now. `None` means no valid release is selected.
     pub serving: Option<String>,
     /// The version the channel named when it was last asked.
     pub available: Option<String>,
@@ -247,7 +248,7 @@ pub struct WorldUpdateRow {
     pub message: Option<String>,
 }
 
-/// The artwork one World ships, as PNG bytes compiled into this build.
+/// The artwork one selected World release ships, as bounded PNG bytes.
 ///
 /// Not part of [`LibraryRow`], and the omission is the design: see
 /// [`world_artwork`]. Both halves are optional and their absence is a real
@@ -1314,6 +1315,15 @@ fn drain_second_launches(channel: crate::single_instance::Channel) {
 /// different identity — is refused rather than spawning a second supervisor
 /// of the same devices.
 pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), String> {
+    start_with_worlds(state_root, sidecar, None)
+}
+
+/// Start with trusted first-party World releases carried by the native host.
+pub fn start_with_worlds(
+    state_root: Option<String>,
+    sidecar: Option<String>,
+    bundled_worlds: Option<String>,
+) -> Result<(), String> {
     // Resolved here when the caller has no opinion, which is every real launch.
     // The interface must not compute either of these: a path worked out on the
     // far side of the bridge is a second opinion about where this installation
@@ -1360,6 +1370,7 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
     let (woken, wakeups) = channel();
     let wake = woken.clone();
     let mut config = Config::new(state_root.clone(), sidecar.clone());
+    config.bundled_worlds = bundled_worlds.map(PathBuf::from);
     // A standalone launch, set by the environment: come up without the identity
     // daemon rather than waiting on one. `env_flag` so `1`, `true`, `on` and
     // `yes` all read the same, and an empty or absent value stays off.
@@ -2321,7 +2332,7 @@ mod tests {
         assert!(project(&App::new()).update.is_none());
     }
 
-    /// The install list crosses the bridge as it stands: the compiled-in
+    /// The install list crosses the bridge as it stands: the selected signed
     /// declaration, keyed by mount, with an undeclared entry path travelling
     /// as absent rather than as a guessed `/`.
     #[test]

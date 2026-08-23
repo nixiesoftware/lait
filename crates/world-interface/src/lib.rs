@@ -20,9 +20,9 @@
 //! Client-facing application interfaces supplied by a World package.
 //!
 //! Runtime's World-call boundary deliberately knows nothing about how an answer
-//! is displayed, and neither does this crate. It is the outer compile-time
-//! seam: a product declares its mount name, its MCP tools, and how to decode a
-//! reply into a value; the application composing lait supplies process
+//! is displayed, and neither does this crate. It is the outer runner-neutral
+//! seam: a World declares its mount name, its MCP tools, and how to decode a
+//! reply into a value; the application shell supplies process
 //! lifecycle, Orbit selection, transport, and every byte a human eventually
 //! reads.
 //!
@@ -39,13 +39,15 @@ use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Stable classification of a client-surface failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureKind {
     /// A declaration, invocation, or returned value was invalid.
     Invalid,
@@ -63,7 +65,7 @@ pub enum FailureKind {
 /// boundaries deliberately render only the classification; an argument-owning
 /// surface such as MCP may explicitly preserve [`Self::diagnostic`] so callers
 /// can repair malformed input without depending on a tracing subscriber.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
     kind: FailureKind,
     diagnostic: Option<String>,
@@ -155,14 +157,14 @@ impl std::error::Error for Failure {}
 /// advancing a read watermark, writing an attachment to disk, committing a
 /// grant through Space authority — never reach a World Handler, so the package
 /// that implements one is the only code that can classify it at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientAccess {
     Query,
     Command,
 }
 
 /// One package-owned local operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalInvocation {
     pub operation: String,
     pub input: Value,
@@ -172,8 +174,8 @@ pub struct LocalInvocation {
 ///
 /// Runtime owns evaluation and the exact answer type. The product owns the
 /// names, cursor spelling, and row envelope it publishes to an agent or human.
-/// Keeping this as an in-process function pointer avoids teaching the host any
-/// product vocabulary while still refusing adapters that reinterpret raw JSON.
+/// Keeping this as a runner-local function pointer avoids teaching the core host
+/// any product vocabulary while still refusing adapters that reinterpret raw JSON.
 pub type FindResponsePresenter = fn(runtime::find::Answer) -> Result<Value, Failure>;
 
 /// The target selected by a parsed product invocation.
@@ -188,6 +190,11 @@ pub enum ClientInvocationKind {
         presenter: Option<FindResponsePresenter>,
     },
     Local(LocalInvocation),
+    /// Opaque parse material owned by a process-backed package. The host may
+    /// inspect only the product-neutral access and confirmation metadata on
+    /// [`ClientInvocation`]; the package re-parses these bounded bytes before
+    /// confirmation and execution.
+    Remote(Vec<u8>),
 }
 
 /// A parsed product invocation with package-owned policy metadata.
@@ -268,6 +275,20 @@ impl ClientInvocation {
         }
     }
 
+    pub fn remote(
+        world: WorldId,
+        access: ClientAccess,
+        confirmation_question: Option<String>,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            world,
+            access,
+            confirmation_question,
+            kind: ClientInvocationKind::Remote(payload),
+        }
+    }
+
     pub fn world_id(&self) -> &WorldId {
         &self.world
     }
@@ -320,7 +341,7 @@ pub type FailureClassifier = fn(&Value) -> Option<(Failure, String)>;
 /// These are deliberately product-neutral. A package may plan assignments or
 /// implementation activation, but the Lait host remains the authority that
 /// resolves the selected Orbit and commits the control operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostControlRequest {
     AssignmentList {
         actor: Option<String>,
@@ -344,7 +365,7 @@ pub enum HostControlRequest {
 /// reader, and a ceiling — and would then be a second place where an attachment
 /// can be truncated, buffered whole, or written somewhere nobody chose. Here it
 /// says *what*, and the shell, which already owns transport, does the moving.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostContentRequest {
     /// Seal a local file onto the content plane. Answers `{content, size}`.
     Write { path: std::path::PathBuf },
@@ -363,7 +384,7 @@ pub enum HostContentRequest {
 }
 
 /// One exact generic Mechanics assignment planned by a product package.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostAssignment {
     pub world: String,
     pub capability: String,
@@ -381,7 +402,7 @@ pub const MAX_PRESENTATION_HANDLES: usize = 256;
 
 /// A handle a product already had in a decoded reply. Not a Card, not
 /// authority, and never a reason to place an Orbit.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PresentationHandle {
     Device(String),
     Actor {
@@ -416,7 +437,7 @@ impl PresentationHandle {
 }
 
 /// One authored label for an exact requested handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresentationLabel {
     pub handle: PresentationHandle,
     /// Absent is "no Card", not an empty name.
@@ -425,7 +446,7 @@ pub struct PresentationLabel {
 
 /// Batched decoration. `coverage` is `Some("unavailable")` when the Orbit
 /// could not be asked — which is not the same as "these people have no names".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresentationResolution {
     pub labels: Vec<PresentationLabel>,
     pub coverage: Option<String>,
@@ -497,8 +518,31 @@ pub trait ClientHost: Send + Sync {
     ) -> ClientFuture<'a, PresentationResolution>;
 }
 
+/// Dynamic client behavior supplied by an independently launched World.
+///
+/// Metadata stays locally enumerable, while parsing and product semantics are
+/// delegated to the exact runner generation that declared them.
+pub trait ClientAdapter: Send + Sync {
+    /// Map one World-owned document reference to its transient Body identity.
+    fn transient_body(&self, document: &str) -> Result<[u8; 16], Failure>;
+    fn parse_mcp(&self, tool: &str, input: Value) -> Result<ClientInvocation, Failure>;
+    fn parse_web(&self, input: Value) -> Result<ClientInvocation, Failure>;
+    fn classify_failure(&self, value: &Value) -> Option<(Failure, String)>;
+    fn confirmation<'a>(
+        &'a self,
+        host: &'a dyn ClientHost,
+        invocation: &'a ClientInvocation,
+    ) -> ClientFuture<'a, Option<String>>;
+    fn execute<'a>(
+        &'a self,
+        host: &'a dyn ClientHost,
+        invocation: ClientInvocation,
+    ) -> ClientFuture<'a, Value>;
+}
+
 pub type LocalInvocationHandler =
     for<'a> fn(&'a dyn ClientHost, LocalInvocation) -> ClientFuture<'a, Value>;
+pub type TransientBodyResolver = fn(&str) -> Result<[u8; 16], Failure>;
 
 /// Resolve the confirmation prompt for one invocation, with a host available.
 ///
@@ -522,8 +566,20 @@ pub type ReplyDecorator =
 pub struct McpTool {
     name: &'static str,
     description: &'static str,
-    schema: McpSchemaFactory,
-    call: McpCallFactory,
+    schema: McpSchema,
+    call: McpCall,
+}
+
+#[derive(Clone)]
+enum McpSchema {
+    Local(McpSchemaFactory),
+    Declared(Value),
+}
+
+#[derive(Clone)]
+enum McpCall {
+    Local(McpCallFactory),
+    Remote(Arc<dyn ClientAdapter>),
 }
 
 impl McpTool {
@@ -536,8 +592,25 @@ impl McpTool {
         Self {
             name,
             description,
-            schema,
-            call,
+            schema: McpSchema::Local(schema),
+            call: McpCall::Local(call),
+        }
+    }
+
+    /// Construct one locally enumerable tool whose parser lives in a World
+    /// process. Names and schemas are already held to the same package bounds
+    /// by the remote declaration loader.
+    pub fn remote(
+        name: &'static str,
+        description: &'static str,
+        schema: Value,
+        adapter: Arc<dyn ClientAdapter>,
+    ) -> Self {
+        Self {
+            name,
+            description,
+            schema: McpSchema::Declared(schema),
+            call: McpCall::Remote(adapter),
         }
     }
 
@@ -550,7 +623,10 @@ impl McpTool {
     }
 
     pub fn schema(&self) -> Value {
-        let mut value = (self.schema)();
+        let mut value = match &self.schema {
+            McpSchema::Local(factory) => factory(),
+            McpSchema::Declared(value) => value.clone(),
+        };
         // MCP requires a tool's input schema to declare `"type": "object"` at
         // the root. A serde-tagged union schemas as a bare `oneOf`/`anyOf` of
         // object variants — the root type is implied by every branch, but
@@ -567,7 +643,10 @@ impl McpTool {
     }
 
     pub fn call(&self, input: Value) -> Result<ClientInvocation, Failure> {
-        (self.call)(input)
+        match &self.call {
+            McpCall::Local(call) => call(input),
+            McpCall::Remote(adapter) => adapter.parse_mcp(self.name, input),
+        }
     }
 }
 
@@ -704,6 +783,8 @@ pub struct WorldClientPackage {
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
     decorator: Option<ReplyDecorator>,
+    transient_body: Option<TransientBodyResolver>,
+    adapter: Option<Arc<dyn ClientAdapter>>,
     display: Display,
     display_surfaces: BTreeMap<String, display::DisplaySurface>,
 }
@@ -751,17 +832,16 @@ pub struct Display {
     /// space it is opening. That is the whole of the coupling, and it runs in
     /// the direction that keeps a World's routes the World's business.
     routes: &'static [Route],
-    /// The square mark drawn where a World is one row in a list — PNG bytes,
-    /// compiled in.
+    /// The square mark drawn where a World is one row in a list — bounded PNG
+    /// bytes loaded from the selected release.
     ///
     /// **Bytes, never a path.** The rule [`Display::icon`] states still holds:
-    /// a Library that went to disk or to a network per row to draw itself would
-    /// make listing cost what opening costs. `include_bytes!` keeps the artwork
-    /// the World's own and the listing free; what it costs instead is binary
-    /// size, which is why both bounds below are enforced at declaration.
+    /// a Library that went to a network per row to draw itself would make
+    /// listing cost what opening costs. The installer verifies the bytes once;
+    /// the client adapter retains them for the selected generation.
     mark: Option<&'static [u8]>,
-    /// The frame drawn behind a World's title on a detail surface — PNG bytes,
-    /// compiled in, under the same rule as [`Display::mark`].
+    /// The frame drawn behind a World's title on a detail surface — bounded
+    /// PNG bytes under the same rule as [`Display::mark`].
     ///
     /// Separate from the mark because they are drawn at sizes an order apart. A
     /// mark at 24 pixels and a banner at 200 cannot be the same image without
@@ -772,10 +852,9 @@ pub struct Display {
 
 /// The most one artwork may weigh.
 ///
-/// It is compiled into every client that bundles the World, so a World shipping
-/// a photograph makes every install carry it. Generous enough for a mark and a
-/// banner at the sizes they are drawn; far below anything that would be called
-/// a wallpaper.
+/// It is carried by every installation of the World. Generous enough for a mark
+/// and a banner at the sizes they are drawn; far below anything that would be
+/// called a wallpaper.
 pub const MAX_ARTWORK_BYTES: usize = 256 * 1024;
 
 /// The widest an artwork may be.
@@ -890,19 +969,16 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// Hold one declared artwork to the bounds a client draws it within.
 ///
-/// Every one of these is a compile-time property of the bundled package, so
-/// finding them here means finding them at the build that ships the World —
-/// which is the only place a person who can fix the image is still looking.
+/// Local/embedded packages validate here; process releases validate the same
+/// bounds during staging before the selected generation is launched.
 fn validate_artwork(world: &WorldId, kind: &str, bytes: &[u8]) -> Result<(), Failure> {
     artwork_bounds(kind, bytes).map_err(|why| Failure::new(format!("World '{world}' {why}")))
 }
 
 /// The bounds every artwork is held to, wherever it came from.
 ///
-/// A compiled-in World meets these at the build that ships it; a World fetched
-/// from a feed meets them when its bundle is staged. One function, because two
-/// tiers of World with two standards for their own artwork is how a fetched
-/// World comes to draw a row a compiled-in one could not.
+/// Every World meets these when its package is built or its release is staged.
+/// One function keeps local test adapters and process releases under one rule.
 pub fn artwork_bounds(kind: &str, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
         return Err(format!("declares an empty {kind}"));
@@ -972,6 +1048,8 @@ impl WorldClientPackage {
             web_parser: None,
             confirmation: None,
             decorator: None,
+            transient_body: None,
+            adapter: None,
             display: Display::unstated(mount),
             display_surfaces: BTreeMap::new(),
         })
@@ -1077,11 +1155,10 @@ impl WorldClientPackage {
     /// Ship this World's own artwork: a square mark for a row, a square frame
     /// for a detail surface.
     ///
-    /// Both are PNG bytes compiled into the binary — `include_bytes!` in the
-    /// product crate — for the reason the whole of [`Display`] is compile-time:
-    /// a client that fetched art to draw a list would make listing cost what
-    /// opening costs. A World may declare either, both, or neither; a client
-    /// that is given neither draws what it can derive from
+    /// Both are already-verified PNG bytes retained for this client generation.
+    /// Process-backed adapters load them from the selected immutable release;
+    /// local embedders may supply static bytes. A World may declare either,
+    /// both, or neither; a client that is given neither draws what it can derive from
     /// [`Display::accent`], which is why no default artwork exists here.
     pub fn with_artwork(
         mut self,
@@ -1197,8 +1274,34 @@ impl WorldClientPackage {
         self
     }
 
+    /// Supply the World's one-way document-reference to Body mapping used by
+    /// the product-neutral transient presence plane.
+    pub fn with_transient_body(mut self, resolver: TransientBodyResolver) -> Self {
+        self.transient_body = Some(resolver);
+        self
+    }
+
+    /// Delegate parsing, confirmation, and execution to an independently
+    /// launched World generation.
+    pub fn with_client_adapter(mut self, adapter: Arc<dyn ClientAdapter>) -> Self {
+        self.adapter = Some(adapter);
+        self
+    }
+
     pub fn world(&self) -> &WorldId {
         &self.world
+    }
+
+    pub fn transient_body(&self, document: &str) -> Result<[u8; 16], Failure> {
+        if let Some(adapter) = self.adapter.as_deref() {
+            return adapter.transient_body(document);
+        }
+        self.transient_body.ok_or_else(|| {
+            Failure::new(format!(
+                "World '{}' exposes no transient Body mapping",
+                self.world
+            ))
+        })?(document)
     }
 
     /// The namespace key every head addresses this package by — the MCP tool
@@ -1249,10 +1352,18 @@ impl WorldClientPackage {
     /// Ask the package whether a delivered answer reports a failure, and of
     /// what class. See [`FailureClassifier`].
     pub fn classify_failure(&self, value: &Value) -> Option<(Failure, String)> {
-        self.classify_failure.and_then(|classify| classify(value))
+        self.adapter
+            .as_deref()
+            .and_then(|adapter| adapter.classify_failure(value))
+            .or_else(|| self.classify_failure.and_then(|classify| classify(value)))
     }
 
     pub fn parse_web(&self, input: Value) -> Result<ClientInvocation, Failure> {
+        if let Some(adapter) = self.adapter.as_deref() {
+            let invocation = adapter.parse_web(input)?;
+            self.validate_invocation(&invocation)?;
+            return Ok(invocation);
+        }
         let parser = self.web_parser.ok_or_else(|| {
             Failure::new(format!(
                 "World '{}' does not expose a web client interface",
@@ -1279,6 +1390,9 @@ impl WorldClientPackage {
     ) -> ClientFuture<'a, Option<String>> {
         Box::pin(async move {
             self.validate_invocation(invocation)?;
+            if let Some(adapter) = self.adapter.as_deref() {
+                return adapter.confirmation(host, invocation).await;
+            }
             let declared = invocation.confirmation_question().map(str::to_string);
             let Some(resolver) = self.confirmation else {
                 return Ok(declared);
@@ -1308,6 +1422,9 @@ impl WorldClientPackage {
     ) -> ClientFuture<'a, Value> {
         Box::pin(async move {
             self.validate_invocation(&invocation)?;
+            if let Some(adapter) = self.adapter.as_deref() {
+                return adapter.execute(host, invocation).await;
+            }
             match invocation.into_kind() {
                 ClientInvocationKind::World(call) => {
                     let reply = host.call_world(call.clone()).await?;
@@ -1343,6 +1460,9 @@ impl WorldClientPackage {
                     })?;
                     handler(host, local).await
                 }
+                ClientInvocationKind::Remote(_) => Err(Failure::new(
+                    "an opaque invocation has no process-backed client adapter",
+                )),
             }
         })
     }

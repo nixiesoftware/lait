@@ -17,15 +17,12 @@
 #
 # Usage:
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
-#     --bundle viewer/dist --channel test --seed ~/.lait-feed-signing.seed
+#     --bundle x86_64-unknown-linux-gnu=target/linux/issues \
+#     --bundle x86_64-pc-windows-msvc=target/windows/issues \
+#     --channel test --seed ~/.lait-feed-signing.seed
 #
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
 #     --channel stable --promote --seed ~/.lait-feed-signing.seed
-#
-# A World this build hosts is declared for you: the bundle is the built head
-# (viewer/dist, or src/serve/assets after `npm run build`) and the declaration
-# is written into it from the composition root. Pass --no-declare for a World
-# that ships its own.
 #
 # The bundle must carry `world.json` at its root: what the World is, how to
 # reach it, and the host facts it runs against. `lait-feed world` refuses
@@ -42,16 +39,16 @@ set -euo pipefail
 BUCKET="gs://the-foundation-dist"
 BASE_URL="https://storage.googleapis.com/the-foundation-dist"
 
-WORLD="" VERSION="" BUNDLE="" CHANNEL="" SEED="" PROMOTE=""
+WORLD="" VERSION="" CHANNEL="" SEED="" PROMOTE=""
+BUNDLES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --world) WORLD="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
-    --bundle) BUNDLE="$2"; shift 2 ;;
+    --bundle) BUNDLES+=("$2"); shift 2 ;;
     --channel) CHANNEL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
     --promote) PROMOTE=1; shift ;;
-    --no-declare) NO_DECLARE=1; shift ;;
     *) echo "publish-world: unknown argument $1" >&2; exit 1 ;;
   esac
 done
@@ -70,6 +67,25 @@ trap 'rm -rf "$WORK"' EXIT
 PREFIX="releases/worlds/$WORLD/$VERSION"
 POINTER_OBJECT="channels/worlds/$WORLD/$CHANNEL"
 
+# A release coordinate is immutable. Re-running an identical publish is
+# idempotent; attempting to put different bytes at an existing coordinate is
+# a hard refusal. The generation-zero precondition closes the race between the
+# public read and the upload.
+upload_immutable() { # $1 local file, $2 object name below PREFIX
+  local source="$1" object="$2" readback="$WORK/existing-$2"
+  if curl -fsSL "$BASE_URL/$PREFIX/$object" -o "$readback"; then
+    cmp "$source" "$readback" || {
+      echo "publish-world: immutable $PREFIX/$object already exists with different bytes" >&2
+      exit 1
+    }
+    echo "==> $object already published identically"
+    return
+  fi
+  gcloud storage cp --if-generation-match=0 \
+    --cache-control="public, max-age=31536000, immutable" \
+    "$source" "$BUCKET/$PREFIX/$object"
+}
+
 if [ -n "$PROMOTE" ]; then
   # Promotion names a release already on the host. The sealed manifest is
   # fetched rather than rebuilt, so a promotion cannot quietly point at
@@ -80,33 +96,40 @@ if [ -n "$PROMOTE" ]; then
   $FEED_TOOL world --world "$WORLD" --version "$VERSION" --channel "$CHANNEL" \
     --promote yes --base-url "$BASE_URL" --seed "$SEED" --out "$WORK"
 else
-  if [ -z "$BUNDLE" ]; then
-    echo "publish-world: --bundle is required unless --promote" >&2
+  if [ "${#BUNDLES[@]}" -eq 0 ]; then
+    echo "publish-world: at least one --bundle target=directory is required unless --promote" >&2
     exit 1
   fi
-  # `--declare` writes the declaration for a World this build hosts, from the
-  # composition root: name, artwork, accent, entry path, and the facts its head
-  # depends on. A third-party World ships its own world.json and is published
-  # with --no-declare, which is the same command minus one flag.
-  DECLARE=(--declare yes)
-  [ -n "${NO_DECLARE:-}" ] && DECLARE=()
+  FEED_BUNDLES=()
+  ARCHIVES=()
+  for spec in "${BUNDLES[@]}"; do
+    target="${spec%%=*}"
+    bundle="${spec#*=}"
+    if [ "$target" = "$spec" ] || [ -z "$target" ] || [ -z "$bundle" ]; then
+      echo "publish-world: --bundle must be target=directory, got $spec" >&2
+      exit 1
+    fi
+    FEED_BUNDLES+=(--bundle "$spec")
+    ARCHIVES+=("world-$WORLD-$VERSION-$target.tar.gz")
+  done
   # shellcheck disable=SC2086
-  $FEED_TOOL world --world "$WORLD" --version "$VERSION" "${DECLARE[@]}" \
-    --bundle "$BUNDLE" --channel "$CHANNEL" --base-url "$BASE_URL" \
+  $FEED_TOOL world --world "$WORLD" --version "$VERSION" \
+    "${FEED_BUNDLES[@]}" --channel "$CHANNEL" --base-url "$BASE_URL" \
     --seed "$SEED" --out "$WORK"
 
-  ARCHIVE="world-$WORLD-$VERSION.tar.gz"
-  echo "==> uploading the bundle"
-  gcloud storage cp --cache-control="public, max-age=31536000, immutable" \
-    "$WORK/$ARCHIVE" "$BUCKET/$PREFIX/$ARCHIVE"
+  echo "==> uploading the native bundles"
+  for archive in "${ARCHIVES[@]}"; do
+    upload_immutable "$WORK/$archive" "$archive"
+  done
 
   echo "==> uploading the signed manifest"
-  gcloud storage cp --cache-control="public, max-age=31536000, immutable" \
-    "$WORK/manifest.json" "$BUCKET/$PREFIX/manifest.json"
+  upload_immutable "$WORK/manifest.json" "manifest.json"
 
-  echo "==> reading both back over the public door"
-  curl -fsSL "$BASE_URL/$PREFIX/$ARCHIVE" -o "$WORK/readback.tar.gz"
-  cmp "$WORK/$ARCHIVE" "$WORK/readback.tar.gz"
+  echo "==> reading every artifact back over the public door"
+  for archive in "${ARCHIVES[@]}"; do
+    curl -fsSL "$BASE_URL/$PREFIX/$archive" -o "$WORK/readback-$archive"
+    cmp "$WORK/$archive" "$WORK/readback-$archive"
+  done
   curl -fsSL "$BASE_URL/$PREFIX/manifest.json" -o "$WORK/readback.json"
   cmp "$WORK/manifest.json" "$WORK/readback.json"
 fi

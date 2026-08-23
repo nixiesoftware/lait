@@ -398,11 +398,18 @@ async fn program_snapshot(
             ),
             authorized.next_challenge,
         ),
-        Err(_) => consumed_refusal(
-            ApiRefusalCode::TemporarilyUnavailable,
-            authorized.next_challenge,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ),
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                %error,
+                "display program snapshot compilation failed"
+            );
+            consumed_refusal(
+                ApiRefusalCode::TemporarilyUnavailable,
+                authorized.next_challenge,
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        }
     }
 }
 
@@ -453,12 +460,20 @@ async fn program_changes(
             now(),
         )
         .await;
-    let Ok(mut compiled) = first else {
-        return consumed_refusal(
-            ApiRefusalCode::TemporarilyUnavailable,
-            authorized.next_challenge,
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
+    let mut compiled = match first {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                %error,
+                "display program change compilation failed"
+            );
+            return consumed_refusal(
+                ApiRefusalCode::TemporarilyUnavailable,
+                authorized.next_challenge,
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
     };
     if parsed.revision.as_ref() == Some(&compiled.program.revision) {
         let requested_wait = parsed.wait_ms.unwrap_or(1);
@@ -495,12 +510,17 @@ async fn program_changes(
             .await
         {
             Ok(refreshed) => compiled = refreshed,
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    device = %authorized.record.device,
+                    %error,
+                    "refreshed display program compilation failed"
+                );
                 return consumed_refusal(
                     ApiRefusalCode::TemporarilyUnavailable,
                     authorized.next_challenge,
                     StatusCode::SERVICE_UNAVAILABLE,
-                )
+                );
             }
         }
     }

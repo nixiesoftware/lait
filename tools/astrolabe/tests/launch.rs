@@ -61,6 +61,95 @@ fn built_binary(name: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Assemble the same immutable first-party seed releases the Tauri bundle
+/// carries. The launch seam must exercise the product-blind sidecar with real
+/// selected runners; linking a test package into the host would conceal a
+/// missing resource or installer handoff.
+fn stage_bundled_worlds(root: &Path) {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    for (id, package, template, runner) in [
+        (
+            "com.lait.issues",
+            "products/issues/Cargo.toml",
+            "products/issues-runner/world.json.template",
+            "lait-world-issues",
+        ),
+        (
+            "com.lait.signage",
+            "products/signage/Cargo.toml",
+            "products/signage-runner/world.json.template",
+            "lait-world-signage",
+        ),
+    ] {
+        let version = package_version(&repo.join(package));
+        let release = root.join(id).join(&version);
+        std::fs::create_dir_all(release.join("bin")).expect("create seed World release");
+        let binary = built_binary(runner).unwrap_or_else(|| {
+            panic!(
+                "no {runner} binary beside the test binary; build the workspace bins before the launch suite"
+            )
+        });
+        std::fs::copy(binary, release.join("bin").join(format!("{runner}{exe}")))
+            .expect("copy seed World runner");
+        let declaration = std::fs::read_to_string(repo.join(template))
+            .expect("read seed World declaration")
+            .replace("${VERSION}", &version)
+            .replace("${EXE}", exe);
+        std::fs::write(release.join("world.json"), declaration)
+            .expect("write seed World declaration");
+
+        if id == "com.lait.issues" {
+            copy_tree(&repo.join("products/issues-app/assets/web"), &release);
+            let art = release.join("art");
+            std::fs::create_dir_all(&art).expect("create Issues artwork directory");
+            std::fs::copy(
+                repo.join("products/issues-app/assets/mark.png"),
+                art.join("mark.png"),
+            )
+            .expect("copy Issues mark");
+            std::fs::copy(
+                repo.join("products/issues-app/assets/hero.png"),
+                art.join("hero.png"),
+            )
+            .expect("copy Issues hero");
+        }
+    }
+}
+
+fn package_version(manifest: &Path) -> String {
+    std::fs::read_to_string(manifest)
+        .expect("read product manifest")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("version")?
+                .trim_start()
+                .strip_prefix('=')?
+                .trim()
+                .strip_prefix('"')?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        })
+        .expect("product manifest package version")
+}
+
+fn copy_tree(source: &Path, target: &Path) {
+    std::fs::create_dir_all(target).expect("create seed World asset directory");
+    for entry in std::fs::read_dir(source).expect("read seed World asset directory") {
+        let entry = entry.expect("read seed World asset entry");
+        let destination = target.join(entry.file_name());
+        if entry
+            .file_type()
+            .expect("read seed World asset type")
+            .is_dir()
+        {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            std::fs::copy(entry.path(), destination).expect("copy seed World asset");
+        }
+    }
+}
+
 struct OwnedReceiver(Child);
 
 impl Drop for OwnedReceiver {
@@ -202,27 +291,43 @@ async fn wait_for_unassigned(path: &Path, device: &str) {
     panic!("enrolled receiver never presented its authenticated unassigned state");
 }
 
-async fn wait_for_assigned(path: &Path, assignment: &str, program: &str) -> String {
+async fn wait_for_assigned(
+    path: &Path,
+    assignment: &str,
+    program: &str,
+    identity: &Path,
+) -> String {
+    let mut last = "active receiver state was absent".to_string();
     for _ in 0..200 {
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let (Some(revision), Some(item)) =
-                    (status["revision"].as_str(), status["item"].as_str())
-                {
-                    if status["assignment"] == assignment
-                        && status["program"] == program
-                        && status["scene"]["kind"] == "frame"
-                        && !revision.is_empty()
-                        && !item.is_empty()
+        match std::fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(status) => {
+                    last = status.to_string();
+                    if let (Some(revision), Some(item)) =
+                        (status["revision"].as_str(), status["item"].as_str())
                     {
-                        return revision.to_owned();
+                        if status["assignment"] == assignment
+                            && status["program"] == program
+                            && status["scene"]["kind"] == "frame"
+                            && !revision.is_empty()
+                            && !item.is_empty()
+                        {
+                            return revision.to_owned();
+                        }
                     }
                 }
-            }
+                Err(error) => last = format!("invalid receiver state: {error}"),
+            },
+            Err(error) => last = format!("receiver state unavailable: {error}"),
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("assigned receiver never presented the compiled Signage frame");
+    let log = daemon_log_tail(identity, 80);
+    panic!(
+        "assigned receiver never presented the compiled Signage frame\n\
+         --- last state at {} ---\n{last}\n--- daemon log tail ---\n{log}",
+        path.display()
+    );
 }
 
 async fn wait_for_revision_change(
@@ -911,6 +1016,8 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
+    let bundled_worlds = tempfile::tempdir().expect("bundled first-party World releases");
+    stage_bundled_worlds(bundled_worlds.path());
     // Declared before the client, so it drops after it: the daemon is asked to
     // stop once nothing is still speaking to it, and before the temporary homes
     // it is holding open are removed.
@@ -918,6 +1025,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
+    config.bundled_worlds = Some(bundled_worlds.path().to_path_buf());
     let (client, signals) = Client::start(config)
         .await
         .expect("a client that starts its identity daemon");
@@ -1068,6 +1176,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             &output_path.join("active.json"),
             &assignment_id,
             &receiver_program,
+            identity.path(),
         )
         .await;
         let frame = std::fs::read(output_path.join("frame.png"))
@@ -1162,6 +1271,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             &second_output_path.join("active.json"),
             &second_assignment_id,
             &second_receiver_program,
+            identity.path(),
         )
         .await;
         wait_for_health(&client, &second_device, &second_revision).await;

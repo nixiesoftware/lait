@@ -277,7 +277,7 @@ prior transaction format commits to a protected whole-Body export, whereas the
 current format commits to a Fabric causal closure. Re-encoding that declaration
 would invalidate the original author's signature and authorization receipt.
 The old store is therefore a bounded, validated, read-only migration source.
-After update consent, the composition-owned migration capability streams those
+After update consent, the launcher-owned migration capability streams those
 facts into a fresh generation through ordinary current transaction validation,
 then verifies semantic Body and receipt evidence before the generation can be
 activated. The half-built target is never hosted or synchronized, and the

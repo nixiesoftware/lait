@@ -311,7 +311,7 @@ pub struct Anchor {
 }
 
 /// The result of resolving an anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnchorResolution {
     Resolved(u64),
     /// The position could not be mapped: the surrounding material was deleted,

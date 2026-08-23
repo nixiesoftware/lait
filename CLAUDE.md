@@ -132,9 +132,9 @@ The core is layered, and the boundary is `api/mod.rs` and nothing else:
   second model disagreeing with the first exactly when an action was refused.
 - `api/mod.rs` is the whole boundary: one `ClientView` out, one `ActionRequest`
   back. The one read outside that pair is `world_artwork` — a World's
-  compiled-in PNGs, which are a build constant rather than state, asked for
-  once per mount and cached on the interface side because the view is pushed
-  whole to every surface on every pump.
+  PNGs from its selected immutable release, asked for once per mount and
+  cached on the interface side because the view is pushed whole to every
+  surface on every pump.
 
   A field added here fails to compile in `src-tauri/src/main.rs` until somebody
   decides what the client does with it — that exhaustive destructure is
@@ -152,13 +152,13 @@ its own action and can be pressed twice.
 
 ### The Library is the install list
 
-One row per World this build bundles (`composition::bundled_client_packages`),
-with name, tagline, accent, entry path and version compiled in — no probe runs
-to draw it. Which Spaces serve a World, and whether any is up, are the
-destination's facts: the head's front page carries the Space selector, and
-selecting there is what attaches a daemon. Do not reintroduce Space rows or a
-placement badge here — a row whose kind depends on whether a daemon is up is
-the "Unnamed Space" defect.
+One row per selected immutable World release, read passively from its signed
+`world.json`; listing starts no runner. Name, tagline, accent, entry path and
+reviewed implementation version belong to that release. Which Spaces serve a
+World, and whether any is up, are the destination's facts: the head's front
+page carries the Space selector, and selecting there is what attaches a
+daemon. Do not reintroduce Space rows or a placement badge here — a row whose
+kind depends on whether a daemon is up is the "Unnamed Space" defect.
 
 ### Rules that are tested, not documented
 
@@ -270,7 +270,7 @@ A screenshot costs ~20k tokens and answers *"does this look right"*. Almost
 nothing you need to know is that question — the last design walk found four
 defect classes and every one of them was a number. `window.lait` carries the
 tools that return those numbers, in dev builds only (`viewer/src/dev/inspect.ts`,
-loaded behind `import.meta.env.DEV`, absent from the embedded bundle):
+loaded behind `import.meta.env.DEV`, absent from the shipped Issues release):
 
 ```js
 lait.where()                                  // url, viewport, theme, open dialog
@@ -314,15 +314,16 @@ wants a Space must ask for one.
 
 ## Rebuilding after a viewer change
 
-`src/serve/shell.rs` embeds `src/serve/assets/` via `include_dir!` at **compile
-time**, so a viewer edit is only visible through the running head after both steps:
+The viewer builds the independently shipped Issues web payload under
+`products/issues-app/assets/web/`. A viewer edit reaches a real head after the
+payload is rebuilt and staged with the Issues runner:
 
 ```sh
-(cd viewer && npm run build)   # regenerates src/serve/assets/*
-cargo build                    # re-embeds the fresh bundle
+(cd viewer && npm run build)   # regenerates products/issues-app/assets/web/*
+cargo build -p lait-issues-runner -p lait
 ```
 
-`cd viewer && npm run dev` does both plus a live head, which is what you want
+`cd viewer && npm run dev` runs a live development head, which is what you want
 while iterating; it shells out to `lait --orbit <sel> --port <n> --json` and
 reads that readiness line.
 

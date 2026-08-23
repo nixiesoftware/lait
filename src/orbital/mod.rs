@@ -3,7 +3,7 @@
 //! It fixes where the application keeps orbital stores, supplies the Mechanics
 //! composition over signed Space material, and defines the product-neutral
 //! [`WorldPackage`] / [`WorldHost`] boundary used by StationHost. Concrete
-//! packages are created by the application composition root and injected
+//! packages are adapted from independently launched releases and injected
 //! through Daemon; this module does not construct or select product Worlds.
 
 use std::path::{Path, PathBuf};

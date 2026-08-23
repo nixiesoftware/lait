@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -26,7 +27,6 @@ use lait::control::{
     content_call, content_request, ContentCall, ContentClientRequest, ContentErrorCode,
     ContentReply, ContentUpload, ControlRoute, Request, Response,
 };
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [151u8; 32];
 
@@ -81,7 +81,7 @@ struct Node {
 fn node(tag: &str) -> Node {
     let net = MemNet::new();
     let home = temp_home(tag);
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Content Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Content Space").unwrap();
     let space = lait::orbital::discover_space(&home).single().unwrap();
     let route = ControlRoute::Orbit {
         address: OrbitAddress::for_store(&home, space),

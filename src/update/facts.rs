@@ -29,11 +29,13 @@ pub const CONTROL: &str = "lait.control";
 /// thing to depend on — a World tied to an engine version rather than to a
 /// surface has found a contract nobody wrote down.
 pub const ENGINE: &str = "lait.version";
+pub const RUNNER: &str = "lait.world-runner.protocol";
+pub const WORLD_ABI: &str = "lait.world-sdk.protocol";
 
 /// Every fact this build offers, by name.
 ///
-/// Cheap and pure: it reads constants and the composition root, so callers may
-/// build it per check rather than caching it.
+/// Cheap and pure: it reads host protocol constants, so callers may build it
+/// per check rather than caching it.
 pub fn offered() -> BTreeMap<String, semver::Version> {
     let mut facts = BTreeMap::new();
     facts.insert(
@@ -43,17 +45,14 @@ pub fn offered() -> BTreeMap<String, semver::Version> {
     if let Ok(engine) = semver::Version::parse(env!("LAIT_VERSION_SEMVER")) {
         facts.insert(ENGINE.to_string(), engine);
     }
-    // Each hosted World's own schema, named after the World it belongs to, so
-    // a World depends on its own shapes and not on every other World's.
-    // Asked of the composition root because this file must not name a product
-    // — `product_independence` is what says so, and it caught the first
-    // version of this reaching for a product's constant directly.
-    for (world, _, schema) in crate::composition::bundled_world_surfaces() {
-        facts.insert(
-            format!("lait.world.{world}.schema"),
-            semver::Version::new(u64::from(schema), 0, 0),
-        );
-    }
+    facts.insert(
+        RUNNER.to_string(),
+        semver::Version::new(u64::from(world_runner::PROTOCOL_VERSION), 0, 0),
+    );
+    facts.insert(
+        WORLD_ABI.to_string(),
+        semver::Version::new(u64::from(world_sdk::ABI_VERSION), 0, 0),
+    );
     facts
 }
 
@@ -80,17 +79,13 @@ mod tests {
     /// facts rather than a fixture: a World naming one fact is unaffected by
     /// every other.
     #[test]
-    fn every_hosted_world_offers_its_own_schema_under_its_own_name() {
+    fn the_process_protocols_are_named_independently() {
         let facts = offered();
-        let worlds = crate::composition::bundled_world_surfaces();
-        assert!(!worlds.is_empty(), "this build hosts no Worlds");
-        for (world, _, schema) in worlds {
-            let named = format!("lait.world.{world}.schema");
-            let offered = facts
-                .get(&named)
-                .unwrap_or_else(|| panic!("{named} is not offered"));
-            assert_eq!(offered.major, u64::from(schema));
-        }
+        assert_eq!(
+            facts[RUNNER].major,
+            u64::from(world_runner::PROTOCOL_VERSION)
+        );
+        assert_eq!(facts[WORLD_ABI].major, u64::from(world_sdk::ABI_VERSION));
     }
 
     #[test]

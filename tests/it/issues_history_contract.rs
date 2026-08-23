@@ -67,7 +67,7 @@ impl runtime::world::AuthorityView for WriterAuthority {
 /// The canonical Issues implementation id, as registered and as the authority
 /// reports it active.
 fn reviewed_implementation() -> [u8; 32] {
-    lait::world::IssuesWorld::implementation_descriptor()
+    issues::IssuesWorld::implementation_descriptor()
         .id()
         .expect("the Issues descriptor is canonical")
 }

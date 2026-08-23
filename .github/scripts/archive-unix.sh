@@ -19,6 +19,7 @@ cp "$BIN" "$NAME/lait"
 # The docs cargo-dist auto-includes in each archive (lait does NOT set
 # auto-includes=false). Keep this set in sync with the release plan.
 cp CHANGELOG.md LICENSE README.md "$NAME/"
+bash .github/scripts/stage-worlds.sh "$TARGET" "$NAME"
 
 tar czf "$ARCHIVE" "$NAME"
 shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"

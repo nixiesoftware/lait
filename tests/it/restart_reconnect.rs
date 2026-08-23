@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -24,7 +25,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [151u8; 32];
 const JOINER_SEED: [u8; 32] = [152u8; 32];
@@ -164,7 +164,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
 
     // Founder: form, seed a project + first issue, mint an auto-approving invite.
     let founder_home = temp_home("founder");
-    lait::orbital::found_space(&founder_home, &FOUNDER_SEED, "Restart Space").unwrap();
+    crate::world_fixture::found_space(&founder_home, &FOUNDER_SEED, "Restart Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -197,6 +197,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
         &rt,
         &founder_home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),
@@ -207,7 +208,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
 
     // Joiner: bootstrap the store from the invite, serve, drive admission.
     let joiner_home = temp_home("joiner");
-    lait::orbital::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
+    crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
     let mut joiner_handle = Some(spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone()));
     wait_online(&rt, &joiner_home);
 

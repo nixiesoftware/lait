@@ -13,10 +13,11 @@ ARCHIVE="${NAME}.zip"
 
 [ -f "$BIN" ] || { echo "::error::binary not found: $BIN"; exit 1; }
 
-rm -f "$ARCHIVE" "${ARCHIVE}.sha256" lait.exe
+rm -rf "$ARCHIVE" "${ARCHIVE}.sha256" lait.exe worlds
 # Flat archive: binary + misc docs at the zip root (matches the published layout).
 cp "$BIN" lait.exe
-7z a "$ARCHIVE" lait.exe CHANGELOG.md LICENSE README.md >/dev/null
+bash .github/scripts/stage-worlds.sh "$TARGET" .
+7z a "$ARCHIVE" lait.exe worlds CHANGELOG.md LICENSE README.md >/dev/null
 sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
 
 echo "built $ARCHIVE"

@@ -987,6 +987,8 @@ fn scope_body(scope: &Target) -> Option<(String, [u8; 16])> {
 pub enum LiveNarrow<'a> {
     /// Everything this Station believes.
     Everything,
+    /// Everything published by one World generation.
+    World(&'a str),
     /// Everything about one Body, whatever scope carries it.
     Body { world: &'a str, body: [u8; 16] },
     /// One exact scope, for a reader that genuinely wants one kind.
@@ -1003,6 +1005,7 @@ impl LiveNarrow<'_> {
     pub fn admits(&self, scope: &Target) -> bool {
         match self {
             Self::Everything => true,
+            Self::World(world) => scope.world() == Some(*world),
             Self::Scope(want) => &scope == want,
             Self::Body { world, body } => {
                 scope_body(scope).is_some_and(|(w, b)| w == *world && b == *body)

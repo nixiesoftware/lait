@@ -395,7 +395,7 @@ pub struct NodeKey {
 }
 
 /// One disclosed Field value and the analyzer terms derived from it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedField {
     pub reference: FieldRef,
     pub value: Value,
@@ -405,7 +405,7 @@ pub struct ExtractedField {
 }
 
 /// One outward Edge and its already-resolved stable targets.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedEdge {
     pub reference: EdgeRef,
     pub gate: GateRef,
@@ -413,7 +413,7 @@ pub struct ExtractedEdge {
 }
 
 /// One optional augmented feature value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedFeature {
     pub reference: FeatureRef,
     pub gate: Option<GateRef>,
@@ -421,7 +421,7 @@ pub struct ExtractedFeature {
 }
 
 /// One complete node emitted by a World extractor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedNode {
     pub key: NodeKey,
     pub gate: Option<GateRef>,
@@ -431,7 +431,7 @@ pub struct ExtractedNode {
 }
 
 /// Complete replacement extraction for one readable Body image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BodyExtraction {
     pub body: BodyKey,
     pub stamp: Vec<u8>,

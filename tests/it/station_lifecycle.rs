@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world_fixture::run_station_process;
 use anyhow::Result;
 use async_trait::async_trait;
 use comms::mem::MemNet;
@@ -20,7 +21,6 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::orbital::run_station_process;
 
 const FOUNDER_SEED: [u8; 32] = [101u8; 32];
 
@@ -111,7 +111,7 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     // device seed.
     std::fs::create_dir_all(&home).unwrap();
     write_identity(&home, &FOUNDER_SEED);
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Station Host Space").unwrap();
+    crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Station Host Space").unwrap();
 
     // Run the daemon on its own thread.
     let daemon_home = home.clone();
@@ -350,6 +350,7 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
         &client_rt,
         &home,
         Request::Invite {
+            world: None,
             role: None,
             reusable: false,
             ttl_hours: Some(24),

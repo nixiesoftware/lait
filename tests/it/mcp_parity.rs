@@ -111,10 +111,11 @@ fn the_served_tool_list_matches_the_declared_surface() {
     let mut mcp = Mcp::start(&config, &home, None);
     let served: std::collections::BTreeSet<String> = mcp.tool_names().into_iter().collect();
     mcp.stop();
-    let declared: std::collections::BTreeSet<String> = declared_tool_names(Some("issues"))
-        .expect("issues is hosted")
-        .into_iter()
-        .collect();
+    let declared: std::collections::BTreeSet<String> =
+        declared_tool_names(&crate::world_fixture::clients(), Some("issues"))
+            .expect("issues is hosted")
+            .into_iter()
+            .collect();
 
     let missing: Vec<_> = declared.difference(&served).collect();
     let extra: Vec<_> = served.difference(&declared).collect();
@@ -134,7 +135,8 @@ fn the_served_tool_list_matches_the_declared_surface() {
 fn mcp_tool_names_are_unique() {
     // Every hosted World's surface, since a session is pinned to one of them.
     for mount in ["issues", "signage"] {
-        let names = declared_tool_names(Some(mount)).expect("a hosted mount");
+        let names = declared_tool_names(&crate::world_fixture::clients(), Some(mount))
+            .expect("a hosted mount");
         let mut seen = std::collections::HashSet::new();
         for name in &names {
             assert!(

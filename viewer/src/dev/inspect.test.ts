@@ -21,7 +21,7 @@ import { describe, expect, it } from "vitest";
  * than trusted to review.
  *
  * Asserted on source, not on the built bundle, deliberately: grepping
- * `src/serve/assets/app.js` would prove the stronger thing and would fail
+ * `products/issues-app/assets/web/app.js` would prove the stronger thing and would fail
  * whenever the assets are a rebuild behind the source, which is most of the
  * time while someone is working.
  */

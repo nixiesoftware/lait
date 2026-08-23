@@ -125,6 +125,19 @@ pub enum Target {
 }
 
 impl Target {
+    /// World namespace this scope belongs to; content residency is global.
+    pub fn world(&self) -> Option<&str> {
+        match self {
+            Self::Body { world, .. }
+            | Self::Material { world, .. }
+            | Self::Field { world, .. }
+            | Self::Preview { world, .. }
+            | Self::Typing { world, .. }
+            | Self::World { world, .. } => Some(world),
+            Self::Content { .. } => None,
+        }
+    }
+
     /// The field this scope names, when it names one.
     pub fn field(&self) -> Option<&str> {
         match self {

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
 const MAX_JOB_BYTES: usize = 64 * 1024;
 static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -19,6 +19,7 @@ static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 pub enum Phase {
     Accepted,
     Fetching,
+    Relaunching,
     Migrating,
     Waiting,
     Verified,
@@ -34,6 +35,7 @@ impl Phase {
         match self {
             Self::Accepted => "accepted",
             Self::Fetching => "fetching",
+            Self::Relaunching => "relaunching",
             Self::Migrating => "migrating",
             Self::Waiting => "waiting",
             Self::Verified => "verified",
@@ -98,11 +100,15 @@ pub fn load(worlds: &Path, world: &str) -> Result<Option<Job>> {
             MAX_JOB_BYTES
         );
     }
-    let job: Job =
+    let mut job: Job =
         serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
-    if job.format != FORMAT || job.world != world {
+    if !(1..=FORMAT).contains(&job.format) || job.world != world {
         anyhow::bail!("World update record identity does not match its path");
     }
+    // Format 2 adds the durable relaunching phase. Format 1 records contain
+    // only phases still represented above, so their exact progress upgrades
+    // without reinterpretation on the next write.
+    job.format = FORMAT;
     Ok(Some(job))
 }
 
@@ -252,6 +258,27 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"{").unwrap();
         assert!(load(root.path(), "lait.test.update").is_err());
+    }
+
+    #[test]
+    fn format_one_progress_is_upgraded_without_losing_its_cursor() {
+        let root = tempfile::tempdir().expect("temp root");
+        let world = "lait.test.update";
+        let mut legacy = enqueue(root.path(), world, 7).expect("enqueue");
+        legacy.format = 1;
+        legacy.phase = Phase::Waiting;
+        legacy.current_orbit = Some("space-b".into());
+        legacy.completed_records = 19;
+        std::fs::write(
+            path(root.path(), world),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let upgraded = load(root.path(), world).unwrap().expect("legacy job");
+        assert_eq!(upgraded.format, FORMAT);
+        assert_eq!(upgraded.current_orbit.as_deref(), Some("space-b"));
+        assert_eq!(upgraded.completed_records, 19);
     }
 
     #[test]

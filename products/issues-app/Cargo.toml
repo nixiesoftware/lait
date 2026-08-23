@@ -19,6 +19,7 @@ mechanics = { path = "../../crates/mechanics" }
 replica = { path = "../../crates/replica" }
 runtime = { path = "../../crates/runtime" }
 world-interface = { path = "../../crates/world-interface" }
+world-sdk = { path = "../../crates/world-sdk" }
 
 # The board wall renders to PNG frames. A receiver is handed pixels rather than
 # product vocabulary, so the drawing lives with the package that owns the

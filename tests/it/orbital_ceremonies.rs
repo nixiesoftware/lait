@@ -50,7 +50,7 @@ fn device_of(seed: &[u8; 32]) -> String {
 fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
     let root = temp_root(tag);
     let (mech, _c) = SpaceAuthority::form(&root, &FOUNDER_SEED, "Cer", vec![]).unwrap();
-    lait::orbital::seed_founder_policy(&mech).unwrap();
+    crate::world_fixture::seed_founder_policy(&mech).unwrap();
     (root, mech)
 }
 
@@ -63,8 +63,7 @@ fn admit(founder: &SpaceAuthority, seed: &[u8; 32], tag: &str) -> (PathBuf, Spac
             3600,
             true,
             now_secs(),
-            "contributor",
-            [0u8; 32],
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
         .unwrap();
     let invite = founder

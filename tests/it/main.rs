@@ -58,6 +58,7 @@ mod semantic_type_names;
 mod signal_is_not_durable;
 mod station_lifecycle;
 mod viewer_parity;
+mod world_fixture;
 
 /// Integration fixtures generally care about the product payload while the
 /// operation protocol itself has dedicated parity/continuity coverage. Keep

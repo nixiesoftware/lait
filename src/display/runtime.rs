@@ -184,6 +184,7 @@ impl DisplayRuntime {
     pub fn open(
         root: &Path,
         router: Arc<crate::orbits::Router>,
+        registry: WorldClientRegistry,
         device_seed: &[u8; 32],
     ) -> Result<Self> {
         let mut identifier_key = [0u8; 32];
@@ -200,7 +201,6 @@ impl DisplayRuntime {
             "Astrolabe",
             DEFAULT_DISPLAY_PORT,
         )?);
-        let registry = crate::world::client_packages().clone();
         let coordinator = Arc::new(DisplayCoordinator::new(
             store.clone(),
             router.clone(),
@@ -391,7 +391,8 @@ impl DisplayRuntime {
             .context("display surface is not bundled by this build")?;
         // The package canonicalizes its own input exactly once, here as at
         // assignment: the generic path never normalizes arbitrary JSON.
-        let canonical = (registered.canonicalize_input)(input)
+        let canonical = registered
+            .canonicalize_input(input)
             .map_err(|error| anyhow::anyhow!("{error}"))
             .context("canonicalize display input")?;
 
@@ -634,7 +635,7 @@ impl DisplayRuntime {
         if reviewed != surface.descriptor.runtime_implementation {
             anyhow::bail!("display surface and host implementation do not match");
         }
-        let input = (surface.canonicalize_input)(input).map_err(|error| {
+        let input = surface.canonicalize_input(input).map_err(|error| {
             anyhow::anyhow!(error.diagnostic().unwrap_or("invalid input").to_string())
         })?;
         let source = SourceGrant::new(
