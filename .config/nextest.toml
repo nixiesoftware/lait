@@ -161,6 +161,15 @@ filter = '(binary_id(lait::it) & test(beacon_convergence::))'
 # scheduler contention. The in-binary mutex remains useful under `cargo test`.
 threads-required = "num-test-threads"
 
+# These tests measure launcher deadlines while starting real daemon processes.
+# Letting several of them compete with the rest of the platform suite makes a
+# scheduler delay indistinguishable from the startup regression the 20-second
+# assertions are meant to catch. Keep the deadlines and retries unchanged;
+# reserve the runner while the measured process boundary is active.
+[[profile.default.overrides]]
+filter = '(binary_id(lait::it) & test(launcher_safety::))'
+threads-required = "num-test-threads"
+
 [[profile.default.overrides]]
 filter = '''
     (binary_id(lait::it) & test(orbital_join_iroh::))
