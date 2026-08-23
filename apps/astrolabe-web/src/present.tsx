@@ -278,11 +278,11 @@ function PresentationChooser({ view, dispatch }: { view: ClientView; dispatch: D
 
   // Each absence says which kind it is. A coordinator that has not answered
   // is a read that has not happened; one that answered with no surfaces is a
-  // build that ships none.
+  // selected World declaration that ships none.
   const blocked = display === null
     ? "The display coordinator has not answered yet."
     : surfaces.length === 0
-      ? "This build bundles no display surface."
+      ? "The selected Worlds declare no display surface."
       : view.orbits.length === 0
         ? "This identity has no Orbit to draw from."
         : null;

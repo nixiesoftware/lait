@@ -126,6 +126,35 @@ fn the_installer_places_both_binaries_in_one_directory() {
     );
 }
 
+/// A canonical install replaces every owned release tree before writing any
+/// new release bytes. The bounded launcher helper performs the transaction;
+/// NSIS must abort on refusal and seal the receipt only after the new tree.
+#[test]
+fn canonical_install_replaces_release_trees_and_never_overlays_them() {
+    let script = directives();
+    let prepare = script
+        .find("--prepare-canonical-install")
+        .expect("the installer never invokes the bounded replacement helper");
+    let release_out = script
+        .find(r#"SetOutPath "$INSTDIR\current""#)
+        .expect("the release out path");
+    let receipt = script
+        .find(r#"FileOpen $0 "$INSTDIR\canonical-layout-v1" w"#)
+        .expect("the installer does not seal the canonical layout receipt");
+    assert!(prepare < release_out && release_out < receipt);
+    assert!(script.contains("No new release tree was installed."));
+    assert!(
+        script.contains(r#"Delete "$INSTDIR\canonical-layout-v1""#),
+        "uninstall leaves the canonical receipt behind and therefore cannot remove its root"
+    );
+    assert!(
+        !script[..release_out]
+            .lines()
+            .any(|line| line.trim().starts_with(r#"RMDir /r "$INSTDIR\current"#)),
+        "NSIS still recursively edits the live tree instead of using the transaction"
+    );
+}
+
 /// Nothing outside the install may point into a release directory.
 ///
 /// The most expensive mistake in this space, by evidence: Squirrel's
@@ -507,7 +536,7 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
     );
     assert!(
         !script.contains("WORLD_ROOT") && !script.contains("$runner"),
-        "the macOS host package still enumerates bundled World executables"
+        "the macOS host package still enumerates World product executables"
     );
     assert!(
         script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
@@ -672,6 +701,10 @@ fn the_linux_package_carries_the_pair_and_notices() {
     assert!(
         script.contains(r#"mkdir "$STAGED/current""#),
         "the Linux package does not place the release under current/"
+    );
+    assert!(
+        script.contains(r#"printf '%s\n' "$VERSION" > "$STAGED/canonical-layout-v1""#),
+        "the Linux package does not seal the canonical install layout"
     );
     assert!(
         script.contains(r#"cp "$REPO/THIRD-PARTY-NOTICES.md""#),
@@ -968,9 +1001,8 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
         "the host update tree still carries executable World releases"
     );
     assert!(
-        tree.contains(r#"[ ! -e "$STAGE/$RESOURCES/worlds" ]"#)
-            && tree.contains(r#"*/world.json|*/art/*.png"#),
-        "the update-tree gate does not refuse legacy or unexpected World payloads"
+        tree.contains(r#"*/world.json|*/art/*.png"#),
+        "the update-tree gate admits files beyond signed catalog declarations and artwork"
     );
 
     // The Linux stable-root package is relocatable, while Tauri's conventional

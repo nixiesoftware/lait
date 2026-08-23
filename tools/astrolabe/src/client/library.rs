@@ -99,7 +99,7 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
     let Some(identity) = identity else {
         return BTreeMap::new();
     };
-    let worlds = lait::serve::head::worlds_root(identity);
+    let worlds = lait::serve::head::installations_root(identity);
     lait::world::installed::declarations(&worlds)
         .unwrap_or_default()
         .into_iter()
@@ -259,7 +259,8 @@ fn declarations(identity: Option<&Path>) -> Vec<lait::world::installed::Declarat
         .or_else(|| lait::config::Selection::default().identity_dir().ok());
     identity
         .and_then(|identity| {
-            lait::world::installed::declarations(&lait::serve::head::worlds_root(&identity)).ok()
+            lait::world::installed::declarations(&lait::serve::head::installations_root(&identity))
+                .ok()
         })
         .unwrap_or_default()
 }
@@ -460,7 +461,7 @@ mod tests {
         assert_eq!(offered.len(), 1);
         assert!(!offered[0].installed, "catalog membership looked installed");
 
-        let worlds = lait::serve::head::worlds_root(identity.path());
+        let worlds = lait::serve::head::installations_root(identity.path());
         let release = worlds
             .join("com.lait.issues")
             .join("releases")
@@ -471,14 +472,14 @@ mod tests {
             serde_json::to_vec(&selected_manifest()).expect("encode installed declaration"),
         )
         .expect("write installed declaration");
-        let selected = lait::update::world::StagedBundle {
+        let selected = lait::update::world::InstalledBundle {
             world: "com.lait.issues".into(),
             version: "1.2.3".into(),
             digest: "ab".repeat(32),
             files: 1,
         };
         std::fs::write(
-            worlds.join("com.lait.issues/current.json"),
+            worlds.join("com.lait.issues/selected.json"),
             serde_json::to_vec(&selected).expect("encode selected record"),
         )
         .expect("write selected record");

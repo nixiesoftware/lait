@@ -47,9 +47,9 @@ This server does not implement Streamable HTTP, OAuth, resources, prompts,
 sampling, roots, logging, or the Tasks extension. Geometry is compiled
 Blueprint output for the viewer and is not an MCP tool.
 
-`$LAIT_WORLD` pins the session to one World mount. Unset, a build that
-hosts a single World (today: `issues`) takes that pin. Unset with more
-than one hosted World is a refusal that names the mounts. An unknown
+`$LAIT_WORLD` pins the session to one World mount. Unset, an identity with a
+single selected World takes that pin. Unset with more than one selected World
+is a refusal that names the mounts. An unknown
 mount is a refusal, not an empty tool list. Existing bindings that omit
 the variable stay valid while Issues is the sole package. A binding
 that names a World writes `LAIT_WORLD` next to `LAIT_AGENT`; it still

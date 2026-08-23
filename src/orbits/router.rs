@@ -960,7 +960,7 @@ impl Router {
         }
         if !self.packages.contains(call.world()) {
             return Err(anyhow!(
-                "World '{}' is not bundled by this Lait daemon",
+                "World '{}' has no selected installation in this Lait daemon",
                 call.world()
             ));
         }

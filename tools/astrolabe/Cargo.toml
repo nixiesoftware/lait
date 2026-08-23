@@ -74,6 +74,7 @@ blake3 = "1"
 data-encoding = "2.6"
 flate2 = "1"
 tar = "0.4"
+astrolabe-stub = { path = "../stub" }
 jiff = "0.2.35"
 replica = { path = "../../crates/replica" }
 schedule = { path = "../../crates/schedule" }

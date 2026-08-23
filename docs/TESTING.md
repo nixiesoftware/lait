@@ -255,7 +255,11 @@ the independently installed World fixtures used by integration tests:
 
 ```sh
 cargo build --workspace --locked --all-targets --all-features
-bash ci/stage-test-worlds.sh
+fixture_channels="$(mktemp -d)"
+bash ci/prepare-independent-world-fixtures.sh \
+  "$fixture_channels" "$PWD/target/debug" "$PWD/target/debug/lait-feed"
+export WORLD_FIXTURE_CHANNELS="$fixture_channels"
+export WORLD_FIXTURE_INSTALLER="$PWD/target/debug/world-channel-installer"
 cargo nextest run --workspace --profile pr                     # what CI runs on Linux
 cargo nextest run --workspace --profile pr-platform $(bash ci/platform-seam-targets.sh)
 cargo nextest run --workspace --profile nightly                # everything

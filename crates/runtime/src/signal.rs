@@ -428,19 +428,19 @@ impl SignalPolicy {
         }
     }
 
-    /// A World this build hosts, with an implementation active at the pinned
+    /// A World this runner has registered, with an implementation active at the pinned
     /// frontier.
     ///
     /// Both halves, and both are `NotRegistered` rather than `Denied`. A World
-    /// we do not host and one whose implementation nobody approved are the same
-    /// answer to a peer: this build cannot interpret that, and interpreting it
+    /// we did not register and one whose implementation nobody approved are the
+    /// same answer to a peer: this runner cannot interpret that, and interpreting it
     /// anyway is how a schema nobody reviewed gets acted on.
     fn world_is_live(&self, world: &replica::body::WorldId) -> Result<(), Refusal> {
         if !self.worlds.contains(world) {
             return Err(Refusal::NotRegistered);
         }
         // An unanswerable ledger refuses like a missing activation at this
-        // peer boundary: this build cannot vouch for the interpretation.
+        // peer boundary: this runner cannot vouch for the interpretation.
         match self.authority.active_implementation(world, &self.frontier) {
             Ok(Some(_)) => Ok(()),
             Ok(None) | Err(_) => Err(Refusal::NotRegistered),

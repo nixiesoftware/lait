@@ -221,8 +221,7 @@ pub async fn run_until(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
-    let worlds = head::worlds_root(&identity);
-    crate::world::installed::retire_legacy_bundles(&identity)?;
+    let worlds = head::installations_root(&identity);
     let registry = Arc::new(crate::world::installed::load(&worlds)?.clients);
     run_until_with_registry(
         port,
@@ -231,36 +230,6 @@ pub async fn run_until(
         world,
         registry,
         move |selected| head::activate(&worlds, selected.as_str()),
-        announce,
-        shutdown,
-    )
-    .await
-}
-
-/// Run an embedded head with a platform-supplied first-party client registry.
-///
-/// Native iOS cannot spawn or dynamically install executable code. Its signed
-/// application therefore adapts the reviewed first-party Worlds in-process,
-/// while desktop uses [`run_until`] and independently selected runner
-/// processes. Keeping this exception at the platform boundary avoids reviving
-/// a product dependency in the host crate.
-pub async fn run_embedded_until(
-    port: u16,
-    open: bool,
-    selection: crate::config::Selection,
-    world: Option<String>,
-    registry: world_interface::WorldClientRegistry,
-    head: head::Source,
-    announce: impl FnOnce(&Ready) + Send,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<()> {
-    run_until_with_registry(
-        port,
-        open,
-        selection,
-        world,
-        Arc::new(registry),
-        move |_| head,
         announce,
         shutdown,
     )
@@ -277,7 +246,7 @@ async fn run_until_with_registry(
     announce: impl FnOnce(&Ready) + Send,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    // Resolved before the listener binds. A build that cannot say which World
+    // Resolved before the listener binds. An identity that cannot say which World
     // this head is refuses to be one, rather than coming up, announcing an
     // address, and answering for whatever mount a request happens to name.
     //
@@ -285,10 +254,10 @@ async fn run_until_with_registry(
     // reason this is not a bare `pin` call: **its last rung is different, because
     // the two heads answer to different callers.**
     //
-    // `pin(None)` refuses when a build hosts several Worlds, and for MCP that is
+    // `pin(None)` refuses when an identity has several selected Worlds, and for MCP that is
     // right — an editor binding names its World, and picking one for an agent
     // would put words in somebody's mouth. A browser head's caller is a person
-    // typing `lait`, and refusing them because the build ships two Worlds is not
+    // typing `lait`, and refusing them because two Worlds are selected is not
     // a safety property, it is the documented entry point declining to start.
     //
     // So this ladder ends one rung further down, at the selected install set's
@@ -338,7 +307,7 @@ async fn run_until_with_registry(
     // at start: a payload that
     // arrives later becomes live at the next head, which is the same
     // "applied at a boundary" rule the client tree follows.
-    // This head's own World, not the build's first one. A Signage head serving
+    // This head's own World, not the selected set's first one. A Signage head serving
     // the Issues bundle would be the staging equivalent of the bug the pin
     // exists to close.
     let head = head_for(&pinned_world);

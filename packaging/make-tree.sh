@@ -85,10 +85,6 @@ CATALOG_ROOT="$STAGE/$RESOURCES/world-catalog"
   echo "make-tree: $CATALOG_ROOT contains no World catalog declaration" >&2
   exit 1
 }
-[ ! -e "$STAGE/$RESOURCES/worlds" ] || {
-  echo "make-tree: $STAGE still contains the retired executable World resource tree" >&2
-  exit 1
-}
 [ -z "$(find "$CATALOG_ROOT" -type l -print -quit)" ] || {
   echo "make-tree: $CATALOG_ROOT contains a symbolic link" >&2
   exit 1

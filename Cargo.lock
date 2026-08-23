@@ -325,6 +325,7 @@ version = "0.1.0"
 dependencies = [
  "addressbook",
  "anyhow",
+ "astrolabe-stub",
  "blake3",
  "correspondence",
  "data-encoding",
@@ -372,10 +373,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lait",
- "lait-issues",
- "lait-issues-app",
- "lait-signage",
- "lait-signage-app",
  "runtime",
  "tempfile",
  "tokio",
@@ -3705,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "addressbook",
  "anyhow",
@@ -8898,6 +8895,15 @@ dependencies = [
  "thiserror 2.0.18",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "world-channel-installer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "lait",
 ]
 
 [[package]]

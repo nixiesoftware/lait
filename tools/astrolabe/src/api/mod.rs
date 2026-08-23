@@ -134,15 +134,9 @@ pub enum UpdateRow {
         holding: Vec<String>,
     },
     /// Something happened that is not an update and is not silence: a
-    /// signature that did not verify, or a pointer that went backwards.
+    /// signature that did not verify, a pointer that went backwards, or a
+    /// release that requires a canonical reinstall.
     Attention { why: String },
-    /// Below the published floor: this build must move. The only case that
-    /// restarts without being asked — declared work drains first and is shown
-    /// while it does, and the restart is taken once `holding` is empty.
-    Forced {
-        version: String,
-        holding: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -986,7 +980,7 @@ pub enum ActionRequest {
     /// Author, or preview, an MCP binding for one World.
     ///
     /// Astrolabe writes the binding; the editor parents `lait mcp`. The World
-    /// pin (`world`) is a mount this build hosts, not a path.
+    /// pin (`world`) is a selected installation's mount, not a path.
     InstallMcp {
         /// `claude` | `cursor` | `windsurf` | `generic`.
         client: String,
@@ -2128,9 +2122,6 @@ fn project(app: &App) -> ClientView {
             crate::runtime::now_secs(),
             &app.in_flight_keys(),
             crate::client::update::running_version(),
-            std::env::var(crate::client::update::RELAUNCHED_ENV)
-                .ok()
-                .as_deref(),
         ) {
             crate::client::update::Intent::Nothing => None,
             crate::client::update::Intent::RestartRequested { version, urgency } => {
@@ -2151,9 +2142,6 @@ fn project(app: &App) -> ClientView {
                 })
             }
             crate::client::update::Intent::Attention { why } => Some(UpdateRow::Attention { why }),
-            crate::client::update::Intent::Forced { version, holding } => {
-                Some(UpdateRow::Forced { version, holding })
-            }
         },
         exited: app.exit().is_some(),
     }
@@ -2317,7 +2305,6 @@ mod tests {
         app.apply(Update::UpdateStanding(Some(Standing::Staged {
             version: "0.9.1".into(),
             at: crate::runtime::now_secs(),
-            below_floor: false,
         })));
 
         let Some(UpdateRow::RestartRequested { version, urgency }) = project(&app).update else {

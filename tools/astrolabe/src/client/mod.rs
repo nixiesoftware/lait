@@ -63,10 +63,8 @@ impl Client {
     /// supervisor does: a consumer that could hold a client without already
     /// holding its stream would have a window in which events vanish.
     pub async fn start(config: Config) -> ClientResult<(Self, Signals)> {
+        require_canonical_install(&config.executable)?;
         let selection = selection_for(config.identity.as_deref());
-        let identity_dir = selection.identity_dir().map_err(|error| {
-            ClientError::internal(format!("resolve identity for the World library: {error:#}"))
-        })?;
         // The supervisor first: starting it spawns nothing, and it is what
         // stages the image everything else runs from. The daemon below is
         // then spawned from the *staged* copy, so no long-lived process holds
@@ -79,16 +77,6 @@ impl Client {
         })
         .await
         .map_err(ClientError::from)?;
-        // v0.9.1/v0.9.2 silently installed locally rebuilt World payloads.
-        // Move only releases carrying that exact legacy digest marker aside;
-        // independently downloaded releases are archive-digested and remain.
-        //
-        // On Windows an old daemon can still have a bundled runner open, which
-        // prevents the containing directory from being renamed. Stop that
-        // daemon, wait for its process tree to release the files, and retry.
-        // A successful migration also requires a restart: a daemon that loaded
-        // the old registry before the move must not keep advertising it.
-        retire_bundled_worlds(&selection, &identity_dir, !config.skip_sidecar).await?;
         // The sidecar is what makes this a hosted identity. Skipping it is a
         // deliberate standalone launch: the daemon-backed planes will report
         // unreachable, but the window comes up at once instead of waiting on a
@@ -270,54 +258,24 @@ impl Client {
     }
 }
 
-async fn retire_bundled_worlds(
-    selection: &lait::config::Selection,
-    identity: &std::path::Path,
-    hosted: bool,
-) -> ClientResult<()> {
-    let worlds = lait::serve::head::worlds_root(identity);
-    let retired = identity.join("retired-bundled-worlds");
-    let first = lait::update::world::retire_bundled(&worlds, &retired);
-    let needs_restart = match first {
-        Ok(0) => return Ok(()),
-        Ok(_) => true,
-        Err(error) if hosted => {
-            tracing::warn!(error = %error, "legacy World retirement is waiting for the daemon to release its runners");
-            true
-        }
-        Err(error) => {
-            return Err(ClientError::internal(format!(
-                "retire bundled Worlds: {error:#}"
-            )));
-        }
+const CANONICAL_LAYOUT: &str = "canonical-layout-v1";
+
+fn require_canonical_install(executable: &std::path::Path) -> ClientResult<()> {
+    let Some(root) = lait::update::watch::install_root_of(executable) else {
+        return Ok(());
     };
-
-    if needs_restart {
-        if let Ok(daemon) = lait::daemon::Client::for_selection(selection) {
-            let _ = daemon
-                .request(
-                    lait::control::ControlRoute::Daemon,
-                    &lait::control::Request::HostRestart,
-                    None,
-                )
-                .await;
-        }
+    let receipt = root.join(CANONICAL_LAYOUT);
+    let valid = std::fs::symlink_metadata(&receipt)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())
+        .and_then(|_| std::fs::read_to_string(&receipt).ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    if valid {
+        return Ok(());
     }
-
-    // `HostRestart` acknowledges before exiting. Retry the filesystem move,
-    // rather than racing the process teardown or sleeping for a guessed delay.
-    let mut last = None;
-    for _ in 0..100 {
-        match lait::update::world::retire_bundled(&worlds, &retired) {
-            Ok(_) => return Ok(()),
-            Err(error) => last = Some(error),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let error = last.expect("a failed retirement records its error");
-    Err(ClientError::internal(format!(
-        "retire bundled Worlds after stopping the old daemon: {error:#}"
-    )))
+    Err(ClientError::refused(
+        "This installation cannot cross the independent-World compatibility boundary in place. Run the canonical Astrolabe installer. Your Spaces and issue data are preserved; Worlds must be installed again from their signed channels.",
+    ))
 }
 
 /// The staged image this client spawns from, as a fact a surface can draw.
@@ -405,7 +363,7 @@ impl Config {
 
 #[cfg(test)]
 mod config_tests {
-    use super::Config;
+    use super::{require_canonical_install, Config, CANONICAL_LAYOUT};
     use std::path::PathBuf;
 
     /// The correspondence fixture is opt-in: absent from a default Config.
@@ -413,5 +371,29 @@ mod config_tests {
     fn the_correspondence_fixture_is_off_by_default() {
         let config = Config::new(PathBuf::from("state"), PathBuf::from("lait"));
         assert!(!config.correspondence_demo);
+    }
+
+    #[test]
+    fn a_legacy_installed_tree_requires_the_canonical_installer() {
+        let root = tempfile::tempdir().expect("an install root");
+        let current = root.path().join(lait::update::tree::LIVE_DIR);
+        std::fs::create_dir(&current).expect("a current tree");
+        let executable = current.join(if cfg!(windows) { "lait.exe" } else { "lait" });
+        std::fs::write(&executable, b"host").expect("the host executable");
+        std::fs::write(
+            root.path().join(if cfg!(windows) {
+                "astrolabe.exe"
+            } else {
+                "astrolabe"
+            }),
+            b"stub",
+        )
+        .expect("the stable launcher");
+
+        let error = require_canonical_install(&executable).expect_err("legacy layout admitted");
+        assert!(error.message.contains("canonical Astrolabe installer"));
+        std::fs::write(root.path().join(CANONICAL_LAYOUT), b"0.9.5\n")
+            .expect("the canonical receipt");
+        require_canonical_install(&executable).expect("canonical layout admitted");
     }
 }

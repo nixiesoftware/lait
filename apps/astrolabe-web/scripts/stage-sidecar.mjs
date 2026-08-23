@@ -83,9 +83,6 @@ console.log(`staged ${targetName} at ${target}`);
 // Catalog membership is why a row exists; choosing Install resolves the
 // World's independently signed channel and downloads its native payload.
 const worldCatalog = resolve(here, "..", "src-tauri", "world-catalog");
-// Collect generated output from the retired bootstrap layout so an old local
-// build cannot be mistaken for a resource owned by this one.
-rmSync(resolve(here, "..", "src-tauri", "bundled-worlds"), { recursive: true, force: true });
 rmSync(worldCatalog, { recursive: true, force: true });
 
 function packageVersion(relativeManifest) {

@@ -604,7 +604,7 @@ pub struct Nudge {
     pub payload: Vec<u8>,
 }
 
-/// The object-safe application handler bundled with a World implementation.
+/// The object-safe application handler provided by a World implementation.
 pub trait Handler: Send + Sync {
     /// Decode and classify a call. Hosts use this trusted classification for
     /// policy such as delegated-agent partial-view guards.

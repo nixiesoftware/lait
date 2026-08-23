@@ -33,7 +33,7 @@ carries `LAIT_AGENT=<name>` and the agent's work signs as itself.
 `no_agent: true` declines one and leaves the work signed by the human.
 `print: true` returns the would-be file contents instead of writing them.
 `$LAIT_WORLD` pins the session to one World mount; omit it only while this
-build hosts a single World. An unknown mount is a refusal, not an empty
+identity has a single selected World. An unknown mount is a refusal, not an empty
 tool list. A project-scoped file lands beside a `.lait` store, never
 inside one.
 

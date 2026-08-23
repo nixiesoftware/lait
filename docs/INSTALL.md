@@ -1,9 +1,11 @@
 # Installing Astrolabe
 
 Astrolabe is the canonical desktop client. Its Tauri host, matching `lait`
-sidecar, license, notices, and first-party World bootstrap bundles ship as one
-native installation. After first install it follows the signed `stable` feed
-and stages verified updates itself.
+sidecar, license, notices, and reviewed first-party World catalog ship as one
+native installation. The catalog is declaration and artwork only; it carries
+no World executable or application payload. After first install the host
+follows its signed `stable` feed and stages verified updates itself, while each
+World follows its own independently signed channel.
 
 Release files live at:
 
@@ -81,7 +83,11 @@ under the configured Lait home and must be preserved across container updates.
 
 ## First launch
 
-Astrolabe starts its bundled daemon, discovers the signed World channels, and
-opens its own native window. Choose **Found a space** to create one or **Use an
-invite** to join a teammate. Closing a World stops its supervised runner; the
-World remains installed and can be launched again without reinstalling it.
+Astrolabe starts its matching local sidecar and opens its own native window.
+A reviewed catalog entry can be present in the Library without being installed:
+its action reads **Install**, reports **Installing** progress while its signed
+independent release is fetched and verified, and changes to **Open** only after
+an immutable installed-bundle record has been selected. Choose **Found a
+space** to create one or **Use an invite** to join a teammate. Closing a World
+stops its supervised runner; the World remains installed and can be launched
+again without reinstalling it.

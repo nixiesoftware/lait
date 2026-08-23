@@ -1,8 +1,8 @@
 //! MCP server over stdio composing shell and one pinned World's tools.
 //!
 //! The root owns identity, Orbit scope, transport, and Mechanics tools. The
-//! session speaks one World (`$LAIT_WORLD`, or the sole World this build
-//! hosts). That package designs the namespaced schemas, omissions, and
+//! session speaks one World (`$LAIT_WORLD`, or the sole World this identity
+//! has selected). That package designs the namespaced schemas, omissions, and
 //! teaching text; this adapter mounts them. It does not generate tools from
 //! the wire protocol, and it does not compose a second World onto the same
 //! `tools/list`.
@@ -183,7 +183,8 @@ impl LaitMcp {
     ) -> Result<Self> {
         let identity = selection.identity_dir()?;
         let registry = std::sync::Arc::new(
-            crate::world::installed::load(&crate::serve::head::worlds_root(&identity))?.clients,
+            crate::world::installed::load(&crate::serve::head::installations_root(&identity))?
+                .clients,
         );
         Self::from_registry(home, selection, act_as, world, registry)
     }
@@ -432,10 +433,10 @@ impl LaitMcp {
     }
 
     #[tool(
-        description = "Make this build's World implementation the space's active one \
-                       (admin only). A node whose build is NEWER already does this by \
+        description = "Make the selected runner's World implementation the space's active one \
+                       (admin only). A node whose runner is NEWER already does this by \
                        itself at startup; this is the deliberate form, and the only way \
-                       to move the space BACK onto an older build. Check `doctor`'s \
+                       to move the space BACK onto an older runner. Check `doctor`'s \
                        `implementation` gate first — it names both versions."
     )]
     async fn world_upgrade(&self) -> Result<CallToolResult, McpError> {

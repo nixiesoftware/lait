@@ -302,12 +302,29 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
-      # Cargo produces runner executables but not the installable fixture tree.
-      # Process tests explicitly install this tree into throwaway identities;
-      # production never discovers executable Worlds beside the host.
-      - name: Stage first-party Worlds for process tests
+      # Publish real signed World archives into an explicit local channel.
+      # Process tests install them through the updater boundary; no runner is
+      # discovered beside the host and no installation record is synthesized.
+      - name: Publish independent World channels for process tests
         shell: bash
-        run: bash ci/stage-test-worlds.sh
+        run: |
+          set -euo pipefail
+          feed="$PWD/target/debug/lait-feed"
+          [ -x "$feed" ] || feed="$PWD/target/debug/lait-feed.exe"
+          channels="$RUNNER_TEMP/world-fixture-channels"
+          mkdir -p "$channels"
+          bash ci/prepare-independent-world-fixtures.sh \
+            "$channels" "$PWD/target/debug" "$feed"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          # Git Bash spells Windows paths as /c/..., but these values are
+          # consumed by native Rust processes after this shell exits.
+          if command -v cygpath >/dev/null 2>&1; then
+            channels="$(cygpath -w "$channels")"
+            installer="$(cygpath -w "$installer")"
+          fi
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       # The `pr` profile in .config/nextest.toml is the tier definition: the
       # whole suite minus the four heavy gates and the real-network suites,
@@ -440,11 +457,28 @@ jobs:
       # of /bin/sleep is not a valid subject, so there is no fallback the test
       # could quietly take instead.
       - name: Build the binaries the seam tests spawn
-        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
+        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-feed -p world-channel-installer -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-feed --bin world-channel-installer --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
 
-      - name: Stage first-party Worlds for process tests
+      - name: Publish independent World channels for process tests
         shell: bash
-        run: bash ci/stage-test-worlds.sh
+        run: |
+          set -euo pipefail
+          feed="$PWD/target/debug/lait-feed"
+          [ -x "$feed" ] || feed="$PWD/target/debug/lait-feed.exe"
+          channels="$RUNNER_TEMP/world-fixture-channels"
+          mkdir -p "$channels"
+          bash ci/prepare-independent-world-fixtures.sh \
+            "$channels" "$PWD/target/debug" "$feed"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          # Git Bash spells Windows paths as /c/..., but these values are
+          # consumed by native Rust processes after this shell exits.
+          if command -v cygpath >/dev/null 2>&1; then
+            channels="$(cygpath -w "$channels")"
+            installer="$(cygpath -w "$installer")"
+          fi
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       - name: Test (OS seam — unit tests, every crate)
         run: cargo nextest run --workspace --locked --all-features --profile pr-platform --lib
@@ -739,6 +773,10 @@ jobs:
           done
           grep -q -- '--from-run' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
+          grep -q -- '--promote' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot promote exact tested bytes"; exit 1; }
+          grep -q -- '--if-generation-match=0' ci/publish-feed.sh \
+            || { echo "::error::feed publisher can overwrite an immutable release"; exit 1; }
           if grep -q -- '--from-release' ci/publish-feed.sh; then
             echo "::error::feed publisher still depends on GitHub Release assets"
             exit 1

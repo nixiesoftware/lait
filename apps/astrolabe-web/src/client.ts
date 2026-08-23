@@ -254,13 +254,7 @@ export type UpdateIntent =
   /** Ready, and something is holding the restart — being waited for, not ignored. */
   | { kind: "waiting"; version: string; holding: string[] }
   /** A signature that did not verify, or a pointer that went backwards. */
-  | { kind: "attention"; why: string }
-  /**
-   * Below the published floor: this build must move. The only case that
-   * restarts without asking — `holding` is what is still draining, and an
-   * empty list means take the restart now.
-   */
-  | { kind: "forced"; version: string; holding: string[] };
+  | { kind: "attention"; why: string };
 
 /** How hard to ask, by how long the release has waited since staging. */
 export type UpdateUrgency = "quiet" | "insistent" | "urgent";

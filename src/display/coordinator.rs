@@ -151,10 +151,10 @@ impl DisplayCoordinator {
         let package = self
             .registry
             .package_for_world(&want.world)
-            .ok_or_else(|| anyhow!("display World is not bundled by this build"))?;
+            .ok_or_else(|| anyhow!("display World is not declared by a selected runner"))?;
         let surface = package
             .display_surface(&want.surface)
-            .ok_or_else(|| anyhow!("display surface is not bundled by this build"))?;
+            .ok_or_else(|| anyhow!("display surface is not declared by the selected runner"))?;
         surface
             .descriptor
             .validate(&want.world)

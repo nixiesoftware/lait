@@ -1555,32 +1555,34 @@ impl WorldClientRegistry {
     /// The one World this MCP session may speak.
     ///
     /// Unset + one package is the sole-World default. Unset + many is a
-    /// refusal that names `LAIT_WORLD`. A named mount this build does not
-    /// host is a refusal, not a silent empty tool list.
+    /// refusal that names `LAIT_WORLD`. A named mount with no selected
+    /// installation is a refusal, not a silent empty tool list.
     pub fn pin(&self, requested: Option<&str>) -> Result<&WorldClientPackage, Failure> {
         if let Some(mount) = requested {
             return self.package_for_mount(mount).ok_or_else(|| {
-                let hosted = self.hosted_mounts();
+                let selected = self.selected_mounts();
                 Failure::new(format!(
-                    "LAIT_WORLD={mount} is not a World this build hosts. Hosted mounts: {hosted}"
+                    "LAIT_WORLD={mount} has no selected installation. Selected mounts: {selected}"
                 ))
             });
         }
         let mut packages: Vec<_> = self.packages().collect();
         match packages.len() {
-            0 => Err(Failure::new("this build hosts no World MCP surface")),
+            0 => Err(Failure::new(
+                "this identity has no selected World MCP surface",
+            )),
             1 => Ok(packages.remove(0)),
             _ => {
-                let hosted = self.hosted_mounts();
+                let selected = self.selected_mounts();
                 Err(Failure::new(format!(
-                    "LAIT_WORLD is unset and this build hosts more than one World ({hosted}); \
+                    "LAIT_WORLD is unset and this identity has more than one selected World ({selected}); \
                      set LAIT_WORLD to one mount"
                 )))
             }
         }
     }
 
-    fn hosted_mounts(&self) -> String {
+    fn selected_mounts(&self) -> String {
         let mounts: Vec<_> = self.packages().map(WorldClientPackage::mount).collect();
         if mounts.is_empty() {
             "(none)".into()
@@ -1760,9 +1762,9 @@ mod tests {
     }
 
     /// The bounds are the whole point of taking bytes instead of a path: the
-    /// artwork ships inside every client that bundles the World, so a World
-    /// that hands over a photograph is spending everyone's binary. Each of
-    /// these is refused where the person who can fix the image is standing.
+    /// artwork ships inside every independently installed World release, so a
+    /// World that hands over a photograph is spending every install's bytes.
+    /// Each of these is refused where the person who can fix the image stands.
     #[test]
     fn artwork_is_held_to_its_bounds_at_declaration() {
         let square = fixed(png(64));

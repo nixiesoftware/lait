@@ -129,4 +129,5 @@ jobs:
           echo "### Sealed feed input" >> "$GITHUB_STEP_SUMMARY"
           echo '```sh' >> "$GITHUB_STEP_SUMMARY"
           echo "ci/publish-feed.sh --from-run $RUN_ID --version $VERSION --channel test --seed ~/.lait-feed-signing.seed" >> "$GITHUB_STEP_SUMMARY"
+          echo "ci/publish-feed.sh --version $VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

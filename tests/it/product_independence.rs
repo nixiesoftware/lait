@@ -7,14 +7,13 @@
 //!
 //! The historical allowlist is now empty. The gate fails for any production
 //! reference and also proves the root package has no production dependency
-//! edge to a product crate. Test fixtures remain allowed to name products. The
-//! sole production exception is iOS's named composition root: Apple platforms
-//! cannot install or spawn native World executables, so that application links
-//! its reviewed first-party adapters there and nowhere else.
+//! edge to a product crate. Test fixtures remain allowed to name products.
+//! There are no platform composition exceptions: a platform that cannot run
+//! an independent World presents that absence instead of linking a product.
 //!
 //! It parses rather than greps, for the same reason `semantic_type_names.rs`
-//! does: `#[cfg(test)]` fixtures legitimately name the bundled product (a test
-//! needs *some* World to test with), and a line scan cannot tell a fixture from
+//! does: `#[cfg(test)]` fixtures legitimately name a product (a test needs
+//! *some* World to test with), and a line scan cannot tell a fixture from
 //! a production dependency. Ask for a `Diagnose` and you should not get an
 //! answer that depends on the Issues crate; ask for a test fixture and of course
 //! you should.
@@ -27,10 +26,6 @@ use syn::visit::Visit;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn platform_composition_roots() -> [PathBuf; 1] {
-    [workspace_root().join("tools/astrolabe-ios/src/worlds.rs")]
 }
 
 /// The production Rust that hosts Worlds without being one: the shell
@@ -62,8 +57,7 @@ fn shell_sources() -> Vec<PathBuf> {
         walk(&workspace_root().join(scope), &mut out);
     }
     let test_fixture = workspace_root().join("src/world/test.rs");
-    let composition_roots = platform_composition_roots();
-    out.retain(|path| path != &test_fixture && !composition_roots.contains(path));
+    out.retain(|path| path != &test_fixture);
     out.sort();
     out
 }
@@ -174,8 +168,8 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Whether an item is compiled only for tests. Mirrors `semantic_type_names.rs`:
-/// an inline `#[cfg(test)] mod` inside `src/` is a test, and a test may name the
-/// bundled product because it has to test against *something*.
+/// an inline `#[cfg(test)] mod` inside `src/` is a test, and a test may name a
+/// product because it has to test against *something*.
 /// Whether a cfg predicate can be true or false when `test` itself is false.
 /// Unknown target/feature predicates are conservatively allowed either value.
 fn cfg_without_test(meta: &syn::Meta) -> (bool, bool) {
@@ -499,8 +493,8 @@ fn no_unallowlisted_product_references() {
             "NEW product references in the shell (not in \
              tests/product_independence_allowlist.tsv).\n\
              The shell hosts Worlds; it must not name one. Inject it through the \
-             installed-package boundary, the reviewed iOS composition root, or \
-             move the shared type into an engine crate:"
+             installed-package boundary or move the shared type into an engine \
+             crate:"
         );
         for (path, rule) in &new {
             let _ = writeln!(msg, "  {path}\t{rule}");
@@ -545,25 +539,17 @@ fn allowlist_is_empty_when_the_shell_stops_depending_on_products() {
     );
 }
 
-/// Native code cannot be dynamically installed or spawned on iOS. Keep that
-/// platform's first-party linkage visible, exact, and outside the generic
-/// product-blind scan instead of growing a symbol allowlist that could absorb
-/// new references throughout the client.
+/// iOS cannot dynamically install native runners. That limitation is not an
+/// excuse for a hidden static composition root: the mobile host must remain
+/// product-free and render Worlds as unavailable until an independent delivery
+/// contract exists for the platform.
 #[test]
-fn ios_has_exactly_one_reviewed_product_composition_root() {
-    let roots = platform_composition_roots();
-    assert_eq!(roots.len(), 1);
+fn ios_has_no_product_composition_root() {
     assert!(
-        roots[0].is_file(),
-        "the reviewed iOS World composition root moved or disappeared"
-    );
-    assert_eq!(
-        roots[0]
-            .strip_prefix(workspace_root())
-            .expect("composition root remains inside the workspace")
-            .to_string_lossy()
-            .replace('\\', "/"),
-        "tools/astrolabe-ios/src/worlds.rs"
+        !workspace_root()
+            .join("tools/astrolabe-ios/src/worlds.rs")
+            .exists(),
+        "iOS regained a product composition root instead of an independent boundary"
     );
 }
 
@@ -637,7 +623,7 @@ fn the_rule_has_teeth() {
 
     assert!(
         scan("#[cfg(test)] mod t { fn f() { let _ = issues::dto::MemberDto; } }").is_empty(),
-        "a #[cfg(test)] fixture may name the bundled product"
+        "a #[cfg(test)] fixture may name a product"
     );
     assert!(
         scan("#[cfg(all(test, unix))] mod t { fn f() { let _ = issues::dto::MemberDto; } }")

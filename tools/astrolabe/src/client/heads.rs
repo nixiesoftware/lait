@@ -20,8 +20,8 @@
 //! time, which is what lets one entry serve every Space on the machine. A
 //! client that offered to pin an Orbit here would be offering to author the
 //! exact staleness that design removed, and this surface says what it does
-//! instead. The World pin is not that: it is a mount name this build hosts,
-//! written as `$LAIT_WORLD`, so two Worlds do not share one `tools/list`.
+//! instead. The World pin is not that: it is a selected installation's mount
+//! name, written as `$LAIT_WORLD`, so two Worlds do not share one `tools/list`.
 
 use lait::control::{ControlRoute, HostReply, Request, Response};
 use lait::install::{Client as AgentClient, Scope};
@@ -48,7 +48,7 @@ pub struct McpBinding {
     /// explicitly because the daemon's working directory is not the person's.
     pub project: String,
     /// Mount of the World this session speaks. `None` lets `lait mcp` take
-    /// the sole World this build hosts.
+    /// the sole World this identity has selected.
     pub world: Option<String>,
 }
 

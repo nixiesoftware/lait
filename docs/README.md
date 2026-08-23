@@ -30,7 +30,7 @@ The normal product model is deliberately small:
   Stations for addressed Orbits, shares one transport endpoint per device
   identity, and remains independent of any head.
 - `lait mcp` exposes the same request contract to agents over stdio, pinned to
-  one Orbit and one World (`$LAIT_WORLD`, or the sole World this build hosts).
+  one Orbit and one World (`$LAIT_WORLD`, or the sole World this identity has selected).
   The World designs that tool list; Astrolabe authors the editor binding.
 - `lait --version` answers the one question that must be answerable with nothing
   running. Anything else exits 1.

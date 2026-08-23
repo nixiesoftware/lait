@@ -1,27 +1,16 @@
-//! The in-process node: the daemon and the loopback head, composed inside the
-//! application process.
+//! The product-free in-process node, composed inside the application process.
 //!
-//! Desktop composes these as processes — the client supervises a `lait`
-//! sidecar, the sidecar spawns the daemon, the head scrapes a readiness line
-//! off stdout. iOS forbids every one of those moves, so this module is the
-//! same composition with the process seams removed: the daemon runs as a task
-//! on an owned runtime, the head announces itself through
-//! [`serve::run_until`]'s callback instead of stdout, and the exit watchdog
-//! is disarmed because a library must never `exit()` its host.
-//!
-//! One seam desktop never needed: **the head pauses and resumes.** iOS
-//! suspends the process shortly after backgrounding and may reclaim listener
-//! resources while it sleeps — a loopback listener carried into suspension
-//! comes back dead, and dead reads as the false-disconnection defect. So the
-//! head steps down before suspension and stands back up on foreground, each a
-//! deliberate transition the shell drives from `scenePhase`. The daemon and
-//! its runtime persist for the process lifetime; only the listener cycles.
+//! Desktop supervises a `lait` sidecar. iOS cannot spawn that process, so the
+//! daemon runs as a task on an owned runtime and the exit watchdog is disarmed
+//! because a library must never `exit()` its host. There is deliberately no
+//! World head: this platform cannot install an independent native runner, and
+//! an in-process first-party adapter would recreate the product coupling the
+//! independent boundary removed.
 //!
 //! The protocol is untouched: joins, invites, and status all ride the same
 //! `daemon::Client` IPC every desktop head uses. One composition, one wire.
 
 use std::collections::HashSet;
-use std::sync::mpsc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -29,44 +18,15 @@ use std::time::Duration;
 use lait::config::{self, Selection};
 use lait::control::{self, OrbitAddress, Probe, Request, Response};
 use lait::daemon::Client;
-use lait::{orbital, serve};
+use lait::orbital;
 use runtime::coordinates::SignedCoordinates;
 
 pub(crate) struct Node {
     rt: tokio::runtime::Runtime,
     client: Client,
-    /// What the head restarts from: resolved once, reused on every resume.
-    selection: Selection,
-    /// The restartable half. `Down` between background and foreground is a
-    /// deliberate state, not a failure.
-    head: Mutex<HeadState>,
-    /// Store paths with a live admission driver, so re-arming on every
-    /// foreground is idempotent instead of a second dialer per wake.
+    /// Store paths with a live admission driver, so re-arming is idempotent
+    /// instead of starting a second dialer for the same pending admission.
     driving: Mutex<HashSet<String>>,
-}
-
-enum HeadState {
-    Up(HeadUp),
-    Down,
-}
-
-/// A serving head: its announcement, and the two ends of stopping it — the
-/// trigger, and the handle whose completion IS "the drain finished".
-struct HeadUp {
-    ready: serve::Ready,
-    stop: tokio::sync::oneshot::Sender<()>,
-    drained: tokio::task::JoinHandle<()>,
-}
-
-impl Node {
-    /// The head's announcement, when it is up. `None` while paused or
-    /// starting — the surface renders that as its own state, never as an error.
-    pub(crate) fn head_ready(&self) -> Option<serve::Ready> {
-        match &*self.head.lock().expect("head state") {
-            HeadState::Up(up) => Some(up.ready.clone()),
-            HeadState::Down => None,
-        }
-    }
 }
 
 static NODE: OnceLock<Node> = OnceLock::new();
@@ -82,10 +42,9 @@ fn ensure_node() -> Result<&'static Node, String> {
     if let Some(node) = NODE.get() {
         return Ok(node);
     }
-    // One starter at a time: launch fires `node_start` and the first
-    // foreground transition near-simultaneously, and two `start_inner` runs
-    // would race two daemons onto one home — the loser reporting a bind
-    // refusal as if the node were broken.
+    // One starter at a time: multiple surfaces may need the node together, and
+    // two `start_inner` runs would race two daemons onto one home — the loser
+    // reporting a bind refusal as if the node were broken.
     static STARTING: Mutex<()> = Mutex::new(());
     let _gate = STARTING.lock().expect("start gate");
     if let Some(node) = NODE.get() {
@@ -100,61 +59,22 @@ fn ensure_node() -> Result<&'static Node, String> {
     }
 }
 
-/// What the head answered when it came up: everything a WebKit tab needs.
-#[derive(uniffi::Record, Clone)]
-pub struct HeadReady {
-    pub url: String,
-    pub token: String,
-    pub port: u16,
-}
-
 #[derive(uniffi::Enum)]
 pub enum NodeStart {
-    Ready { head: HeadReady },
+    Ready,
     Failed { reason: String },
 }
 
-/// Bring the node up, idempotently. Blocks up to ~30s on first call; the
-/// shell calls it off the main thread and renders a starting state.
+/// Bring the product-free node up, idempotently. Blocks up to ~30s on first
+/// call; the shell calls it off the main thread and renders a starting state.
 #[uniffi::export]
 pub fn node_start() -> NodeStart {
-    node_foreground()
-}
-
-/// The foreground transition: the node up, the head serving, every pending
-/// admission being driven. Idempotent — at launch it IS the start, and after
-/// a suspension it restarts only what suspension killed (the listener), so
-/// the shell calls it on every `scenePhase == .active` without counting.
-///
-/// A restarted head is a *new* announcement — fresh port, fresh token — and
-/// the returned fact is the one every open tab must re-authenticate against.
-#[uniffi::export]
-pub fn node_foreground() -> NodeStart {
     let node = match ensure_node() {
         Ok(node) => node,
         Err(reason) => return NodeStart::Failed { reason },
     };
     arm_pending_admissions(node);
-    match resume_head(node) {
-        Ok(ready) => NodeStart::Ready {
-            head: head_ready(&ready),
-        },
-        Err(reason) => NodeStart::Failed { reason },
-    }
-}
-
-/// The background transition: the head steps down before suspension freezes
-/// it. Close-then-suspend is the platform's own guidance — a listener carried
-/// into suspension is reclaimed under the app and comes back dead — and the
-/// shell holds a background-task assertion across this call so the drain
-/// finishes before the freeze. The daemon stays; suspension merely pauses it.
-///
-/// A no-op when the node never started or the head is already down.
-#[uniffi::export]
-pub fn node_background() {
-    if let Some(node) = node() {
-        pause_head(node);
-    }
+    NodeStart::Ready
 }
 
 /// The name of the persisted invite beside an entered-but-unadmitted store.
@@ -176,14 +96,6 @@ fn arm_pending_admissions(node: &'static Node) {
     }
 }
 
-fn head_ready(ready: &serve::Ready) -> HeadReady {
-    HeadReady {
-        url: ready.url.clone(),
-        token: ready.token.clone(),
-        port: ready.port,
-    }
-}
-
 fn start_inner(selection: Selection) -> anyhow::Result<Node> {
     // The embedder's standing declaration: this daemon is a guest in a
     // process and on a device it does not own — so the exit watchdog never
@@ -192,8 +104,7 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
     lait::daemon::embed_in_host_process();
 
     // Four workers, not two: `Station::contact` blocks its thread for up to
-    // 35s, and a runtime shared by the daemon, the Station, and the head
-    // starves under two overlapping contacts.
+    // 35s, and the daemon's runtime starves under two overlapping contacts.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -207,20 +118,21 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
     {
         let sel = selection.clone();
         let failure = daemon_failure.clone();
-        let installation = crate::worlds::installation()?;
         rt.spawn(async move {
-            if let Err(error) =
-                lait::daemon::run_lait_daemon(installation.packages, installation.clients, sel)
-                    .await
+            if let Err(error) = lait::daemon::run_lait_daemon(
+                lait::orbital::WorldPackages::new(),
+                world_interface::WorldClientRegistry::new(),
+                sel,
+            )
+            .await
             {
                 *failure.lock().expect("daemon failure slot") = Some(format!("{error:#}"));
             }
         });
     }
 
-    // The head probes for a daemon before serving, and on a miss it would
-    // spawn one as a child process — the one thing this platform forbids. So
-    // the daemon must already answer Healthy before the head starts.
+    // Do not hand an unusable node to the native shell. The in-process daemon
+    // must answer Healthy before startup is reported complete.
     let daemon_home = selection.daemon_home()?;
     rt.block_on(async {
         for _ in 0..200 {
@@ -238,114 +150,11 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
         anyhow::bail!("the in-process daemon did not come up")
     })?;
 
-    let up = start_head(&rt, selection.clone())?;
     Ok(Node {
         rt,
         client,
-        selection,
-        head: Mutex::new(HeadState::Up(up)),
         driving: Mutex::new(HashSet::new()),
     })
-}
-
-/// Start one head and wait for its announcement. Port 0: the OS picks; the
-/// announcement carries the real one. Never `open` — there is no browser to
-/// hand off to, WebKit is in-process.
-fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Result<HeadUp> {
-    let (tx, rx) = mpsc::channel();
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let registry = crate::worlds::client_packages()?;
-    let drained = rt.spawn(async move {
-        let announce = move |ready: &serve::Ready| {
-            let _ = tx.send(ready.clone());
-        };
-        // The shutdown future resolves on the trigger — or on its drop, so a
-        // head whose handle is lost drains rather than serving unsupervised.
-        let shutdown = async move {
-            let _ = stopped.await;
-        };
-        // Named rather than left to the sole-World fallback. This crate links
-        // the whole workspace, so "the only World" stopped being true the
-        // moment a second one shipped — and the fallback answers that with a
-        // refusal, which for an embedded node is a head that never comes up.
-        //
-        // One World at a time is the deliberate mobile shape, and pinning it to
-        // this one is safe *only while nothing on the phone can ask for
-        // another*: the shell already lists every platform-supplied World, and opening
-        // them is CLIENT-58, still unbuilt. When that lands, this constant
-        // becomes a shell that offers a World its head refuses.
-        //
-        // The seam is here rather than a rebuild: `resume_head` already mints a
-        // fresh port and token on every foreground, and the shell is built to
-        // re-authenticate against a new announcement. Serving a different World
-        // is that same transition with a different pin — still one head, still
-        // one at a time.
-        let world = Some(crate::worlds::primary_mount().to_owned());
-        if let Err(error) = serve::run_embedded_until(
-            0,
-            false,
-            selection,
-            world,
-            registry,
-            serve::head::Source::unavailable(),
-            announce,
-            shutdown,
-        )
-        .await
-        {
-            tracing::error!(%error, "in-process head exited");
-        }
-    });
-    let ready = rx.recv_timeout(Duration::from_secs(20))?;
-    Ok(HeadUp {
-        ready,
-        stop,
-        drained,
-    })
-}
-
-/// How long the background transition waits on the head's drain. The drain is
-/// single-digit milliseconds in the ordinary case — the stop reaches the
-/// never-ending responses before axum starts waiting on them — and the bound
-/// exists so a wedged drain degrades to "suspension freezes it mid-close"
-/// instead of holding the transition forever.
-const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
-
-/// Step the head down and see the drain finish. Idempotent.
-fn pause_head(node: &Node) {
-    // Taken in its own statement so the guard drops before the drain —
-    // holding the state lock across `block_on` would deadlock every reader.
-    let taken = std::mem::replace(&mut *node.head.lock().expect("head state"), HeadState::Down);
-    if let HeadState::Up(up) = taken {
-        let _ = up.stop.send(());
-        let _ = node
-            .rt
-            .block_on(async { tokio::time::timeout(DRAIN_DEADLINE, up.drained).await });
-    }
-}
-
-/// The head, serving: the one already up, or a fresh start. A fresh start is
-/// a new announcement — new port, new token — never a resurrection of the old
-/// one, whose resources suspension may have reclaimed.
-fn resume_head(node: &Node) -> Result<serve::Ready, String> {
-    if let Some(ready) = node.head_ready() {
-        return Ok(ready);
-    }
-    let up = match start_head(&node.rt, node.selection.clone()) {
-        Ok(up) => up,
-        Err(error) => return Err(format!("{error:#}")),
-    };
-    let mut head = node.head.lock().expect("head state");
-    match &*head {
-        // Two foregrounds raced and the other one won: keep its head, stop
-        // ours by dropping the trigger — the drain follows on its own.
-        HeadState::Up(existing) => Ok(existing.ready.clone()),
-        HeadState::Down => {
-            let ready = up.ready.clone();
-            *head = HeadState::Up(up);
-            Ok(ready)
-        }
-    }
 }
 
 /// What an invite says, before anything is created. The confirm screen renders
@@ -681,78 +490,23 @@ fn refusal(response: &Response) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
 
-    /// One HTTP status line off the announced head, over a raw socket — the
-    /// proof that the listener accepts and the token is honored, with no
-    /// client stack between the assertion and the wire.
-    fn status_line(ready: &serve::Ready) -> String {
-        let mut stream = TcpStream::connect(("127.0.0.1", ready.port))
-            .expect("the announced port accepts a connection");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("a bounded read");
-        write!(
-            stream,
-            "GET /?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            ready.token, ready.port
-        )
-        .expect("the request goes out");
-        let mut raw = Vec::new();
-        let _ = stream.read_to_end(&mut raw);
-        let text = String::from_utf8_lossy(&raw);
-        text.lines().next().unwrap_or_default().to_owned()
-    }
-
-    /// The chain, asserted end to end against the embedded composition — the
-    /// class of failure `tools/astrolabe/tests/launch.rs` exists for, where
-    /// every component is correct and the composition is wrong. Daemon up,
-    /// head announced before accepting, pause actually closes the port,
-    /// resume is a fresh working announcement.
+    /// The iOS host starts its engine without manufacturing a World registry
+    /// or a loopback World head. Joining and syncing Spaces remain available;
+    /// opening a World waits for a platform-safe independent runner contract.
     #[test]
-    fn the_embedded_node_comes_up_steps_down_and_returns() {
+    fn the_product_free_embedded_node_starts_without_a_world_head() {
         let home = tempfile::tempdir().expect("a scratch identity home");
-        let node =
-            start_inner(Selection::for_identity(home.path())).expect("the embedded node starts");
+        let selection = Selection::for_identity(home.path());
+        let daemon_home = selection.daemon_home().expect("the daemon home");
+        let node = start_inner(selection).expect("the embedded node starts");
 
-        let first = node.head_ready().expect("the head announced");
-        let line = status_line(&first);
         assert!(
-            line.starts_with("HTTP/1.1 "),
-            "the announced head must answer HTTP, got: {line:?}"
-        );
-
-        // The background transition: down means the port is closed, not that
-        // a stale announcement lingers.
-        pause_head(&node);
-        assert!(
-            node.head_ready().is_none(),
-            "paused must read as down, never as the old announcement"
-        );
-        assert!(
-            TcpStream::connect(("127.0.0.1", first.port)).is_err(),
-            "the paused head must not accept on its old port"
-        );
-
-        // The foreground transition: a fresh announcement that works. The old
-        // token died with the old head; the new one must be honored.
-        let second = resume_head(&node).expect("the head returns");
-        assert_ne!(
-            second.token, first.token,
-            "a resumed head is a new announcement, not a resurrection"
-        );
-        let line = status_line(&second);
-        assert!(
-            line.starts_with("HTTP/1.1 "),
-            "the resumed head must answer HTTP, got: {line:?}"
-        );
-
-        // Resume while up is the fast path: the same announcement, no churn.
-        let third = resume_head(&node).expect("resume while up answers");
-        assert_eq!(
-            third.port, second.port,
-            "resume while serving must keep the head it has"
+            matches!(
+                node.rt.block_on(control::probe(&daemon_home)),
+                Probe::Healthy { .. }
+            ),
+            "the product-free embedded daemon did not answer"
         );
     }
 }

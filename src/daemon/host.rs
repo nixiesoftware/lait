@@ -1126,7 +1126,7 @@ impl Daemon {
     /// step, so progress never monopolizes the host reactor or a Station.
     fn spawn_world_upgrades(&self) -> tokio::task::JoinHandle<()> {
         let router = self.router.clone();
-        let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+        let worlds = crate::serve::head::installations_root(router.catalog().identity());
         let stop = self.endpoint.subscribe_stop();
         let relaunch = GenerationRelaunch {
             requested: self.relaunch_requested.clone(),
@@ -1242,7 +1242,7 @@ async fn advance_world_upgrade_job(
 ) -> Result<WorldUpgradeAdvance> {
     use crate::update::consent::Phase;
 
-    // `current.json` can move while this daemon is running, but every Runtime
+    // `selected.json` can move while this daemon is running, but every Runtime
     // Catalog and client adapter in this process is pinned to the release it
     // launched. Only a fresh daemon may interpret the new descriptor. The
     // durable phase is written before the old generation drains; the new
