@@ -102,9 +102,17 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
-      - name: Stage first-party Worlds for process tests
+      - name: Publish independent World channels for process tests
         shell: bash
-        run: bash ci/stage-test-worlds.sh
+        run: |
+          set -euo pipefail
+          feed="$PWD/target/debug/lait-feed"
+          [ -x "$feed" ] || feed="$PWD/target/debug/lait-feed.exe"
+          channels="$RUNNER_TEMP/world-fixture-channels"
+          mkdir -p "$channels"
+          bash ci/prepare-independent-world-fixtures.sh \
+            "$channels" "$PWD/target/debug" "$feed"
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
 
       # The `nightly` profile runs everything and gives the heavy gates their
       # own slow-timeout budget, plus a retry on the real-network group — a

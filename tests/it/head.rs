@@ -27,12 +27,110 @@ pub fn temp_root(tag: &str) -> PathBuf {
     root
 }
 
+/// Install the process fixtures through the same signed-channel and immutable
+/// record boundary as a real client. The publisher is an explicit test input:
+/// there is no fallback to package resources, a neighboring build directory,
+/// or hand-authored installation records.
+pub fn install_independent_test_worlds(identity: &Path) {
+    let channels = std::env::var_os("WORLD_FIXTURE_CHANNELS").unwrap_or_else(|| {
+        panic!(
+            "WORLD_FIXTURE_CHANNELS is required; run \
+             ci/prepare-independent-world-fixtures.sh with explicit built artifacts"
+        )
+    });
+    let channels = PathBuf::from(channels);
+    assert!(
+        channels.is_dir(),
+        "fixture channels are absent: {}",
+        channels.display()
+    );
+    let encoded = std::fs::read_to_string(channels.join("pubkey.hex"))
+        .expect("read the fixture channel public key");
+    let decoded = data_encoding::HEXLOWER
+        .decode(encoded.trim().as_bytes())
+        .expect("decode the fixture channel public key");
+    let pubkey: [u8; 32] = decoded
+        .try_into()
+        .expect("the fixture channel public key is 32 bytes");
+    let installations = lait::serve::head::installations_root(identity);
+
+    for world in ["com.lait.issues", "com.lait.signage"] {
+        let published = channels.join(world);
+        let pointer_url = lait::update::world::pointer_url(
+            "https://world-fixture.invalid",
+            world,
+            lait::update::feed::Channel::Test,
+        );
+        let resolved = lait::update::feed::resolve_pointer_with(
+            |asked| {
+                let path = if asked == pointer_url {
+                    published.join("pointer")
+                } else if asked.ends_with("/manifest.json") {
+                    published.join("manifest.json")
+                } else {
+                    return Err(lait::update::feed::Failure::Unreachable(format!(
+                        "fixture channel has no signed object at {asked}"
+                    )));
+                };
+                std::fs::read(&path).map_err(|error| {
+                    lait::update::feed::Failure::Unreachable(format!(
+                        "read fixture object {}: {error}",
+                        path.display()
+                    ))
+                })
+            },
+            &pointer_url,
+            lait::update::feed::Channel::Test,
+            &[pubkey],
+            None,
+        )
+        .expect("the signed fixture channel resolves");
+
+        let outcome = lait::update::world::stage_bundle_with(
+            |url, _| {
+                let name = url.rsplit('/').next().unwrap_or_default();
+                if name.is_empty()
+                    || name == "."
+                    || name == ".."
+                    || name.contains('/')
+                    || name.contains('\\')
+                {
+                    return Err(lait::update::feed::Failure::Invalid(format!(
+                        "fixture artifact URL has no bounded file name: {url}"
+                    )));
+                }
+                let path = published.join(name);
+                std::fs::read(&path).map_err(|error| {
+                    lait::update::feed::Failure::Unreachable(format!(
+                        "read fixture artifact {}: {error}",
+                        path.display()
+                    ))
+                })
+            },
+            &resolved,
+            world,
+            &lait::update::facts::offered(),
+            &installations,
+        )
+        .expect("install the independently published fixture World");
+        assert!(
+            matches!(
+                outcome,
+                lait::update::world::Outcome::Staged { .. }
+                    | lait::update::world::Outcome::Current { .. }
+            ),
+            "the signed fixture World was not installed: {outcome:?}"
+        );
+    }
+}
+
 /// The environment every head in these suites runs under.
 ///
 /// `LAIT_CONFIG_ROOT` is the isolation that matters: `$LAIT_HOME` pins the
 /// store, but the Orbit registry lives under the config root, so without this
 /// every space founded here files itself in the developer's real catalog.
 fn with_env(command: &mut Command, config: &Path, home: Option<&Path>) {
+    install_independent_test_worlds(home.unwrap_or(config));
     command
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
