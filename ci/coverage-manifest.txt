@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2603
-pr-platform    2123
-nightly        2631
+pr             2610
+pr-platform    2130
+nightly        2638
 mutants        106
 
 [gates]
@@ -95,6 +95,7 @@ astrolabe api::tests::the_book_crosses_as_authored_cards_not_as_reachability
 astrolabe api::tests::the_glance_is_the_book_joined_to_one_world
 astrolabe api::tests::the_library_crosses_as_the_declaration_keyed_by_mount
 astrolabe browser::tests::only_a_web_address_is_ever_handed_to_the_shell
+astrolabe client::config_tests::a_legacy_installed_tree_requires_the_canonical_installer
 astrolabe client::config_tests::the_correspondence_fixture_is_off_by_default
 astrolabe client::correspondence::tests::ada_folds_two_devices_into_one_conversation
 astrolabe client::correspondence::tests::blocking_a_person_stops_their_messages_landing
@@ -130,9 +131,8 @@ astrolabe client::storage::tests::an_unknown_transfer_total_is_not_zero_and_not_
 astrolabe client::storage::tests::an_unmeasured_footprint_is_absent_rather_than_zero
 astrolabe client::update::tests::a_clock_behind_the_staging_time_is_quiet_rather_than_urgent
 astrolabe client::update::tests::a_machine_that_has_never_checked_says_nothing_rather_than_up_to_date
-astrolabe client::update::tests::a_relaunch_that_did_not_apply_escalates_instead_of_asking_again
 astrolabe client::update::tests::a_verification_failure_and_a_replayed_pointer_both_ask_for_attention
-astrolabe client::update::tests::below_the_floor_the_restart_is_taken_rather_than_asked_for
+astrolabe client::update::tests::below_the_floor_requires_a_canonical_reinstall
 astrolabe client::update::tests::declared_work_in_flight_holds_the_request_and_names_what_is_holding_it
 astrolabe client::update::tests::only_the_installed_shape_has_a_managing_stub
 astrolabe client::update::tests::staging_is_silent_and_so_is_a_channel_that_could_not_be_asked
@@ -197,11 +197,11 @@ astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_synchronized_snapshot_keeps_advancing_while_assets_are_staged
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::an_unsynchronized_snapshot_begins_when_it_is_activated
 astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
-astrolabe-ios worlds::tests::signed_adapter_carries_exactly_the_reviewed_first_party_defaults
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
 astrolabe-stub tests::a_live_tree_that_cannot_start_falls_back_to_the_previous_tree
 astrolabe-stub tests::a_manifest_that_does_not_carry_its_own_entry_is_refused
 astrolabe-stub tests::a_missing_live_tree_with_no_stage_restores_the_previous_tree
+astrolabe-stub tests::a_receipt_symlink_cannot_admit_a_legacy_installation
 astrolabe-stub tests::a_same_length_tamper_is_caught_by_the_digest_rather_than_the_size
 astrolabe-stub tests::a_stage_being_written_right_now_is_left_alone
 astrolabe-stub tests::a_stage_manifest_without_its_tree_is_cleared_rather_than_refused_forever
@@ -210,13 +210,20 @@ astrolabe-stub tests::a_tampered_stage_is_refused_by_name_and_the_live_tree_is_u
 astrolabe-stub tests::a_verified_stage_is_applied_and_the_previous_tree_is_kept
 astrolabe-stub tests::an_extra_file_in_the_staged_tree_is_a_verification_failure
 astrolabe-stub tests::an_interrupted_swap_is_finished_at_the_next_launch
+astrolabe-stub tests::canonical_install_refuses_a_live_installation_without_changing_it
+astrolabe-stub tests::canonical_install_refuses_an_active_stager_without_changing_it
+astrolabe-stub tests::canonical_install_removes_all_owned_trees_and_preserves_unknown_root_content
+astrolabe-stub tests::canonical_install_rolls_back_every_detached_tree_when_replacement_is_refused
+astrolabe-stub tests::canonical_install_unlinks_a_hostile_tree_symlink_without_following_it
 astrolabe-stub tests::nothing_staged_is_the_ordinary_launch_and_touches_nothing
+astrolabe-stub tests::only_a_regular_nonempty_canonical_receipt_admits_launch
 astrolabe-stub tests::stale_scratch_is_swept_when_the_installation_is_claimed
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::launch a_relaunch_request_reaches_the_apply_window_under_one_stub
 astrolabe::launch a_request_with_nothing_staged_relaunches_once_and_is_consumed
 astrolabe::launch a_secondary_stub_cannot_consume_the_primary_relaunch_request
 astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
+astrolabe::packaging canonical_install_replaces_release_trees_and_never_overlays_them
 astrolabe::packaging every_platform_stages_the_terms_where_the_update_tree_will_find_them
 astrolabe::packaging every_shell_artifact_points_at_the_stub_and_never_into_a_release
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
@@ -867,13 +874,13 @@ lait update::world::tests::a_signed_bundle_that_runs_here_is_staged_under_its_ow
 lait update::world::tests::a_tampered_bundle_fails_the_digest_and_stages_nothing
 lait update::world::tests::a_world_channel_sits_beside_the_products_and_under_the_same_rules
 lait update::world::tests::a_world_this_build_declares_is_a_world_this_build_accepts
+lait update::world::tests::an_explicit_directory_still_crosses_the_signed_install_boundary
 lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
 lait update::world::tests::an_unmet_bundle_records_the_refusal_and_keeps_naming_what_serves
 lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bounds
 lait update::world::tests::old_releases_are_never_replaced_and_can_be_selected_without_a_download
 lait update::world::tests::only_a_known_newer_bundle_this_build_can_run_is_behind
 lait update::world::tests::republishing_an_old_version_never_overwrites_its_release
-lait update::world::tests::retirement_moves_only_the_legacy_directory_digest_and_preserves_its_bytes
 lait update::world::tests::the_standing_is_recorded_beside_the_served_tree_and_never_within_it
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
@@ -1395,7 +1402,7 @@ lait::it orbital_two_node::two_station_hosts_join_admit_and_converge_over_the_so
 lait::it product_features::a_follower_hears_about_an_issue_they_are_not_assigned
 lait::it product_features::milestones_cycles_initiatives_teams_triage_delete_and_attachments
 lait::it product_independence::allowlist_is_empty_when_the_shell_stops_depending_on_products
-lait::it product_independence::ios_has_exactly_one_reviewed_product_composition_root
+lait::it product_independence::ios_has_no_product_composition_root
 lait::it product_independence::no_unallowlisted_product_references
 lait::it product_independence::the_rule_has_teeth
 lait::it product_schema::positive_examples_roundtrip_and_canonical_bytes_are_stable
