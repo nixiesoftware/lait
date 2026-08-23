@@ -108,13 +108,14 @@ async fn main() -> Result<()> {
 
         // The label registry rides the same opt-in: it is the public half of
         // the same deployment, and an operator who mounted no directory has
-        // no registry to speak of either. In-memory until its Firestore
-        // collection lands — bindings are curated and wave-one-sized, and an
-        // empty registry that answers 404 is exactly what an unbound label
-        // should look like.
-        let registry = Arc::new(Mutex::new(lait_directory::registry::MemRegistry::default()));
+        // no registry to speak of either. Same project, its own collections —
+        // `registry-bindings` holds the curated allocation, `registry-routes`
+        // what identities publish.
+        let registry_store =
+            lait_directory::FirestoreStore::open(&project, lait_directory::Credentials::Metadata);
+        let registry = Arc::new(Mutex::new(registry_store));
         app = app.merge(lait_directory::registry::router(registry));
-        tracing::info!("the registry is mounted under /registry");
+        tracing::info!(project, "the registry is mounted under /registry");
     }
 
     let listener = tokio::net::TcpListener::bind(http)

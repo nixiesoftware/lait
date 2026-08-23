@@ -49,6 +49,8 @@ const TOKEN_MARGIN: Duration = Duration::from_secs(120);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 const ADDRESSES: &str = "addresses";
+const REGISTRY_BINDINGS: &str = "registry-bindings";
+const REGISTRY_ROUTES: &str = "registry-routes";
 const PROFILES: &str = "profiles";
 const CHALLENGES: &str = "challenges";
 const RESOLVES: &str = "resolves";
@@ -250,6 +252,79 @@ fn integer(value: &Value, field: &str) -> Option<u64> {
     value["fields"][field]["integerValue"]
         .as_str()
         .and_then(|raw| raw.parse().ok())
+}
+
+impl crate::registry::RegistryStore for FirestoreStore {
+    fn binding(
+        &mut self,
+        label: &crate::registry::Label,
+    ) -> Result<Option<mechanics::kinship::ProfileId>> {
+        let Some(document) = self.get(REGISTRY_BINDINGS, label.as_str())? else {
+            return Ok(None);
+        };
+        Ok(string(&document, "profile")
+            .and_then(|value| mechanics::kinship::ProfileId::parse(&value)))
+    }
+
+    fn bind(
+        &mut self,
+        label: &crate::registry::Label,
+        profile: &mechanics::kinship::ProfileId,
+    ) -> Result<bool> {
+        // The same atomic mint the address claim rests on: Firestore refuses
+        // a create whose id exists, consistently, so a binding never moves
+        // through this path however many replicas race.
+        self.create(
+            REGISTRY_BINDINGS,
+            label.as_str(),
+            json!({ "profile": { "stringValue": profile.as_str() } }),
+        )
+    }
+
+    fn route(
+        &mut self,
+        label: &crate::registry::Label,
+    ) -> Result<Option<crate::registry::Resolved>> {
+        let Some(document) = self.get(REGISTRY_ROUTES, label.as_str())? else {
+            return Ok(None);
+        };
+        let (Some(profile), Some(endpoint), Some(epoch)) = (
+            string(&document, "profile"),
+            string(&document, "endpoint"),
+            integer(&document, "epoch"),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::registry::Resolved {
+            label: label.clone(),
+            profile,
+            endpoint,
+            epoch,
+        }))
+    }
+
+    fn record_route(&mut self, resolved: &crate::registry::Resolved) -> Result<bool> {
+        // Read-compare-put, exactly as `record` above accepts it: the epoch
+        // guard exists to refuse replay, and the residual cross-replica
+        // window is the one the directory already carries for publications.
+        if let Some(held) = self.get(REGISTRY_ROUTES, resolved.label.as_str())? {
+            if let Some(existing) = integer(&held, "epoch") {
+                if resolved.epoch <= existing {
+                    return Ok(false);
+                }
+            }
+        }
+        self.put(
+            REGISTRY_ROUTES,
+            resolved.label.as_str(),
+            json!({
+                "profile": { "stringValue": resolved.profile },
+                "endpoint": { "stringValue": resolved.endpoint },
+                "epoch": { "integerValue": resolved.epoch.to_string() },
+            }),
+        )?;
+        Ok(true)
+    }
 }
 
 impl Store for FirestoreStore {
