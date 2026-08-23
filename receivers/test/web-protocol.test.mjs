@@ -15,7 +15,7 @@ import {
 } from "../shared/web/protocol.mjs";
 import { DisplayReceiverClient, parseLiveMediaPacket } from "../shared/web/client.mjs";
 import {
-  coordinatorParent,
+  deploymentRoot,
   normalizeSiteCode,
   siteOrigin,
   validSiteCode,
@@ -304,29 +304,33 @@ test("a site code is one DNS label, and case and padding are the operator's", ()
   assert.equal(normalizeSiteCode(null), "");
 });
 
-test("a coordinator is a subdomain of whatever served the receiver", () => {
-  assert.equal(siteOrigin("acme", "signage.example.pub"), "https://acme.signage.example.pub");
-  assert.equal(coordinatorParent("Signage.Example.Pub"), "signage.example.pub");
+test("a coordinator is a sibling of the app that served the receiver", () => {
+  // The app is itself one identity's subdomain of the deployment root, so the
+  // root is the serving host minus the app's own label — never the host
+  // itself, which would nest every site under the app's identity.
+  assert.equal(deploymentRoot("astrolabe.foundation.pub"), "foundation.pub");
+  assert.equal(deploymentRoot("Display.Internal.Example.Lan"), "internal.example.lan");
+  assert.equal(siteOrigin("acme", deploymentRoot("astrolabe.foundation.pub")), "https://acme.foundation.pub");
 });
 
 test("a host that cannot name a site refuses rather than inventing one", () => {
-  // An IP literal, a bare label or a port has no subdomain to hand a site, and
-  // guessing one would produce a coordinator nobody deployed.
-  for (const host of ["localhost", "127.0.0.1", "192.168.1.10", "signage.example.pub:8443", "example.pub."]) {
-    assert.throws(() => coordinatorParent(host), ProtocolError, `${host} is unprovisionable`);
+  // An IP literal, a bare label, a port, or an apex has nothing to hand a
+  // site, and guessing would produce a coordinator nobody deployed.
+  for (const host of ["localhost", "127.0.0.1", "192.168.1.10", "astrolabe.foundation.pub:8443", "example.pub.", "foundation.pub"]) {
+    assert.throws(() => deploymentRoot(host), ProtocolError, `${host} is unprovisionable`);
   }
 });
 
 test("an invalid site code never becomes an origin", () => {
-  assert.throws(() => siteOrigin("acme.lobby", "signage.example.pub"), ProtocolError);
-  assert.throws(() => siteOrigin("", "signage.example.pub"), ProtocolError);
+  assert.throws(() => siteOrigin("acme.lobby", "foundation.pub"), ProtocolError);
+  assert.throws(() => siteOrigin("", "foundation.pub"), ProtocolError);
 });
 
 test("the provisioned bootstrap is Web-PKI and carries no pinned material", () => {
-  const bootstrap = webPkiBootstrap("https://acme.signage.example.pub");
+  const bootstrap = webPkiBootstrap("https://acme.foundation.pub");
   assert.deepEqual(bootstrap, {
     protocol_major: 1,
-    trust: { kind: "web_pki_origin", origin: "https://acme.signage.example.pub" },
+    trust: { kind: "web_pki_origin", origin: "https://acme.foundation.pub" },
     certificate_pem: null,
     rendezvous: null,
   });

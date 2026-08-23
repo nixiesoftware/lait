@@ -2,7 +2,7 @@ import { DisplayReceiverClient } from "./runtime/client.mjs";
 import { CredentialVault } from "./runtime/vault.mjs";
 import {
   ProvisioningStore,
-  coordinatorParent,
+  deploymentRoot,
   normalizeSiteCode,
   siteOrigin,
   validSiteCode,
@@ -255,9 +255,9 @@ window.addEventListener("pagehide", () => client && client.stop());
 // one yet. A stored site starts silently; an unprovisioned display asks.
 async function boot() {
   ui.showBooting();
-  const parent = coordinatorParent(window.location.hostname);
+  const root = deploymentRoot(window.location.hostname);
   const store = await ProvisioningStore.open();
-  const site = (await store.read(parent)) || (await ui.askForSite(store, parent));
+  const site = (await store.read(root)) || (await ui.askForSite(store, root));
 
   const vault = await CredentialVault.open();
   const enrolled = Boolean(await vault.load().catch(() => null));

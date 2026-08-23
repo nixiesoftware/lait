@@ -41,16 +41,8 @@ export function validSiteCode(code) {
   return typeof code === "string" && SITE_CODE.test(code);
 }
 
-/// The domain the coordinators of this deployment live under.
-///
-/// Derived from the host that served this receiver rather than compiled in:
-/// a deployment's coordinators are subdomains of the deployment. That keeps a
-/// private or self-hosted install working with no build of its own — the same
-/// freedom `receiver-bootstrap.json` gives the native receivers — and it
-/// cannot disagree with the Content-Security-Policy, which is the thing that
-/// actually enforces it.
-export function coordinatorParent(host) {
-  const parent = String(host === null || host === undefined ? "" : host).trim().toLowerCase();
+function validParent(value) {
+  const parent = String(value === null || value === undefined ? "" : value).trim().toLowerCase();
   if (!parent.includes(".") || parent.endsWith(".") || /^[0-9.]+$/.test(parent) || parent.includes(":")) {
     throw new ProtocolError(
       "unprovisionable_host",
@@ -60,11 +52,34 @@ export function coordinatorParent(host) {
   return parent;
 }
 
-export function siteOrigin(code, parent) {
+/// The domain the coordinators of this deployment live under.
+///
+/// Derived from the host that served this receiver rather than compiled in,
+/// minus the app's own label: the receiver app is itself one identity's
+/// subdomain of the deployment root, and coordinators are its *siblings*,
+/// never its children. `astrolabe.foundation.pub` serving the app means
+/// `acme` resolves to `acme.foundation.pub`. That keeps a private or
+/// self-hosted install working with no build of its own — the same freedom
+/// `receiver-bootstrap.json` gives the native receivers — and it cannot
+/// disagree with the Content-Security-Policy, which is the thing that
+/// actually enforces it.
+export function deploymentRoot(served) {
+  const host = validParent(served);
+  const labels = host.split(".");
+  if (labels.length < 3) {
+    throw new ProtocolError(
+      "unprovisionable_host",
+      "This receiver must be served one label below its deployment root",
+    );
+  }
+  return validParent(labels.slice(1).join("."));
+}
+
+export function siteOrigin(code, root) {
   if (!validSiteCode(code)) {
     throw new ProtocolError("invalid_site", "A site code is up to 32 letters, digits and hyphens");
   }
-  return `https://${code}.${coordinatorParent(parent)}`;
+  return `https://${code}.${validParent(root)}`;
 }
 
 export function webPkiBootstrap(origin) {

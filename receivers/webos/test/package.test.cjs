@@ -49,7 +49,7 @@ test('mandatory app art has the exact webOS dimensions', () => {
 test('the store stub redirects only to the named HTTPS host', () => {
   const html = read('package/index.html');
 
-  assert.match(html, /https:\/\/signage\.foundation\.pub\/astrolabe\/display\//);
+  assert.match(html, /https:\/\/astrolabe\.foundation\.pub\/display\//);
   assert.doesNotMatch(html, /http:\/\//);
 });
 
@@ -69,7 +69,7 @@ test('the hosted receiver uses granted MSE live media', () => {
   const source = `${read('hosted/index.html')}\n${read('hosted/app.mjs')}\n${read('hosted/runtime/client.mjs')}`;
   assert.match(source, /tier: mseCapable \? "mse_live"/);
   assert.match(source, /\/head\/v1\/live\/tickets/);
-  assert.match(source, /connect-src https:\/\/\*\.signage\.foundation\.pub wss:\/\/\*\.signage\.foundation\.pub/);
+  assert.match(source, /connect-src https:\/\/\*\.foundation\.pub wss:\/\/\*\.foundation\.pub/);
   assert.match(source, /new MediaSource\(\)/);
   assert.match(source, /new WebSocket\(/);
 });
@@ -122,7 +122,7 @@ test('no coordinator origin is compiled into the receiver', () => {
   // app, so a new location never needs a new build.
   assert.doesNotMatch(read('hosted/app.mjs'), /https:\/\/[a-z0-9]/i);
   assert.doesNotMatch(read('hosted/runtime/provisioning.mjs'), /https:\/\/[a-z0-9]/i);
-  assert.match(read('hosted/app.mjs'), /coordinatorParent\(window\.location\.hostname\)/);
+  assert.match(read('hosted/app.mjs'), /deploymentRoot\(window\.location\.hostname\)/);
   assert.match(read('hosted/index.html'), /id="site-entry"/);
 });
 
