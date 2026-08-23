@@ -318,7 +318,7 @@ impl WorldPackages {
             .packages
             .iter()
             .find(|package| package.world_id() == world && package.preferred)
-            .ok_or_else(|| anyhow::anyhow!("World '{world}' is not bundled"))?;
+            .ok_or_else(|| anyhow::anyhow!("World '{world}' has no selected package"))?;
         let lifecycle = package
             .lifecycle
             .as_deref()

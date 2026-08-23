@@ -1760,9 +1760,9 @@ mod tests {
     }
 
     /// The bounds are the whole point of taking bytes instead of a path: the
-    /// artwork ships inside every client that bundles the World, so a World
-    /// that hands over a photograph is spending everyone's binary. Each of
-    /// these is refused where the person who can fix the image is standing.
+    /// artwork ships inside every independently installed World release, so a
+    /// World that hands over a photograph is spending every install's bytes.
+    /// Each of these is refused where the person who can fix the image stands.
     #[test]
     fn artwork_is_held_to_its_bounds_at_declaration() {
         let square = fixed(png(64));

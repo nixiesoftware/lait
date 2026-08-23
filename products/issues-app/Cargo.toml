@@ -3,7 +3,7 @@ name = "lait-issues-app"
 version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
-description = "Client interfaces and application protocol for LAIT's bundled Issues World"
+description = "Client interfaces and application protocol for LAIT's independently distributed Issues World"
 license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 

@@ -385,10 +385,10 @@ impl DisplayRuntime {
         let package = self
             .registry
             .package_for_world(&world_id)
-            .context("display World is not bundled by this build")?;
+            .context("display World is not declared by a selected runner")?;
         let registered = package
             .display_surface(&surface_id)
-            .context("display surface is not bundled by this build")?;
+            .context("display surface is not declared by the selected runner")?;
         // The package canonicalizes its own input exactly once, here as at
         // assignment: the generic path never normalizes arbitrary JSON.
         let canonical = registered
@@ -618,13 +618,13 @@ impl DisplayRuntime {
         let package = self
             .registry
             .package_for_world(&world)
-            .context("display World is not bundled")?;
+            .context("display World is not declared by a selected runner")?;
         let surface_id = DisplaySurfaceId::new(surface.to_string()).map_err(|error| {
             anyhow::anyhow!(error.diagnostic().unwrap_or("invalid surface").to_string())
         })?;
         let surface = package
             .display_surface(&surface_id)
-            .context("display surface is not bundled")?;
+            .context("display surface is not declared by the selected runner")?;
         surface.descriptor.validate(&world).map_err(|error| {
             anyhow::anyhow!(error.diagnostic().unwrap_or("invalid surface").to_string())
         })?;
