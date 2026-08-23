@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2598
+pr             2600
 pr-platform    2120
-nightly        2626
+nightly        2628
 mutants        106
 
 [gates]
@@ -193,6 +193,8 @@ astrolabe single_instance::tests::instance_artifacts_are_stable_within_a_user_an
 astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
+astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_synchronized_snapshot_keeps_advancing_while_assets_are_staged
+astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::an_unsynchronized_snapshot_begins_when_it_is_activated
 astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
 astrolabe-ios worlds::tests::signed_adapter_carries_exactly_the_reviewed_first_party_defaults
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
