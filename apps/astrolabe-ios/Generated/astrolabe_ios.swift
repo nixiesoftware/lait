@@ -465,38 +465,6 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
-    typealias FfiType = UInt16
-    typealias SwiftType = UInt16
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
-        return try lift(readInt(&buf))
-    }
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
-    typealias FfiType = UInt32
-    typealias SwiftType = UInt32
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
-        return try lift(readInt(&buf))
-    }
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -650,67 +618,6 @@ public func FfiConverterTypeEntered_lower(_ value: Entered) -> RustBuffer {
 
 
 /**
- * What the head answered when it came up: everything a WebKit tab needs.
- */
-public struct HeadReady: Equatable, Hashable {
-    public var url: String
-    public var token: String
-    public var port: UInt16
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(url: String, token: String, port: UInt16) {
-        self.url = url
-        self.token = token
-        self.port = port
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension HeadReady: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeHeadReady: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HeadReady {
-        return
-            try HeadReady(
-                url: FfiConverterString.read(from: &buf), 
-                token: FfiConverterString.read(from: &buf), 
-                port: FfiConverterUInt16.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: HeadReady, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.url, into: &buf)
-        FfiConverterString.write(value.token, into: &buf)
-        FfiConverterUInt16.write(value.port, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHeadReady_lift(_ buf: RustBuffer) throws -> HeadReady {
-    return try FfiConverterTypeHeadReady.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHeadReady_lower(_ value: HeadReady) -> RustBuffer {
-    return FfiConverterTypeHeadReady.lower(value)
-}
-
-
-/**
  * Whole immutable projection out — the only thing a surface may render.
  */
 public struct IosView: Equatable, Hashable {
@@ -727,11 +634,6 @@ public struct IosView: Equatable, Hashable {
      * navigation state, never truth.
      */
     public var spaces: [SpaceRow]
-    /**
-     * The in-process head, when the node has started. A World cannot open
-     * without it, and its absence renders as "starting", not as an error.
-     */
-    public var head: HeadReady?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -745,15 +647,10 @@ public struct IosView: Equatable, Hashable {
         /**
          * One row per joined Space, from the Orbit registry — advisory
          * navigation state, never truth.
-         */spaces: [SpaceRow], 
-        /**
-         * The in-process head, when the node has started. A World cannot open
-         * without it, and its absence renders as "starting", not as an error.
-         */head: HeadReady?) {
+         */spaces: [SpaceRow]) {
         self.coreVersion = coreVersion
         self.link = link
         self.spaces = spaces
-        self.head = head
     }
 
     
@@ -774,8 +671,7 @@ public struct FfiConverterTypeIosView: FfiConverterRustBuffer {
             try IosView(
                 coreVersion: FfiConverterString.read(from: &buf), 
                 link: FfiConverterTypeLinkState.read(from: &buf), 
-                spaces: FfiConverterSequenceTypeSpaceRow.read(from: &buf), 
-                head: FfiConverterOptionTypeHeadReady.read(from: &buf)
+                spaces: FfiConverterSequenceTypeSpaceRow.read(from: &buf)
         )
     }
 
@@ -783,7 +679,6 @@ public struct FfiConverterTypeIosView: FfiConverterRustBuffer {
         FfiConverterString.write(value.coreVersion, into: &buf)
         FfiConverterTypeLinkState.write(value.link, into: &buf)
         FfiConverterSequenceTypeSpaceRow.write(value.spaces, into: &buf)
-        FfiConverterOptionTypeHeadReady.write(value.head, into: &buf)
     }
 }
 
@@ -814,12 +709,10 @@ public struct SpaceRow: Equatable, Hashable {
      */
     public var path: String
     /**
-     * The head's address for this Space (`orb_…`), when the store is
-     * present: `/spaces/{orbit_id}` in the served shell.
+     * The orbital address for this Space (`orb_…`), when the store is present.
      */
     public var orbitId: String?
     public var status: SpaceStatus
-    public var worlds: [SpaceWorldRow]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -828,15 +721,13 @@ public struct SpaceRow: Equatable, Hashable {
          * The store path — the handle invite-minting keys on.
          */path: String, 
         /**
-         * The head's address for this Space (`orb_…`), when the store is
-         * present: `/spaces/{orbit_id}` in the served shell.
-         */orbitId: String?, status: SpaceStatus, worlds: [SpaceWorldRow]) {
+         * The orbital address for this Space (`orb_…`), when the store is present.
+         */orbitId: String?, status: SpaceStatus) {
         self.spaceId = spaceId
         self.name = name
         self.path = path
         self.orbitId = orbitId
         self.status = status
-        self.worlds = worlds
     }
 
     
@@ -859,8 +750,7 @@ public struct FfiConverterTypeSpaceRow: FfiConverterRustBuffer {
                 name: FfiConverterString.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
                 orbitId: FfiConverterOptionString.read(from: &buf), 
-                status: FfiConverterTypeSpaceStatus.read(from: &buf), 
-                worlds: FfiConverterSequenceTypeSpaceWorldRow.read(from: &buf)
+                status: FfiConverterTypeSpaceStatus.read(from: &buf)
         )
     }
 
@@ -870,7 +760,6 @@ public struct FfiConverterTypeSpaceRow: FfiConverterRustBuffer {
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterOptionString.write(value.orbitId, into: &buf)
         FfiConverterTypeSpaceStatus.write(value.status, into: &buf)
-        FfiConverterSequenceTypeSpaceWorldRow.write(value.worlds, into: &buf)
     }
 }
 
@@ -887,77 +776,6 @@ public func FfiConverterTypeSpaceRow_lift(_ buf: RustBuffer) throws -> SpaceRow 
 #endif
 public func FfiConverterTypeSpaceRow_lower(_ value: SpaceRow) -> RustBuffer {
     return FfiConverterTypeSpaceRow.lower(value)
-}
-
-
-/**
- * A World within a Space's disclosure.
- */
-public struct SpaceWorldRow: Equatable, Hashable {
-    public var mount: String
-    public var name: String
-    public var accent: UInt32?
-    /**
-     * False renders as the typed "not resident" absence.
-     */
-    public var resident: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(mount: String, name: String, accent: UInt32?, 
-        /**
-         * False renders as the typed "not resident" absence.
-         */resident: Bool) {
-        self.mount = mount
-        self.name = name
-        self.accent = accent
-        self.resident = resident
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension SpaceWorldRow: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeSpaceWorldRow: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SpaceWorldRow {
-        return
-            try SpaceWorldRow(
-                mount: FfiConverterString.read(from: &buf), 
-                name: FfiConverterString.read(from: &buf), 
-                accent: FfiConverterOptionUInt32.read(from: &buf), 
-                resident: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: SpaceWorldRow, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.mount, into: &buf)
-        FfiConverterString.write(value.name, into: &buf)
-        FfiConverterOptionUInt32.write(value.accent, into: &buf)
-        FfiConverterBool.write(value.resident, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSpaceWorldRow_lift(_ buf: RustBuffer) throws -> SpaceWorldRow {
-    return try FfiConverterTypeSpaceWorldRow.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSpaceWorldRow_lower(_ value: SpaceWorldRow) -> RustBuffer {
-    return FfiConverterTypeSpaceWorldRow.lower(value)
 }
 
 
@@ -1279,8 +1097,7 @@ public func FfiConverterTypeLinkState_lower(_ value: LinkState) -> RustBuffer {
 
 public enum NodeStart: Equatable, Hashable {
     
-    case ready(head: HeadReady
-    )
+    case ready
     case failed(reason: String
     )
 
@@ -1304,8 +1121,7 @@ public struct FfiConverterTypeNodeStart: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .ready(head: try FfiConverterTypeHeadReady.read(from: &buf)
-        )
+        case 1: return .ready
         
         case 2: return .failed(reason: try FfiConverterString.read(from: &buf)
         )
@@ -1316,13 +1132,12 @@ public struct FfiConverterTypeNodeStart: FfiConverterRustBuffer {
 
     public static func write(_ value: NodeStart, into buf: inout [UInt8]) {
         switch value {
-        
-        
-        case let .ready(head):
+
+
+        case .ready:
             writeInt(&buf, Int32(1))
-            FfiConverterTypeHeadReady.write(head, into: &buf)
-            
-        
+
+
         case let .failed(reason):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(reason, into: &buf)
@@ -1614,30 +1429,6 @@ public func FfiConverterTypeTicketRead_lower(_ value: TicketRead) -> RustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
-    typealias SwiftType = UInt32?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterUInt32.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterUInt32.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1654,30 +1445,6 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionTypeHeadReady: FfiConverterRustBuffer {
-    typealias SwiftType = HeadReady?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeHeadReady.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeHeadReady.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -1703,31 +1470,6 @@ fileprivate struct FfiConverterSequenceTypeSpaceRow: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeSpaceRow.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeSpaceWorldRow: FfiConverterRustBuffer {
-    typealias SwiftType = [SpaceWorldRow]
-
-    public static func write(_ value: [SpaceWorldRow], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeSpaceWorldRow.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SpaceWorldRow] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [SpaceWorldRow]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeSpaceWorldRow.read(from: &buf))
         }
         return seq
     }
@@ -1770,39 +1512,8 @@ public func mintInvite(spacePath: String) -> InviteOutcome  {
 })
 }
 /**
- * The background transition: the head steps down before suspension freezes
- * it. Close-then-suspend is the platform's own guidance — a listener carried
- * into suspension is reclaimed under the app and comes back dead — and the
- * shell holds a background-task assertion across this call so the drain
- * finishes before the freeze. The daemon stays; suspension merely pauses it.
- *
- * A no-op when the node never started or the head is already down.
- */
-public func nodeBackground()  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_astrolabe_ios_fn_func_node_background(uniffiCallStatus
-    )
-}
-}
-/**
- * The foreground transition: the node up, the head serving, every pending
- * admission being driven. Idempotent — at launch it IS the start, and after
- * a suspension it restarts only what suspension killed (the listener), so
- * the shell calls it on every `scenePhase == .active` without counting.
- *
- * A restarted head is a *new* announcement — fresh port, fresh token — and
- * the returned fact is the one every open tab must re-authenticate against.
- */
-public func nodeForeground() -> NodeStart  {
-    return try!  FfiConverterTypeNodeStart_lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_astrolabe_ios_fn_func_node_foreground(uniffiCallStatus
-    )
-})
-}
-/**
- * Bring the node up, idempotently. Blocks up to ~30s on first call; the
- * shell calls it off the main thread and renders a starting state.
+ * Bring the product-free node up, idempotently. Blocks up to ~30s on first
+ * call; the shell calls it off the main thread and renders a starting state.
  */
 public func nodeStart() -> NodeStart  {
     return try!  FfiConverterTypeNodeStart_lift(try! rustCall() {
@@ -1861,13 +1572,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_astrolabe_ios_checksum_func_mint_invite() != 62254) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_astrolabe_ios_checksum_func_node_background() != 36104) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_astrolabe_ios_checksum_func_node_foreground() != 58076) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_astrolabe_ios_checksum_func_node_start() != 15601) {
+    if (uniffi_astrolabe_ios_checksum_func_node_start() != 49092) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_astrolabe_ios_checksum_func_read_ticket() != 29817) {
