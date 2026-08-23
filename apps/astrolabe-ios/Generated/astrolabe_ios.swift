@@ -566,105 +566,6 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 /**
- * A reviewed first-party World this signed iOS application carries.
- */
-public struct BundledWorld: Equatable, Hashable {
-    /**
-     * The published namespace key — machine input, never renamed.
-     */
-    public var mount: String
-    /**
-     * What the World calls itself.
-     */
-    public var name: String
-    /**
-     * One line under the name, when the World declared one.
-     */
-    public var tagline: String?
-    /**
-     * Packed 0xRRGGBB accent seed, when declared.
-     */
-    public var accent: UInt32?
-    /**
-     * Whether `Open` has anywhere to land. False is a real answer.
-     */
-    public var openable: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * The published namespace key — machine input, never renamed.
-         */mount: String, 
-        /**
-         * What the World calls itself.
-         */name: String, 
-        /**
-         * One line under the name, when the World declared one.
-         */tagline: String?, 
-        /**
-         * Packed 0xRRGGBB accent seed, when declared.
-         */accent: UInt32?, 
-        /**
-         * Whether `Open` has anywhere to land. False is a real answer.
-         */openable: Bool) {
-        self.mount = mount
-        self.name = name
-        self.tagline = tagline
-        self.accent = accent
-        self.openable = openable
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension BundledWorld: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeBundledWorld: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BundledWorld {
-        return
-            try BundledWorld(
-                mount: FfiConverterString.read(from: &buf), 
-                name: FfiConverterString.read(from: &buf), 
-                tagline: FfiConverterOptionString.read(from: &buf), 
-                accent: FfiConverterOptionUInt32.read(from: &buf), 
-                openable: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: BundledWorld, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.mount, into: &buf)
-        FfiConverterString.write(value.name, into: &buf)
-        FfiConverterOptionString.write(value.tagline, into: &buf)
-        FfiConverterOptionUInt32.write(value.accent, into: &buf)
-        FfiConverterBool.write(value.openable, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeBundledWorld_lift(_ buf: RustBuffer) throws -> BundledWorld {
-    return try FfiConverterTypeBundledWorld.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeBundledWorld_lower(_ value: BundledWorld) -> RustBuffer {
-    return FfiConverterTypeBundledWorld.lower(value)
-}
-
-
-/**
  * The joiner's reply, verbatim from the host plane. `admitted: false` is not
  * a failure — the inviter may be offline — and the surface must keep the
  * difference between "you're in" and "the board stays encrypted until they
@@ -822,10 +723,6 @@ public struct IosView: Equatable, Hashable {
      */
     public var link: LinkState
     /**
-     * What this signed build bundles — the Library facts, compiled in.
-     */
-    public var bundledWorlds: [BundledWorld]
-    /**
      * One row per joined Space, from the Orbit registry — advisory
      * navigation state, never truth.
      */
@@ -846,9 +743,6 @@ public struct IosView: Equatable, Hashable {
          * This phone's standing in the identity's linked-device set.
          */link: LinkState, 
         /**
-         * What this signed build bundles — the Library facts, compiled in.
-         */bundledWorlds: [BundledWorld], 
-        /**
          * One row per joined Space, from the Orbit registry — advisory
          * navigation state, never truth.
          */spaces: [SpaceRow], 
@@ -858,7 +752,6 @@ public struct IosView: Equatable, Hashable {
          */head: HeadReady?) {
         self.coreVersion = coreVersion
         self.link = link
-        self.bundledWorlds = bundledWorlds
         self.spaces = spaces
         self.head = head
     }
@@ -881,7 +774,6 @@ public struct FfiConverterTypeIosView: FfiConverterRustBuffer {
             try IosView(
                 coreVersion: FfiConverterString.read(from: &buf), 
                 link: FfiConverterTypeLinkState.read(from: &buf), 
-                bundledWorlds: FfiConverterSequenceTypeBundledWorld.read(from: &buf), 
                 spaces: FfiConverterSequenceTypeSpaceRow.read(from: &buf), 
                 head: FfiConverterOptionTypeHeadReady.read(from: &buf)
         )
@@ -890,7 +782,6 @@ public struct FfiConverterTypeIosView: FfiConverterRustBuffer {
     public static func write(_ value: IosView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.coreVersion, into: &buf)
         FfiConverterTypeLinkState.write(value.link, into: &buf)
-        FfiConverterSequenceTypeBundledWorld.write(value.bundledWorlds, into: &buf)
         FfiConverterSequenceTypeSpaceRow.write(value.spaces, into: &buf)
         FfiConverterOptionTypeHeadReady.write(value.head, into: &buf)
     }
@@ -1789,31 +1680,6 @@ fileprivate struct FfiConverterOptionTypeHeadReady: FfiConverterRustBuffer {
         case 1: return try FfiConverterTypeHeadReady.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeBundledWorld: FfiConverterRustBuffer {
-    typealias SwiftType = [BundledWorld]
-
-    public static func write(_ value: [BundledWorld], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeBundledWorld.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [BundledWorld] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [BundledWorld]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeBundledWorld.read(from: &buf))
-        }
-        return seq
     }
 }
 
