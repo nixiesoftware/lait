@@ -315,9 +315,15 @@ jobs:
           mkdir -p "$channels"
           bash ci/prepare-independent-world-fixtures.sh \
             "$channels" "$PWD/target/debug" "$feed"
-          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
           installer="$PWD/target/debug/world-channel-installer"
           [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          # Git Bash spells Windows paths as /c/..., but these values are
+          # consumed by native Rust processes after this shell exits.
+          if command -v cygpath >/dev/null 2>&1; then
+            channels="$(cygpath -w "$channels")"
+            installer="$(cygpath -w "$installer")"
+          fi
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
           echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       # The `pr` profile in .config/nextest.toml is the tier definition: the
@@ -463,9 +469,15 @@ jobs:
           mkdir -p "$channels"
           bash ci/prepare-independent-world-fixtures.sh \
             "$channels" "$PWD/target/debug" "$feed"
-          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
           installer="$PWD/target/debug/world-channel-installer"
           [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          # Git Bash spells Windows paths as /c/..., but these values are
+          # consumed by native Rust processes after this shell exits.
+          if command -v cygpath >/dev/null 2>&1; then
+            channels="$(cygpath -w "$channels")"
+            installer="$(cygpath -w "$installer")"
+          fi
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
           echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       - name: Test (OS seam — unit tests, every crate)
