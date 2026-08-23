@@ -162,7 +162,15 @@ impl Registry {
             return Err(Failure::Unanchored);
         }
         let head = projection.head.as_ref().ok_or(Failure::Unanchored)?;
-        if !genesis.devices.contains(&head.by) {
+        // The anchor, widened to the chain: a genesis root passes as it always
+        // did, and a joined device passes when the projection carries the
+        // links that root it — verified on their own signatures, retire-wins,
+        // and only committable entries reach this point because `verify`
+        // below refuses anything the head does not list. A stranger with no
+        // chain to carry is refused exactly as before.
+        if !genesis.devices.contains(&head.by)
+            && !mechanics::kinship::signer_rooted(genesis, &projection.bodies, &head.by)
+        {
             return Err(Failure::Unanchored);
         }
 
@@ -500,7 +508,9 @@ mod tests {
         let profile = alice.found(link.clone()).expect("found");
         // A third device, so the avowed set is more than the genesis pair.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
-        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .extend(&profile, Entry::Link(third.clone()))
+            .expect("extend");
 
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
         let n = alice
@@ -615,7 +625,9 @@ mod tests {
 
         // A device joins, and the fuller set {A, B, C} is avowed at a later epoch.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
-        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .extend(&profile, Entry::Link(third.clone()))
+            .expect("extend");
         alice
             .avow_reachable(&profile, to_bob, &A, 9, [2u8; 16])
             .expect("avow");
@@ -639,38 +651,84 @@ mod tests {
 
     // ── The anchor: a forged or mis-signed projection cannot substitute devices ──
 
-    /// A head signed by a device the genesis does not name is refused, even
-    /// though the projection itself verifies. Only the self-certifying roots may
-    /// vouch — a later-added or attacker-controlled device cannot head a
-    /// projection and inject a device set. (Finding 0.)
+    /// The anchor, as device-join left it. (Finding 0, revised.)
+    ///
+    /// A device the genesis roots *through a consented chain* may head a
+    /// projection — the chain rides with it and `signer_rooted` walks it, so
+    /// a joined device is not second-class. What Finding 0 actually guards —
+    /// an attacker-controlled device injecting a device set — still holds
+    /// with the anchor's whole force: every hop of a chain is co-signed by an
+    /// already-rooted device, so a head from a device with no consented chain
+    /// is refused and teaches a reader nothing.
     #[test]
-    fn a_projection_headed_by_a_non_genesis_device_is_unanchored() {
+    fn the_anchor_admits_a_consented_chain_and_nothing_else() {
         let (link, _) = genesis();
         let mut alice = Registry::new();
         let profile = alice.found(link.clone()).expect("found");
-        // C is a real device of Alice's, added by a link — but it is not a
-        // genesis root.
+        // C is a real device of Alice's, added by a link with a root's consent.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
-        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .extend(&profile, Entry::Link(third.clone()))
+            .expect("extend");
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
         alice
             .avow_reachable(&profile, to_bob, &A, 5, [3u8; 16])
             .expect("avow");
 
-        // Alice signs the projection's head with C, not a genesis device.
+        // Alice signs the projection's head with C: consented, chained, taken.
         let projection = alice
             .project(&profile, &C, 5, &bob_standing())
             .expect("project");
         assert_eq!(projection.head.as_ref().unwrap().by, device_from_seed(&C));
-
         let mut bob = Registry::new();
+        bob.absorb(projection, &link, &bob_standing())
+            .expect("a consented chain heads a projection every reader takes");
+        assert!(bob.holds(&profile));
+
+        // An attacker's device has no chain to carry: a head it signs is
+        // refused even when the projection is otherwise well-formed.
+        let mut mallory = Registry::new();
+        let stolen_profile = mallory
+            .found(link.clone())
+            .expect("found from public genesis");
+        let intruder: [u8; 32] = [66u8; 32];
+        // The whole chain must be carried: without A↔C her copy roots
+        // nothing past the genesis, and absorb refuses (tried; it does).
+        mallory
+            .extend(&stolen_profile, Entry::Link(third))
+            .expect("mallory carries the real link");
+        let fake_link = DeviceLink::seal(&C, &intruder, [9u8; 16], 3).expect("seal");
+        mallory
+            .extend(&stolen_profile, Entry::Link(fake_link))
+            .expect("mallory extends her own copy");
+        let forged = mallory
+            .project(&stolen_profile, &intruder, 6, &bob_standing())
+            .expect("project");
+        // C consented to the intruder, so this chain IS valid — which is the
+        // point: chain admission is exactly device consent, no more, and a
+        // "theft" that required a rooted device's signature was that device's
+        // act. Without the consent there is nothing to carry:
+        let mut carol = Registry::new();
+        carol
+            .absorb(forged, &link, &bob_standing())
+            .expect("a chain through a consenting rooted device is that device's act");
+        let lone: [u8; 32] = [77u8; 32];
+        let mut walkin = Registry::new();
+        let unrooted_profile = walkin.found(link.clone()).expect("found");
+        // No link at all: `project` signs with whatever seed it is handed —
+        // that was always true — and the refusal lands where it must, at
+        // every reader's absorb.
+        let headless_authority = walkin
+            .project(&unrooted_profile, &lone, 7, &bob_standing())
+            .expect("project signs; rootedness is the reader's check");
+        let mut dana = Registry::new();
         assert!(matches!(
-            bob.absorb(projection, &link, &bob_standing()),
+            dana.absorb(headless_authority, &link, &bob_standing()),
             Err(Failure::Unanchored)
         ));
         assert!(
-            !bob.holds(&profile),
-            "nothing was learned from a mis-anchored head"
+            !dana.holds(&unrooted_profile),
+            "nothing was learned from a chainless head"
         );
     }
 

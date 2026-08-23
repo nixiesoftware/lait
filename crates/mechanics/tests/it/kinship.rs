@@ -555,3 +555,164 @@ fn a_sponsorship_avowal_is_an_assertion_and_not_a_grant() {
         "and all it carries is the assertion itself"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Chained authority: the signer is rooted by carried evidence
+// ---------------------------------------------------------------------------
+
+use mechanics::kinship::signer_rooted;
+
+fn genesis() -> DeviceLink {
+    DeviceLink::seal(&FIRST, &SECOND, [1u8; 16], 1).expect("genesis")
+}
+
+fn stranger_standing() -> Standing {
+    Standing {
+        device: Some(device_from_seed(&[99u8; 32])),
+        ..Standing::default()
+    }
+}
+
+/// The whole point: a joined device's projection is evidence to a stranger,
+/// because the chain rides with it and the verifier walks it.
+#[test]
+fn a_joined_device_signs_a_head_a_stranger_can_verify() {
+    let log = founded();
+    let projection = log
+        .project(&THIRD, 2, &stranger_standing())
+        .expect("project as the joined device");
+    // The chain was carried despite the stranger's standing…
+    assert!(
+        projection.bodies.iter().any(
+            |entry| matches!(entry, Entry::Link(link) if link.names(&device_from_seed(&THIRD)))
+        ),
+        "the authority chain rides with the projection"
+    );
+    // …verifies as a projection…
+    projection
+        .verify(&stranger_standing())
+        .expect("structural entries are proof, not disclosure");
+    // …and roots the signer.
+    assert!(signer_rooted(
+        &genesis(),
+        &projection.bodies,
+        &device_from_seed(&THIRD)
+    ));
+}
+
+/// A stranger with no chain is refused exactly as before.
+#[test]
+fn an_unlinked_device_is_not_rooted_by_any_amount_of_asserting() {
+    let log = founded();
+    let projection = log
+        .project(&THIRD, 2, &stranger_standing())
+        .expect("project");
+    assert!(!signer_rooted(
+        &genesis(),
+        &projection.bodies,
+        &device_from_seed(&STRANGER)
+    ));
+}
+
+/// A forged link extends nothing: both signatures must verify.
+#[test]
+fn a_forged_link_roots_nobody() {
+    let real = DeviceLink::seal(&FIRST, &THIRD, [2u8; 16], 1).expect("join");
+    let forged = DeviceLink {
+        devices: real.devices.clone(),
+        nonce: real.nonce,
+        epoch: real.epoch,
+        signatures: [real.signatures[0].clone(), Signature([9u8; 64])],
+    };
+    assert!(!signer_rooted(
+        &genesis(),
+        &[Entry::Link(forged)],
+        &device_from_seed(&THIRD)
+    ));
+}
+
+/// Retirement severs the chain — when its author held the authority to make
+/// it. A stranger's retirement severs nothing.
+#[test]
+fn retirement_severs_and_a_stranger_cannot_wield_it() {
+    let join = DeviceLink::seal(&FIRST, &THIRD, [2u8; 16], 1).expect("join");
+    let retire = Retirement::seal(&SECOND, device_from_seed(&THIRD), 3, [4u8; 16])
+        .expect("retire by a rooted peer");
+    assert!(
+        !signer_rooted(
+            &genesis(),
+            &[Entry::Link(join.clone()), Entry::Retire(retire)],
+            &device_from_seed(&THIRD)
+        ),
+        "a rooted author's retirement severs the subject"
+    );
+
+    let strangers_retire = Retirement::seal(&STRANGER, device_from_seed(&THIRD), 3, [5u8; 16])
+        .expect("a stranger can sign whatever it likes");
+    assert!(
+        signer_rooted(
+            &genesis(),
+            &[Entry::Link(join), Entry::Retire(strangers_retire)],
+            &device_from_seed(&THIRD)
+        ),
+        "an unrooted author's retirement severs nothing"
+    );
+}
+
+/// A chain through a retired device is severed at the break: authority does
+/// not flow through a device that lost its own.
+#[test]
+fn a_chain_through_a_retired_device_is_dead_past_the_break() {
+    // FIRST ↔ THIRD, THIRD ↔ FOURTH; then THIRD retired.
+    let fourth: [u8; 32] = [55u8; 32];
+    let join_third = DeviceLink::seal(&FIRST, &THIRD, [2u8; 16], 1).expect("join third");
+    let join_fourth = DeviceLink::seal(&THIRD, &fourth, [3u8; 16], 2).expect("join fourth");
+    let retire_third =
+        Retirement::seal(&FIRST, device_from_seed(&THIRD), 3, [6u8; 16]).expect("retire third");
+    let bodies = [
+        Entry::Link(join_third),
+        Entry::Link(join_fourth),
+        Entry::Retire(retire_third),
+    ];
+    assert!(
+        !signer_rooted(&genesis(), &bodies, &device_from_seed(&THIRD)),
+        "the retired device itself is severed"
+    );
+    // The fourth device was linked by a device that was live when it linked;
+    // reachability is two-pass, so the *link* stands while the *linker* falls
+    // — matching `KinshipLog::devices`, where retirement names devices and
+    // not the links they made.
+    assert!(
+        signer_rooted(&genesis(), &bodies, &device_from_seed(&fourth)),
+        "a link made while live survives its maker's retirement, as devices() rules"
+    );
+}
+
+/// A cycle of links terminates: the walk grows the set or stops.
+#[test]
+fn a_link_cycle_does_not_spin_the_verifier() {
+    let join = DeviceLink::seal(&FIRST, &THIRD, [2u8; 16], 1).expect("join");
+    let back = DeviceLink::seal(&THIRD, &SECOND, [7u8; 16], 2).expect("cycle back");
+    assert!(signer_rooted(
+        &genesis(),
+        &[Entry::Link(join), Entry::Link(back)],
+        &device_from_seed(&THIRD)
+    ));
+}
+
+/// The genesis-rooted projection carries no chain it does not need: the
+/// disclosure is paid only when a joined device signs.
+#[test]
+fn a_genesis_signer_disloses_no_chain() {
+    let log = founded();
+    let projection = log
+        .project(&FIRST, 2, &stranger_standing())
+        .expect("project as a genesis device");
+    assert!(
+        !projection
+            .bodies
+            .iter()
+            .any(|entry| matches!(entry, Entry::Link(_) | Entry::Retire(_))),
+        "a genesis signer needs no chain, so none is disclosed"
+    );
+}

@@ -476,6 +476,49 @@ impl DeviceLink {
     pub fn names(&self, device: &DeviceId) -> bool {
         &self.devices[0] == device || &self.devices[1] == device
     }
+
+    /// One side's signature over the link both sides will hold.
+    ///
+    /// The sponsorship shape: `seal` needs both seeds on one machine, and a
+    /// real join has them on two. Each side signs the same preimage where its
+    /// seed lives; [`DeviceLink::assemble`] puts the halves together and
+    /// refuses anything that does not verify as if `seal` had made it. Nothing
+    /// half-signed is ever a link — the half is a signature, not an artifact.
+    #[must_use]
+    pub fn half(seed: &[u8; 32], other: &DeviceId, nonce: [u8; 16], epoch: u64) -> Signature {
+        let me = crate::actor::device_from_seed(seed);
+        let devices = if me <= *other {
+            [me, other.clone()]
+        } else {
+            [other.clone(), me]
+        };
+        Signature(sign_detached(
+            seed,
+            &Self::preimage(&devices, &nonce, epoch),
+        ))
+    }
+
+    /// Assemble a link from two halves, verifying it is exactly what `seal`
+    /// would have produced.
+    pub fn assemble(
+        a: (DeviceId, Signature),
+        b: (DeviceId, Signature),
+        nonce: [u8; 16],
+        epoch: u64,
+    ) -> Result<Self, Refusal> {
+        if a.0 == b.0 {
+            return Err(Refusal::NotDistinct);
+        }
+        let (first, second) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+        let link = Self {
+            devices: [first.0, second.0],
+            nonce,
+            epoch,
+            signatures: [first.1, second.1],
+        };
+        link.verify()?;
+        Ok(link)
+    }
 }
 
 /// A signed statement that a subject stands in a stated relation, made to a
@@ -872,12 +915,100 @@ impl KinshipLog {
                 bodies.push(entry.clone());
             }
         }
+        // The signer's authority chain rides with the projection whenever the
+        // audience filter would have withheld it: a head signed by a joined
+        // device is only evidence to a reader who can walk from the genesis
+        // to the signer, and **authority is never secret from whoever must
+        // verify it**. What is included is every structural entry — links and
+        // retirements — not avowals; the audience-gated disclosures stay
+        // gated. A reader learns the device topology, which is the disclosed
+        // cost of a verifiable non-genesis signer, and is the same set a
+        // correspondent of the profile's own devices already sees.
+        let signer = crate::actor::device_from_seed(seed);
+        let genesis_rooted = self
+            .entries
+            .first()
+            .is_some_and(|entry| matches!(entry, Entry::Link(link) if link.names(&signer)));
+        if !genesis_rooted {
+            for entry in &self.entries {
+                if matches!(entry, Entry::Link(_) | Entry::Retire(_)) && !bodies.contains(entry) {
+                    bodies.push(entry.clone());
+                }
+            }
+        }
         Ok(Projection {
             profile: self.profile.clone(),
             bodies,
             head: Some(head),
         })
     }
+
+    /// Whether `device` is in this log's current device set — link-reachable
+    /// from the genesis and not retired. The authored-side answer to the
+    /// question [`signer_rooted`] answers for a reader holding only a
+    /// projection.
+    #[must_use]
+    pub fn rooted(&self, device: &DeviceId) -> bool {
+        self.devices().contains(device)
+    }
+}
+
+/// Whether `signer` holds this profile's authority, judged from carried
+/// evidence alone: link-reachable from the genesis pair through the `Link`
+/// entries in `bodies`, and not retired by any `Retire` entry whose author is
+/// itself reachable.
+///
+/// Two passes, deliberately: reachability first over every verified link,
+/// then retirement — so a retirement only counts when its author held
+/// authority to make it, and a stranger's forged retirement severs nothing.
+/// Retire-wins within that rule, matching [`KinshipLog::devices`]. What this
+/// cannot establish is that every retirement was *carried*: a signer
+/// withholding a retirement of itself presents a chain this cannot fault,
+/// which is the same freshness bound the genesis anchor already had — a
+/// compromised genesis device is refused by nothing here either, and both are
+/// answered the same way, by a newer head from a surviving device.
+#[must_use]
+pub fn signer_rooted(genesis: &DeviceLink, bodies: &[Entry], signer: &DeviceId) -> bool {
+    if genesis.verify().is_err() {
+        return false;
+    }
+    // Pass one: reachability over verified links, genesis included.
+    let mut reachable: Vec<DeviceId> = genesis.devices.to_vec();
+    loop {
+        let mut grew = false;
+        for entry in bodies {
+            let Entry::Link(link) = entry else { continue };
+            if link.verify().is_err() {
+                continue;
+            }
+            let touches = link.devices.iter().any(|device| reachable.contains(device));
+            if touches {
+                for device in &link.devices {
+                    if !reachable.contains(device) {
+                        reachable.push(device.clone());
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // Pass two: retirements by reachable authors sever their subjects.
+    let mut live = reachable.clone();
+    for entry in bodies {
+        let Entry::Retire(retirement) = entry else {
+            continue;
+        };
+        if retirement.verify().is_err() {
+            continue;
+        }
+        if reachable.contains(&retirement.by) {
+            live.retain(|device| device != &retirement.device);
+        }
+    }
+    live.contains(signer)
 }
 
 /// An audience-scoped view of a log, plus the head that makes omission visible.
@@ -918,7 +1049,15 @@ impl Projection {
             if !head.entries.contains(&id) {
                 return Err(Refusal::Unlisted);
             }
-            if !entry.audience().admits(standing) {
+            // Structural entries are exempt from the audience gate: they are
+            // the head signer's authority chain, and **authority is never
+            // secret from whoever must verify it** — a reader who cannot read
+            // the chain cannot verify the head at all. What reaches a reader
+            // is still decided at projection time (the minimal chain, not the
+            // topology); this only refuses to call proof a disclosure.
+            if !matches!(entry, Entry::Link(_) | Entry::Retire(_))
+                && !entry.audience().admits(standing)
+            {
                 return Err(Refusal::OutsideAudience);
             }
             delivered.push(id);

@@ -442,6 +442,13 @@ impl ReachPlane {
 
     /// Every profile this identity holds, its own included.
     #[must_use]
+    /// The registry beneath, read-only — for a caller projecting with a seed
+    /// this plane does not hold, which is exactly an adopted placement's case.
+    #[must_use]
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     pub fn registry_profiles(&self) -> Vec<ProfileId> {
         self.registry.profiles().cloned().collect()
     }
@@ -469,6 +476,29 @@ impl ReachPlane {
     #[must_use]
     pub fn canonical_device(&self) -> DeviceId {
         device_from_seed(&self.canonical_seed())
+    }
+
+    /// Adopt a device this identity does not hold the seed for — a placement
+    /// on another machine, or the printed recovery device — by appending its
+    /// consented link.
+    ///
+    /// The link is the sponsorship artifact: both sides signed the same
+    /// preimage where their seeds live (`DeviceLink::half` + `assemble`), and
+    /// one of them must already be rooted here, or the append is an unrelated
+    /// pair wearing this profile's log. The adopted device can then *sign
+    /// heads every reader takes* — `project` carries its chain and `absorb`
+    /// walks it — but it cannot compose from this plane, which holds no seed
+    /// for it and says so rather than pretending.
+    pub fn adopt_device(&mut self, link: mechanics::kinship::DeviceLink) -> Result<(), Failure> {
+        link.verify()
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        let rooted = self.registry.resolve(&self.profile).unwrap_or_default();
+        if !link.devices.iter().any(|device| rooted.contains(device)) {
+            return Err(Failure::NotReachable);
+        }
+        self.registry
+            .extend(&self.profile, mechanics::kinship::Entry::Link(link))?;
+        Ok(())
     }
 
     /// Hand the canonical role to another of this identity's devices.
@@ -1044,22 +1074,74 @@ mod tests {
         );
     }
 
-    /// **A device outside the genesis pair cannot publish**, and this is the
-    /// constraint device-join has to design around.
-    ///
-    /// `Registry::project` signs the head with whichever seed it is handed, and
-    /// `absorb` refuses any head whose signer is not one of the two devices in
-    /// the genesis link (`Failure::Unanchored`) — deliberately, since that
-    /// anchor is what stops a stranger substituting a device set. So `canonical`
-    /// today conflates two authorities that are not the same: *composing and
-    /// sealing a letter*, which any live device may do, and *signing a head a
-    /// correspondent will accept*, which only a genesis root may do.
-    ///
-    /// Pinned rather than fixed: splitting the two is the next piece of work,
-    /// and it is worth this being a failing expectation somebody reads rather
-    /// than a surprise somebody hits.
+    /// The sponsorship round trip: halves signed on two machines, assembled,
+    /// adopted — and the adopted device signs a head a stranger takes. The
+    /// full remote-join flow minus only the transport that carries the half.
     #[test]
-    fn a_device_outside_the_genesis_pair_cannot_publish_a_head_anyone_will_take() {
+    fn an_adopted_device_publishes_from_its_own_seed() {
+        let (a, b) = ([81u8; 32], [82u8; 32]);
+        let placement: [u8; 32] = [84u8; 32];
+        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+
+        // The sponsor (a) and the placement each sign the same preimage where
+        // their seed lives; nobody's seed crosses a machine boundary.
+        let sponsor_device = device_from_seed(&a);
+        let placement_device = device_from_seed(&placement);
+        let (nonce, epoch) = ([13u8; 16], 9);
+        let sponsor_half =
+            mechanics::kinship::DeviceLink::half(&a, &placement_device, nonce, epoch);
+        let placement_half =
+            mechanics::kinship::DeviceLink::half(&placement, &sponsor_device, nonce, epoch);
+        let link = mechanics::kinship::DeviceLink::assemble(
+            (sponsor_device, sponsor_half),
+            (placement_device.clone(), placement_half),
+            nonce,
+            epoch,
+        )
+        .expect("two halves make the link seal would have made");
+        plane.adopt_device(link).expect("adopt the placement");
+
+        // An unrelated pair is refused: adoption is rooted or it is nothing.
+        let unrelated =
+            mechanics::kinship::DeviceLink::seal(&[85u8; 32], &[86u8; 32], [14u8; 16], 10)
+                .expect("seal");
+        assert!(plane.adopt_device(unrelated).is_err());
+
+        // The adopted device signs from its own seed on its own machine: the
+        // registry projections carry its chain, so any reader takes the head.
+        let reader = Standing {
+            device: Some(device_from_seed(&[91u8; 32])),
+            ..Standing::default()
+        };
+        let projection = plane
+            .registry()
+            .project(plane.profile(), &placement, 11, &reader)
+            .expect("project as the placement");
+        let mut theirs = Registry::new();
+        let genesis = mechanics::kinship::DeviceLink::seal(
+            &a,
+            &b,
+            super::GENESIS_NONCE,
+            super::GENESIS_EPOCH,
+        )
+        .expect("the deterministic genesis");
+        theirs
+            .absorb(projection, &genesis, &reader)
+            .expect("an adopted placement's head is evidence to a stranger");
+    }
+
+    /// **A joined device publishes, and every reader can verify it** — the
+    /// device-join the pinned form of this test named as the next piece of
+    /// work. `project` carries the signer's authority chain, `absorb` walks
+    /// it (`signer_rooted`), and the genesis anchor keeps its whole force: a
+    /// chain is co-signed by an already-rooted device at every hop, so a
+    /// stranger substituting a device set still has nothing to carry.
+    ///
+    /// `canonical` therefore stops conflating two authorities: composing was
+    /// always any live device's, and signing a head a correspondent accepts
+    /// is now any *rooted* device's.
+    #[test]
+    fn a_joined_device_publishes_a_head_every_reader_takes() {
         let (a, b, c) = ([81u8; 32], [82u8; 32], [83u8; 32]);
         let mut plane = ReachPlane::found(vec![a, b, c], NOW).expect("found");
 
@@ -1075,13 +1157,10 @@ mod tests {
         let announcement = plane.announce(Audience::Public, &reader).expect("announce");
 
         let mut theirs = Registry::new();
-        assert!(
-            matches!(
-                theirs.absorb(announcement.projection, &announcement.genesis, &reader),
-                Err(registry::Failure::Unanchored)
-            ),
-            "a head signed off the genesis pair is refused by every reader"
-        );
+        let absorbed = theirs
+            .absorb(announcement.projection, &announcement.genesis, &reader)
+            .expect("a chained head is evidence to a stranger");
+        assert_eq!(&absorbed, plane.profile(), "the same identity, verified");
     }
 
     /// Handing the canonical role to another device leaves the address alone.
