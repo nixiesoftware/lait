@@ -872,9 +872,23 @@ mod tests {
     #[test]
     fn asking_reaches_the_childs_children() {
         let mut command = Command::new("sh");
-        command.args(["-c", "trap '' TERM; sleep 60"]);
+        // Order and readiness are both load-bearing. The child is spawned
+        // BEFORE the trap, because an ignored disposition survives exec — a
+        // child forked after `trap '' TERM` is TERM-deaf too, and the ask
+        // could reach nobody. And the readiness line is read before the stop,
+        // because without it the group signal could land before the trap is
+        // installed and kill the shell by default disposition — a pass that
+        // proves nothing about reaching descendants.
+        command.args(["-c", "sleep 60 & trap '' TERM; echo ready; wait"]);
+        command.stdout(Stdio::piped());
         own_process_group(&mut command);
-        let child = command.spawn().expect("spawn a parent with a child");
+        let mut child = command.spawn().expect("spawn a parent with a child");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read the fixture's readiness line");
+        assert_eq!(line.trim(), "ready");
 
         let mut head = OwnedHead {
             facts: HeadFacts {
