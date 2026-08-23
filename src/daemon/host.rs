@@ -992,6 +992,7 @@ impl Daemon {
             router.clone(),
             clients,
             device_seed,
+            crate::config::Settings::load(Some(home)).display_port(),
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
