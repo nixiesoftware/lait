@@ -699,6 +699,10 @@ fn the_linux_package_carries_the_pair_and_notices() {
         "the Linux package does not place the release under current/"
     );
     assert!(
+        script.contains(r#"printf '%s\n' "$VERSION" > "$STAGED/canonical-layout-v1""#),
+        "the Linux package does not seal the canonical install layout"
+    );
+    assert!(
         script.contains(r#"cp "$REPO/THIRD-PARTY-NOTICES.md""#),
         "the Linux package ships binaries without their notices"
     );

@@ -119,6 +119,10 @@ cp -a "$BUNDLE/." "$STAGED/current/"
 cp "$REPO/THIRD-PARTY-NOTICES.md" "$STAGED/current/THIRD-PARTY-NOTICES.md"
 cp "$REPO/LICENSE" "$STAGED/current/LICENSE"
 cp "$STUB" "$STAGED/astrolabe"
+# This receipt is deliberately at the installation root, outside the release
+# trees an update may swap. Its presence means a canonical installer created
+# this shape; an older sparse-overlay install cannot acquire it by updating.
+printf '%s\n' "$VERSION" > "$STAGED/canonical-layout-v1"
 
 # DrvFS presents ordinary files as executable unless Windows metadata is
 # enabled. Normalize the archive so a WSL-built bundle has the same safe modes

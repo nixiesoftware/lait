@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::head::install_process_test_worlds;
 use crate::world_fixture::run_station_process_with;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -333,7 +332,6 @@ fn stop_kills_the_daemon_even_with_a_live_subscriber() {
 fn the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_store() {
     let cfg = unique("guard-cfg");
     let cwd = unique("guard-cwd");
-    install_process_test_worlds(&cfg);
 
     // Seed the registry with a space the user "joined" elsewhere.
     let entry = Entry {
@@ -401,7 +399,6 @@ fn the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_store() {
 fn the_mcp_head_with_an_empty_registry_still_refuses_and_names_the_way_in() {
     let cfg = unique("guard0-cfg");
     let cwd = unique("guard0-cwd");
-    install_process_test_worlds(&cfg);
 
     let out = Command::new(bin())
         .arg("mcp")
@@ -452,7 +449,6 @@ fn the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none() 
     let cfg = unique("solo-cfg");
     let cwd = unique("solo-cwd");
     let store = unique("solo-store");
-    install_process_test_worlds(&cfg);
     crate::world_fixture::found_space(&store, &FOUNDER_SEED, "Solo").unwrap();
 
     let entry = Entry {
@@ -543,7 +539,6 @@ fn the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none() 
 fn the_mcp_head_refuses_to_guess_among_several_registered_orbits() {
     let cfg = unique("many-cfg");
     let cwd = unique("many-cwd");
-    install_process_test_worlds(&cfg);
 
     let entries = vec![
         Entry {

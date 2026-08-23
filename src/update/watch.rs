@@ -604,7 +604,6 @@ mod tests {
         let staged = Standing::Staged {
             version: "0.9.0".into(),
             at: 1_700_000_000,
-            below_floor: false,
         };
         record(identity.path(), &staged);
         assert_eq!(standing(identity.path()), Some(staged));
@@ -676,7 +675,6 @@ mod tests {
             Some(Standing::Staged {
                 version: "0.9.0".into(),
                 at: long_ago,
-                below_floor: false,
             }),
         );
         assert_eq!(
@@ -684,7 +682,6 @@ mod tests {
             Standing::Staged {
                 version: "0.9.0".into(),
                 at: long_ago,
-                below_floor: false,
             },
             "re-observing the same staged release reset its clock"
         );

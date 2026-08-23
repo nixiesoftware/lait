@@ -2031,10 +2031,7 @@ fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
     let mut stub_process = Command::new(root.join(installed_stub_name()))
         .env("CHAIN_PROBE_ANNOUNCE", root)
         .env("CHAIN_PROBE_RUNS", &runs)
-        .env(
-            "CHAIN_PROBE_ENV_NAME",
-            astrolabe::client::update::RELAUNCHED_ENV,
-        )
+        .env("CHAIN_PROBE_ENV_NAME", astrolabe_stub::RELAUNCHED_ENV)
         .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
         .env("CHAIN_PROBE_RELAUNCH_GATE", &gate)
         .env(
@@ -2176,10 +2173,7 @@ fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
     let runs = root.join("runs.log");
     let status = Command::new(root.join(installed_stub_name()))
         .env("CHAIN_PROBE_RUNS", &runs)
-        .env(
-            "CHAIN_PROBE_ENV_NAME",
-            astrolabe::client::update::RELAUNCHED_ENV,
-        )
+        .env("CHAIN_PROBE_ENV_NAME", astrolabe_stub::RELAUNCHED_ENV)
         .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
         .env(
             "CHAIN_PROBE_REQUEST",

@@ -35,8 +35,6 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::head::install_process_test_worlds;
-
 /// Clean-env entrypoint for this binary (step 0 of the Agent Experience
 /// initiative). A developer's shell may export `$LAIT_HOME` pointing at their
 /// live identity-scoped daemon. Scrubbed once at binary load, before any test
@@ -128,7 +126,6 @@ fn config_root(home: &std::path::Path) -> std::path::PathBuf {
 /// starts is *guaranteed* to still be up when the server exits — the race the
 /// stdout guard below needs to be deterministic.
 fn serve(home: &std::path::Path) -> std::process::Child {
-    install_process_test_worlds(home);
     Command::new(bin())
         .env("LAIT_HOME", home)
         .env("LAIT_CONFIG_ROOT", config_root(home))
@@ -337,7 +334,6 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
 #[test]
 fn an_unresolvable_orbit_is_refused_in_one_voice() {
     let home = tmp_home("orbit");
-    install_process_test_worlds(&home);
     let run = |args: &[&str]| {
         Command::new(bin())
             .env("LAIT_HOME", &home)
@@ -424,7 +420,6 @@ fn against_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Option<i32>,
     use std::os::unix::net::UnixListener;
 
     let home = tmp_home(tag);
-    install_process_test_worlds(&home);
     let daemon_home = home.join("daemon");
     std::fs::create_dir_all(&daemon_home).expect("daemon home");
 
@@ -476,7 +471,6 @@ fn takes_over_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Duration)
     use std::sync::mpsc;
 
     let home = tmp_home(tag);
-    install_process_test_worlds(&home);
     let daemon_home = home.join("daemon");
     std::fs::create_dir_all(&daemon_home).expect("daemon home");
 
