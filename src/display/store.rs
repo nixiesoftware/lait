@@ -1106,6 +1106,55 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Placement, at the custody layer: a second device of the identity is
+    /// admitted by device id, imports the envelope on its own machine, and
+    /// opens the *same* identifier key — so both placements compile
+    /// assignment-bound material every receiver already holds, and neither
+    /// invalidates anything the other delivered. `DisplayRuntime::admit_placement`
+    /// is this pair of calls with the daemon's own unlock.
+    #[test]
+    fn a_placement_admitted_by_device_opens_the_same_identifier() {
+        let root = temp();
+        let store = CoordinatorStore::open(&root, [7; 32], &custodian()).unwrap();
+        let placement_seed = [9u8; 32];
+        let placement = mechanics::actor::device_from_seed(&placement_seed);
+        store
+            .admit_identifier_slot(
+                &custodian().unlock,
+                &custody::SlotSpec::RecoveryKey {
+                    recipient: placement.clone(),
+                },
+            )
+            .unwrap();
+        let exported = store.export_identifier().unwrap();
+
+        let elsewhere = temp();
+        let unlock = custody::UnlockKey::RecoveryKey {
+            seed: placement_seed,
+            me: placement.clone(),
+        };
+        CoordinatorStore::import_identifier(&elsewhere, &exported, &unlock).unwrap();
+        let second = CoordinatorStore::open(
+            &elsewhere,
+            // A fresh mint that must be ignored: the imported envelope is
+            // the identity, and reminting silently would invalidate every
+            // assignment-bound item the first placement delivered.
+            [3; 32],
+            &Custodian {
+                device: placement,
+                unlock,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            store.identifier_key().unwrap(),
+            second.identifier_key().unwrap(),
+            "two placements of one identity hold one identifier"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(elsewhere);
+    }
+
     #[test]
     fn an_exported_envelope_is_sealed_and_imports_onto_another_machine() {
         let root = temp();

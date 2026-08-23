@@ -233,6 +233,32 @@ impl DisplayRuntime {
         })
     }
 
+    /// Admit another device of this identity into the coordinator's custody,
+    /// and hand back the sealed envelope it imports.
+    ///
+    /// This is placement in one act: the identifier key is re-wrapped to the
+    /// recipient — never exposed, never re-encrypted, nothing already
+    /// delivered is invalidated — and what leaves is the envelope, which is
+    /// only as good as the slot the recipient can open. The same act with a
+    /// recovery device as the recipient is the printed-key ceremony's
+    /// substance; which device is being admitted is the caller's meaning, not
+    /// this method's.
+    ///
+    /// What this deliberately does not do is admit the device into the
+    /// kinship log: a second placement can *serve* with this, but a route
+    /// publication the registry accepts is still signed by a genesis device
+    /// until device-join lands in the reach plane — the same seam
+    /// `correspondence`'s own pinned test names as the next piece of work.
+    pub fn admit_placement(&self, recipient: &mechanics::ids::DeviceId) -> Result<Vec<u8>> {
+        self.store.admit_identifier_slot(
+            &self.custodian.unlock,
+            &mechanics::authorization::custody::SlotSpec::RecoveryKey {
+                recipient: recipient.clone(),
+            },
+        )?;
+        self.store.export_identifier()
+    }
+
     /// The identity this coordinator answers for — what a receiver anchors on.
     ///
     /// A property of the identity, never of this placement: every placement of
