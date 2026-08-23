@@ -182,6 +182,17 @@ threads-required = "num-test-threads"
 filter = '(binary_id(lait::it) & test(launcher_safety::))'
 threads-required = "num-test-threads"
 
+# This runtime case proves that reads remain available while a deliberately
+# blocked extractor owns the mutation lane. Its 250 ms assertions measure lock
+# behavior, and the worker must first be scheduled to reach that gate. In the
+# 2,610-test PR aggregate on the 56-core dev box the worker was starved past its
+# 15 s admission sentinel; the exact test passed in 0.21 s when isolated. Give
+# this scheduling-sensitive measurement the runner rather than weakening its
+# product deadlines or misreporting test-pool contention as a lock regression.
+[[profile.default.overrides]]
+filter = '(binary_id(runtime) & test(dispatch_tests::historical_find_uses_the_exact_installed_implementation_after_activation_moves))'
+threads-required = "num-test-threads"
+
 [[profile.default.overrides]]
 filter = '''
     (binary_id(lait::it) & test(orbital_join_iroh::))
