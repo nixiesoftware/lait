@@ -722,7 +722,7 @@ mod tests {
         let pointer = serde_json::json!({
             "kind": "release",
             "version": version,
-            "manifest": format!("https://feed.example/releases/worlds/{WORLD}/{version}/m.json"),
+            "manifest": format!("https://feed.example/releases/worlds/{WORLD}/{version}/manifest.json"),
         });
         let mut objects = std::collections::HashMap::new();
         objects.insert(
@@ -730,7 +730,7 @@ mod tests {
             feed::tests::seal(&pointer, &seed).into_bytes(),
         );
         objects.insert(
-            format!("https://feed.example/releases/worlds/{WORLD}/{version}/m.json"),
+            format!("https://feed.example/releases/worlds/{WORLD}/{version}/manifest.json"),
             feed::tests::seal(&manifest, &seed).into_bytes(),
         );
         objects.insert(url, archive.to_vec());
@@ -795,7 +795,7 @@ mod tests {
         );
         let published = tempfile::tempdir().expect("a published directory");
         let pointer = pointer_url("https://feed.example", WORLD, Channel::Test);
-        let manifest = format!("https://feed.example/releases/worlds/{WORLD}/0.9.0/m.json");
+        let manifest = format!("https://feed.example/releases/worlds/{WORLD}/0.9.0/manifest.json");
         let artifact = format!("https://feed.example/releases/worlds/{WORLD}/0.9.0/bundle.tar.gz");
         std::fs::write(
             published.path().join("pointer"),
