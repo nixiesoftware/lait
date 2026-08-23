@@ -89,6 +89,24 @@ fn the_installer_places_both_binaries_in_one_directory() {
         stub < out,
         "the stub is installed after the release, so it would land inside it"
     );
+
+    // Portable editor bindings invoke `lait mcp` from PATH. The installer must
+    // register its own release after it exists and unregister it before the
+    // helper is deleted, or a clean machine works only when Cargo happened to
+    // install another copy first.
+    let register = script
+        .find(r#"ExecWait '"$INSTDIR\astrolabe.exe" --install-command-path'"#)
+        .expect("the native install never registers its bundled lait command");
+    let uninstall = script
+        .find(r#"ExecWait '"$INSTDIR\astrolabe.exe" --uninstall-command-path'"#)
+        .expect("uninstall leaves its bundled lait command registered");
+    let delete = script
+        .find(r#"Delete "$INSTDIR\astrolabe.exe""#)
+        .expect("the uninstaller does not remove the stable stub");
+    assert!(
+        daemon < register && uninstall < delete,
+        "PATH registration is not bounded by the installed helper's lifetime"
+    );
 }
 
 /// Nothing outside the install may point into a release directory.
@@ -460,6 +478,26 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep_signs() {
     for signed in [r#"sign "$STAGED/Contents/MacOS/lait""#, r#"sign "$STAGED""#] {
         assert!(script.contains(signed), "not signed explicitly: {signed}");
     }
+    let runners = script
+        .find(r#"find "$WORLD_ROOT" -type f -path '*/bin/*' -print0"#)
+        .expect("the packager does not enumerate bundled World runners");
+    let sidecar = script
+        .find(r#"sign "$STAGED/Contents/MacOS/lait""#)
+        .expect("the packager does not sign the lait sidecar");
+    let bundle = script
+        .find(r#"sign "$STAGED""#)
+        .expect("the packager does not sign the outer app");
+    assert!(
+        script.contains(r#"file -b "$runner""#)
+            && script.contains(r#"sign "$runner""#)
+            && runners < sidecar
+            && sidecar < bundle,
+        "nested World runners, the sidecar, and the outer app are not signed inside-out"
+    );
+    assert!(
+        script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
+        "the preflight does not recursively verify the code graph Apple notarizes"
+    );
     assert!(
         !script.contains("libastrolabe.dylib")
             && !script.contains("apps/astrolabe/macos/Runner/Release.entitlements"),
@@ -522,36 +560,6 @@ fn the_dmg_refuses_a_non_distribution_signing_identity() {
     assert!(
         dmg_directives().contains(r#""Developer ID Application"*)"#),
         "any codesigning identity is accepted; only Developer ID Application can be notarized"
-    );
-}
-
-/// Independently versioned Worlds are resources from Tauri's point of view,
-/// but their runners are executable code from Gatekeeper's point of view.
-/// They must be signed as leaves before the outer app seals the resource tree,
-/// and the final verification must recursively assess the same nesting Apple
-/// will inspect during notarization.
-#[test]
-fn the_dmg_signs_and_recursively_verifies_bundled_world_runners() {
-    let script = dmg_directives();
-    let runners = script
-        .find(r#"find "$WORLD_ROOT" -type f -path '*/bin/*' -print0"#)
-        .expect("the packager does not enumerate bundled World runners");
-    let sidecar = script
-        .find(r#"sign "$STAGED/Contents/MacOS/lait""#)
-        .expect("the packager does not sign the lait sidecar");
-    let bundle = script
-        .find(r#"sign "$STAGED""#)
-        .expect("the packager does not sign the outer app");
-    assert!(
-        script.contains(r#"file -b "$runner""#)
-            && script.contains(r#"sign "$runner""#)
-            && runners < sidecar
-            && sidecar < bundle,
-        "nested World runners, the sidecar, and the outer app are not signed inside-out"
-    );
-    assert!(
-        script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
-        "the preflight does not recursively verify the code graph Apple notarizes"
     );
 }
 

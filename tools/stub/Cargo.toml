@@ -45,5 +45,15 @@ serde_json = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
+# The installer asks the stable stub to register the independently shipped
+# `lait` sidecar on the current user's PATH. Direct Win32 registry calls avoid
+# NSIS's 1024-character string ceiling, which can corrupt an existing PATH.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile = "3"

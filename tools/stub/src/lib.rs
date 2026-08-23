@@ -60,6 +60,8 @@
 //! that cannot start falls back to.
 
 pub mod bundle;
+#[cfg(windows)]
+pub mod command_path;
 
 use std::fs;
 use std::io::Write as _;

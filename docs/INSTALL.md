@@ -15,7 +15,11 @@ https://storage.googleapis.com/the-foundation-dist/releases/<version>/
 
 Download and run `astrolabe-<version>-setup.exe`. It installs per-user under
 `%LOCALAPPDATA%\Programs\Astrolabe`, creates the Start Menu shortcut, registers
-`lait:` links, and launches through the stable updater stub.
+`lait:` links, and launches through the stable updater stub. It also prepends
+its own `current` directory to the per-user `PATH`, so portable `lait mcp`
+editor bindings resolve the release from this installer rather than requiring
+a Cargo-installed copy. Open a new terminal after installation to use `lait`
+there.
 
 ```powershell
 $version = '<version>'
