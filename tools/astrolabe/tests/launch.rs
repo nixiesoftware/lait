@@ -1053,6 +1053,25 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         .expect("a client that starts its identity daemon");
 
     let selection = lait::config::Selection::for_identity(identity.path());
+    // `HostRestart` acknowledges before the daemon has released its process
+    // lock. Exercise the actual client handoff before any World operation: a
+    // replacement spawned on acknowledgement loses the lock race, exits, and
+    // leaves this entire launch chain with no daemon after the old one drains.
+    let daemon = lait::daemon::Client::for_selection(&selection)
+        .expect("address the original identity daemon");
+    let before = lait::config::daemon_pid(daemon.home()).expect("original daemon records its pid");
+    client
+        .roll_identity_daemon()
+        .await
+        .expect("restart waits for release and stands up the replacement");
+    let daemon = lait::daemon::Client::for_selection(&selection)
+        .expect("address the replacement identity daemon");
+    assert!(
+        matches!(daemon.probe().await, lait::control::Probe::Healthy { .. }),
+        "replacement daemon is not healthy"
+    );
+    let after = lait::config::daemon_pid(daemon.home()).expect("replacement records its pid");
+    assert_ne!(before, after, "restart kept the original daemon process");
     let daemon = lait::daemon::Client::for_selection(&selection).expect("the identity daemon");
     assert!(
         matches!(daemon.probe().await, lait::control::Probe::Healthy { .. }),

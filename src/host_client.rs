@@ -328,6 +328,46 @@ pub async fn ensure_lait_daemon_with_executable(
     .into())
 }
 
+/// Restart the selected identity daemon onto `executable` without racing its
+/// process lock.
+///
+/// `HostRestart` answers before shutdown begins so the caller knows its
+/// request was accepted. That answer does **not** mean the old process has
+/// released its control endpoint or single-instance lock. Spawning at that
+/// point creates a deterministic loser: the replacement observes the old
+/// lock, exits, and then the old daemon finishes leaving nobody online.
+///
+/// The handoff therefore proves both halves of absence before spawning: the
+/// control endpoint is gone and the daemon lock can be acquired. A lost reply
+/// is safe when those facts still become true; the request may have applied,
+/// but starting exactly one replacement after full release is not a replay of
+/// product work.
+pub async fn restart_lait_daemon_with_executable(
+    selection: &crate::config::Selection,
+    executable: &Path,
+) -> Result<()> {
+    let client = crate::daemon::Client::for_selection(selection)?;
+    if matches!(client.probe().await, control::Probe::Healthy { .. }) {
+        let request = client
+            .request(ControlRoute::Daemon, &Request::HostRestart, None)
+            .await;
+        if !daemon_gone(client.home()).await {
+            return match request {
+                Ok(_) => Err(Failure::unreachable(format!(
+                    "the Lait daemon at {} acknowledged restart but did not release its endpoint and process lock",
+                    client.home().display()
+                ))
+                .into()),
+                Err(error) => Err(error).context(format!(
+                    "request restart of the Lait daemon at {}",
+                    client.home().display()
+                )),
+            };
+        }
+    }
+    ensure_lait_daemon_with_executable(selection, executable).await
+}
+
 /// Stop a daemon this build is ahead of, so this build can start its own.
 ///
 /// Run without asking, and that is the change: the repair used to be an
@@ -394,10 +434,12 @@ async fn replace_foreign_daemon(client: &crate::daemon::Client) -> Result<()> {
     .into())
 }
 
-/// Wait a few seconds for a home's control channel to go quiet.
+/// Wait up to ten seconds for a daemon to release both of its process claims.
 async fn daemon_gone(home: &Path) -> bool {
-    for _ in 0..30 {
-        if matches!(control::probe(home).await, control::Probe::Absent) {
+    for _ in 0..100 {
+        if matches!(control::probe(home).await, control::Probe::Absent)
+            && crate::config::acquire_daemon_lock(home).is_ok()
+        {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

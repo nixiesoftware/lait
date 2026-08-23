@@ -231,17 +231,6 @@ impl Client {
             return Ok(());
         }
         let selection = selection_for(self.inner.identity.as_deref());
-        if let Ok(daemon) = self.daemon() {
-            // A daemon that was not up cannot be asked to stop, and does not
-            // need to be — the ensure below stands the fresh one up either way.
-            let _ = daemon
-                .request(
-                    lait::control::ControlRoute::Daemon,
-                    &lait::control::Request::HostRestart,
-                    None,
-                )
-                .await;
-        }
         let image = self
             .inner
             .supervisor
@@ -250,7 +239,7 @@ impl Client {
             .ok_or_else(|| {
                 ClientError::refused("nothing is staged, so there is no image to roll onto")
             })?;
-        lait::host_client::ensure_lait_daemon_with_executable(&selection, &image)
+        lait::host_client::restart_lait_daemon_with_executable(&selection, &image)
             .await
             .map_err(|error| {
                 ClientError::unreachable(format!("restart the identity daemon: {error:#}"))
