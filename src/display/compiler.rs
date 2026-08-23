@@ -19,8 +19,13 @@ use world_interface::display::{
 
 pub struct CompiledProgram {
     pub program: DisplayProgram,
+    /// Package-selected deadline after which the World projection itself may
+    /// change without a write. Kept separate from the effective refresh so a
+    /// sync-item boundary can realign the cheap playback cursor without
+    /// rendering every frame through the World runner again.
+    pub source_refresh_after_ms: Option<u32>,
     /// Package-selected boundary after which the same Query must be projected
-    /// again even if the underlying World has emitted no invalidation.
+    /// again, or the next synchronized playback boundary, whichever is first.
     pub refresh_after_ms: Option<u32>,
     assets: BTreeMap<DisplayAssetId, Vec<u8>>,
     media_resources: BTreeMap<DisplayAssetId, String>,
@@ -77,7 +82,8 @@ impl ProgramCompiler {
         alignment: Option<&PlaybackAlignment>,
         playback_tier: PlaybackTier,
     ) -> Result<CompiledProgram> {
-        let mut refresh_after_ms = projection.program.refresh_after_ms;
+        let source_refresh_after_ms = projection.program.refresh_after_ms;
+        let mut refresh_after_ms = source_refresh_after_ms;
         let mut assets = BTreeMap::new();
         let mut media_resources = BTreeMap::new();
         let mut items = Vec::with_capacity(projection.program.items.len());
@@ -185,6 +191,7 @@ impl ProgramCompiler {
         validate_program(&wire).context("validate compiled receiver program")?;
         Ok(CompiledProgram {
             program: wire,
+            source_refresh_after_ms,
             refresh_after_ms,
             assets,
             media_resources,
@@ -267,7 +274,7 @@ fn media_scene(
     )))
 }
 
-fn aligned_playback(
+pub(super) fn aligned_playback(
     items: &[DisplayProgramItem],
     cycle: ProgramCycle,
     alignment: &PlaybackAlignment,
@@ -435,6 +442,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(compiled.asset_count(), 1);
+        assert_eq!(compiled.source_refresh_after_ms, Some(500));
         assert_eq!(compiled.refresh_after_ms, Some(500));
         validate_program(&compiled.program).unwrap();
 
