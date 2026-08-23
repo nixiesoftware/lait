@@ -460,7 +460,7 @@ fn the_dmg_refuses_a_bundle_missing_either_half_of_the_pair() {
 /// deprecated way to half-do this sight unseen — an enumerated payload is the
 /// point, same as the NSIS file list. Deep verification remains desirable.
 #[test]
-fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep_signs() {
+fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
     let script = dmg_directives();
     assert!(
         script.contains("--options runtime"),
