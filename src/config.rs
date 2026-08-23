@@ -646,6 +646,35 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A coordinator answers where it is told to, and a typo does not cost a
+    /// daemon that will not start.
+    #[test]
+    fn the_display_port_is_configured_and_degrades_to_the_built_in() {
+        let settings = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("display.port", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+
+        assert_eq!(settings("8443").display_port(), 8443);
+        assert_eq!(settings("  8443  ").display_port(), 8443);
+        assert_eq!(
+            Settings::default().display_port(),
+            crate::display::DEFAULT_DISPLAY_PORT,
+            "unset is the built-in"
+        );
+        for refused in ["0", "not-a-port", "99999", ""] {
+            assert_eq!(
+                settings(refused).display_port(),
+                crate::display::DEFAULT_DISPLAY_PORT,
+                "{refused} falls back rather than refusing to start"
+            );
+        }
+    }
+
     #[test]
     fn settings_store_layer_wins_over_global() {
         let dir = std::env::temp_dir().join(format!("gc-settings-{}", std::process::id()));
@@ -912,6 +941,16 @@ pub const KEYS: &[KeySpec] = &[
         help: "Project key issue-creating commands fall back to when -p is omitted.",
         built_in: || None,
     },
+    // Not `daemon_read`: the port is spent at bind, so a live daemon cannot
+    // honour a change without dropping the listener every receiver is on. The
+    // help says so rather than a reload pretending otherwise.
+    KeySpec {
+        name: "display.port",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Port the display coordinator serves on (applies at next daemon start).",
+        built_in: || Some(crate::display::DEFAULT_DISPLAY_PORT.to_string()),
+    },
 ];
 
 /// Look up a key in the table. `space.*` names get the reserved-namespace
@@ -1020,6 +1059,20 @@ impl Settings {
     /// The configured default project key, if any.
     pub fn default_project(&self) -> Option<String> {
         self.get("project.default").map(str::to_string)
+    }
+
+    /// The port the display coordinator serves on.
+    ///
+    /// Unparseable or zero falls back to the built-in rather than refusing:
+    /// a typo here would otherwise mean an identity daemon that will not start
+    /// at all, and a coordinator on the default port is the recoverable
+    /// failure. Zero is excluded because `DisplayTlsIdentity` refuses it —
+    /// an ephemeral port cannot be told to a receiver.
+    pub fn display_port(&self) -> u16 {
+        self.get("display.port")
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .unwrap_or(crate::display::DEFAULT_DISPLAY_PORT)
     }
 }
 

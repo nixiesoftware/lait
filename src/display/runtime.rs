@@ -19,7 +19,7 @@ use world_interface::WorldClientRegistry;
 
 use super::{
     serve_display_https, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
-    DisplayPairingService, DisplayTlsIdentity, DEFAULT_DISPLAY_PORT,
+    DisplayPairingService, DisplayTlsIdentity,
 };
 use super::{AssignmentRecord, AssignmentSync, Custodian, SourceGrant};
 
@@ -186,6 +186,7 @@ impl DisplayRuntime {
         router: Arc<crate::orbits::Router>,
         registry: WorldClientRegistry,
         device_seed: &[u8; 32],
+        port: u16,
     ) -> Result<Self> {
         let mut identifier_key = [0u8; 32];
         getrandom::fill(&mut identifier_key).context("mint display identifier key")?;
@@ -199,7 +200,7 @@ impl DisplayRuntime {
         let tls = Arc::new(DisplayTlsIdentity::load_or_create(
             &root.join("tls"),
             "Astrolabe",
-            DEFAULT_DISPLAY_PORT,
+            port,
         )?);
         let coordinator = Arc::new(DisplayCoordinator::new(
             store.clone(),
