@@ -193,6 +193,18 @@ Section "Astrolabe" SecMain
   WriteRegDWORD HKCU "${REGKEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD HKCU "${REGKEY}" "EstimatedSize" "$0"
+
+  ; Agent/editor bindings deliberately contain the portable command
+  ; `lait mcp`, not this machine's absolute install path. Register the stable
+  ; current/ coordinate after every file and registry write has landed, so a
+  ; clean machine resolves the sidecar this installer owns and never needs a
+  ; Cargo-installed copy. The stub performs the registry edit natively: NSIS's
+  ; ordinary 1024-character strings can truncate an existing user PATH.
+  ExecWait '"$INSTDIR\astrolabe.exe" --install-command-path' $0
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Astrolabe was installed, but its lait command could not be registered for this user. The installation has been left intact; run this installer again to repair it."
+    Abort
+  ${EndIf}
 SectionEnd
 
 Section "Uninstall"
@@ -202,6 +214,15 @@ Section "Uninstall"
   ; for devices, and an uninstaller that quietly destroyed a store would be the
   ; worst possible place to conflate them.
   ;
+  ; Remove only our exact command directory while the stable stub still
+  ; exists to perform the full-length registry edit. Refuse to remove the
+  ; program if this fails: a stale PATH entry is an installed surface too.
+  ExecWait '"$INSTDIR\astrolabe.exe" --uninstall-command-path' $0
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Astrolabe could not remove its lait command from this user's PATH, so no program files were removed."
+    Abort
+  ${EndIf}
+
   Delete "$INSTDIR\astrolabe.exe"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\instance.lock"

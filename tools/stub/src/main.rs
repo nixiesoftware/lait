@@ -19,6 +19,28 @@ fn main() {
         }
     };
 
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+
+    // Installer-only modes. The stable stub owns the install root, so it can
+    // register the release's equally stable `current` coordinate without an
+    // absolute path baked into every editor binding. Kept here rather than in
+    // NSIS because NSIS strings truncate a sufficiently long existing PATH.
+    #[cfg(windows)]
+    if let [mode] = args.as_slice() {
+        let present = match mode.to_str() {
+            Some("--install-command-path") => Some(true),
+            Some("--uninstall-command-path") => Some(false),
+            _ => None,
+        };
+        if let Some(present) = present {
+            if let Err(error) = astrolabe_stub::command_path::set(&root, present) {
+                eprintln!("astrolabe-stub: the command path could not be updated: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+
     // The claim is held until this process exits — through the swap, and
     // through the client's whole run. `None` means something already holds
     // it, which is a deferral and not a failure: the launch still happens.
@@ -36,8 +58,6 @@ fn main() {
             None
         }
     };
-
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
     // A stale request is answered by this very launch, but only the stub that
     // owns the installation may consume it. A secondary launch must leave the

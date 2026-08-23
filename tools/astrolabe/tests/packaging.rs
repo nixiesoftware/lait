@@ -89,6 +89,24 @@ fn the_installer_places_both_binaries_in_one_directory() {
         stub < out,
         "the stub is installed after the release, so it would land inside it"
     );
+
+    // Portable editor bindings invoke `lait mcp` from PATH. The installer must
+    // register its own release after it exists and unregister it before the
+    // helper is deleted, or a clean machine works only when Cargo happened to
+    // install another copy first.
+    let register = script
+        .find(r#"ExecWait '"$INSTDIR\astrolabe.exe" --install-command-path'"#)
+        .expect("the native install never registers its bundled lait command");
+    let uninstall = script
+        .find(r#"ExecWait '"$INSTDIR\astrolabe.exe" --uninstall-command-path'"#)
+        .expect("uninstall leaves its bundled lait command registered");
+    let delete = script
+        .find(r#"Delete "$INSTDIR\astrolabe.exe""#)
+        .expect("the uninstaller does not remove the stable stub");
+    assert!(
+        daemon < register && uninstall < delete,
+        "PATH registration is not bounded by the installed helper's lifetime"
+    );
 }
 
 /// Nothing outside the install may point into a release directory.
@@ -437,10 +455,10 @@ fn the_dmg_refuses_a_bundle_missing_either_half_of_the_pair() {
 }
 
 /// Every executable is signed with the hardened runtime, nested code before
-/// the bundle that seals it, and never with `--deep`. Notarization requires
-/// the runtime flag on every executable; `--deep` is the deprecated way to
-/// half-do this sight unseen — an enumerated payload is the point, same as
-/// the NSIS file list.
+/// the bundle that seals it, and never *signed* with `--deep`. Notarization
+/// requires the runtime flag on every executable; deep signing is the
+/// deprecated way to half-do this sight unseen — an enumerated payload is the
+/// point, same as the NSIS file list. Deep verification remains desirable.
 #[test]
 fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
     let script = dmg_directives();
@@ -448,13 +466,38 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
         script.contains("--options runtime"),
         "signing without the hardened runtime notarizes nothing"
     );
-    assert!(
-        !script.contains("--deep"),
-        "--deep signs every nesting level sight unseen; enumerate the payload instead"
-    );
+    for command in script
+        .lines()
+        .filter(|line| line.trim_start().starts_with("codesign --force"))
+    {
+        assert!(
+            !command.contains("--deep"),
+            "--deep signs every nesting level sight unseen; enumerate the payload instead"
+        );
+    }
     for signed in [r#"sign "$STAGED/Contents/MacOS/lait""#, r#"sign "$STAGED""#] {
         assert!(script.contains(signed), "not signed explicitly: {signed}");
     }
+    let runners = script
+        .find(r#"find "$WORLD_ROOT" -type f -path '*/bin/*' -print0"#)
+        .expect("the packager does not enumerate bundled World runners");
+    let sidecar = script
+        .find(r#"sign "$STAGED/Contents/MacOS/lait""#)
+        .expect("the packager does not sign the lait sidecar");
+    let bundle = script
+        .find(r#"sign "$STAGED""#)
+        .expect("the packager does not sign the outer app");
+    assert!(
+        script.contains(r#"file -b "$runner""#)
+            && script.contains(r#"sign "$runner""#)
+            && runners < sidecar
+            && sidecar < bundle,
+        "nested World runners, the sidecar, and the outer app are not signed inside-out"
+    );
+    assert!(
+        script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
+        "the preflight does not recursively verify the code graph Apple notarizes"
+    );
     assert!(
         !script.contains("libastrolabe.dylib")
             && !script.contains("apps/astrolabe/macos/Runner/Release.entitlements"),
@@ -539,6 +582,11 @@ fn the_dmg_ships_the_notices_inside_the_bundle() {
 #[test]
 fn the_dmg_staples_assesses_and_keeps_identity_out_of_the_project() {
     let script = dmg_directives();
+    assert!(
+        script.contains(r#"[ "$notary_status" != "Accepted" ]"#)
+            && script.contains("notarytool log"),
+        "an Invalid notarization can reach stapling without printing Apple's diagnostic log"
+    );
     assert!(
         script.contains("stapler staple"),
         "an unstapled DMG needs Apple reachable at first launch"

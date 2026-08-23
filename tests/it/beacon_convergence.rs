@@ -113,6 +113,15 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
+    issue_req_with_budget(rt, home, request, BUSY_BUDGET)
+}
+
+fn issue_req_with_budget(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+    budget: Duration,
+) -> IssueResponse {
     let started = Instant::now();
     loop {
         let response = super::accepted_issue_response(
@@ -125,7 +134,7 @@ fn issue_req(
                 error_kind: issues_app::IssuesErrorKind::Retry,
                 ..
             }
-        ) || started.elapsed() >= BUSY_BUDGET
+        ) || started.elapsed() >= budget
         {
             return response;
         }
@@ -756,20 +765,11 @@ fn surviving_members_converge_after_the_approach_station_dies() {
         labels: vec![],
         body: None,
     };
-    let started = Instant::now();
-    let resp = loop {
-        let response = issue_req(&client, &b_home, write.clone());
-        if !matches!(
-            response,
-            IssueResponse::Error {
-                error_kind: issues_app::IssuesErrorKind::Retry,
-                ..
-            }
-        ) || started.elapsed() >= Duration::from_secs(25)
-        {
-            break response;
-        }
-    };
+    // This transition is the subject of the test, so give its bounded
+    // pre-admission interval one explicit budget. The old outer 25-second loop
+    // called `issue_req`, whose own 30-second loop consumed the outer budget on
+    // its first attempt; it therefore never performed the retry it described.
+    let resp = issue_req_with_budget(&client, &b_home, write, Duration::from_secs(60));
     let IssueResponse::Ref { reff: issue_ref } = resp else {
         panic!("issue creation did not return its stable reference: {resp:?}");
     };

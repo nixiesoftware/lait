@@ -11,12 +11,6 @@
 # integration suite grows and the runners can take the load.
 [test-groups]
 network = { max-threads = 4 }
-# These process-backed MemNet acceptance tests share no transport, but each
-# starts three complete StationHosts and drives convergence. `nextest` runs
-# each test in a separate process, so the Rust mutex in the integration binary
-# cannot serialize them. One lane prevents four simultaneous survivor rings
-# from turning a typed, bounded busy interval into runner-load roulette.
-beacon = { max-threads = 1 }
 
 [profile.default]
 # No blanket retry. A retry is a statement that a test has a known, tolerated
@@ -159,7 +153,22 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 
 [[profile.default.overrides]]
 filter = '(binary_id(lait::it) & test(beacon_convergence::))'
-test-group = 'beacon'
+# Each process-backed MemNet case starts three complete StationHosts and drives
+# bounded convergence. A one-thread test group only serialized these tests
+# against each other; the rest of the suite still saturated the runner beside
+# them and could consume the entire 30-second typed-busy budget. Reserve the
+# global nextest pool so each acceptance case measures the product rather than
+# scheduler contention. The in-binary mutex remains useful under `cargo test`.
+threads-required = "num-test-threads"
+
+# These tests measure launcher deadlines while starting real daemon processes.
+# Letting several of them compete with the rest of the platform suite makes a
+# scheduler delay indistinguishable from the startup regression the 20-second
+# assertions are meant to catch. Keep the deadlines and retries unchanged;
+# reserve the runner while the measured process boundary is active.
+[[profile.default.overrides]]
+filter = '(binary_id(lait::it) & test(launcher_safety::))'
+threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
 filter = '''

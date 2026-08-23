@@ -113,11 +113,26 @@ cp "$REPO/LICENSE" "$STAGED/Contents/Resources/LICENSE"
 #
 # `--options runtime` (the hardened runtime) is on every executable because
 # notarization requires it on every executable, not just the app. The Tauri
-# bundle has one nested executable, `lait`; signing the bundle signs its main
-# `astrolabe` executable and seals the already-signed sidecar.
+# bundle carries `lait` beside its main executable and independently versioned
+# World runners under Resources. Sign those leaves explicitly before signing
+# the app; the outer signature then seals the complete reviewed code graph.
 sign() {
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$@"
 }
+
+WORLD_ROOT="$STAGED/Contents/Resources/worlds"
+if [ -d "$WORLD_ROOT" ]; then
+  while IFS= read -r -d '' runner; do
+    # A World's bin/ directory is code-only. Refuse an unexpected payload
+    # rather than signing arbitrary data or silently shipping a runner that
+    # Gatekeeper cannot assess as native code.
+    if ! file -b "$runner" | grep -q 'Mach-O'; then
+      echo "make-dmg: World runner is not Mach-O code: $runner" >&2
+      exit 1
+    fi
+    sign "$runner"
+  done < <(find "$WORLD_ROOT" -type f -path '*/bin/*' -print0)
+fi
 
 sign "$STAGED/Contents/MacOS/lait"
 # The app itself deliberately claims no exceptional entitlements. Tauri does
@@ -128,7 +143,7 @@ sign "$STAGED"
 # Prove the seal before shipping it. `--strict` is the assessment Gatekeeper
 # actually runs; a signature that verifies loosely and fails strictly is a
 # failure that would otherwise first appear on someone else's machine.
-codesign --verify --strict --verbose=1 "$STAGED"
+codesign --verify --deep --strict --verbose=1 "$STAGED"
 
 # The update tree must carry these signed bytes too. The caller supplies a
 # disposable destination because this script's own work directory is removed
@@ -175,7 +190,33 @@ codesign --force --timestamp --identifier com.nixiesoftware.astrolabe.dmg \
 # validation — but Gatekeeper on a customer machine will refuse it, so a
 # release without --notarize is not a release.
 if [ -n "$NOTARIZE_PROFILE" ]; then
-  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARIZE_PROFILE" --wait
+  # `notarytool submit --wait` exits successfully when Apple's terminal status
+  # is Invalid, so its process status alone is not a release gate. Keep the
+  # structured response, require Accepted explicitly, and always print the
+  # completed submission log: Apple recommends reviewing it even on success,
+  # and on failure it contains the actionable signing path that the one-line
+  # status omits.
+  NOTARY_RESULT="$WORK/notary-result.plist"
+  set +e
+  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARIZE_PROFILE" \
+    --wait --output-format plist > "$NOTARY_RESULT"
+  NOTARY_EXIT=$?
+  set -e
+  cat "$NOTARY_RESULT"
+
+  submission_id="$(plutil -extract id raw "$NOTARY_RESULT" 2>/dev/null || true)"
+  notary_status="$(plutil -extract status raw "$NOTARY_RESULT" 2>/dev/null || true)"
+  if [ -n "$submission_id" ]; then
+    xcrun notarytool log "$submission_id" \
+      --keychain-profile "$NOTARIZE_PROFILE" || true
+  fi
+  if [ "$NOTARY_EXIT" -ne 0 ] || [ "$notary_status" != "Accepted" ]; then
+    echo "make-dmg: notarization was not accepted" >&2
+    echo "  submission: ${submission_id:-unavailable}" >&2
+    echo "  status: ${notary_status:-unavailable} (notarytool exit $NOTARY_EXIT)" >&2
+    exit 1
+  fi
+
   xcrun stapler staple "$DMG"
   # The assessment a customer's Gatekeeper makes, run here first.
   spctl --assess --type open --context context:primary-signature -v "$DMG"
