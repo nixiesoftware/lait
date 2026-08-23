@@ -55,7 +55,10 @@ async fn build_endpoint_binds_every_policy() {
     let local = build_endpoint(
         &SecretKey::from_bytes(&[2u8; 32]),
         &Network::Local(LocalNet {
-            relay: "https://relay.invalid".to_string(),
+            relays: vec![
+                "https://relay.invalid".to_string(),
+                "https://second.invalid".to_string(),
+            ],
         }),
     )
     .await;
@@ -98,7 +101,7 @@ async fn local_endpoints_converge_by_bare_id_over_an_in_process_relay() {
 
     // Teach the client how to reach the server the way the daemon does: register
     // `{server_id, relay}` via lait's own address construction …
-    client_lookup.add_endpoint_info(relay_addr(&relay_url, server_id));
+    client_lookup.add_endpoint_info(relay_addr(std::slice::from_ref(&relay_url), server_id));
     // … then dial by BARE ID — the production path. Resolution goes through the
     // MemoryLookup we just populated; no address is hand-carried into `connect`.
     let result = tokio::time::timeout(Duration::from_secs(20), async move {
@@ -191,4 +194,57 @@ async fn isolated_endpoints_converge_by_carried_direct_address() {
     // that failed its own `ping` assertion never sends a pong, so the timeout
     // above catches that; nothing is being swallowed.
     server_task.abort();
+}
+
+/// REACH-1's claim, exercised: a peer registered at MORE than one relay is
+/// still reachable when the preferred relay is dead. The first relay in the
+/// map is a black hole (a routable URL nothing answers); the second is the
+/// live in-process relay. If the endpoint treated "the relay" as one address,
+/// this dial would hang on the corpse and the timeout would catch it.
+#[tokio::test]
+async fn a_dead_relay_is_a_degraded_route_and_not_a_lost_peer() {
+    let (_live_map, live_url, _relay_guard): (RelayMap, RelayUrl, _) =
+        iroh::test_utils::run_relay_server()
+            .await
+            .expect("run in-process relay");
+    let dead_url: RelayUrl = "https://dead.relay.invalid".parse().unwrap();
+
+    // Both endpoints hold BOTH relays, dead one first — the shape
+    // `build_endpoint` produces for `LocalNet { relays: [dead, live] }`.
+    let both = RelayMap::from_iter(vec![dead_url.clone(), live_url.clone()]);
+    let (server, _server_lookup) = local_test_endpoint([33u8; 32], both.clone()).await;
+    let (client, client_lookup) = local_test_endpoint([44u8; 32], both).await;
+    server.online().await;
+    client.online().await;
+    let server_id = server.id();
+
+    let _server_task = tokio::spawn(async move {
+        let incoming = server.accept().await.expect("incoming");
+        let conn = incoming.await.expect("accept conn");
+        let (mut send, mut recv) = conn.accept_bi().await.expect("accept bi");
+        let mut buf = [0u8; 4];
+        recv.read_exact(&mut buf).await.expect("read ping");
+        send.write_all(b"pong").await.expect("write pong");
+        send.finish().expect("finish");
+        conn.closed().await;
+    });
+
+    // The peer's one address carries every relay, dead one included — the
+    // multi-relay `relay_addr` the daemon's `PeerBook::learn` now builds.
+    client_lookup.add_endpoint_info(relay_addr(&[dead_url, live_url], server_id));
+
+    let result = tokio::time::timeout(Duration::from_secs(20), async move {
+        let conn = client.connect(server_id, TEST_ALPN).await.expect("connect");
+        let (mut send, mut recv) = conn.open_bi().await.expect("open bi");
+        send.write_all(b"ping").await.expect("write ping");
+        send.finish().expect("finish");
+        let mut buf = [0u8; 4];
+        recv.read_exact(&mut buf).await.expect("read pong");
+        conn.close(0u32.into(), b"done");
+        buf
+    })
+    .await
+    .expect("failover round trip timed out — the dial hung on the dead relay");
+
+    assert_eq!(&result, b"pong", "converged through the surviving relay");
 }

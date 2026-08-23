@@ -167,7 +167,7 @@ impl From<&Network> for NetworkKey {
     fn from(network: &Network) -> Self {
         match network {
             Network::Public => Self::Public,
-            Network::Local(local) => Self::Local(local.relay.clone()),
+            Network::Local(local) => Self::Local(local.relays.join(",")),
             Network::Isolated => Self::Isolated,
         }
     }
