@@ -24,7 +24,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use astrolabe::client::http::{post_json, Head};
 use astrolabe::client::{display::DisplayAssignmentInput, Client};
@@ -391,8 +391,28 @@ async fn wait_for_health_staged(
     revision: &str,
     staged: std::ops::RangeInclusive<u16>,
 ) {
+    wait_for_health_staged_within(
+        client,
+        device,
+        revision,
+        staged,
+        Duration::from_secs(20),
+        "during live presentation",
+    )
+    .await;
+}
+
+async fn wait_for_health_staged_within(
+    client: &Client,
+    device: &str,
+    revision: &str,
+    staged: std::ops::RangeInclusive<u16>,
+    budget: Duration,
+    phase: &str,
+) {
     let mut last = String::from("the coordinator was never reached");
-    for _ in 0..200 {
+    let deadline = Instant::now() + budget;
+    loop {
         let display = client.display_status().await.expect("read receiver health");
         if let Some(health) = display
             .devices
@@ -441,7 +461,11 @@ async fn wait_for_health_staged(
                 ),
             },
         };
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
     }
     // Three different bugs used to arrive as this one sentence: a receiver that
     // never paired, one that paired and went silent, and one stuck presenting an
@@ -450,7 +474,7 @@ async fn wait_for_health_staged(
     // them named nothing and cost a bisect.
     panic!(
         "coordinator never observed health for the presented Signage revision \
-         after 20s. Last observation: {last}"
+         {phase} after {budget:?}. Last observation: {last}"
     );
 }
 
@@ -1501,8 +1525,30 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         );
         // The first device carries the film across the restart; its health
         // reports the film revision and stages a grant, not bytes.
-        wait_for_health_staged(&restarted, &device, &film_revision, 0..=0).await;
-        wait_for_health(&restarted, &second_device, &second_revision).await;
+        // A receiver whose coordinator was unavailable may legally be inside
+        // the live loop's 30-second maximum recovery backoff when the new daemon
+        // becomes ready. The ordinary 20-second presentation budget therefore
+        // cannot prove reconnect failure; cover the declared backoff plus a
+        // bounded margin for the authenticated poll and health report.
+        let reconnect_budget = Duration::from_secs(45);
+        wait_for_health_staged_within(
+            &restarted,
+            &device,
+            &film_revision,
+            0..=0,
+            reconnect_budget,
+            "after daemon restart",
+        )
+        .await;
+        wait_for_health_staged_within(
+            &restarted,
+            &second_device,
+            &second_revision,
+            1..=2,
+            reconnect_budget,
+            "after daemon restart",
+        )
+        .await;
         restarted
             .display_device_revoke(device.clone())
             .await
