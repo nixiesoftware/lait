@@ -175,7 +175,33 @@ codesign --force --timestamp --identifier com.nixiesoftware.astrolabe.dmg \
 # validation — but Gatekeeper on a customer machine will refuse it, so a
 # release without --notarize is not a release.
 if [ -n "$NOTARIZE_PROFILE" ]; then
-  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARIZE_PROFILE" --wait
+  # `notarytool submit --wait` exits successfully when Apple's terminal status
+  # is Invalid, so its process status alone is not a release gate. Keep the
+  # structured response, require Accepted explicitly, and always print the
+  # completed submission log: Apple recommends reviewing it even on success,
+  # and on failure it contains the actionable signing path that the one-line
+  # status omits.
+  NOTARY_RESULT="$WORK/notary-result.plist"
+  set +e
+  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARIZE_PROFILE" \
+    --wait --output-format plist > "$NOTARY_RESULT"
+  NOTARY_EXIT=$?
+  set -e
+  cat "$NOTARY_RESULT"
+
+  submission_id="$(plutil -extract id raw "$NOTARY_RESULT" 2>/dev/null || true)"
+  notary_status="$(plutil -extract status raw "$NOTARY_RESULT" 2>/dev/null || true)"
+  if [ -n "$submission_id" ]; then
+    xcrun notarytool log "$submission_id" \
+      --keychain-profile "$NOTARIZE_PROFILE" || true
+  fi
+  if [ "$NOTARY_EXIT" -ne 0 ] || [ "$notary_status" != "Accepted" ]; then
+    echo "make-dmg: notarization was not accepted" >&2
+    echo "  submission: ${submission_id:-unavailable}" >&2
+    echo "  status: ${notary_status:-unavailable} (notarytool exit $NOTARY_EXIT)" >&2
+    exit 1
+  fi
+
   xcrun stapler staple "$DMG"
   # The assessment a customer's Gatekeeper makes, run here first.
   spctl --assess --type open --context context:primary-signature -v "$DMG"

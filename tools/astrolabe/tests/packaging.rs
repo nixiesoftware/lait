@@ -540,6 +540,11 @@ fn the_dmg_ships_the_notices_inside_the_bundle() {
 fn the_dmg_staples_assesses_and_keeps_identity_out_of_the_project() {
     let script = dmg_directives();
     assert!(
+        script.contains(r#"[ "$notary_status" != "Accepted" ]"#)
+            && script.contains("notarytool log"),
+        "an Invalid notarization can reach stapling without printing Apple's diagnostic log"
+    );
+    assert!(
         script.contains("stapler staple"),
         "an unstapled DMG needs Apple reachable at first launch"
     );
