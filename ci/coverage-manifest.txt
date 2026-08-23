@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2603
-pr-platform    2123
-nightly        2631
+pr             2636
+pr-platform    2146
+nightly        2665
 mutants        106
 
 [gates]
@@ -47,7 +47,6 @@ addressbook registry::tests::a_correspondent_resolves_the_devices_avowed_to_them
 addressbook registry::tests::a_device_retired_after_avowing_is_dropped_on_the_next_publication
 addressbook registry::tests::a_link_adds_a_device_and_a_retirement_removes_one
 addressbook registry::tests::a_mismatched_genesis_is_unanchored
-addressbook registry::tests::a_projection_headed_by_a_non_genesis_device_is_unanchored
 addressbook registry::tests::a_stranger_absorbs_a_projection_but_reaches_nothing
 addressbook registry::tests::absorb_takes_the_newer_projection_and_never_regresses
 addressbook registry::tests::avow_reachable_follows_the_live_set
@@ -56,6 +55,7 @@ addressbook registry::tests::founding_a_profile_resolves_to_its_two_devices
 addressbook registry::tests::founding_the_same_genesis_twice_is_idempotent_and_keeps_appends
 addressbook registry::tests::resolving_an_unheld_profile_is_none_never_empty
 addressbook registry::tests::round_trips_through_bytes
+addressbook registry::tests::the_anchor_admits_a_consented_chain_and_nothing_else
 addressbook registry::tests::the_reach_handshake_in_two_calls
 addressbook tests::a_crash_between_remove_and_rename_recovers_the_survivor
 addressbook tests::a_hostile_header_length_is_refused
@@ -193,6 +193,11 @@ astrolabe single_instance::tests::a_second_launch_hands_its_arguments_to_the_fir
 astrolabe single_instance::tests::instance_artifacts_are_stable_within_a_user_and_distinct_between_users
 astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
+astrolabe-display-reference shell::tests::a_dead_player_under_an_unchanged_desire_is_restarted
+astrolabe-display-reference shell::tests::a_film_keeps_playing_across_status_rewrites_naming_the_same_url
+astrolabe-display-reference shell::tests::a_frame_desires_the_player_on_the_handoff_pixels
+astrolabe-display-reference shell::tests::an_unreadable_handoff_idles_rather_than_replaying_the_last_scene
+astrolabe-display-reference shell::tests::changed_pixels_re_present_and_a_blank_kills_the_player
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_synchronized_snapshot_keeps_advancing_while_assets_are_staged
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::an_unsynchronized_snapshot_begins_when_it_is_activated
@@ -217,6 +222,7 @@ astrolabe::launch a_relaunch_request_reaches_the_apply_window_under_one_stub
 astrolabe::launch a_request_with_nothing_staged_relaunches_once_and_is_consumed
 astrolabe::launch a_secondary_stub_cannot_consume_the_primary_relaunch_request
 astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
+astrolabe::launch the_daemon_serves_the_identity_profile_of_the_home_it_was_given
 astrolabe::packaging every_platform_stages_the_terms_where_the_update_tree_will_find_them
 astrolabe::packaging every_shell_artifact_points_at_the_stub_and_never_into_a_release
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
@@ -257,6 +263,7 @@ comms network_simulation_tests::a_lossy_network_actually_loses
 comms network_simulation_tests::a_partition_is_symmetric_and_heals
 comms network_simulation_tests::the_default_network_loses_nothing
 comms network_simulation_tests::the_same_seed_replays_exactly
+comms policy::tests::a_relay_list_parses_and_an_empty_one_refuses
 comms policy::tests::from_env_default_is_public_and_trims
 comms policy::tests::peerbook_registers_under_local_and_noops_without_a_relay
 comms relay::tests::a_plain_relay_advertises_http
@@ -275,6 +282,7 @@ comms::it flows::concurrent_flows_do_not_interleave_with_each_other
 comms::it flows::read_exact_refuses_a_short_flow_rather_than_returning_part
 comms::it flows::uni_and_bi_accept_queues_can_be_polled_at_the_same_time
 comms::it identity_interop::iroh_keypair_is_the_same_ed25519_pair_as_a_lait_seed
+comms::it policy::a_dead_relay_is_a_degraded_route_and_not_a_lost_peer
 comms::it policy::build_endpoint_binds_every_policy
 comms::it policy::isolated_endpoints_converge_by_carried_direct_address
 comms::it policy::local_endpoints_converge_by_bare_id_over_an_in_process_relay
@@ -305,11 +313,14 @@ correspondence mem::tests::a_malformed_envelope_is_refused_by_what_is_wrong_with
 correspondence mem::tests::a_sealed_letter_reaches_its_recipient_and_nobody_else
 correspondence mem::tests::the_deposit_is_attributed_to_the_witness_and_not_to_a_claim
 correspondence plane::tests::a_collect_asks_every_device_the_identity_holds
-correspondence plane::tests::a_device_outside_the_genesis_pair_cannot_publish_a_head_anyone_will_take
+correspondence plane::tests::a_correspondents_address_book_learns_an_adopted_device
 correspondence plane::tests::a_device_set_that_grew_is_a_change_a_person_has_to_answer_for
+correspondence plane::tests::a_joined_device_publishes_a_head_every_reader_takes
 correspondence plane::tests::a_plane_reaches_over_the_deployed_post
+correspondence plane::tests::an_adopted_device_publishes_from_its_own_seed
 correspondence plane::tests::one_device_cannot_found_a_profile
 correspondence plane::tests::post_reach_self_round_trips_over_the_deployed_post
+correspondence plane::tests::profile_for_is_the_plane_own_derivation
 correspondence plane::tests::sending_to_an_unlearned_profile_is_not_reachable
 correspondence plane::tests::the_canonical_device_moves_and_the_profile_does_not
 correspondence plane::tests::two_planes_reach_each_other_over_a_carrier
@@ -333,7 +344,7 @@ correspondence::reach reach_by_profile_then_carry_over_a_real_post
 display-protocol::protocol a_blank_is_a_closed_native_reason_not_a_url_or_message
 display-protocol::protocol a_forged_program_revision_is_refused
 display-protocol::protocol a_program_revision_commits_semantics_but_not_cursor_position
-display-protocol::protocol confirmation_phrase_commits_fingerprint_pairing_and_receiver_nonce
+display-protocol::protocol confirmation_phrase_commits_profile_pairing_and_receiver_nonce
 display-protocol::protocol confirmation_words_outside_the_frozen_dictionary_are_refused
 display-protocol::protocol cross_language_lists_use_wire_string_order
 display-protocol::protocol frame_metadata_cannot_smuggle_a_manifest_or_unbounded_decode
@@ -492,6 +503,7 @@ journal reconciliation_tests::what_only_the_local_side_holds_is_not_reported
 lait client_action::tests::a_world_call_never_needs_request_classification
 lait client_action::tests::an_action_materializes_the_route_it_selected_at_parse_time
 lait client_action::tests::control_requests_become_explicit_orbital_actions
+lait config::tests::a_service_url_resolves_env_then_key_and_empty_is_offline
 lait config::tests::config_map_roundtrips_and_degrades_to_empty
 lait config::tests::discovery_never_creates_but_init_path_does
 lait config::tests::find_store_dir_walks_up_to_the_nearest_lait
@@ -501,7 +513,9 @@ lait config::tests::kinship_seeds_are_the_identitys_own_and_outlive_the_run
 lait config::tests::second_daemon_lock_fails_while_first_is_held
 lait config::tests::settings_store_layer_wins_over_global
 lait config::tests::socket_path_stays_under_the_unix_limit
+lait config::tests::the_display_port_is_configured_and_degrades_to_the_built_in
 lait config::tests::the_lock_holder_stays_identifiable_while_it_holds_the_lock
+lait config::tests::the_network_follows_the_relay_list_and_debug_defaults_public
 lait control::tests::a_different_executable_is_never_stale_however_new_we_are
 lait control::tests::a_drained_signal_says_how_many_were_lost
 lait control::tests::a_first_live_read_carries_no_generation_at_all
@@ -599,12 +613,14 @@ lait display::live::tests::a_complete_presentation_declares_its_end_and_a_live_o
 lait display::live::tests::a_gap_in_the_sequence_is_still_addressable_on_both_sides
 lait display::live::tests::a_missing_segment_says_which_kind_of_missing_it_is
 lait display::live::tests::a_planned_presentation_serves_any_segment_without_holding_all_of_them
+lait display::live::tests::a_planned_presentation_serves_mse_from_its_table
 lait display::live::tests::a_resource_is_refused_when_two_source_sessions_claim_it
 lait display::live::tests::a_stored_install_refuses_rather_than_leaving_an_empty_presentation
 lait display::live::tests::a_stored_presentation_also_serves_its_mse_snapshot
 lait display::live::tests::a_stored_presentation_serves_every_segment_and_declares_its_end
 lait display::live::tests::a_whole_presentation_keeps_what_a_rolling_one_drops
 lait display::live::tests::hls_urls_are_relative_to_the_opaque_ticket_and_window_is_bounded
+lait display::overlay::tests::the_display_router_answers_over_the_overlay
 lait display::pairing::tests::approval_enrolls_only_after_receiver_proves_the_new_key
 lait display::runtime::tests::a_degraded_source_keeps_its_reasons_instead_of_reading_as_empty
 lait display::runtime::tests::a_frame_reaches_a_member_screen_as_bytes_and_its_declared_dimensions
@@ -612,6 +628,7 @@ lait display::runtime::tests::live_media_refuses_visibly_rather_than_drawing_som
 lait display::store::tests::a_legacy_single_file_migrates_into_the_split_pair
 lait display::store::tests::a_machine_holding_no_unlock_path_is_refused_rather_than_reminting
 lait display::store::tests::a_passphrase_opens_the_key_when_the_identity_is_gone_too
+lait display::store::tests::a_placement_admitted_by_device_opens_the_same_identifier
 lait display::store::tests::a_snapshot_cannot_yield_a_credential
 lait display::store::tests::a_version_two_secrets_file_lifts_its_key_instead_of_minting_a_new_one
 lait display::store::tests::admitting_a_second_passphrase_is_refused_rather_than_stacked
@@ -627,6 +644,7 @@ lait display::stored_tests::a_video_track_survives_the_round_trip_through_its_ow
 lait display::stored_tests::a_whole_file_reads_from_its_bytes_and_serves
 lait display::stored_tests::an_audio_track_survives_the_round_trip_through_its_own_init_segment
 lait display::stored_tests::the_groups_a_track_produces_package_into_real_segments
+lait display::tls::tests::the_port_is_a_listener_detail_and_not_the_identity
 lait display::tls::tests::tls_identity_is_stable_and_private
 lait host_client::tests::a_book_resolution_crosses_as_labels_not_cards
 lait host_client::tests::a_directory_selected_scope_cannot_address_a_sibling_orbit
@@ -885,6 +903,12 @@ lait-directory address::tests::an_address_off_the_word_list_still_parses_and_say
 lait-directory address::tests::every_minted_address_parses_and_uses_only_listed_words
 lait-directory firestore::tests::a_path_separator_cannot_escape_a_document_id
 lait-directory firestore::tests::a_unix_second_renders_as_the_utc_instant_firestore_expects
+lait-directory registry::tests::a_binding_never_moves_through_bind
+lait-directory registry::tests::a_bound_label_resolves_and_a_replay_does_not_roll_it_back
+lait-directory registry::tests::a_route_publishes_and_resolves_over_the_wire
+lait-directory registry::tests::a_stranger_cannot_route_a_label_it_does_not_root
+lait-directory registry::tests::an_unbound_label_is_not_a_claim_path
+lait-directory registry::tests::labels_are_one_dns_label_and_infrastructure_is_reserved
 lait-directory words::tests::every_word_appears_once_and_the_list_is_ordered
 lait-directory words::tests::no_two_words_agree_in_their_first_four_letters
 lait-directory words::tests::the_list_has_the_shape_an_address_is_minted_from
@@ -1119,6 +1143,9 @@ lait-post tests::one_persons_mailbox_is_not_anothers
 lait-post tests::the_challenge_map_is_bounded_without_becoming_a_wall
 lait-post tests::unblocking_a_sender_lets_their_next_letter_through
 lait-post::over_http a_letter_crosses_the_wire_and_only_its_recipient_collects_it
+lait-reach::bin/lait-reach tests::a_receiver_reaches_its_coordinator_through_the_splice
+lait-reach::bin/lait-reach tests::an_unbound_label_is_refused_without_a_dial
+lait-reach::bin/lait-reach tests::the_label_is_the_first_host_label_and_ports_do_not_confuse_it
 lait-signage contract::tests::a_catalog_is_canonical_or_absent_and_only_bytes_carry_one
 lait-signage contract::tests::a_program_grant_and_a_fleet_grant_both_satisfy_writing_that_program
 lait-signage contract::tests::a_screen_reports_when_its_answer_changes_with_nobody_writing
@@ -1687,8 +1714,13 @@ mechanics::it device_sealing::a_sealed_payload_survives_persistence
 mechanics::it device_sealing::admitting_a_reader_needs_a_reader_and_re_encrypts_nothing
 mechanics::it device_sealing::sealing_to_nobody_is_a_failure_not_an_empty_success
 mechanics::it kinship::a_body_not_in_the_committed_head_is_refused
+mechanics::it kinship::a_chain_through_a_retired_device_is_dead_past_the_break
 mechanics::it kinship::a_device_cannot_link_to_itself
+mechanics::it kinship::a_forged_link_roots_nobody
+mechanics::it kinship::a_genesis_signer_disloses_no_chain
 mechanics::it kinship::a_head_minted_under_other_semantics_is_refused
+mechanics::it kinship::a_joined_device_signs_a_head_a_stranger_can_verify
+mechanics::it kinship::a_link_cycle_does_not_spin_the_verifier
 mechanics::it kinship::a_link_is_symmetric_and_both_devices_signed_it
 mechanics::it kinship::a_link_signed_by_only_one_side_is_refused_as_not_mutual
 mechanics::it kinship::a_member_tier_projection_excludes_a_reader_from_another_space
@@ -1702,11 +1734,13 @@ mechanics::it kinship::an_actor_party_carries_its_space_because_an_actor_id_is_n
 mechanics::it kinship::an_avowal_and_an_attestation_differ_only_by_who_signed
 mechanics::it kinship::an_avowal_shown_outside_its_audience_is_refused_by_the_artifact_alone
 mechanics::it kinship::an_id_the_head_never_covered_is_unlisted_rather_than_withheld
+mechanics::it kinship::an_unlinked_device_is_not_rooted_by_any_amount_of_asserting
 mechanics::it kinship::attribution_states_what_the_audience_size_actually_buys
 mechanics::it kinship::editing_the_committed_entry_set_breaks_the_commitment
 mechanics::it kinship::every_refusal_carries_a_name_rather_than_a_boolean
 mechanics::it kinship::losing_one_device_leaves_every_other_link_standing
 mechanics::it kinship::own_and_kin_cannot_be_decided_without_being_resolved
+mechanics::it kinship::retirement_severs_and_a_stranger_cannot_wield_it
 mechanics::it kinship::the_profile_id_is_the_genesis_links_content_address
 mechanics::it kinship::widening_the_audience_breaks_the_signature
 mechanics::it world_policy::delegation_permits_granting_but_not_meta_capability
