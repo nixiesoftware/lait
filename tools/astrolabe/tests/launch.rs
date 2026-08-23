@@ -1115,11 +1115,11 @@ async fn the_daemon_serves_the_identity_profile_of_the_home_it_was_given() {
     let identity = tempfile::tempdir().expect("an identity home");
     let bundled_worlds = tempfile::tempdir().expect("bundled first-party World releases");
     stage_bundled_worlds(bundled_worlds.path());
+    install_test_worlds(bundled_worlds.path(), identity.path());
     let _daemon_stopped = DaemonStopped(identity.path().to_path_buf());
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
-    config.bundled_worlds = Some(bundled_worlds.path().to_path_buf());
     let (client, _signals) = Client::start(config)
         .await
         .expect("a client that starts its identity daemon");
