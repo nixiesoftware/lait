@@ -410,9 +410,8 @@ async fn wait_for_health_staged_within(
     budget: Duration,
     phase: &str,
 ) {
-    let mut last = String::from("the coordinator was never reached");
     let deadline = Instant::now() + budget;
-    loop {
+    let last = loop {
         let display = client.display_status().await.expect("read receiver health");
         if let Some(health) = display
             .devices
@@ -437,7 +436,7 @@ async fn wait_for_health_staged_within(
             assert!(health.pipeline_unobservable);
             return;
         }
-        last = match display.devices.iter().find(|row| row.device == device) {
+        let observation = match display.devices.iter().find(|row| row.device == device) {
             None => format!(
                 "the coordinator lists no device {device} at all (it knows: [{known}])",
                 known = display
@@ -463,10 +462,10 @@ async fn wait_for_health_staged_within(
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            break;
+            break observation;
         }
         tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
-    }
+    };
     // Three different bugs used to arrive as this one sentence: a receiver that
     // never paired, one that paired and went silent, and one stuck presenting an
     // older revision. Only the third is a Signage bug, and the message could not
