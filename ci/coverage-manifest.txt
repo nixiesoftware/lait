@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2583
-pr-platform    2113
-nightly        2611
+pr             2598
+pr-platform    2120
+nightly        2626
 mutants        106
 
 [gates]
@@ -115,7 +115,7 @@ astrolabe client::launch::tests::the_composed_url_lands_on_the_declared_entry_ca
 astrolabe client::library::tests::a_launch_url_carries_the_ticket_to_the_declared_entry
 astrolabe client::library::tests::a_mount_resolves_to_the_world_id_updates_are_scoped_by
 astrolabe client::library::tests::an_undeclared_entry_path_is_carried_as_absent_not_guessed
-astrolabe client::library::tests::the_library_lists_what_this_build_installs
+astrolabe client::library::tests::the_library_maps_the_selected_declaration
 astrolabe client::presence::tests::an_unasked_space_is_recorded_as_unasked
 astrolabe client::presence::tests::an_unresolved_station_measures_only_its_device
 astrolabe client::presence::tests::the_best_observation_of_an_identity_wins
@@ -194,6 +194,7 @@ astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
+astrolabe-ios worlds::tests::signed_adapter_carries_exactly_the_reviewed_first_party_defaults
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
 astrolabe-stub tests::a_live_tree_that_cannot_start_falls_back_to_the_previous_tree
 astrolabe-stub tests::a_manifest_that_does_not_carry_its_own_entry_is_refused
@@ -649,9 +650,8 @@ lait orbital::hosting::nudge_delivery::actor_matching_is_equality_and_not_a_pref
 lait orbital::hosting::nudge_delivery::an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error
 lait orbital::hosting::nudge_delivery::several_nudges_each_find_their_own_actor
 lait orbital::hosting::nudge_delivery::two_devices_of_one_person_each_hear_once
-lait orbital::hosting::tests::a_live_body_wait_ignores_other_issues_before_the_watched_one
-lait orbital::hosting::tests::a_live_issue_wakes_when_its_durable_body_arrives
-lait orbital::hosting::tests::an_issue_is_named_by_its_doc_id_and_an_alias_names_nothing
+lait orbital::hosting::tests::a_live_body_wait_wakes_on_its_world
+lait orbital::hosting::tests::a_live_stream_wakes_for_its_world
 lait orbital::hosting::tests::an_unscoped_live_stream_wakes_for_any_issue_body_or_reset
 lait orbital::hosting::tests::historical_upgrade_refuses_before_migrator_activation_without_continuity
 lait orbital::hosting::tests::narrowing_to_an_issue_admits_nothing_about_another_body
@@ -739,8 +739,8 @@ lait serve::head::tests::a_bundle_that_vanishes_underneath_falls_back_rather_tha
 lait serve::head::tests::a_source_answers_from_the_bundle_it_was_given
 lait serve::head::tests::an_activated_bundle_answers_and_an_absent_path_falls_through
 lait serve::head::tests::each_world_activates_its_own_payload_and_never_anothers
+lait serve::head::tests::no_release_is_available_when_nothing_is_activated
 lait serve::head::tests::nothing_outside_the_bundle_is_readable_through_it
-lait serve::head::tests::the_embedded_floor_is_the_source_when_nothing_is_activated
 lait serve::policy::tests::a_storage_read_is_a_read_and_belongs_to_a_space_not_to_the_host_plane
 lait serve::policy::tests::reads_are_reads
 lait serve::policy::tests::runtime_work_classifies_its_typed_operation_not_its_transport_envelope
@@ -760,7 +760,6 @@ lait serve::shell::composition::every_act_that_grants_admits_or_approves_is_on_t
 lait serve::shell::composition::the_documents_the_head_serves_are_composed
 lait serve::shell::composition::the_marker_is_minted_per_run_and_nothing_a_world_authored_can_carry_it
 lait serve::shell::tests::content_types_cover_what_vite_emits
-lait serve::shell::tests::the_client_is_actually_embedded
 lait serve::socket::tests::a_body_carries_the_space_and_the_question_it_answers
 lait serve::socket::tests::a_body_past_the_ceiling_is_not_sent_at_all
 lait serve::socket::tests::a_control_frame_survives_pressure_that_a_transient_one_does_not
@@ -801,11 +800,12 @@ lait serve::tests::the_origin_is_judged_before_the_credential
 lait serve::tests::unknown_paths_fall_back_to_the_app
 lait update::consent::tests::corrupt_job_is_not_treated_as_absent
 lait update::consent::tests::enqueue_is_durable_and_idempotent_while_pending
+lait update::consent::tests::format_one_progress_is_upgraded_without_losing_its_cursor
 lait update::consent::tests::restart_preserves_progress_and_replayed_consent
 lait update::consent::tests::terminal_job_allows_a_new_explicit_consent
 lait update::facts::tests::a_world_that_names_a_fact_this_build_does_not_offer_is_told_which_one
-lait update::facts::tests::every_hosted_world_offers_its_own_schema_under_its_own_name
 lait update::facts::tests::the_control_protocol_is_offered_as_a_version_a_range_can_be_written_over
+lait update::facts::tests::the_process_protocols_are_named_independently
 lait update::feed::tests::a_channel_resolves_to_the_release_its_pointer_names
 lait update::feed::tests::a_channel_resolves_when_a_successor_key_signed_it
 lait update::feed::tests::a_floor_is_carried_and_an_unsatisfiable_floor_is_ignored_and_flagged
@@ -866,7 +866,9 @@ lait update::world::tests::a_world_this_build_declares_is_a_world_this_build_acc
 lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
 lait update::world::tests::an_unmet_bundle_records_the_refusal_and_keeps_naming_what_serves
 lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bounds
+lait update::world::tests::old_releases_are_never_replaced_and_can_be_selected_without_a_download
 lait update::world::tests::only_a_known_newer_bundle_this_build_can_run_is_behind
+lait update::world::tests::republishing_an_old_version_never_overwrites_its_release
 lait update::world::tests::the_standing_is_recorded_beside_the_served_tree_and_never_within_it
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
@@ -1077,6 +1079,7 @@ lait-issues-app router::tests::every_denial_cause_keeps_the_denied_error_kind
 lait-issues-app tests::a_denied_answer_is_the_callers_problem_not_an_internal_fault
 lait-issues-app tests::every_public_tool_keeps_its_issues_prefix
 lait-issues-app tests::the_world_declares_a_display_name_distinct_from_its_mount
+lait-issues-runner::process the_shipped_issues_process_exposes_every_host_adapter
 lait-issues::it package_boundary::semantic_package_has_no_shell_or_process_dependency
 lait-issues::it package_boundary::the_implementation_id_is_pinned_and_moving_it_is_deliberate
 lait-post store::tests::a_deposit_id_reaching_for_another_path_is_refused
@@ -1166,6 +1169,7 @@ lait-signage-app protocol::tests::each_document_carries_its_own_schema_pair
 lait-signage-app protocol::tests::every_delete_asks_and_names_what_it_deletes
 lait-signage-app protocol::tests::query_and_command_classification_is_product_owned
 lait-signage-app tests::package_registers_the_exact_signage_program_surface
+lait-signage-runner::process the_shipped_signage_process_exposes_its_host_adapters
 lait-workbench api::tests::contract_endpoint_is_authenticated_and_versioned
 lait-workbench api::tests::every_api_route_requires_the_loopback_credential
 lait-workbench api::tests::foreign_hosts_are_rejected_even_with_the_token
@@ -1386,6 +1390,7 @@ lait::it orbital_two_node::two_station_hosts_join_admit_and_converge_over_the_so
 lait::it product_features::a_follower_hears_about_an_issue_they_are_not_assigned
 lait::it product_features::milestones_cycles_initiatives_teams_triage_delete_and_attachments
 lait::it product_independence::allowlist_is_empty_when_the_shell_stops_depending_on_products
+lait::it product_independence::ios_has_exactly_one_reviewed_product_composition_root
 lait::it product_independence::no_unallowlisted_product_references
 lait::it product_independence::the_rule_has_teeth
 lait::it product_schema::positive_examples_roundtrip_and_canonical_bytes_are_stable
@@ -2648,6 +2653,7 @@ world-interface manifest::tests::an_unsupported_target_is_kept_and_never_offered
 world-interface manifest::tests::artwork_must_be_named_as_a_path_inside_the_bundle
 world-interface manifest::tests::conditions_live_on_the_entry_so_one_release_serves_every_host
 world-interface manifest::tests::every_unmet_requirement_is_reported_and_each_kind_says_which_it_is
+world-interface manifest::tests::one_applicable_runner_must_be_the_formation_default
 world-interface manifest::tests::the_primary_entry_is_offered_first_and_hidden_ones_never
 world-interface manifest::tests::two_launch_entries_may_not_share_an_id
 world-interface tests::a_live_hit_adds_only_a_presentation_field
@@ -2664,3 +2670,12 @@ world-interface tests::every_invocation_declares_an_access_class
 world-interface tests::mount_and_reserved_name_collisions_fail_at_composition
 world-interface tests::png_dimensions_are_read_from_the_header_alone
 world-interface tests::unavailable_resolution_does_not_write_empty_names
+world-runner tests::release_paths_never_escape_the_bundle
+world-runner::process a_crashed_child_is_restored_from_the_same_immutable_generation
+world-runner::process a_world_callback_can_reenter_the_same_generation
+world-runner::process a_world_is_pinned_until_an_explicit_relaunch
+world-runner::process dropping_an_owned_instance_collects_the_process
+world-sdk tests::remote_client_host_decodes_one_application_result_layer
+world-sdk tests::runtime_codec_round_trips_flattened_world_replies
+world-sdk tests::runtime_codec_round_trips_json_values
+world-sdk::semantic semantic_queries_execute_in_the_child_but_read_only_through_the_host
