@@ -980,7 +980,7 @@ pub enum ActionRequest {
     /// Author, or preview, an MCP binding for one World.
     ///
     /// Astrolabe writes the binding; the editor parents `lait mcp`. The World
-    /// pin (`world`) is a mount this build hosts, not a path.
+    /// pin (`world`) is a selected installation's mount, not a path.
     InstallMcp {
         /// `claude` | `cursor` | `windsurf` | `generic`.
         client: String,

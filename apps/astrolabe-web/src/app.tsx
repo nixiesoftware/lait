@@ -281,7 +281,7 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
 }
 
 /**
- * The artwork a World compiled in, read once per mount. The initial render
+ * The artwork a World declares, read once per mount. The initial render
  * draws the accent fallback and the art arrives a frame later — the same
  * fallback a World that ships no art keeps for good.
  */

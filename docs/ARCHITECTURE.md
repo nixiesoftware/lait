@@ -69,7 +69,7 @@ or CRDT engine. An explicit control route addresses the process-level daemon, a
 local Orbit plus its expected Space, or a World reached through that Orbit. The
 web head is a picker over the whole registered catalog under one identity; MCP
 is pinned to its launch Orbit and to one World (`$LAIT_WORLD`, or the sole
-World this build hosts) and inherits no catalog-wide visibility. The World
+World this identity has selected) and inherits no catalog-wide visibility. The World
 owns the agent surface (tools, omissions, instructions); `lait mcp` mounts
 that surface and does not generate tools from the wire protocol. Astrolabe
 authors the editor binding (`LAIT_AGENT`, `LAIT_WORLD`) and never parents

@@ -498,8 +498,8 @@ party, and a Station repeating one is making a claim on its own authority. That
 is intentional. A signed signal would be a durable artefact by another name, and
 the whole contract here is that nothing is retained.
 
-**A World signal is trusted only when this build's reviewed implementation is
-active at the session's pinned frontier.** A World the Station does not host and
+**A World signal is trusted only when the selected runner's reviewed
+implementation is active at the session's pinned frontier.** A World the Station does not host and
 a World whose implementation nobody approved get the same refusal, and neither
 reveals the other. Acting on a payload whose schema was never reviewed is the
 failure this prevents.

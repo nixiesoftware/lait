@@ -72,9 +72,9 @@ enum Mode {
         home: Option<String>,
         /// The one World this head serves.
         ///
-        /// `None` falls back to `$LAIT_WORLD`, and then to the sole World a
-        /// build hosts — the same ladder `lait mcp` climbs, resolved by the
-        /// same `registry.pin`, so a build with several Worlds and no pin
+        /// `None` falls back to `$LAIT_WORLD`, and then to the sole World this
+        /// identity has selected — the same ladder `lait mcp` climbs, resolved
+        /// by the same `registry.pin`, so several selected Worlds with no pin
         /// refuses here exactly as it refuses there rather than picking one.
         ///
         /// A head that knows which World it is, is a head a supervisor can

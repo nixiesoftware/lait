@@ -327,8 +327,8 @@ where
     }
 }
 
-/// Check every World this build hosts, and stage any head published for this
-/// runtime.
+/// Check every selected World installation, and stage any head published for
+/// this runtime.
 ///
 /// Separate from the client check and never able to fail it: a World's
 /// publisher and the product's are different parties on different cadences,

@@ -478,7 +478,7 @@ impl WorldHost {
         &self.reviewed_implementation
     }
 
-    /// The version this build declares for the World it hosts.
+    /// The implementation version declared by this selected World runner.
     pub fn reviewed_version(&self) -> u32 {
         self.reviewed_version
     }

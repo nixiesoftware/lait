@@ -1102,10 +1102,10 @@ The acknowledgement is itself one-way, which is how a ping does not become a
 loop. A sender that expects nothing stops its read half rather than dropping it,
 so a peer cannot write into a flow the other side will never read.
 
-**A World signal is refused when this build cannot interpret it.** A World this
-Station does not host, and a World whose implementation is not active at the
-session's pinned frontier, get the same answer: not registered. Both mean this
-build cannot interpret that payload, and interpreting it anyway is how a schema
+**A World signal is refused when the selected runner cannot interpret it.** A
+World this Station does not host, and a World whose implementation is not active
+at the session's pinned frontier, get the same answer: not registered. Both mean
+the runner cannot interpret that payload, and interpreting it anyway is how a schema
 nobody reviewed gets acted on. That is a different answer from denial, and
 neither reveals the other.
 

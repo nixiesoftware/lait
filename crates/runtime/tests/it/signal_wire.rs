@@ -152,7 +152,7 @@ fn policy(lanes: Vec<u8>) -> SignalPolicy {
         granted_lanes: lanes,
         authority: Arc::new(Everyone),
         // No hosted Worlds. `WorldSignal` is refused on that basis below, which
-        // is the honest shape: a build that hosts nothing can interpret nothing.
+        // is the honest shape: a runner that registered nothing can interpret nothing.
         worlds: Builder::new().build().expect("empty registry"),
     }
 }
