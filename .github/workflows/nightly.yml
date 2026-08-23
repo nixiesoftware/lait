@@ -113,6 +113,9 @@ jobs:
           bash ci/prepare-independent-world-fixtures.sh \
             "$channels" "$PWD/target/debug" "$feed"
           echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       # The `nightly` profile runs everything and gives the heavy gates their
       # own slow-timeout budget, plus a retry on the real-network group — a

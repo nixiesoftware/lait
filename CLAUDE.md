@@ -357,18 +357,23 @@ link step fails (`taskkill //F //IM lait.exe` on Windows).
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features --locked
   cargo build --workspace --locked --all-targets --all-features
-  bash ci/stage-test-worlds.sh
+  fixture_channels="$(mktemp -d)"
+  bash ci/prepare-independent-world-fixtures.sh \
+    "$fixture_channels" "$PWD/target/debug" "$PWD/target/debug/lait-feed"
+  export WORLD_FIXTURE_CHANNELS="$fixture_channels"
+  export WORLD_FIXTURE_INSTALLER="$PWD/target/debug/world-channel-installer"
   cargo nextest run --workspace --all-features --profile pr --no-fail-fast
   bash ci/third-party-notices.sh --check
   ```
 
   `--workspace` is load-bearing: a bare `cargo test` covers only the root
-  package and silently skips every product and crate. **The build and World
-  staging steps are load-bearing too**: nextest builds test binaries, never the
-  workspace bins or the application-bundle layout. The real-process suites
-  execute those bins and expect the independently carried releases beside
-  `lait`. A stale bin or an unstaged World fails those tests in ways that name
-  everything except the missing prerequisite — a pre-#136 receiver read as a
+  package and silently skips every product and crate. **The build and signed
+  fixture-publish steps are load-bearing too**: nextest builds test binaries,
+  never the workspace bins or the independent World channels. The real-process
+  suites install those signed archives through the production boundary. There
+  is no discovery beside `lait` and no direct record synthesis. A stale bin or
+  absent fixture channel fails those tests in ways that name everything except
+  the missing prerequisite — a pre-#136 receiver read as a
   broken media pipeline for most of a day. Tiering lives in
   `.config/nextest.toml`; see [`docs/TESTING.md`](docs/TESTING.md).
 - End to end against the real binary: `bash ci/smoke-p0.sh`. It starts the head

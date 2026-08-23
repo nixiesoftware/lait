@@ -8898,6 +8898,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "world-channel-installer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "lait",
+]
+
+[[package]]
 name = "world-fixture"
 version = "0.1.0"
 dependencies = [

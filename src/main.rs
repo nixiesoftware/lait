@@ -230,7 +230,6 @@ impl Mode {
                         Some(_) => anyhow::anyhow!(lait::host_client::no_store_here()),
                         None => error,
                     })?;
-                let identity = selection.identity_dir()?;
                 lait::mcp::run_mcp(&home, selection).await
             }
             Mode::Serve {

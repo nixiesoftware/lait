@@ -537,6 +537,75 @@ pub fn check(world: &str, worlds: &Path, channel: feed::Channel) -> Result<Outco
     check_with_progress(world, worlds, channel, |_| {})
 }
 
+/// Install one World from an explicitly supplied, already-published channel
+/// directory. This changes transport, never authority: the pointer and
+/// manifest still verify against `pubkeys`, and the artifact still passes the
+/// production size, digest, declaration, compatibility, and immutable-record
+/// gates before it is selected.
+///
+/// The directory is the output of `lait-feed world`: `pointer`,
+/// `manifest.json`, and the target archive. It is used by local-network
+/// developer sharing and hostile-layout acceptance tests, where silently
+/// discovering a neighboring build product would invalidate the test.
+pub fn install_from_published_directory(
+    published: &Path,
+    pubkeys: &[[u8; 32]],
+    world: &str,
+    offers: &std::collections::BTreeMap<String, semver::Version>,
+    worlds: &Path,
+) -> Result<Outcome> {
+    if !published.is_dir() {
+        bail!("published World channel is absent: {}", published.display());
+    }
+    let base = "https://world-directory.invalid";
+    let pointer_url = pointer_url(base, world, feed::Channel::Test);
+    let resolved = feed::resolve_pointer_with(
+        |asked| {
+            let path = if asked == pointer_url {
+                published.join("pointer")
+            } else if asked.ends_with("/manifest.json") {
+                published.join("manifest.json")
+            } else {
+                return Err(feed::Failure::Unreachable(format!(
+                    "published directory has no signed object at {asked}"
+                )));
+            };
+            std::fs::read(&path).map_err(|error| {
+                feed::Failure::Unreachable(format!("read {}: {error}", path.display()))
+            })
+        },
+        &pointer_url,
+        feed::Channel::Test,
+        pubkeys,
+        None,
+    )
+    .map_err(|error| anyhow!(error))?;
+
+    stage_bundle_with(
+        |url, _| {
+            let name = url.rsplit('/').next().unwrap_or_default();
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains('/')
+                || name.contains('\\')
+            {
+                return Err(feed::Failure::Invalid(format!(
+                    "published artifact URL has no bounded file name: {url}"
+                )));
+            }
+            let path = published.join(name);
+            std::fs::read(&path).map_err(|error| {
+                feed::Failure::Unreachable(format!("read {}: {error}", path.display()))
+            })
+        },
+        &resolved,
+        world,
+        offers,
+        worlds,
+    )
+}
+
 /// Resolve and install one World's signed channel release with progress.
 pub fn check_with_progress<P>(
     world: &str,
@@ -712,6 +781,79 @@ mod tests {
         worlds: &Path,
     ) -> Result<Outcome> {
         stage_bundle_with(fetcher(objects), resolved, WORLD, offers, worlds)
+    }
+
+    #[test]
+    fn an_explicit_directory_still_crosses_the_signed_install_boundary() {
+        let archive = ordinary("0.9.0", serde_json::json!([]));
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed(
+            "0.9.0",
+            &archive,
+            u64::try_from(archive.len()).unwrap(),
+            &digest,
+        );
+        let published = tempfile::tempdir().expect("a published directory");
+        let pointer = pointer_url("https://feed.example", WORLD, Channel::Test);
+        let manifest = format!("https://feed.example/releases/worlds/{WORLD}/0.9.0/m.json");
+        let artifact = format!("https://feed.example/releases/worlds/{WORLD}/0.9.0/bundle.tar.gz");
+        std::fs::write(
+            published.path().join("pointer"),
+            objects.get(&pointer).expect("the sealed pointer"),
+        )
+        .unwrap();
+        std::fs::write(
+            published.path().join("manifest.json"),
+            objects.get(&manifest).expect("the sealed manifest"),
+        )
+        .unwrap();
+        std::fs::write(
+            published.path().join("bundle.tar.gz"),
+            objects.get(&artifact).expect("the artifact"),
+        )
+        .unwrap();
+        // A neighboring file is not discovered; the signed URL's bounded
+        // final component is the only artifact addressed.
+        std::fs::write(published.path().join("newer-runner"), b"not selected").unwrap();
+
+        let installations = tempfile::tempdir().expect("installation records");
+        let outcome = install_from_published_directory(
+            published.path(),
+            &[pubkey],
+            WORLD,
+            &BTreeMap::new(),
+            installations.path(),
+        )
+        .expect("the explicit signed channel installs");
+        assert_eq!(
+            outcome,
+            Outcome::Staged {
+                version: "0.9.0".into()
+            }
+        );
+        assert_eq!(
+            selected(installations.path(), WORLD)
+                .expect("a selected immutable record")
+                .digest,
+            digest
+        );
+
+        let refused = tempfile::tempdir().expect("a refused installation root");
+        assert!(
+            install_from_published_directory(
+                published.path(),
+                &[[0x55; 32]],
+                WORLD,
+                &BTreeMap::new(),
+                refused.path(),
+            )
+            .is_err(),
+            "an explicit directory bypassed signature verification"
+        );
+        assert!(
+            std::fs::read_dir(refused.path()).unwrap().next().is_none(),
+            "a refused directory channel wrote an installation record"
+        );
     }
 
     #[test]

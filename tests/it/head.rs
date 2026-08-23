@@ -55,59 +55,9 @@ pub fn install_independent_test_worlds(identity: &Path) {
     let installations = lait::serve::head::installations_root(identity);
 
     for world in ["com.lait.issues", "com.lait.signage"] {
-        let published = channels.join(world);
-        let pointer_url = lait::update::world::pointer_url(
-            "https://world-fixture.invalid",
-            world,
-            lait::update::feed::Channel::Test,
-        );
-        let resolved = lait::update::feed::resolve_pointer_with(
-            |asked| {
-                let path = if asked == pointer_url {
-                    published.join("pointer")
-                } else if asked.ends_with("/manifest.json") {
-                    published.join("manifest.json")
-                } else {
-                    return Err(lait::update::feed::Failure::Unreachable(format!(
-                        "fixture channel has no signed object at {asked}"
-                    )));
-                };
-                std::fs::read(&path).map_err(|error| {
-                    lait::update::feed::Failure::Unreachable(format!(
-                        "read fixture object {}: {error}",
-                        path.display()
-                    ))
-                })
-            },
-            &pointer_url,
-            lait::update::feed::Channel::Test,
+        let outcome = lait::update::world::install_from_published_directory(
+            &channels.join(world),
             &[pubkey],
-            None,
-        )
-        .expect("the signed fixture channel resolves");
-
-        let outcome = lait::update::world::stage_bundle_with(
-            |url, _| {
-                let name = url.rsplit('/').next().unwrap_or_default();
-                if name.is_empty()
-                    || name == "."
-                    || name == ".."
-                    || name.contains('/')
-                    || name.contains('\\')
-                {
-                    return Err(lait::update::feed::Failure::Invalid(format!(
-                        "fixture artifact URL has no bounded file name: {url}"
-                    )));
-                }
-                let path = published.join(name);
-                std::fs::read(&path).map_err(|error| {
-                    lait::update::feed::Failure::Unreachable(format!(
-                        "read fixture artifact {}: {error}",
-                        path.display()
-                    ))
-                })
-            },
-            &resolved,
             world,
             &lait::update::facts::offered(),
             &installations,

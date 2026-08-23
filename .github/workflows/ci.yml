@@ -316,6 +316,9 @@ jobs:
           bash ci/prepare-independent-world-fixtures.sh \
             "$channels" "$PWD/target/debug" "$feed"
           echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       # The `pr` profile in .config/nextest.toml is the tier definition: the
       # whole suite minus the four heavy gates and the real-network suites,
@@ -448,7 +451,7 @@ jobs:
       # of /bin/sleep is not a valid subject, so there is no fallback the test
       # could quietly take instead.
       - name: Build the binaries the seam tests spawn
-        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-feed -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-feed --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
+        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-feed -p world-channel-installer -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-feed --bin world-channel-installer --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
 
       - name: Publish independent World channels for process tests
         shell: bash
@@ -461,6 +464,9 @@ jobs:
           bash ci/prepare-independent-world-fixtures.sh \
             "$channels" "$PWD/target/debug" "$feed"
           echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       - name: Test (OS seam — unit tests, every crate)
         run: cargo nextest run --workspace --locked --all-features --profile pr-platform --lib
