@@ -311,7 +311,7 @@ struct CoreInner {
         WorldReadHead,
     >,
     publication_flights: std::collections::BTreeMap<
-        (WorldId, crate::publication::PublicationId),
+        (WorldId, crate::publication::WorldPublicationId),
         Arc<PublicationFlight>,
     >,
     world_builders: std::collections::BTreeMap<WorldId, WorldPublicationBuilder>,
@@ -1693,18 +1693,25 @@ impl CoreInner {
         world: &WorldId,
         semantic: crate::publication::PublicationId,
     ) -> Option<Arc<WorldPublication>> {
-        self.world_publications
+        let current = self
+            .world_publications
             .get(world)
             .filter(|publication| publication.id.publication == semantic)
-            .cloned()
-            .or_else(|| {
-                self.retained_world_publications
-                    .iter()
-                    .find(|((candidate_world, id), _)| {
-                        candidate_world == world && id.publication == semantic
-                    })
-                    .map(|(_, publication)| publication.clone())
+            .cloned();
+        let selects_authority_active = semantic.manifest_root == self.snapshot.root()
+            && self.world_builders.get(world).is_some_and(|builder| {
+                builder.implementation == semantic.implementation_digest
+                    && builder.extractor_schema_digest == semantic.extractor_schema_digest
+            });
+        if current.is_some() || selects_authority_active {
+            return current;
+        }
+        self.retained_world_publications
+            .iter()
+            .find(|((candidate_world, id), _)| {
+                candidate_world == world && id.publication == semantic
             })
+            .map(|(_, publication)| publication.clone())
             .or_else(|| {
                 self.cursor_leases
                     .iter()
@@ -1713,6 +1720,41 @@ impl CoreInner {
                     })
                     .map(|(_, lease)| lease.publication.clone())
             })
+    }
+
+    /// Resolve the singleflight for the materialization that currently owns a
+    /// semantic publication. Authority-only refreshes can keep the semantic
+    /// root while advancing the local materialization, so a flight for the old
+    /// coordinate must never make the new one appear Building.
+    fn publication_flight(
+        &self,
+        world: &WorldId,
+        semantic: crate::publication::PublicationId,
+    ) -> Option<(
+        crate::publication::WorldPublicationId,
+        Arc<PublicationFlight>,
+    )> {
+        let materialization = if semantic.manifest_root == self.snapshot.root() {
+            Some(self.snapshot_materialization)
+        } else {
+            self.generations
+                .get(&semantic.manifest_root)
+                .map(|generation| generation.materialization)
+        };
+        if let Some(materialization) = materialization {
+            let id = crate::publication::WorldPublicationId::new(semantic, materialization);
+            return self
+                .publication_flights
+                .get(&(world.clone(), id))
+                .cloned()
+                .map(|flight| (id, flight));
+        }
+        self.publication_flights
+            .iter()
+            .find(|((candidate_world, id), _)| {
+                candidate_world == world && id.publication == semantic
+            })
+            .map(|((_, id), flight)| (*id, flight.clone()))
     }
 
     fn affected_publications(&self, bodies: &[BodyKey]) -> Vec<AffectedWorldPublication> {
@@ -2468,7 +2510,7 @@ impl StationCore {
             prior: Option<Arc<WorldPublication>>,
             snapshot: Arc<replica::ReadSnapshot>,
             id: crate::publication::WorldPublicationId,
-            key: (WorldId, crate::publication::PublicationId),
+            key: (WorldId, crate::publication::WorldPublicationId),
             flight: Arc<PublicationFlight>,
             memory: BuildMemoryReservation,
             changed: Vec<BodyKey>,
@@ -2523,7 +2565,7 @@ impl StationCore {
                             ),
                             inner.snapshot_materialization,
                         );
-                        let key = (world_id.clone(), id.publication);
+                        let key = (world_id.clone(), id);
                         if inner.publication_flights.contains_key(&key) {
                             continue;
                         }
@@ -2688,7 +2730,7 @@ impl StationCore {
             Follow(Arc<PublicationFlight>),
             Build {
                 flight: Arc<PublicationFlight>,
-                key: (WorldId, crate::publication::PublicationId),
+                key: (WorldId, crate::publication::WorldPublicationId),
                 id: crate::publication::WorldPublicationId,
                 snapshot: Arc<replica::ReadSnapshot>,
                 build_memory: BuildMemoryReservation,
@@ -2738,7 +2780,7 @@ impl StationCore {
                         Plan::Ready
                     }
                     Some(WorldReadHead::Building) => {
-                        let key = (world_id.clone(), semantic);
+                        let key = (world_id.clone(), id);
                         let Some(flight) = inner.publication_flights.get(&key).cloned() else {
                             // A prepared local/remote publication is already
                             // being installed under the writer. Do not start a
@@ -2755,7 +2797,7 @@ impl StationCore {
                         {
                             Plan::Ready
                         } else {
-                            let key = (world_id.clone(), semantic);
+                            let key = (world_id.clone(), id);
                             if let Some(flight) = inner.publication_flights.get(&key).cloned() {
                                 Plan::Follow(flight)
                             } else {
@@ -2888,7 +2930,10 @@ impl StationCore {
                             .map_err(|failure| find_publication_failure(failure.clone())),
                     );
                     let publication = result?;
-                    if publication.id.publication.manifest_root == self.lock().snapshot.root() {
+                    let inner = self.lock();
+                    if inner.snapshot.root() == publication.id.publication.manifest_root
+                        && inner.snapshot_materialization == publication.id.materialization
+                    {
                         return Ok(());
                     }
                 }
@@ -2942,8 +2987,7 @@ impl StationCore {
             if let Some(publication) = ready {
                 return OperationPublication::Ready(publication.id);
             }
-            let key = (world_id.clone(), semantic);
-            if inner.publication_flights.contains_key(&key) {
+            if inner.publication_flight(&world_id, semantic).is_some() {
                 return OperationPublication::Building;
             }
             (semantic.manifest_root != inner.snapshot.root()
@@ -2984,10 +3028,6 @@ impl StationCore {
             if let Some(publication) = ready {
                 return OperationPublication::Ready(publication.id);
             }
-            let key = (world_id.clone(), semantic);
-            if inner.publication_flights.contains_key(&key) {
-                return OperationPublication::Building;
-            }
             let (source, materialization) = if semantic.manifest_root == inner.snapshot.root() {
                 (
                     Source::Resident(inner.snapshot.clone()),
@@ -3002,6 +3042,9 @@ impl StationCore {
                 let Some((reader, footprint)) = cold else {
                     return OperationPublication::GenerationUnavailable;
                 };
+                if inner.publication_flight(&world_id, semantic).is_some() {
+                    return OperationPublication::Building;
+                }
                 let materialization = inner.reserve_materialization();
                 (
                     Source::Cold {
@@ -3013,6 +3056,10 @@ impl StationCore {
                 )
             };
             let id = crate::publication::WorldPublicationId::new(semantic, materialization);
+            let key = (world_id.clone(), id);
+            if inner.publication_flights.contains_key(&key) {
+                return OperationPublication::Building;
+            }
             match inner.world_read_heads.get(&(world_id.clone(), id)).cloned() {
                 Some(WorldReadHead::Building) => return OperationPublication::Building,
                 Some(WorldReadHead::Unavailable(PublicationFailure::Capacity)) => {
@@ -6756,6 +6803,9 @@ impl Session {
     ) {
         let mut inner = self.core.lock();
         inner
+            .world_publications
+            .retain(|_, publication| publication.id.publication != semantic);
+        inner
             .retained_world_publications
             .retain(|(_, id), _| id.publication != semantic);
         inner
@@ -6765,6 +6815,24 @@ impl Session {
             .world_read_heads
             .retain(|(_, id), _| id.publication != semantic);
         let _ = inner.sync_read_memory();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_authority_advanced_for_test(&self) {
+        self.core.note_authority_advanced();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publication_flights_for_test(
+        &self,
+        semantic: crate::publication::PublicationId,
+    ) -> usize {
+        self.core
+            .lock()
+            .publication_flights
+            .keys()
+            .filter(|(world, id)| world == &self.world_id && id.publication == semantic)
+            .count()
     }
 
     #[cfg(test)]
@@ -8825,7 +8893,7 @@ impl Session {
     ) -> Result<crate::find::Answer, crate::find::Failure> {
         struct BuildPlan {
             flight: Arc<PublicationFlight>,
-            key: (WorldId, crate::publication::PublicationId),
+            key: (WorldId, crate::publication::WorldPublicationId),
             id: crate::publication::WorldPublicationId,
             root: [u8; 32],
             reserved_materialization: crate::publication::MaterializationId,
@@ -9032,25 +9100,12 @@ impl Session {
                     .ok_or(crate::find::Failure::PublicationExpired)?;
                 PublicationPlan::Ready(publication)
             } else {
-                if let Some(publication) = inner
-                    .world_publications
-                    .get(&self.world_id)
-                    .filter(|publication| publication.id.publication == semantic)
-                    .cloned()
-                    .or_else(|| {
-                        inner
-                            .retained_world_publications
-                            .iter()
-                            .find(|((world, id), _)| {
-                                world == &self.world_id && id.publication == semantic
-                            })
-                            .map(|(_, publication)| publication.clone())
-                    })
+                if let Some(publication) =
+                    inner.ready_semantic_publication(&self.world_id, semantic)
                 {
                     PublicationPlan::Ready(publication)
                 } else {
-                    let key = (self.world_id.clone(), semantic);
-                    if let Some(flight) = inner.publication_flights.get(&key).cloned() {
+                    if let Some((_, flight)) = inner.publication_flight(&self.world_id, semantic) {
                         PublicationPlan::Follow(flight)
                     } else {
                         let root = semantic.manifest_root;
@@ -9082,6 +9137,7 @@ impl Session {
                             semantic,
                             reserved_materialization,
                         );
+                        let key = (self.world_id.clone(), id);
                         let head = (self.world_id.clone(), id);
                         if let Some(WorldReadHead::Unavailable(failure)) =
                             inner.world_read_heads.get(&head).cloned()
@@ -9205,7 +9261,10 @@ impl Session {
                         (reconstructed, plan.reserved_materialization)
                     }
                 };
-                let id = crate::publication::WorldPublicationId::new(plan.key.1, materialization);
+                let id = crate::publication::WorldPublicationId::new(
+                    plan.key.1.publication,
+                    materialization,
+                );
                 if id != plan.id {
                     let mut inner = self.core.lock();
                     inner
@@ -9420,7 +9479,7 @@ impl Session {
     ) -> Result<Projection, Failure> {
         struct BuildPlan {
             flight: Arc<PublicationFlight>,
-            key: (WorldId, crate::publication::PublicationId),
+            key: (WorldId, crate::publication::WorldPublicationId),
             id: crate::publication::WorldPublicationId,
             root: [u8; 32],
             reserved_materialization: crate::publication::MaterializationId,
@@ -9548,37 +9607,12 @@ impl Session {
                     .exact_world_publication(&key)
                     .ok_or(Failure::PublicationExpired(id))?;
                 Plan::Ready(publication)
-            } else if let Some(publication) = inner
-                .world_publications
-                .get(&self.world_id)
-                .filter(|publication| publication.id.publication == semantic)
-                .cloned()
-                .or_else(|| {
-                    inner
-                        .retained_world_publications
-                        .iter()
-                        .find(|((world, id), _)| {
-                            world == &self.world_id && id.publication == semantic
-                        })
-                        .map(|(_, publication)| publication.clone())
-                })
+            } else if let Some(publication) =
+                inner.ready_semantic_publication(&self.world_id, semantic)
             {
                 Plan::Ready(publication)
             } else {
-                let key = (self.world_id.clone(), semantic);
-                if let Some(flight) = inner.publication_flights.get(&key).cloned() {
-                    let Some(id) = inner
-                        .world_read_heads
-                        .iter()
-                        .find_map(|((world, id), head)| {
-                            (world == &self.world_id
-                                && id.publication == semantic
-                                && matches!(head, WorldReadHead::Building))
-                            .then_some(*id)
-                        })
-                    else {
-                        return Err(Failure::Interrupted);
-                    };
+                if let Some((id, flight)) = inner.publication_flight(&self.world_id, semantic) {
                     Plan::Follow { flight, id }
                 } else {
                     let root = semantic.manifest_root;
@@ -9609,6 +9643,7 @@ impl Session {
                         semantic,
                         reserved_materialization,
                     );
+                    let key = (self.world_id.clone(), id);
                     let head = (self.world_id.clone(), id);
                     if let Some(WorldReadHead::Unavailable(failure)) =
                         inner.world_read_heads.get(&head).cloned()
@@ -9750,7 +9785,10 @@ impl Session {
                         (reconstructed, plan.reserved_materialization)
                     }
                 };
-                let id = crate::publication::WorldPublicationId::new(plan.key.1, materialization);
+                let id = crate::publication::WorldPublicationId::new(
+                    plan.key.1.publication,
+                    materialization,
+                );
                 if id != plan.id {
                     let mut inner = self.core.lock();
                     inner
