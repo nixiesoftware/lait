@@ -149,6 +149,68 @@ pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     stub.is_file().then(|| root.to_path_buf())
 }
 
+/// Remove executable World payloads carried inside pre-independent client
+/// release trees.
+///
+/// Installer upgrades overlay `current`, and the stub keeps the replaced tree
+/// as `previous`; either can therefore retain a `worlds/` directory that a new
+/// host package no longer carries. This migration recognizes an installation
+/// through [`install_root_of`] before constructing the two exact obsolete
+/// paths. A developer's `target/debug/worlds` is never touched, and identity
+/// Worlds live elsewhere entirely.
+///
+/// Retrying on every client start is intentional. A scanner can briefly hold a
+/// Windows executable open; a failed removal stays inert and the next launch
+/// gets another bounded attempt.
+pub fn retire_embedded_worlds(executable: &Path) -> std::io::Result<usize> {
+    let Some(root) = install_root_of(executable) else {
+        return Ok(0);
+    };
+    let mut retired = 0;
+    let mut first_error = None;
+    for release in [tree::LIVE_DIR, "previous"] {
+        let worlds = root.join(release).join("worlds");
+        match std::fs::symlink_metadata(&worlds) {
+            Ok(metadata) => {
+                let result = remove_embedded_world_root(&worlds, &metadata);
+                match result {
+                    Ok(()) => retired += 1,
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    first_error.map_or(Ok(retired), Err)
+}
+
+fn remove_embedded_world_root(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    // Never recurse through a link somebody placed inside the install. Unix
+    // reports a directory symlink as a non-directory through symlink_metadata;
+    // Windows junctions are directory-shaped reparse points, so identify them
+    // explicitly and remove the link itself.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return if metadata.is_dir() {
+                std::fs::remove_dir(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+        }
+    }
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 /// The install root of the running binary, when it is stub-managed.
 pub fn install_root() -> Option<PathBuf> {
     install_root_of(&std::env::current_exe().ok()?)
@@ -652,6 +714,79 @@ mod tests {
             None,
             "a build directory was read as an installation"
         );
+    }
+
+    #[test]
+    fn a_recognised_install_retires_embedded_worlds_and_nothing_else() {
+        let root = tempfile::tempdir().expect("a scratch root");
+        let current = root.path().join(tree::LIVE_DIR);
+        let previous = root.path().join("previous");
+        let executable = current.join(if cfg!(windows) { "lait.exe" } else { "lait" });
+        let stub = root.path().join(if cfg!(windows) {
+            "astrolabe.exe"
+        } else {
+            "astrolabe"
+        });
+        std::fs::create_dir_all(current.join("worlds/com.lait.issues"))
+            .expect("a legacy live World");
+        std::fs::create_dir_all(previous.join("worlds/com.lait.signage"))
+            .expect("a legacy rollback World");
+        std::fs::create_dir_all(current.join("world-catalog")).expect("the reviewed catalog");
+        std::fs::write(&executable, b"not really lait").expect("the installed sidecar");
+        std::fs::write(&stub, b"not really a stub").expect("the stable launcher");
+        std::fs::write(
+            current.join("worlds/com.lait.issues/lait-world-issues"),
+            b"legacy runner",
+        )
+        .expect("the legacy live runner");
+        std::fs::write(
+            previous.join("worlds/com.lait.signage/lait-world-signage"),
+            b"legacy runner",
+        )
+        .expect("the legacy rollback runner");
+        std::fs::write(
+            current.join("world-catalog/issues.json"),
+            b"reviewed metadata",
+        )
+        .expect("the catalog declaration");
+
+        assert_eq!(
+            retire_embedded_worlds(&executable).expect("retire the obsolete payloads"),
+            2
+        );
+        assert!(!current.join("worlds").exists());
+        assert!(!previous.join("worlds").exists());
+        assert_eq!(
+            std::fs::read(current.join("world-catalog/issues.json")).expect("the catalog remains"),
+            b"reviewed metadata"
+        );
+        assert_eq!(
+            retire_embedded_worlds(&executable).expect("the migration is idempotent"),
+            0
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = root.path().join("outside-worlds");
+            std::fs::create_dir(&outside).expect("an external directory");
+            std::fs::write(outside.join("keep"), b"not install content").expect("an external file");
+            symlink(&outside, current.join("worlds")).expect("a hostile directory link");
+            assert_eq!(retire_embedded_worlds(&executable).unwrap(), 1);
+            assert!(
+                outside.join("keep").is_file(),
+                "the link target was deleted"
+            );
+        }
+
+        let developer = root.path().join("target/debug/lait");
+        std::fs::create_dir_all(root.path().join("target/debug/worlds"))
+            .expect("a developer-owned directory");
+        std::fs::write(&developer, b"a developer build").expect("the developer binary");
+        std::fs::write(root.path().join("target/debug/worlds/keep"), b"mine")
+            .expect("a developer-owned file");
+        assert_eq!(retire_embedded_worlds(&developer).unwrap(), 0);
+        assert!(root.path().join("target/debug/worlds/keep").is_file());
     }
 
     /// A period that re-observes the same staged release must leave its age

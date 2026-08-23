@@ -57,7 +57,7 @@ resolver = "2"
 
 [package]
 name = "lait"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2021"
 # MSRV: driven by typst 0.15.1 (via products/issues-app), which requires rustc
 # 1.92. iroh 1.0.0-rc.1 held the floor at 1.91 before that; it is no longer the

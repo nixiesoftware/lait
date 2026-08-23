@@ -125,6 +125,16 @@ Section "Astrolabe" SecMain
   SetOutPath "$INSTDIR"
   File "/oname=astrolabe.exe" "${STUB}"
 
+  ; v0.9.1/v0.9.2 carried executable World payloads inside each release tree.
+  ; Installing a newer sparse tree over `current` does not remove files the
+  ; new package omits, so retire those exact obsolete roots before writing the
+  ; independently distributed host. The paths are deliberately narrower than
+  ; a release tree: unknown files elsewhere remain visible rather than being
+  ; swept by an upgrade.
+  RMDir /r "$INSTDIR\current\worlds"
+  RMDir /r "$INSTDIR\previous\worlds"
+  RMDir /r "$INSTDIR\staged\worlds"
+
   ; --- The release ----------------------------------------------------------
   SetOutPath "$INSTDIR\current"
 

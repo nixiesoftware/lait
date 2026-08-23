@@ -67,6 +67,19 @@ impl Client {
         let identity_dir = selection.identity_dir().map_err(|error| {
             ClientError::internal(format!("resolve identity for the World library: {error:#}"))
         })?;
+        match lait::update::watch::retire_embedded_worlds(&config.executable) {
+            Ok(retired) if retired > 0 => {
+                tracing::info!(
+                    retired,
+                    "retired executable Worlds embedded by an older client"
+                )
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "obsolete embedded World payloads could not be retired; the next launch will retry"
+            ),
+        }
         // The supervisor first: starting it spawns nothing, and it is what
         // stages the image everything else runs from. The daemon below is
         // then spawned from the *staged* copy, so no long-lived process holds

@@ -126,6 +126,36 @@ fn the_installer_places_both_binaries_in_one_directory() {
     );
 }
 
+/// An installer upgrade overlays `current`; omission from the new package is
+/// not deletion from the old installation. The pre-independent releases put
+/// executable Worlds there, and rollback/staging may hold another copy, so the
+/// migration must name all three obsolete roots before writing the new tree.
+#[test]
+fn upgrading_retires_only_the_obsolete_embedded_world_roots() {
+    let script = directives();
+    let release_out = script
+        .find(r#"SetOutPath "$INSTDIR\current""#)
+        .expect("the release out path");
+
+    for root in ["current", "previous", "staged"] {
+        let directive = format!(r#"RMDir /r "$INSTDIR\{root}\worlds""#);
+        let cleanup = script
+            .find(&directive)
+            .unwrap_or_else(|| panic!("the installer leaves {root}/worlds behind on upgrade"));
+        assert!(
+            cleanup < release_out,
+            "{root}/worlds is retired after the new release is written"
+        );
+    }
+
+    assert!(
+        !script
+            .lines()
+            .any(|line| line.trim() == r#"RMDir /r "$INSTDIR""#),
+        "the upgrade recursively removes the whole install root"
+    );
+}
+
 /// Nothing outside the install may point into a release directory.
 ///
 /// The most expensive mistake in this space, by evidence: Squirrel's
