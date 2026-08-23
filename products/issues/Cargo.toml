@@ -1,6 +1,8 @@
 [package]
 name = "lait-issues"
-version = "0.7.8"
+# This is also the immutable com.lait.issues World release coordinate. Any
+# change to its runner, application, assets, or declaration must advance it.
+version = "0.9.1"
 edition = "2021"
 rust-version = "1.92"
 description = "LAIT's canonical IssuesWorld product: schemas, semantic model, DTOs, and product identifiers"

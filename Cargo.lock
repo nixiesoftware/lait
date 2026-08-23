@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues"
-version = "0.7.8"
+version = "0.9.1"
 dependencies = [
  "blake3",
  "data-encoding",
