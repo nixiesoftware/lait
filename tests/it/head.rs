@@ -27,71 +27,12 @@ pub fn temp_root(tag: &str) -> PathBuf {
     root
 }
 
-/// Install the process-test World releases into one throwaway identity.
-///
-/// CI assembles these runners beside the debug binary, but production no
-/// longer discovers executable Worlds beside the host. Tests that need a real
-/// World therefore opt in by installing the fixture into their isolated
-/// identity, exactly where an independently downloaded release lives.
-pub fn install_process_test_worlds(identity: &Path) {
-    let executable = Path::new(bin());
-    let source = executable
-        .parent()
-        .expect("lait test binary has a parent")
-        .join("worlds");
-    assert!(
-        source.is_dir(),
-        "process World fixture was not staged at {}; run ci/stage-test-worlds.sh",
-        source.display()
-    );
-    let worlds = lait::serve::head::worlds_root(identity);
-    lait::update::world::seed_bundled(&source, &worlds)
-        .expect("install process-test World releases");
-
-    // `seed_bundled` intentionally writes the retired carried-release marker.
-    // Replace it in this test-only registry with an archive-domain digest so
-    // startup does not quarantine the fixture as a legacy client payload.
-    for world in ["com.lait.issues", "com.lait.signage"] {
-        let selected = lait::update::world::staged(&worlds, world)
-            .expect("selected process-test World release");
-        let digest = blake3::hash(
-            format!(
-                "independent-process-test-artifact:{world}:{}",
-                selected.version
-            )
-            .as_bytes(),
-        )
-        .to_hex()
-        .to_string();
-        for record in [
-            worlds.join(world).join("current.json"),
-            worlds
-                .join(world)
-                .join("records")
-                .join(format!("{}.json", selected.version)),
-        ] {
-            let mut value: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(&record).expect("read process-test World release record"),
-            )
-            .expect("decode process-test World release record");
-            value["digest"] = serde_json::Value::String(digest.clone());
-            std::fs::write(
-                record,
-                serde_json::to_vec_pretty(&value)
-                    .expect("encode process-test World release record"),
-            )
-            .expect("write process-test World release record");
-        }
-    }
-}
-
 /// The environment every head in these suites runs under.
 ///
 /// `LAIT_CONFIG_ROOT` is the isolation that matters: `$LAIT_HOME` pins the
 /// store, but the Orbit registry lives under the config root, so without this
 /// every space founded here files itself in the developer's real catalog.
 fn with_env(command: &mut Command, config: &Path, home: Option<&Path>) {
-    install_process_test_worlds(home.unwrap_or(config));
     command
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")

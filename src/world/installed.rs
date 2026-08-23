@@ -1,6 +1,6 @@
 //! Loading independently installed World processes from immutable releases.
 //!
-//! This module is deliberately product-blind. A selected `current.json` names
+//! This module is deliberately product-blind. A `selected.json` record names
 //! one release; its signed `world.json` names the applicable executables; and
 //! each executable must describe the exact reviewed implementation it serves
 //! before Runtime sees it. Directory order, process output, and executable
@@ -26,26 +26,8 @@ pub struct Installation {
 #[derive(Debug, Clone)]
 pub struct Declaration {
     pub root: std::path::PathBuf,
-    pub release: crate::update::world::StagedBundle,
+    pub release: crate::update::world::InstalledBundle,
     pub manifest: WorldManifest,
-}
-
-/// Retire releases seeded by the former native-bundle bootstrap.
-///
-/// New native packages carry catalog metadata only. This one-way compatibility
-/// boundary recognizes the old directory-digest records and quarantines their
-/// complete roots; it never inspects or installs resources beside the binary.
-pub fn retire_legacy_bundles(identity: &Path) -> Result<usize> {
-    let worlds = crate::serve::head::worlds_root(identity);
-    let retired = identity.join("retired-bundled-worlds");
-    let retired_count = crate::update::world::retire_bundled(&worlds, &retired)?;
-    if retired_count > 0 {
-        tracing::info!(
-            retired = retired_count,
-            "retired legacy client-bundled World releases"
-        );
-    }
-    Ok(retired_count)
 }
 
 /// Passively enumerate selected signed declarations without launching code.
@@ -67,7 +49,7 @@ pub fn declarations(worlds: &Path) -> Result<Vec<Declaration>> {
             continue;
         }
         let world = entry.file_name().to_string_lossy().to_string();
-        let release = crate::update::world::staged(worlds, &world)
+        let release = crate::update::world::selected(worlds, &world)
             .ok_or_else(|| anyhow!("World {world} has no valid selected immutable release"))?;
         let root = crate::update::world::active_dir(worlds, &world)
             .ok_or_else(|| anyhow!("World {world} selected release is absent"))?;

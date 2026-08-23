@@ -117,6 +117,23 @@ VIAddVersionKey "LegalCopyright" "Copyright 2026 Omar Younes - PolyForm Noncomme
 Section "Astrolabe" SecMain
   SectionIn RO
 
+  ; --- Canonical replacement ------------------------------------------------
+  ;
+  ; Releases before the independent-World boundary performed sparse overlays.
+  ; The signed launcher is also the bounded install-tree cleaner: it locks the
+  ; installation, atomically detaches current/previous/staged, treats reparse
+  ; points as links, and refuses before new bytes land if the old trees cannot
+  ; be removed. Identity and Space data live outside $INSTDIR and are never
+  ; inspected here.
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File "/oname=astrolabe-canonical-install.exe" "${STUB}"
+  ExecWait '"$PLUGINSDIR\astrolabe-canonical-install.exe" --prepare-canonical-install "$INSTDIR"' $0
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Astrolabe could not replace the existing installation safely. Close Astrolabe and run this canonical installer again. No new release tree was installed."
+    Abort
+  ${EndIf}
+
   ; --- The stub -------------------------------------------------------------
   ;
   ; The one file an update never moves, and the only thing anything outside
@@ -124,16 +141,6 @@ Section "Astrolabe" SecMain
   ; rename when no client holds the installation, and starts what is current.
   SetOutPath "$INSTDIR"
   File "/oname=astrolabe.exe" "${STUB}"
-
-  ; v0.9.1/v0.9.2 carried executable World payloads inside each release tree.
-  ; Installing a newer sparse tree over `current` does not remove files the
-  ; new package omits, so retire those exact obsolete roots before writing the
-  ; independently distributed host. The paths are deliberately narrower than
-  ; a release tree: unknown files elsewhere remain visible rather than being
-  ; swept by an upgrade.
-  RMDir /r "$INSTDIR\current\worlds"
-  RMDir /r "$INSTDIR\previous\worlds"
-  RMDir /r "$INSTDIR\staged\worlds"
 
   ; --- The release ----------------------------------------------------------
   SetOutPath "$INSTDIR\current"
@@ -158,6 +165,18 @@ Section "Astrolabe" SecMain
   ; chooses Install and the signed World channel verifies.
   SetOutPath "$INSTDIR\current\world-catalog"
   File /r "${STAGE}\world-catalog\*.*"
+
+  ; Written last among release bytes. Auto-updating an older sparse layout
+  ; cannot manufacture this root receipt, so the new client explicitly asks
+  ; for a canonical reinstall instead of accepting a mixed installation.
+  ClearErrors
+  FileOpen $0 "$INSTDIR\canonical-layout-v1" w
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "Astrolabe installed the release tree but could not seal its canonical-layout receipt. Run the installer again."
+    Abort
+  ${EndIf}
+  FileWrite $0 "${VERSION}$\r$\n"
+  FileClose $0
 
   SetOutPath "$INSTDIR"
 

@@ -112,34 +112,19 @@ pub enum Intent {
         /// What happened, in the words the feed used.
         why: String,
     },
-    /// This build is below the published floor and must move.
-    ///
-    /// The only case that restarts without being asked. Declared work is
-    /// drained first and shown while it drains — the floor overrides the
-    /// *question*, never the work — and the restart is taken once `holding`
-    /// is empty.
-    Forced {
-        /// The version that becomes live on restart.
-        version: String,
-        /// What is still draining. Empty means take the restart now.
-        holding: Vec<String>,
-    },
 }
 
 /// The whole decision, as a pure function of what is known.
 ///
-/// `now`, `in_flight`, `running_version`, and `relaunched_for` are arguments
+/// `now`, `in_flight`, and `running_version` are arguments
 /// rather than ambient reads so the policy is testable across every axis
 /// without a clock or a running client — which is the point of it being
-/// separate from the surface that draws it. `relaunched_for` is the version a
-/// relaunch already answered for this process ([`RELAUNCHED_ENV`]), read once
-/// at the boundary.
+/// separate from the surface that draws it.
 pub fn intent(
     standing: Option<&Standing>,
     now: u64,
     in_flight: &[String],
     running_version: Option<&str>,
-    relaunched_for: Option<&str>,
 ) -> Intent {
     let Some(standing) = standing else {
         // No check has ever completed here. Not "up to date", not "could not
@@ -151,6 +136,11 @@ pub fn intent(
         // that is not on this machine yet. Neither is a person's business:
         // staging is silent and continuous.
         Standing::Current { .. } | Standing::Available { .. } => Intent::Nothing,
+        Standing::ReinstallRequired { version, floor } => Intent::Attention {
+            why: format!(
+                "Astrolabe {version} requires a canonical reinstall (compatibility floor {floor}). Spaces and issue data are preserved; Worlds must be installed again from their signed channels."
+            ),
+        },
         // The channel could not be asked. A network is not news.
         Standing::CouldNotAsk { .. } => Intent::Nothing,
         // These two are news. A signature that did not verify means the host
@@ -168,26 +158,6 @@ pub fn intent(
         Standing::Staged { version, .. } if running_version == Some(version.as_str()) => {
             Intent::Nothing
         }
-        // The same release came back from its own window: asking again would
-        // boot-loop, so the loop is cut here, by naming the failure.
-        Standing::Staged {
-            version,
-            below_floor: true,
-            ..
-        } if relaunched_for == Some(version.as_str()) => Intent::Attention {
-            why: format!(
-                "{version} is required and staged, and a relaunch did not apply it; \
-                 the stub's log names the refusal"
-            ),
-        },
-        Standing::Staged {
-            version,
-            below_floor: true,
-            ..
-        } => Intent::Forced {
-            version: version.clone(),
-            holding: in_flight.to_vec(),
-        },
         Standing::Staged { version, .. } => {
             let waited = standing.staged_for(now).unwrap_or_default();
             if !in_flight.is_empty() {

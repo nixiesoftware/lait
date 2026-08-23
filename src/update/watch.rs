@@ -63,19 +63,18 @@ pub enum Standing {
         /// The newer version the channel names.
         version: String,
     },
+    /// This build is below the channel's compatibility floor. Crossing is not
+    /// staged: the canonical installer must replace the owned release trees.
+    ReinstallRequired {
+        /// The release the channel names.
+        version: String,
+        /// The oldest client the release permits.
+        floor: String,
+    },
     /// A verified tree is on disk waiting for a launch to accept it.
     Staged {
         /// The version that will be live after the next launch.
         version: String,
-        /// This build is below the release's published compatibility floor.
-        ///
-        /// The one case that restarts on its own: a build below the floor must
-        /// move, so the restart is taken after declared work drains rather
-        /// than asked for. Absent on a store written before this was recorded,
-        /// which reads as "not below the floor" — the side that asks rather
-        /// than the side that acts.
-        #[serde(default)]
-        below_floor: bool,
         /// When it was staged, unix seconds.
         ///
         /// Recorded because the only question a person is ever asked on this
@@ -147,68 +146,6 @@ pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
         "astrolabe"
     });
     stub.is_file().then(|| root.to_path_buf())
-}
-
-/// Remove executable World payloads carried inside pre-independent client
-/// release trees.
-///
-/// Installer upgrades overlay `current`, and the stub keeps the replaced tree
-/// as `previous`; either can therefore retain a `worlds/` directory that a new
-/// host package no longer carries. This migration recognizes an installation
-/// through [`install_root_of`] before constructing the two exact obsolete
-/// paths. A developer's `target/debug/worlds` is never touched, and identity
-/// Worlds live elsewhere entirely.
-///
-/// Retrying on every client start is intentional. A scanner can briefly hold a
-/// Windows executable open; a failed removal stays inert and the next launch
-/// gets another bounded attempt.
-pub fn retire_embedded_worlds(executable: &Path) -> std::io::Result<usize> {
-    let Some(root) = install_root_of(executable) else {
-        return Ok(0);
-    };
-    let mut retired = 0;
-    let mut first_error = None;
-    for release in [tree::LIVE_DIR, "previous"] {
-        let worlds = root.join(release).join("worlds");
-        match std::fs::symlink_metadata(&worlds) {
-            Ok(metadata) => {
-                let result = remove_embedded_world_root(&worlds, &metadata);
-                match result {
-                    Ok(()) => retired += 1,
-                    Err(error) if first_error.is_none() => first_error = Some(error),
-                    Err(_) => {}
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            Err(_) => {}
-        }
-    }
-    first_error.map_or(Ok(retired), Err)
-}
-
-fn remove_embedded_world_root(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
-    // Never recurse through a link somebody placed inside the install. Unix
-    // reports a directory symlink as a non-directory through symlink_metadata;
-    // Windows junctions are directory-shaped reparse points, so identify them
-    // explicitly and remove the link itself.
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return if metadata.is_dir() {
-                std::fs::remove_dir(path)
-            } else {
-                std::fs::remove_file(path)
-            };
-        }
-    }
-    if metadata.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    }
 }
 
 /// The install root of the running binary, when it is stub-managed.
@@ -341,6 +278,17 @@ where
         };
     }
 
+    if let Some(floor) = resolved
+        .floor
+        .as_ref()
+        .filter(|floor| *floor <= &resolved.version && current < *floor)
+    {
+        return Standing::ReinstallRequired {
+            version: resolved.version.to_string(),
+            floor: floor.to_string(),
+        };
+    }
+
     // A tree already staged at this version is the answer; re-downloading it
     // every period would be bytes spent to learn nothing.
     if let Some(staged) = tree::staged_version(root) {
@@ -358,7 +306,6 @@ where
             return Standing::Staged {
                 version: staged,
                 at,
-                below_floor: below_floor(&resolved, current),
             };
         }
     }
@@ -367,7 +314,6 @@ where
         Ok(staged) => Standing::Staged {
             version: staged.version,
             at: now(),
-            below_floor: below_floor(&resolved, current),
         },
         Err(error) => {
             // The release exists and this machine could not take it. That is
@@ -381,17 +327,6 @@ where
     }
 }
 
-/// Whether this build is below the release's published compatibility floor.
-///
-/// A floor above the release naming it cannot ship and is ignored when
-/// observed anyway, so an unsatisfiable one never forces a restart.
-fn below_floor(resolved: &feed::Resolved, current: &semver::Version) -> bool {
-    resolved
-        .floor
-        .as_ref()
-        .is_some_and(|floor| floor <= &resolved.version && current < floor)
-}
-
 /// Check every World this build hosts, and stage any head published for this
 /// runtime.
 ///
@@ -402,7 +337,7 @@ fn below_floor(resolved: &feed::Resolved, current: &semver::Version) -> bool {
 /// prompted — a staged head becomes live at the next head that starts, which
 /// is the same "applied at a boundary" rule the client tree follows.
 fn check_worlds(identity: &Path, channel: feed::Channel) {
-    let worlds = crate::serve::head::worlds_root(identity);
+    let worlds = crate::serve::head::installations_root(identity);
     let installed = crate::world::installed::declarations(&worlds).unwrap_or_default();
     for declaration in installed {
         let world = declaration.manifest.id;
@@ -714,79 +649,6 @@ mod tests {
             None,
             "a build directory was read as an installation"
         );
-    }
-
-    #[test]
-    fn a_recognised_install_retires_embedded_worlds_and_nothing_else() {
-        let root = tempfile::tempdir().expect("a scratch root");
-        let current = root.path().join(tree::LIVE_DIR);
-        let previous = root.path().join("previous");
-        let executable = current.join(if cfg!(windows) { "lait.exe" } else { "lait" });
-        let stub = root.path().join(if cfg!(windows) {
-            "astrolabe.exe"
-        } else {
-            "astrolabe"
-        });
-        std::fs::create_dir_all(current.join("worlds/com.lait.issues"))
-            .expect("a legacy live World");
-        std::fs::create_dir_all(previous.join("worlds/com.lait.signage"))
-            .expect("a legacy rollback World");
-        std::fs::create_dir_all(current.join("world-catalog")).expect("the reviewed catalog");
-        std::fs::write(&executable, b"not really lait").expect("the installed sidecar");
-        std::fs::write(&stub, b"not really a stub").expect("the stable launcher");
-        std::fs::write(
-            current.join("worlds/com.lait.issues/lait-world-issues"),
-            b"legacy runner",
-        )
-        .expect("the legacy live runner");
-        std::fs::write(
-            previous.join("worlds/com.lait.signage/lait-world-signage"),
-            b"legacy runner",
-        )
-        .expect("the legacy rollback runner");
-        std::fs::write(
-            current.join("world-catalog/issues.json"),
-            b"reviewed metadata",
-        )
-        .expect("the catalog declaration");
-
-        assert_eq!(
-            retire_embedded_worlds(&executable).expect("retire the obsolete payloads"),
-            2
-        );
-        assert!(!current.join("worlds").exists());
-        assert!(!previous.join("worlds").exists());
-        assert_eq!(
-            std::fs::read(current.join("world-catalog/issues.json")).expect("the catalog remains"),
-            b"reviewed metadata"
-        );
-        assert_eq!(
-            retire_embedded_worlds(&executable).expect("the migration is idempotent"),
-            0
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            let outside = root.path().join("outside-worlds");
-            std::fs::create_dir(&outside).expect("an external directory");
-            std::fs::write(outside.join("keep"), b"not install content").expect("an external file");
-            symlink(&outside, current.join("worlds")).expect("a hostile directory link");
-            assert_eq!(retire_embedded_worlds(&executable).unwrap(), 1);
-            assert!(
-                outside.join("keep").is_file(),
-                "the link target was deleted"
-            );
-        }
-
-        let developer = root.path().join("target/debug/lait");
-        std::fs::create_dir_all(root.path().join("target/debug/worlds"))
-            .expect("a developer-owned directory");
-        std::fs::write(&developer, b"a developer build").expect("the developer binary");
-        std::fs::write(root.path().join("target/debug/worlds/keep"), b"mine")
-            .expect("a developer-owned file");
-        assert_eq!(retire_embedded_worlds(&developer).unwrap(), 0);
-        assert!(root.path().join("target/debug/worlds/keep").is_file());
     }
 
     /// A period that re-observes the same staged release must leave its age

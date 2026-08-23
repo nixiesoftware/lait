@@ -683,7 +683,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                     "World '{world}' is not installed in this build"
                 )));
             }
-            let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+            let worlds = crate::serve::head::installations_root(router.catalog().identity());
             let world_for_job = world.clone();
             match router
                 .run_blocking(move || {
@@ -714,7 +714,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                     "World '{world}' is not installed in this build"
                 )));
             }
-            let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+            let worlds = crate::serve::head::installations_root(router.catalog().identity());
             let world_for_job = world.clone();
             match router
                 .run_blocking(move || crate::update::consent::load(&worlds, &world_for_job))

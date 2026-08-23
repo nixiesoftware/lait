@@ -10,9 +10,9 @@
 //!
 //! The view below is the interface design's shape rendered honestly at this
 //! platform's capability. iOS cannot spawn or dynamically install native World
-//! executables, so the signed app carries reviewed first-party adapters while
-//! desktop reads independently selected releases. The link state says *why*
-//! content is absent.
+//! executables. It therefore carries no World implementation: until a
+//! platform-safe independent delivery contract exists, World content is a
+//! typed absence rather than native product code linked into the host.
 //! Chats and the Inbox render from nothing at all yet: correspondence rides
 //! the mailbox primitive (a payload sealed once, unlocked per device), and
 //! until that contract is issued their surfaces say so rather than carrying
@@ -21,7 +21,6 @@
 uniffi::setup_scaffolding!();
 
 mod node;
-mod worlds;
 pub use node::*;
 
 use lait::orbits;
@@ -33,8 +32,6 @@ pub struct IosView {
     pub core_version: String,
     /// This phone's standing in the identity's linked-device set.
     pub link: LinkState,
-    /// Reviewed first-party Worlds carried by this signed iOS application.
-    pub bundled_worlds: Vec<BundledWorld>,
     /// One row per joined Space, from the Orbit registry — advisory
     /// navigation state, never truth.
     pub spaces: Vec<SpaceRow>,
@@ -54,21 +51,6 @@ pub enum LinkState {
     Unlinked,
     /// This phone is a linked device of the selected identity.
     Linked { device_name: String, did: String },
-}
-
-/// A reviewed first-party World this signed iOS application carries.
-#[derive(uniffi::Record)]
-pub struct BundledWorld {
-    /// The published namespace key — machine input, never renamed.
-    pub mount: String,
-    /// What the World calls itself.
-    pub name: String,
-    /// One line under the name, when the World declared one.
-    pub tagline: Option<String>,
-    /// Packed 0xRRGGBB accent seed, when declared.
-    pub accent: Option<u32>,
-    /// Whether `Open` has anywhere to land. False is a real answer.
-    pub openable: bool,
 }
 
 /// One Space, one row, however many providers advertise it.
@@ -117,21 +99,6 @@ pub struct SpaceWorldRow {
 /// The one read. Whole view out; no partial asks.
 #[uniffi::export]
 pub fn client_view() -> IosView {
-    let registry = worlds::client_packages().unwrap_or_default();
-    let bundled_worlds: Vec<BundledWorld> = registry
-        .packages()
-        .map(|package| {
-            let display = package.display();
-            BundledWorld {
-                mount: package.mount().to_owned(),
-                name: display.name().to_owned(),
-                tagline: display.tagline().map(str::to_owned),
-                accent: display.accent(),
-                openable: display.entry_path().is_some(),
-            }
-        })
-        .collect();
-
     // The head's *current* announcement: a paused head reads as absent, and
     // the tab surface renders that as its own state. Never a startup-frozen
     // copy — after a foreground restart the old one is a dead port.
@@ -175,16 +142,6 @@ pub fn client_view() -> IosView {
                 ),
                 _ => None,
             };
-            let worlds = bundled_worlds
-                .iter()
-                .filter(|world| world.openable)
-                .map(|world| SpaceWorldRow {
-                    mount: world.mount.clone(),
-                    name: world.name.clone(),
-                    accent: world.accent,
-                    resident: present,
-                })
-                .collect();
             SpaceRow {
                 space_id: entry.space.clone(),
                 name: if entry.name.is_empty() {
@@ -195,7 +152,7 @@ pub fn client_view() -> IosView {
                 path: entry.path,
                 orbit_id,
                 status,
-                worlds,
+                worlds: Vec::new(),
             }
         })
         .collect();
@@ -203,7 +160,6 @@ pub fn client_view() -> IosView {
     IosView {
         core_version: lait::VERSION.to_owned(),
         link: LinkState::Unavailable,
-        bundled_worlds,
         spaces,
         head,
     }

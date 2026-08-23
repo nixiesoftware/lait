@@ -86,13 +86,14 @@ fn read_under(root: &Path, relative: &str) -> Option<Vec<u8>> {
     std::fs::read(root.join(candidate)).ok()
 }
 
-/// Where staged World payloads live: `<identity>/worlds/<world>/current/`.
+/// Where independently installed World bundles live.
 ///
-/// One directory per World, because two Worlds sharing one is a collision
-/// that appears only after more than one is published — which is to say after
-/// it would have been expensive to find.
-pub fn worlds_root(identity: &Path) -> PathBuf {
-    identity.join("worlds")
+/// The versioned namespace is the compatibility boundary. Pre-independent
+/// clients wrote `worlds/*/current.json`; this host never reads that namespace,
+/// so every old selection is inert and each World must reinstall from its
+/// signed channel.
+pub fn installations_root(identity: &Path) -> PathBuf {
+    identity.join("world-bundles-v1")
 }
 
 /// Serve a World's staged payload, when one is staged for it.
@@ -184,7 +185,7 @@ mod tests {
     #[test]
     fn each_world_activates_its_own_payload_and_never_anothers() {
         let identity = tempfile::tempdir().expect("an identity dir");
-        let worlds = worlds_root(identity.path());
+        let worlds = installations_root(identity.path());
         assert!(
             activate(&worlds, "world.a").bundle().is_none(),
             "an absent worlds directory activated something"
@@ -195,8 +196,8 @@ mod tests {
         std::fs::create_dir_all(&a).expect("a payload for world.a");
         std::fs::write(a.join("index.html"), b"a").expect("its entry");
         std::fs::write(
-            crate::update::world::world_root(&worlds, "world.a").join("current.json"),
-            serde_json::to_vec(&crate::update::world::StagedBundle {
+            crate::update::world::world_root(&worlds, "world.a").join("selected.json"),
+            serde_json::to_vec(&crate::update::world::InstalledBundle {
                 world: "world.a".to_string(),
                 version: "1.0.0".to_string(),
                 digest: "00".repeat(32),

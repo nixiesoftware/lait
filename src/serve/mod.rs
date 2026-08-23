@@ -221,8 +221,7 @@ pub async fn run_until(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
-    let worlds = head::worlds_root(&identity);
-    crate::world::installed::retire_legacy_bundles(&identity)?;
+    let worlds = head::installations_root(&identity);
     let registry = Arc::new(crate::world::installed::load(&worlds)?.clients);
     run_until_with_registry(
         port,

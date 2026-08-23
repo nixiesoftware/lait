@@ -126,33 +126,28 @@ fn the_installer_places_both_binaries_in_one_directory() {
     );
 }
 
-/// An installer upgrade overlays `current`; omission from the new package is
-/// not deletion from the old installation. The pre-independent releases put
-/// executable Worlds there, and rollback/staging may hold another copy, so the
-/// migration must name all three obsolete roots before writing the new tree.
+/// A canonical install replaces every owned release tree before writing any
+/// new release bytes. The bounded launcher helper performs the transaction;
+/// NSIS must abort on refusal and seal the receipt only after the new tree.
 #[test]
-fn upgrading_retires_only_the_obsolete_embedded_world_roots() {
+fn canonical_install_replaces_release_trees_and_never_overlays_them() {
     let script = directives();
+    let prepare = script
+        .find("--prepare-canonical-install")
+        .expect("the installer never invokes the bounded replacement helper");
     let release_out = script
         .find(r#"SetOutPath "$INSTDIR\current""#)
         .expect("the release out path");
-
-    for root in ["current", "previous", "staged"] {
-        let directive = format!(r#"RMDir /r "$INSTDIR\{root}\worlds""#);
-        let cleanup = script
-            .find(&directive)
-            .unwrap_or_else(|| panic!("the installer leaves {root}/worlds behind on upgrade"));
-        assert!(
-            cleanup < release_out,
-            "{root}/worlds is retired after the new release is written"
-        );
-    }
-
+    let receipt = script
+        .find(r#"FileOpen $0 "$INSTDIR\canonical-layout-v1" w"#)
+        .expect("the installer does not seal the canonical layout receipt");
+    assert!(prepare < release_out && release_out < receipt);
+    assert!(script.contains("No new release tree was installed."));
     assert!(
-        !script
+        !script[..release_out]
             .lines()
-            .any(|line| line.trim() == r#"RMDir /r "$INSTDIR""#),
-        "the upgrade recursively removes the whole install root"
+            .any(|line| line.trim().starts_with(r#"RMDir /r "$INSTDIR\current"#)),
+        "NSIS still recursively edits the live tree instead of using the transaction"
     );
 }
 

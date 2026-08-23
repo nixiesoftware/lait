@@ -207,11 +207,13 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
     {
         let sel = selection.clone();
         let failure = daemon_failure.clone();
-        let installation = crate::worlds::installation()?;
         rt.spawn(async move {
-            if let Err(error) =
-                lait::daemon::run_lait_daemon(installation.packages, installation.clients, sel)
-                    .await
+            if let Err(error) = lait::daemon::run_lait_daemon(
+                lait::orbital::WorldPackages::new(),
+                world_interface::WorldClientRegistry::new(),
+                sel,
+            )
+            .await
             {
                 *failure.lock().expect("daemon failure slot") = Some(format!("{error:#}"));
             }
@@ -254,7 +256,7 @@ fn start_inner(selection: Selection) -> anyhow::Result<Node> {
 fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Result<HeadUp> {
     let (tx, rx) = mpsc::channel();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let registry = crate::worlds::client_packages()?;
+    let registry = world_interface::WorldClientRegistry::new();
     let drained = rt.spawn(async move {
         let announce = move |ready: &serve::Ready| {
             let _ = tx.send(ready.clone());
@@ -264,23 +266,7 @@ fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Res
         let shutdown = async move {
             let _ = stopped.await;
         };
-        // Named rather than left to the sole-World fallback. This crate links
-        // the whole workspace, so "the only World" stopped being true the
-        // moment a second one shipped — and the fallback answers that with a
-        // refusal, which for an embedded node is a head that never comes up.
-        //
-        // One World at a time is the deliberate mobile shape, and pinning it to
-        // this one is safe *only while nothing on the phone can ask for
-        // another*: the shell already lists every platform-supplied World, and opening
-        // them is CLIENT-58, still unbuilt. When that lands, this constant
-        // becomes a shell that offers a World its head refuses.
-        //
-        // The seam is here rather than a rebuild: `resume_head` already mints a
-        // fresh port and token on every foreground, and the shell is built to
-        // re-authenticate against a new announcement. Serving a different World
-        // is that same transition with a different pin — still one head, still
-        // one at a time.
-        let world = Some(crate::worlds::primary_mount().to_owned());
+        let world = None;
         if let Err(error) = serve::run_embedded_until(
             0,
             false,

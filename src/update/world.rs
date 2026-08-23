@@ -99,7 +99,7 @@ pub enum InstallProgress {
 /// within it would be reachable at a URL, and a served tree must hold only
 /// what its publisher put there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StagedBundle {
+pub struct InstalledBundle {
     /// The World this bundle belongs to.
     pub world: String,
     /// The bundle version.
@@ -122,7 +122,7 @@ pub fn release_dir(worlds: &Path, world: &str, version: &str) -> Option<PathBuf>
 }
 
 fn record_path(worlds: &Path, world: &str) -> PathBuf {
-    world_root(worlds, world).join("current.json")
+    world_root(worlds, world).join("selected.json")
 }
 
 fn release_record_path(worlds: &Path, world: &str, version: &str) -> Option<PathBuf> {
@@ -134,9 +134,9 @@ fn release_record_path(worlds: &Path, world: &str, version: &str) -> Option<Path
     )
 }
 
-fn installed(worlds: &Path, world: &str, version: &str) -> Option<StagedBundle> {
+fn installed(worlds: &Path, world: &str, version: &str) -> Option<InstalledBundle> {
     let bytes = std::fs::read(release_record_path(worlds, world, version)?).ok()?;
-    let release: StagedBundle = serde_json::from_slice(&bytes).ok()?;
+    let release: InstalledBundle = serde_json::from_slice(&bytes).ok()?;
     if release.world != world
         || release.version != version
         || !release_dir(worlds, world, version)?.is_dir()
@@ -146,7 +146,7 @@ fn installed(worlds: &Path, world: &str, version: &str) -> Option<StagedBundle> 
     Some(release)
 }
 
-fn write_record(path: &Path, record: &StagedBundle) -> Result<()> {
+fn write_record(path: &Path, record: &InstalledBundle) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("World release record has no parent"))?;
@@ -159,240 +159,14 @@ fn write_record(path: &Path, record: &StagedBundle) -> Result<()> {
         .with_context(|| format!("seal World release record at {}", path.display()))
 }
 
-fn select(worlds: &Path, release: &StagedBundle) -> Result<()> {
+fn select(worlds: &Path, release: &InstalledBundle) -> Result<()> {
     write_record(&record_path(worlds, &release.world), release)
 }
 
-/// Seed trusted first-party releases carried by an application bundle.
-///
-/// `source` is `<world>/<version>/...`. Existing immutable releases are
-/// compared byte-for-byte through a deterministic tree digest and never
-/// replaced. The newest carried release may advance future launches, but a
-/// newer independently fetched release is never rolled back by reinstalling
-/// an older client.
-pub fn seed_bundled(source: &Path, worlds: &Path) -> Result<usize> {
-    let mut seeded = 0usize;
-    let world_entries = read_sorted_directories(source)?;
-    for world_entry in world_entries {
-        let world = world_entry.file_name().to_string_lossy().to_string();
-        let mut release_entries = read_sorted_directories(&world_entry.path())?;
-        release_entries.sort_by(|left, right| {
-            let left = semver::Version::parse(&left.file_name().to_string_lossy()).ok();
-            let right = semver::Version::parse(&right.file_name().to_string_lossy()).ok();
-            left.cmp(&right)
-        });
-        for release_entry in release_entries {
-            let version = release_entry.file_name().to_string_lossy().to_string();
-            let parsed = semver::Version::parse(&version)
-                .with_context(|| format!("bundled World {world} has invalid release {version}"))?;
-            let source_release = release_entry.path();
-            let declaration =
-                std::fs::read(source_release.join("world.json")).with_context(|| {
-                    format!("bundled World {world} {version} carries no world.json")
-                })?;
-            let manifest = world_interface::manifest::WorldManifest::parse(&declaration)
-                .map_err(anyhow::Error::msg)?;
-            if manifest.id != world || manifest.version != version {
-                bail!(
-                    "bundled World path {world}/{version} declares {} {}",
-                    manifest.id,
-                    manifest.version
-                );
-            }
-            validate_bundled_files(&source_release, &manifest)?;
-            let (digest, files) = directory_digest(&source_release)?;
-            let target = release_dir(worlds, &world, &version)
-                .ok_or_else(|| anyhow!("invalid bundled World release path"))?;
-            if target.exists() {
-                let (existing, _) = directory_digest(&target)?;
-                if existing != digest {
-                    bail!(
-                        "World {world} {version} is already installed from different immutable bytes"
-                    );
-                }
-            } else {
-                let parent = target
-                    .parent()
-                    .ok_or_else(|| anyhow!("World release has no parent"))?;
-                std::fs::create_dir_all(parent)?;
-                let scratch = parent.join(tree::scratch_name("bundled.tmp-"));
-                copy_directory(&source_release, &scratch)?;
-                std::fs::rename(&scratch, &target).with_context(|| {
-                    format!("install bundled World release at {}", target.display())
-                })?;
-                seeded = seeded.saturating_add(1);
-            }
-            let record = StagedBundle {
-                world: world.clone(),
-                version: version.clone(),
-                digest,
-                files,
-            };
-            let release_record = release_record_path(worlds, &world, &version)
-                .ok_or_else(|| anyhow!("invalid bundled World release record path"))?;
-            write_record(&release_record, &record)?;
-            let selected = staged(worlds, &world)
-                .and_then(|current| semver::Version::parse(&current.version).ok());
-            if selected.as_ref().is_none_or(|current| &parsed > current) {
-                select(worlds, &record)?;
-            }
-        }
-    }
-    Ok(seeded)
-}
-
-/// Move releases created by the retired client-bundle bootstrap out of the
-/// active registry without deleting them.
-///
-/// That bootstrap wrote a deterministic *directory* digest into a field whose
-/// contract is the signed archive digest. Equality with a fresh directory
-/// digest is therefore an exact legacy marker. Independently downloaded
-/// releases carry the archive digest and are never selected by this migration.
-/// Whole World roots move together so the selected pointer, release records,
-/// standings, and any interrupted scratch remain available for audit while no
-/// longer looking installed to the runtime.
-pub fn retire_bundled(worlds: &Path, retired: &Path) -> Result<usize> {
-    let mut moved = 0usize;
-    for entry in read_sorted_directories(worlds)? {
-        let world = entry.file_name().to_string_lossy().to_string();
-        let Some(selected) = staged(worlds, &world) else {
-            continue;
-        };
-        let Some(active) = release_dir(worlds, &world, &selected.version) else {
-            continue;
-        };
-        let Ok((directory, _)) = directory_digest(&active) else {
-            continue;
-        };
-        if !directory.eq_ignore_ascii_case(&selected.digest) {
-            continue;
-        }
-
-        let suffix: String = selected.digest.chars().take(12).collect();
-        let name = format!("{}-{suffix}", selected.version);
-        let mut destination = retired.join(&world).join(&name);
-        // A rollback to an old client can seed the same legacy payload again.
-        // Preserve both quarantines; an occupied audit path must not reactivate
-        // the later copy or make the new client unable to start.
-        let mut ordinal = 2u64;
-        while destination.exists() {
-            destination = retired.join(&world).join(format!("{name}-{ordinal}"));
-            ordinal = ordinal.saturating_add(1);
-        }
-        let parent = destination
-            .parent()
-            .ok_or_else(|| anyhow!("retired World destination has no parent"))?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create retired World directory at {}", parent.display()))?;
-        std::fs::rename(entry.path(), &destination).with_context(|| {
-            format!(
-                "retire legacy bundled World {world} {} to {}",
-                selected.version,
-                destination.display()
-            )
-        })?;
-        moved = moved.saturating_add(1);
-    }
-    Ok(moved)
-}
-
-fn read_sorted_directories(root: &Path) -> Result<Vec<std::fs::DirEntry>> {
-    let mut entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries.collect::<std::io::Result<Vec<_>>>()?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    entries.retain(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()));
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    Ok(entries)
-}
-
-fn directory_files(root: &Path) -> Result<Vec<PathBuf>> {
-    fn visit(root: &Path, at: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-        let mut entries = std::fs::read_dir(at)?.collect::<std::io::Result<Vec<_>>>()?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            let kind = entry.file_type()?;
-            if kind.is_symlink() {
-                bail!(
-                    "bundled World contains a symbolic link at {}",
-                    entry.path().display()
-                );
-            }
-            if kind.is_dir() {
-                visit(root, &entry.path(), files)?;
-            } else if kind.is_file() {
-                files.push(entry.path().strip_prefix(root)?.to_path_buf());
-            } else {
-                bail!(
-                    "bundled World contains a non-file at {}",
-                    entry.path().display()
-                );
-            }
-        }
-        Ok(())
-    }
-    let mut files = Vec::new();
-    visit(root, root, &mut files)?;
-    Ok(files)
-}
-
-fn directory_digest(root: &Path) -> Result<(String, usize)> {
-    let files = directory_files(root)?;
-    let mut digest = blake3::Hasher::new();
-    digest.update(b"lait.bundled-world.tree.v1");
-    for relative in &files {
-        let name = relative.to_string_lossy().replace('\\', "/");
-        let bytes = std::fs::read(root.join(relative))?;
-        digest.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
-        digest.update(name.as_bytes());
-        digest.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
-        digest.update(&bytes);
-    }
-    Ok((digest.finalize().to_hex().to_string(), files.len()))
-}
-
-fn copy_directory(source: &Path, target: &Path) -> Result<()> {
-    std::fs::create_dir_all(target)?;
-    for relative in directory_files(source)? {
-        let from = source.join(&relative);
-        let to = target.join(&relative);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(&from, &to)?;
-        std::fs::set_permissions(&to, std::fs::metadata(&from)?.permissions())?;
-    }
-    Ok(())
-}
-
-fn validate_bundled_files(
-    root: &Path,
-    manifest: &world_interface::manifest::WorldManifest,
-) -> Result<()> {
-    for runner in &manifest.runners {
-        if runner.admits(std::env::consts::OS, std::env::consts::ARCH)
-            && !root.join(&runner.program).is_file()
-        {
-            bail!(
-                "bundled World {} runner {} is absent",
-                manifest.id,
-                runner.program
-            );
-        }
-    }
-    for (kind, path) in [("mark", &manifest.mark), ("hero", &manifest.hero)] {
-        if path.as_ref().is_some_and(|path| !root.join(path).is_file()) {
-            bail!("bundled World {} {kind} is absent", manifest.id);
-        }
-    }
-    Ok(())
-}
-
 /// What is staged for a World, when anything is.
-pub fn staged(worlds: &Path, world: &str) -> Option<StagedBundle> {
+pub fn selected(worlds: &Path, world: &str) -> Option<InstalledBundle> {
     let bytes = std::fs::read(record_path(worlds, world)).ok()?;
-    let staged: StagedBundle = serde_json::from_slice(&bytes).ok()?;
+    let staged: InstalledBundle = serde_json::from_slice(&bytes).ok()?;
     if staged.world != world || !release_dir(worlds, world, &staged.version)?.is_dir() {
         return None;
     }
@@ -401,7 +175,7 @@ pub fn staged(worlds: &Path, world: &str) -> Option<StagedBundle> {
 
 /// The immutable release directory selected for future launches and heads.
 pub fn active_dir(worlds: &Path, world: &str) -> Option<PathBuf> {
-    let staged = staged(worlds, world)?;
+    let staged = selected(worlds, world)?;
     release_dir(worlds, world, &staged.version)
 }
 
@@ -412,7 +186,7 @@ fn standing_path(worlds: &Path, world: &str) -> PathBuf {
 /// What this machine last learned about one World's channel.
 ///
 /// Beside the staged bundle rather than inside it, for the same reason
-/// `current.json` is beside it: everything under `current/` may be *served*,
+/// `selected.json` is beside it: everything under a release may be *served*,
 /// and a served tree holds only what its publisher put there.
 ///
 /// This exists because the daemon's period is hours long and a World is
@@ -468,7 +242,7 @@ pub fn standing(worlds: &Path, world: &str) -> Option<Standing> {
 /// that says nothing, which is the same thing it says before the first check.
 /// Failing the check over it would trade a working update for a missing note.
 pub fn note(worlds: &Path, world: &str, outcome: &Outcome, now: u64) {
-    let serving = staged(worlds, world).map(|bundle| bundle.version);
+    let serving = selected(worlds, world).map(|bundle| bundle.version);
     let standing = match outcome {
         Outcome::Staged { version } | Outcome::Current { version } => Standing {
             serving: Some(version.clone()),
@@ -566,7 +340,7 @@ where
         return Ok(Outcome::NothingPublished { version });
     };
 
-    if let Some(bundle) = staged(worlds, world).filter(|bundle| bundle.version == version) {
+    if let Some(bundle) = selected(worlds, world).filter(|bundle| bundle.version == version) {
         if bundle.digest.eq_ignore_ascii_case(&artifact.blake3) {
             return Ok(Outcome::Current { version });
         }
@@ -738,7 +512,7 @@ fn stage_into(
     std::fs::rename(scratch, &live)
         .with_context(|| format!("seal the immutable release at {}", live.display()))?;
 
-    let bundle = StagedBundle {
+    let bundle = InstalledBundle {
         world: world.to_string(),
         version: version.to_string(),
         digest: digest.to_string(),
@@ -861,89 +635,6 @@ mod tests {
         )
     }
 
-    /// The retired bootstrap can be recognized without a version deny-list:
-    /// it alone put a directory digest in the archive-digest field. A real
-    /// downloaded release at the same version must stay active.
-    #[test]
-    fn retirement_moves_only_the_legacy_directory_digest_and_preserves_its_bytes() {
-        let worlds = tempfile::tempdir().expect("a worlds root");
-        let retired = tempfile::tempdir().expect("a retirement root");
-
-        let bundled = release_dir(worlds.path(), WORLD, "0.9.2").expect("a release path");
-        std::fs::create_dir_all(&bundled).expect("a bundled release directory");
-        std::fs::write(
-            bundled.join("world.json"),
-            declaration(WORLD, "0.9.2", serde_json::json!([])),
-        )
-        .expect("a bundled declaration");
-        std::fs::write(bundled.join("payload"), b"legacy bytes").expect("a bundled payload");
-        let (digest, files) = directory_digest(&bundled).expect("the legacy tree digest");
-        let legacy = StagedBundle {
-            world: WORLD.into(),
-            version: "0.9.2".into(),
-            digest: digest.clone(),
-            files,
-        };
-        select(worlds.path(), &legacy).expect("select the bundled release");
-
-        let downloaded_world = "world.lait.signage";
-        let downloaded =
-            release_dir(worlds.path(), downloaded_world, "0.1.1").expect("a release path");
-        std::fs::create_dir_all(&downloaded).expect("a downloaded release directory");
-        std::fs::write(downloaded.join("payload"), b"signed archive bytes")
-            .expect("a downloaded payload");
-        select(
-            worlds.path(),
-            &StagedBundle {
-                world: downloaded_world.into(),
-                version: "0.1.1".into(),
-                digest: "ab".repeat(32),
-                files: 1,
-            },
-        )
-        .expect("select the downloaded release");
-
-        assert_eq!(
-            retire_bundled(worlds.path(), retired.path()).expect("retire legacy releases"),
-            1
-        );
-        assert!(
-            !world_root(worlds.path(), WORLD).exists(),
-            "the legacy World still looks installed"
-        );
-        let suffix: String = digest.chars().take(12).collect();
-        let preserved = retired.path().join(WORLD).join(format!("0.9.2-{suffix}"));
-        assert_eq!(
-            std::fs::read(preserved.join("releases/0.9.2/payload")).expect("the retired payload"),
-            b"legacy bytes"
-        );
-        let reseeded = release_dir(worlds.path(), WORLD, "0.9.2").expect("a release path");
-        std::fs::create_dir_all(&reseeded).expect("a reseeded release directory");
-        std::fs::write(
-            reseeded.join("world.json"),
-            declaration(WORLD, "0.9.2", serde_json::json!([])),
-        )
-        .expect("a reseeded declaration");
-        std::fs::write(reseeded.join("payload"), b"legacy bytes").expect("a reseeded payload");
-        select(worlds.path(), &legacy).expect("select the reseeded legacy release");
-        assert_eq!(
-            retire_bundled(worlds.path(), retired.path()).expect("retire the rollback copy"),
-            1
-        );
-        assert!(
-            retired
-                .path()
-                .join(WORLD)
-                .join(format!("0.9.2-{suffix}-2"))
-                .is_dir(),
-            "the rollback copy was not preserved beside the first quarantine"
-        );
-        assert!(
-            world_root(worlds.path(), downloaded_world).is_dir(),
-            "an independently downloaded release was retired"
-        );
-    }
-
     fn sealed(
         version: &str,
         archive: &[u8],
@@ -1050,13 +741,13 @@ mod tests {
             std::fs::read(active(worlds.path(), WORLD).join("index.html")).expect("the entry"),
             b"<html>the head</html>"
         );
-        let record = staged(worlds.path(), WORLD).expect("the record beside the payload");
+        let record = selected(worlds.path(), WORLD).expect("the record beside the payload");
         assert_eq!(record.version, "0.1.0");
         assert_eq!(record.world, WORLD);
         // Beside, never inside: everything under the payload directory may be
         // served, so a marker within it would be reachable at a URL.
         assert!(
-            !active(worlds.path(), WORLD).join("current.json").exists(),
+            !active(worlds.path(), WORLD).join("selected.json").exists(),
             "the record was written inside the served payload"
         );
     }
@@ -1415,7 +1106,7 @@ mod tests {
             before
         );
         assert_eq!(
-            staged(worlds.path(), WORLD).map(|bundle| bundle.version),
+            selected(worlds.path(), WORLD).map(|bundle| bundle.version),
             Some("0.2.0".into()),
             "a refused republish changed the current selection"
         );
@@ -1765,7 +1456,7 @@ mod tests {
         std::fs::create_dir_all(&live).expect("a live tree");
         std::fs::write(
             record_path(worlds.path(), WORLD),
-            serde_json::to_vec(&StagedBundle {
+            serde_json::to_vec(&InstalledBundle {
                 world: WORLD.to_string(),
                 version: "0.9.0".into(),
                 digest: "00".repeat(32),

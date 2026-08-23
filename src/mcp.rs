@@ -183,7 +183,8 @@ impl LaitMcp {
     ) -> Result<Self> {
         let identity = selection.identity_dir()?;
         let registry = std::sync::Arc::new(
-            crate::world::installed::load(&crate::serve::head::worlds_root(&identity))?.clients,
+            crate::world::installed::load(&crate::serve::head::installations_root(&identity))?
+                .clients,
         );
         Self::from_registry(home, selection, act_as, world, registry)
     }

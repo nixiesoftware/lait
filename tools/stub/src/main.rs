@@ -21,6 +21,19 @@ fn main() {
 
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
+    #[cfg(windows)]
+    if let [mode, requested_root] = args.as_slice() {
+        if mode == "--prepare-canonical-install" {
+            if let Err(error) =
+                astrolabe_stub::prepare_canonical_install(std::path::Path::new(requested_root))
+            {
+                eprintln!("astrolabe-stub: canonical reinstall refused: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+
     // Installer-only modes. The stable stub owns the install root, so it can
     // register the release's equally stable `current` coordinate without an
     // absolute path baked into every editor binding. Kept here rather than in
@@ -39,6 +52,11 @@ fn main() {
             }
             return;
         }
+    }
+
+    if let Err(error) = astrolabe_stub::require_canonical_layout(&root) {
+        eprintln!("astrolabe-stub: launch refused: {error}");
+        std::process::exit(1);
     }
 
     // The claim is held until this process exits — through the swap, and
