@@ -266,10 +266,10 @@ fn swap_self(binary: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The in-archive path of the `lait` binary in a published release archive,
-/// per cargo-dist's **per-OS** layout: the unix `.tar.gz` archives nest
-/// everything under a `lait-<target-triple>/` directory, while the Windows
-/// `.zip` is flat with `lait.exe` at the archive root.
+/// The in-archive path of the `lait` binary in our published feed archives.
+/// The repository-owned Unix builder nests everything under a
+/// `lait-<target-triple>/` directory, while the Windows builder emits a flat
+/// `.zip` with `lait.exe` at the archive root.
 ///
 /// Takes `target` rather than reading `#[cfg(windows)]` so that **every**
 /// platform's answer is computable from any host — a `cfg` split can only ever
@@ -361,9 +361,9 @@ mod tests {
 
     #[test]
     fn update_bin_path_matches_the_published_archive_layout_for_every_target() {
-        // Ground truth, read off the real v0.5.0 release artifacts and their
-        // dist-manifest.json: the unix `.tar.gz` archives nest everything under
-        // `lait-<target>/`, and the Windows `.zip` is FLAT with `lait.exe` at
+        // The contract implemented by `.github/scripts/archive-unix.sh` and
+        // `archive-windows.sh`: Unix archives nest everything under
+        // `lait-<target>/`, and the Windows `.zip` is flat with `lait.exe` at
         // the root.
         assert_eq!(bin_path_for("x86_64-pc-windows-msvc"), "lait.exe");
         for target in [
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(win.matches(".exe").count(), 1, "expected one `.exe`: {win}");
     }
 
-    /// Every target cargo-dist ships, and the archive extension it ships it as.
+    /// Every target our native host workflow ships, and its archive extension.
     const RELEASE_TARGETS: &[(&str, &str)] = &[
         ("x86_64-pc-windows-msvc", "zip"),
         ("aarch64-apple-darwin", "tar.gz"),
@@ -421,12 +421,10 @@ mod tests {
     /// This one reads the bytes.
     ///
     /// `#[ignore]` because it needs the archives on disk; CI's
-    /// `updater-contract` job fetches the latest release into
+    /// `self-updater archive contract` job fetches the stable feed archives into
     /// `$LAIT_RELEASE_ARCHIVES` and runs it with `--ignored`. Missing archives
     /// fail loudly rather than skipping — a check that silently passes when
-    /// its input is absent is worse than none. Once the feed carries its first
-    /// published release, the job fetches from the feed instead of the GitHub
-    /// mirror; the assertion is the same either way.
+    /// its input is absent is worse than none.
     #[test]
     #[ignore = "needs $LAIT_RELEASE_ARCHIVES; run in CI's updater-contract job"]
     fn update_bin_path_is_a_real_entry_in_the_published_archives() {

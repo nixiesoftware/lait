@@ -61,9 +61,11 @@ proved:
   Developer ID and notarization credentials; all three attach provenance for
   the installer built from the release tag.
 
-`ci/publish-feed.sh --from-release <tag>` is consequently the canonical feed
-promotion path again. It still refuses an incomplete release rather than
-quietly publishing an engine-only feed.
+`ci/publish-feed.sh --from-run <run-id> --version <version>` is the canonical
+feed promotion path. The run's assembled artifact is transient build transport;
+the signed GCS feed is the distribution. The publisher refuses an incomplete
+release rather than quietly publishing an engine-only feed, and it cannot source
+bytes from a GitHub Release.
 
 ## Why Flutter was left behind
 

@@ -1,8 +1,8 @@
 //! Staging a whole client tree from the release feed (CLIENT-65).
 //!
 //! The single-binary path in [`super`] swaps `lait` in place. An installed
-//! client is a directory — the astrolabe+lait pair, the Flutter runtime, the
-//! assets — and a directory is staged, never self-replaced: this module
+//! client is a directory — the astrolabe+lait pair and its native resources —
+//! and a directory is staged, never self-replaced: this module
 //! downloads the release's *tree artifact*, proves it against the signed
 //! manifest, extracts it beside the live tree, and records what it must hash
 //! to. The stub launcher (`tools/stub`) is the other half: it re-proves the

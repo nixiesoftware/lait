@@ -7,8 +7,8 @@
 //! (the `Dev Release` workflow, or any build that sets `LAIT_BUILD_SHA`) appends a
 //! `-dev+<sha> (<date>)` suffix so a nightly binary is unmistakable from a tagged
 //! release. We deliberately read **only** explicit env vars — never shell out to
-//! git — so a normal `cargo install` / cargo-dist release stays clean and
-//! reproducible, and only the dev workflow opts into the suffix.
+//! git — so a tagged build from the repository-owned release workflow stays
+//! clean and reproducible, and only the dev workflow opts into the suffix.
 
 use std::env;
 fn main() {
