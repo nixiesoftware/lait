@@ -1841,6 +1841,17 @@ fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
+/// Lay down the stable launcher boundary as a canonical installer does.
+fn install_stub(root: &Path, stub: &Path) {
+    std::fs::copy(stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+    std::fs::write(
+        root.join(astrolabe_stub::CANONICAL_LAYOUT),
+        format!("{}\n", env!("CARGO_PKG_VERSION")),
+    )
+    .expect("the canonical install receipt");
+}
+
 /// Run the stub as a real process against `root`, with the probe announcing
 /// into `root`, and wait for it to exit.
 ///
@@ -1849,11 +1860,6 @@ fn blake3_hex(bytes: &[u8]) -> String {
 /// what keeps the next phase from racing a still-exiting client over the
 /// directory it is about to rename.
 fn run_stub(root: &Path) {
-    std::fs::write(
-        root.join(astrolabe_stub::CANONICAL_LAYOUT),
-        format!("{}\n", env!("CARGO_PKG_VERSION")),
-    )
-    .expect("the canonical install receipt");
     let status = Command::new(root.join(installed_stub_name()))
         .env("CHAIN_PROBE_ANNOUNCE", root)
         .stdin(Stdio::null())
@@ -1896,8 +1902,7 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
     // lays it down — the build name `astrolabe-stub` exists in no
     // installation, and `lait::update::watch::install_root_of` keys on the
     // installed name to decide whether staging happens at all.
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
 
     // The live tree, version 0.0.1 — the install as the person has it.
     let current = root.join("current");
@@ -2050,8 +2055,7 @@ fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
 
     let current = root.join("current");
     std::fs::create_dir(&current).expect("the live tree");
@@ -2136,8 +2140,7 @@ fn a_secondary_stub_cannot_consume_the_primary_relaunch_request() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
     let current = root.join("current");
     std::fs::create_dir(&current).expect("the live tree");
     std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
@@ -2194,8 +2197,7 @@ fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
 
     let current = root.join("current");
     std::fs::create_dir(&current).expect("the live tree");
