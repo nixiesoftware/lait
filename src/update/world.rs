@@ -268,7 +268,7 @@ pub fn retire_bundled(worlds: &Path, retired: &Path) -> Result<usize> {
             continue;
         }
 
-        let suffix = &selected.digest[..selected.digest.len().min(12)];
+        let suffix: String = selected.digest.chars().take(12).collect();
         let name = format!("{}-{suffix}", selected.version);
         let mut destination = retired.join(&world).join(&name);
         // A rollback to an old client can seed the same legacy payload again.
@@ -911,10 +911,8 @@ mod tests {
             !world_root(worlds.path(), WORLD).exists(),
             "the legacy World still looks installed"
         );
-        let preserved = retired
-            .path()
-            .join(WORLD)
-            .join(format!("0.9.2-{}", &digest[..12]));
+        let suffix: String = digest.chars().take(12).collect();
+        let preserved = retired.path().join(WORLD).join(format!("0.9.2-{suffix}"));
         assert_eq!(
             std::fs::read(preserved.join("releases/0.9.2/payload")).expect("the retired payload"),
             b"legacy bytes"
@@ -936,7 +934,7 @@ mod tests {
             retired
                 .path()
                 .join(WORLD)
-                .join(format!("0.9.2-{}-2", &digest[..12]))
+                .join(format!("0.9.2-{suffix}-2"))
                 .is_dir(),
             "the rollback copy was not preserved beside the first quarantine"
         );

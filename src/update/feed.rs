@@ -590,7 +590,10 @@ pub fn http_fetch_with_progress(
         if read == 0 {
             break;
         }
-        bytes.extend_from_slice(&chunk[..read]);
+        let received = chunk.get(..read).ok_or_else(|| {
+            Failure::Unreachable("reader returned more bytes than its buffer can hold".into())
+        })?;
+        bytes.extend_from_slice(received);
         progress(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit);
     }
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
