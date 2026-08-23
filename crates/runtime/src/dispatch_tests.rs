@@ -1890,7 +1890,7 @@ fn old_receipt_status_builds_one_exact_retained_publication_off_lock() {
         find_extractors: world.find_extractors().to_vec(),
         exec_specs: Vec::new(),
     };
-    let station = station_with(descriptor, world);
+    let station = station_with(descriptor, world.clone());
     let identity = writer();
     let session = station.dock(&world_id, &identity).unwrap();
     let old_request = crate::action::RequestId::from_bytes([0x93; 16]);
@@ -1907,16 +1907,21 @@ fn old_receipt_status_builds_one_exact_retained_publication_off_lock() {
         .unwrap();
     let old_hash = old_action.header.payload_hash;
     let old = session.submit(old_action).unwrap();
-    submit_as(
-        &session,
-        &identity,
-        Intent {
-            schema: SchemaId::parse("note").unwrap(),
-            schema_version: 1,
-            payload: b"current receipt".to_vec(),
-        },
-    )
-    .unwrap();
+    let current_request = crate::action::RequestId::from_bytes([0x94; 16]);
+    let current_action = identity
+        .sign_action(
+            &session,
+            current_request,
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: b"current receipt".to_vec(),
+            },
+        )
+        .unwrap();
+    let current_hash = current_action.header.payload_hash;
+    let current = session.submit(current_action).unwrap();
+    let current_publication = current.publication;
     session.evict_semantic_publication_for_test(old.publication.publication);
     calls.store(0, Ordering::SeqCst);
     *blocked.0.lock().unwrap() = true;
@@ -1997,6 +2002,71 @@ fn old_receipt_status_builds_one_exact_retained_publication_off_lock() {
         .unwrap();
     assert_eq!(projection.bytes, b"OLD RECEIPT");
     assert_eq!(session.test_building_memory_bytes(), 0);
+
+    // Authority can make protected Bodies readable without moving the
+    // semantic Manifest root. If that rematerialization lands while the old
+    // exact publication is still extracting, the new materialization needs
+    // its own flight; joining the old semantic-only flight leaves the current
+    // read head absent forever after the old build completes.
+    let (authority_started_tx, authority_started_rx) = std::sync::mpsc::channel();
+    *world.started.lock().unwrap() = Some(authority_started_tx);
+    calls.store(0, Ordering::SeqCst);
+    *blocked.0.lock().unwrap() = true;
+    session.evict_semantic_publication_for_test(current_publication.publication);
+    let rebuilding = session
+        .operation_status(current_request.as_bytes(), current_hash)
+        .unwrap();
+    assert!(matches!(
+        rebuilding,
+        crate::session::OperationStatus::Found {
+            publication: crate::session::OperationPublication::Building,
+            ..
+        }
+    ));
+    authority_started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("current extractor entered the bounded worker");
+
+    let before_authority = session.materialization_pair().0;
+    session.note_authority_advanced_for_test();
+    let after_authority = session.materialization_pair().0;
+    assert_ne!(after_authority, before_authority);
+    assert_eq!(
+        session.publication_flights_for_test(current_publication.publication),
+        2,
+        "same-root authority rematerialization owns a distinct exact flight"
+    );
+
+    *blocked.0.lock().unwrap() = false;
+    blocked.1.notify_all();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (snapshot, publication) = session.materialization_pair();
+        if publication == Some(snapshot) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "authority refresh left the current materialization unpublished"
+        );
+        std::thread::yield_now();
+    }
+    let current_projection = session
+        .query(Query {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+            publication: None,
+        })
+        .unwrap();
+    assert_eq!(current_projection.bytes, b"CURRENT RECEIPT");
+    assert_eq!(
+        current_projection
+            .publication
+            .expect("current query returns an exact publication")
+            .materialization,
+        after_authority
+    );
 }
 
 #[test]
