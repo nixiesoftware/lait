@@ -48,13 +48,45 @@ fi
 [ -x "$LAIT_BIN" ] || { echo "::error::no built lait binary at target/debug"; exit 1; }
 LAIT_BIN="$(cd "$(dirname "$LAIT_BIN")" && pwd)/$(basename "$LAIT_BIN")"
 
-# A clean CI checkout has no installed Worlds, by design. Assemble the same
-# first-party bootstrap tree a native client carries beside the binaries the
-# build step just produced. When the daemon self-spawns it seeds these bytes
-# through the ordinary immutable-release installer; the smoke therefore proves
-# the runner boundary instead of accidentally depending on a developer's
-# identity or the removed compiled-in implementation.
+# A clean CI checkout has no installed Worlds, by design. Assemble process-test
+# fixtures beside the binaries, then explicitly place them in this smoke's
+# disposable identity. Production does not discover executable Worlds beside
+# the host; this harness opts into the same immutable-release shape an
+# independently downloaded World occupies.
 bash ci/stage-test-worlds.sh "$(dirname "$LAIT_BIN")"
+
+install_process_worlds() {
+  local fixtures="$(dirname "$LAIT_BIN")/worlds"
+  local worlds="$LAIT_CONFIG_ROOT/worlds"
+  local source id release version target digest record
+  [ -d "$fixtures" ] || { echo "::error::no staged World fixtures at $fixtures"; exit 1; }
+  mkdir -p "$worlds"
+
+  for source in "$fixtures"/*; do
+    [ -d "$source" ] || continue
+    id="$(basename "$source")"
+    for release in "$source"/*; do
+      [ -d "$release" ] || continue
+      version="$(basename "$release")"
+      target="$worlds/$id/releases/$version"
+      mkdir -p "$(dirname "$target")" "$worlds/$id/records"
+      cp -R "$release" "$target"
+
+      # This is a test-only archive-domain digest, deliberately distinct from
+      # seed_bundled's legacy directory digest so startup does not quarantine
+      # the fixture as payload from an old native client.
+      case "$id" in
+        com.lait.issues) digest="1111111111111111111111111111111111111111111111111111111111111111" ;;
+        com.lait.signage) digest="2222222222222222222222222222222222222222222222222222222222222222" ;;
+        *) echo "::error::unexpected process World fixture $id"; exit 1 ;;
+      esac
+      record="{\"world\":\"$id\",\"version\":\"$version\",\"digest\":\"$digest\",\"files\":1}"
+      printf '%s\n' "$record" > "$worlds/$id/records/$version.json"
+      printf '%s\n' "$record" > "$worlds/$id/current.json"
+    done
+  done
+}
+install_process_worlds
 
 has() { case "$1" in *"$2"*) : ;; *) echo "::error::expected '$2' in:"; echo "$1"; exit 1 ;; esac; }
 
