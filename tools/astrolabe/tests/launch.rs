@@ -455,58 +455,96 @@ async fn wait_for_health_staged(
 }
 
 async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
-    let read = |path: &Path| {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-    };
     let first_frame = first.with_file_name("frame.png");
     let second_frame = second.with_file_name("frame.png");
+
+    // Read the atomic handoff, the frame it commits, and the handoff's commit
+    // time as one stable observation. The test task is not a clock for two
+    // independently scheduled receiver processes: under runner load it can
+    // notice one file, be descheduled, and notice the other much later even
+    // when both receivers committed on the same boundary.
+    //
+    // `active.json` is freshly authored and replaced after `frame.png` is
+    // flushed. The frame itself is copied, and some platforms preserve its
+    // source mtime, so the handoff record is the presentation event.
+    let committed_handoff = |status_path: &Path, frame_path: &Path| {
+        let before = std::fs::metadata(status_path).ok()?.modified().ok()?;
+        let status_bytes = std::fs::read(status_path).ok()?;
+        let frame = std::fs::read(frame_path).ok()?;
+        let after = std::fs::metadata(status_path).ok()?.modified().ok()?;
+        if before != after {
+            return None;
+        }
+        let status = serde_json::from_slice::<serde_json::Value>(&status_bytes).ok()?;
+        Some((status, frame, after))
+    };
+
     let mut initial = None;
+    let mut last = None;
     for _ in 0..400 {
-        if let (Some(first), Some(second)) = (read(first), read(second)) {
-            let aligned = first["sync"]["group"] == group
-                && second["sync"]["group"] == group
-                && first["sync"]["mode"] == "stay_in_sync"
-                && second["sync"]["mode"] == "stay_in_sync";
-            if aligned {
-                if let (Ok(first_bytes), Ok(second_bytes)) =
-                    (std::fs::read(&first_frame), std::fs::read(&second_frame))
-                {
-                    if first_bytes == second_bytes {
-                        initial = Some(first_bytes);
-                        break;
-                    }
-                }
+        if let (
+            Some((first_status, first_bytes, first_at)),
+            Some((second_status, second_bytes, second_at)),
+        ) = (
+            committed_handoff(first, &first_frame),
+            committed_handoff(second, &second_frame),
+        ) {
+            let aligned = first_status["sync"]["group"] == group
+                && second_status["sync"]["group"] == group
+                && first_status["sync"]["mode"] == "stay_in_sync"
+                && second_status["sync"]["mode"] == "stay_in_sync";
+            if aligned && first_bytes == second_bytes {
+                initial = Some((first_bytes, first_at, second_at));
+                break;
             }
+            last = Some((first_status, second_status));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let initial = initial.expect("two receivers never adopted one boundary-sync target");
+    let (initial_frame, first_initial_at, second_initial_at) = initial.unwrap_or_else(|| {
+        let (first, second) = last.unwrap_or_else(|| {
+            (
+                serde_json::Value::String("<unreadable>".into()),
+                serde_json::Value::String("<unreadable>".into()),
+            )
+        });
+        panic!(
+            "two receivers never adopted one boundary-sync target\n\
+             --- first active.json ---\n{first:#}\n\
+             --- second active.json ---\n{second:#}"
+        )
+    });
 
-    let observed = std::time::Instant::now();
     let mut first_boundary = None;
     let mut second_boundary = None;
     for _ in 0..400 {
-        let first_bytes = std::fs::read(&first_frame).ok();
-        let second_bytes = std::fs::read(&second_frame).ok();
-        if first_boundary.is_none() && first_bytes.as_ref().is_some_and(|bytes| bytes != &initial) {
-            first_boundary = Some(observed.elapsed());
+        if first_boundary.is_none() {
+            first_boundary =
+                committed_handoff(first, &first_frame).and_then(|(_, frame, committed_at)| {
+                    (committed_at != first_initial_at && frame != initial_frame)
+                        .then_some((frame, committed_at))
+                });
         }
-        if second_boundary.is_none() && second_bytes.as_ref().is_some_and(|bytes| bytes != &initial)
-        {
-            second_boundary = Some(observed.elapsed());
+        if second_boundary.is_none() {
+            second_boundary =
+                committed_handoff(second, &second_frame).and_then(|(_, frame, committed_at)| {
+                    (committed_at != second_initial_at && frame != initial_frame)
+                        .then_some((frame, committed_at))
+                });
         }
-        if let (Some(first_at), Some(second_at), Some(first_bytes), Some(second_bytes)) =
-            (first_boundary, second_boundary, first_bytes, second_bytes)
+        if let (Some((first_bytes, first_at)), Some((second_bytes, second_at))) =
+            (&first_boundary, &second_boundary)
         {
             assert_eq!(
                 first_bytes, second_bytes,
                 "sync group advanced to different presented frames"
             );
+            let drift = first_at
+                .duration_since(*second_at)
+                .unwrap_or_else(|error| error.duration());
             assert!(
-                first_at.abs_diff(second_at) <= Duration::from_millis(500),
-                "boundary-synced receivers drifted by more than 500 ms"
+                drift <= Duration::from_millis(500),
+                "boundary-synced receivers committed {drift:?} apart"
             );
             return;
         }
@@ -599,8 +637,14 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
     let route = lait::control::ControlRoute::Orbit {
         address: lait::control::OrbitAddress::for_store(std::path::Path::new(&store), space_id),
     };
+    // Content IPC is addressed by the daemon's resolved runtime home. Passing
+    // the identity root hashes or joins a different endpoint; asking the client
+    // is the same resolution every other control plane uses.
+    let daemon = client
+        .daemon()
+        .expect("resolve the identity daemon for the film upload");
     let upload = lait::control::ContentUpload::open(
-        home,
+        daemon.home(),
         route,
         [0xC1; 16],
         None,
@@ -610,25 +654,15 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
     let mut upload = match upload {
         Ok(upload) => upload,
         Err(error) => {
-            let selection = lait::config::Selection::for_identity(home);
-            let (daemon_home, pid, probe) = match lait::daemon::Client::for_selection(&selection) {
-                Ok(daemon) => (
-                    daemon.home().display().to_string(),
-                    lait::config::daemon_pid(daemon.home()),
-                    format!("{:?}", daemon.probe().await),
-                ),
-                Err(resolve) => (
-                    "<unresolved>".to_owned(),
-                    None,
-                    format!("could not resolve daemon client: {resolve:#}"),
-                ),
-            };
+            let daemon_home = daemon.home().display();
+            let pid = lait::config::daemon_pid(daemon.home());
+            let probe = daemon.probe().await;
             let log = daemon_log_tail(home, 80);
             panic!(
                 "open the film upload: {error:#}\n\
                  daemon home: {daemon_home}\n\
                  recorded pid: {pid:?}\n\
-                 probe after failure: {probe}\n\
+                 probe after failure: {probe:?}\n\
                  --- daemon log tail ---\n{log}"
             );
         }
