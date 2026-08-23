@@ -413,7 +413,10 @@ async fn local_policy_relay_resolution() {
     });
 
     // Register {server_id, relay} exactly as PeerBook::learn does under Local.
-    c_lookup.add_endpoint_info(comms::policy::relay_addr(&relay_url, server_id));
+    c_lookup.add_endpoint_info(comms::policy::relay_addr(
+        std::slice::from_ref(&relay_url),
+        server_id,
+    ));
     let result = tokio::time::timeout(Duration::from_secs(20), async move {
         let conn = client.connect(server_id, ALPN).await.expect("connect");
         let (mut send, mut recv) = conn.open_bi().await.unwrap();

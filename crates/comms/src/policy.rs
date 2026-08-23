@@ -61,17 +61,42 @@ pub enum Network {
     Isolated,
 }
 
-/// A single relay lait supplies. Reachability is relay-based — a peer is
-/// `{its id, this relay}`, which lait builds directly (it knows the relay) and
-/// registers via [`PeerBook`], needing no public discovery. lait names the relay
-/// in a plain URL; iroh is the contractor.
+/// The relays lait supplies. Reachability is relay-based — a peer is
+/// `{its id, these relays}`, which lait builds directly (it knows its relays)
+/// and registers via [`PeerBook`], needing no public discovery. lait names
+/// each relay in a plain URL; iroh is the contractor and picks among them by
+/// its own reachability probing, so a site whose WAN path is down falls back
+/// to a relay it can still reach with no orchestration above.
+///
+/// More than one relay is the REACH-1 widening: a coordinator placement and a
+/// cloud relay are different paths to the same peers, and a Station that can
+/// hold only one address for "the relay" cannot express that.
 #[derive(Debug, Clone)]
 pub struct LocalNet {
-    /// The relay URL peers rendezvous through (`https://…` / `http://…`). A
-    /// self-hosted relay presenting a valid certificate. (Self-signed / dev
-    /// relays require skipping cert verification, which iroh gates to test
-    /// builds — so that path lives in the test harness, not here.)
-    pub relay: String,
+    /// Relay URLs peers rendezvous through (`https://…` / `http://…`), in
+    /// preference order, never empty. Self-hosted relays presenting valid
+    /// certificates. (Self-signed / dev relays require skipping cert
+    /// verification, which iroh gates to test builds — so that path lives in
+    /// the test harness, not here.)
+    pub relays: Vec<String>,
+}
+
+impl LocalNet {
+    /// Parse the `LAIT_RELAY` form: a comma-separated URL list, whitespace
+    /// tolerated, empty entries dropped. Nothing usable is an error — a Local
+    /// network with no relay is a contradiction, not a default.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let relays: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .collect();
+        if relays.is_empty() {
+            anyhow::bail!("LAIT_NETWORK=local requires at least one relay in LAIT_RELAY");
+        }
+        Ok(Self { relays })
+    }
 }
 
 impl Network {
@@ -86,9 +111,7 @@ impl Network {
         match raw.trim().to_ascii_lowercase().as_str() {
             "" | "public" => Ok(Network::Public),
             "isolated" => Ok(Network::Isolated),
-            "local" => Ok(Network::Local(LocalNet {
-                relay: env_req("LAIT_RELAY")?,
-            })),
+            "local" => Ok(Network::Local(LocalNet::parse(&env_req("LAIT_RELAY")?)?)),
             other => {
                 anyhow::bail!("unknown LAIT_NETWORK '{other}' (expected public|local|isolated)")
             }
@@ -106,12 +129,16 @@ fn env_req(key: &str) -> Result<String> {
     std::env::var(key).with_context(|| format!("LAIT_NETWORK=local requires {key}"))
 }
 
-/// The reachability address for `id` under a relay policy: `{id, relay}`. lait
-/// KNOWS its relay (it configured it), so it builds this directly — no discovery
-/// service is consulted, and nothing is faked. This is the one iroh-typed
-/// address construction, shared by the daemon (via [`PeerBook`]) and the tests.
-pub fn relay_addr(relay: &RelayUrl, id: EndpointId) -> EndpointAddr {
-    EndpointAddr::new(id).with_relay_url(relay.clone())
+/// The reachability address for `id` under a relay policy: `{id, relays}`.
+/// lait KNOWS its relays (it configured them), so it builds this directly — no
+/// discovery service is consulted, and nothing is faked. One address carries
+/// every relay, because `EndpointAddr` holds a set of transport addresses and
+/// iroh chooses among them by reachability. This is the one iroh-typed address
+/// construction, shared by the daemon (via [`PeerBook`]) and the tests.
+pub fn relay_addr(relays: &[RelayUrl], id: EndpointId) -> EndpointAddr {
+    relays.iter().fold(EndpointAddr::new(id), |addr, relay| {
+        addr.with_relay_url(relay.clone())
+    })
 }
 
 /// How the daemon teaches its endpoint to reach peers under lait's policy.
@@ -125,7 +152,7 @@ pub fn relay_addr(relay: &RelayUrl, id: EndpointId) -> EndpointAddr {
 #[derive(Clone)]
 pub struct PeerBook {
     lookup: MemoryLookup,
-    relay: Option<RelayUrl>,
+    relays: Vec<RelayUrl>,
     /// True under `Isolated`: peers are reached by carried direct addresses, so a
     /// minted ticket must ship the host's own addresses.
     direct: bool,
@@ -139,8 +166,8 @@ impl PeerBook {
     ///
     /// [`learn_direct`]: PeerBook::learn_direct
     pub fn learn(&self, id: EndpointId) {
-        if let Some(relay) = &self.relay {
-            self.lookup.add_endpoint_info(relay_addr(relay, id));
+        if !self.relays.is_empty() {
+            self.lookup.add_endpoint_info(relay_addr(&self.relays, id));
         }
     }
 
@@ -174,7 +201,7 @@ pub async fn build_endpoint(secret_key: &SecretKey, net: &Network) -> Result<(En
     // daemon. Under Public it is a harmless extra cache; under Local it is the
     // resolution mechanism.
     let lookup = MemoryLookup::new();
-    let mut relay = None;
+    let mut relays = Vec::new();
     let builder = match net {
         // Public: n0's relays + discovery, plus the in-process address cache the
         // daemon has always used.
@@ -183,14 +210,20 @@ pub async fn build_endpoint(secret_key: &SecretKey, net: &Network) -> Result<(En
         Network::Isolated => Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .address_lookup(lookup.clone()),
-        // Local: lait's own single relay. Reachability is relay-based — the
-        // daemon registers `{id, relay}` per peer into `lookup`, so a bare id
-        // resolves with no discovery, which is what makes it hermetic.
+        // Local: lait's own relays. Reachability is relay-based — the daemon
+        // registers `{id, relays}` per peer into `lookup`, so a bare id
+        // resolves with no discovery, which is what makes it hermetic. iroh
+        // probes every relay in the map and prefers what answers, which is the
+        // whole failover story: nothing above this chooses.
         Network::Local(l) => {
-            let url: RelayUrl = l.relay.parse().context("LAIT_RELAY is not a valid URL")?;
-            relay = Some(url.clone());
+            for raw in &l.relays {
+                let url: RelayUrl = raw
+                    .parse()
+                    .with_context(|| format!("LAIT_RELAY entry '{raw}' is not a valid URL"))?;
+                relays.push(url);
+            }
             Endpoint::builder(presets::Minimal)
-                .relay_mode(RelayMode::Custom(RelayMap::from(url)))
+                .relay_mode(RelayMode::Custom(RelayMap::from_iter(relays.clone())))
                 .address_lookup(lookup.clone())
         }
     };
@@ -204,7 +237,7 @@ pub async fn build_endpoint(secret_key: &SecretKey, net: &Network) -> Result<(En
         endpoint,
         PeerBook {
             lookup,
-            relay,
+            relays,
             direct,
         },
     ))
@@ -213,6 +246,18 @@ pub async fn build_endpoint(secret_key: &SecretKey, net: &Network) -> Result<(En
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relay_list_parses_and_an_empty_one_refuses() {
+        let net = LocalNet::parse(" https://a.example , https://b.example ,, ").unwrap();
+        assert_eq!(net.relays, vec!["https://a.example", "https://b.example"]);
+        let single = LocalNet::parse("https://only.example").unwrap();
+        assert_eq!(single.relays.len(), 1, "one relay stays valid");
+        assert!(
+            LocalNet::parse("  ,, ").is_err(),
+            "nothing usable is an error"
+        );
+    }
 
     #[test]
     fn from_env_default_is_public_and_trims() {
@@ -224,24 +269,34 @@ mod tests {
     fn peerbook_registers_under_local_and_noops_without_a_relay() {
         let id = SecretKey::from_bytes(&[7u8; 32]).public();
 
-        // Local: learn registers `{id, relay}` so a bare-id dial can resolve it.
-        let relay: RelayUrl = "https://relay.example".parse().unwrap();
+        // Local: learn registers `{id, relays}` so a bare-id dial can resolve
+        // it — one entry carrying every configured relay, so losing one path
+        // is a degraded route and not a lost peer.
+        let relays: Vec<RelayUrl> = vec![
+            "https://relay.example".parse().unwrap(),
+            "https://fallback.example".parse().unwrap(),
+        ];
         let local = PeerBook {
             lookup: MemoryLookup::new(),
-            relay: Some(relay),
+            relays: relays.clone(),
             direct: false,
         };
         assert!(local.lookup.get_endpoint_info(id).is_none());
         local.learn(id);
-        assert!(
-            local.lookup.get_endpoint_info(id).is_some(),
-            "Local registers the peer so bare-id resolution succeeds"
+        let info = local
+            .lookup
+            .get_endpoint_info(id)
+            .expect("Local registers the peer so bare-id resolution succeeds");
+        assert_eq!(
+            info.relay_urls().count(),
+            2,
+            "the one address carries every configured relay"
         );
 
         // Public (no relay): learn is a no-op — Public resolves via n0 discovery.
         let public = PeerBook {
             lookup: MemoryLookup::new(),
-            relay: None,
+            relays: Vec::new(),
             direct: false,
         };
         public.learn(id);
@@ -253,7 +308,7 @@ mod tests {
         // Isolated: learn_direct registers explicit addresses (carried in a ticket).
         let isolated = PeerBook {
             lookup: MemoryLookup::new(),
-            relay: None,
+            relays: Vec::new(),
             direct: true,
         };
         assert!(isolated.is_isolated());
