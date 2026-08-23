@@ -90,6 +90,20 @@ fn the_installer_places_both_binaries_in_one_directory() {
         "the stub is installed after the release, so it would land inside it"
     );
 
+    // The host resources are part of the same release tree. A recursive copy
+    // is intentional here: World ids and versions are independently owned,
+    // while the `worlds/` boundary itself is fixed and reviewed.
+    let worlds_out = script
+        .find(r#"SetOutPath "$INSTDIR\current\worlds""#)
+        .expect("the installer never enters the bundled Worlds resource directory");
+    let worlds = script
+        .find(r#"File /r "${STAGE}\worlds\*.*""#)
+        .expect("the installer does not carry the staged World releases");
+    assert!(
+        out < worlds_out && worlds_out < worlds,
+        "the bootstrap Worlds are not installed inside the current release tree"
+    );
+
     // Portable editor bindings invoke `lait mcp` from PATH. The installer must
     // register its own release after it exists and unregister it before the
     // helper is deleted, or a clean machine works only when Cargo happened to
@@ -666,9 +680,12 @@ fn the_linux_package_carries_the_pair_and_notices() {
         script.contains(r#"find "$STAGED" -type f -exec chmod 0644 {} +"#)
             && script.contains(
                 r#"chmod 0755 "$STAGED/astrolabe" "$STAGED/current/astrolabe" "$STAGED/current/lait""#
+            )
+            && script.contains(
+                r#"find "$STAGED/current/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +"#
             ),
         "the Linux package inherits host-specific file modes, or leaves the \
-         stub or a half of the pair unexecutable"
+         stub, a half of the pair, or a World runner unexecutable"
     );
 }
 
@@ -900,6 +917,39 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
         at(r#"cp "$REPO/LICENSE" "$REPO/THIRD-PARTY-NOTICES.md" "$STAGE/$LIVE_DIR/""#)
             < at(r#"--stage "$STAGE/$LIVE_DIR""#),
         "the plain update tree is sealed before its terms are staged"
+    );
+    assert!(
+        at(r#"cp -R "$BUNDLED_WORLDS" "$STAGE/$LIVE_DIR/worlds""#)
+            < at(r#"--stage "$STAGE/$LIVE_DIR""#),
+        "the plain update tree is sealed before its bootstrap Worlds are staged"
+    );
+
+    // `make-tree` is the final common boundary and must refuse an empty
+    // Library even when invoked outside the normal release builder. It also
+    // owns the Unix mode normalization, so independently named runners regain
+    // their executable bit after the blanket 0644 pass.
+    let tree = std::fs::read_to_string(repo_root().join("packaging/make-tree.sh"))
+        .expect("read the update-tree packager");
+    assert!(
+        tree.contains(r#"find "$WORLD_ROOT" -type f -name world.json -print -quit"#),
+        "an update tree with no World declaration is publishable"
+    );
+    assert!(
+        tree.contains(
+            r#"find "$STAGED/$RESOURCES/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +"#
+        ),
+        "the update tree strips the executable bit from World runners"
+    );
+
+    // The Linux stable-root package is relocatable, while Tauri's conventional
+    // resource directory is /usr/lib for a raw Linux executable. The host must
+    // accept the owned resource sibling the release builder puts beside it.
+    let host =
+        std::fs::read_to_string(repo_root().join("apps/astrolabe-web/src-tauri/src/main.rs"))
+            .expect("read the Tauri host");
+    assert!(
+        host.contains("std::env::current_exe()") && host.contains(r#"parent.join("worlds")"#),
+        "the relocatable Linux client cannot find its carried World resources"
     );
 
     // macOS stages by a different route and is correct for a different reason:

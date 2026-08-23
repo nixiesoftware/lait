@@ -167,6 +167,18 @@ case "$TARGET" in
     [ -f "$host" ] || { echo "build-astrolabe: no client binary at $host" >&2; exit 1; }
     cp "$host" "$STAGE/$LIVE_DIR/astrolabe$EXE"
     cp "$STAGED_LAIT" "$STAGE/$LIVE_DIR/lait$EXE"
+    # `tauri build` did stage the reviewed bootstrap Worlds, but this branch
+    # deliberately rebuilds the stable stub layout from the raw host binary.
+    # A raw binary carries none of Tauri's resources with it. Preserve that
+    # resource tree explicitly in the directory both the installer and the
+    # self-update archive consume; otherwise a clean install has no selected
+    # World release and the daemon cannot start.
+    BUNDLED_WORLDS="$CLIENT/src-tauri/bundled-worlds"
+    [ -d "$BUNDLED_WORLDS" ] || {
+      echo "build-astrolabe: Tauri staged no first-party Worlds at $BUNDLED_WORLDS" >&2
+      exit 1
+    }
+    cp -R "$BUNDLED_WORLDS" "$STAGE/$LIVE_DIR/worlds"
     # The terms travel with the tree, not only with the installer: the tree is
     # what a self-update swaps into `current/`, so a file the installer added
     # afterwards would survive the install and not the first upgrade.

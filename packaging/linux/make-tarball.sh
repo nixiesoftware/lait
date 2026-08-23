@@ -126,6 +126,7 @@ cp "$STUB" "$STAGED/astrolabe"
 find "$STAGED" -type d -exec chmod 0755 {} +
 find "$STAGED" -type f -exec chmod 0644 {} +
 chmod 0755 "$STAGED/astrolabe" "$STAGED/current/astrolabe" "$STAGED/current/lait"
+find "$STAGED/current/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +
 
 ARCHIVE="$OUT/$ROOT_NAME.tar.gz"
 rm -f "$ARCHIVE" "$ARCHIVE.sha256"

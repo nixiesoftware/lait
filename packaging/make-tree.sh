@@ -60,11 +60,11 @@ done
 # a CI workflow and cannot see a local or future invocation at all.
 case "$TARGET" in
   *-windows-*) ENTRY="astrolabe.exe";            SIDECAR="lait.exe"
-               DOCS="." ;;
+               DOCS=".";                         RESOURCES="." ;;
   *-apple-*)   ENTRY="Contents/MacOS/astrolabe"; SIDECAR="Contents/MacOS/lait"
-               DOCS="Contents/Resources" ;;
+               DOCS="Contents/Resources";        RESOURCES="Contents/Resources" ;;
   *)           ENTRY="astrolabe";                SIDECAR="lait"
-               DOCS="." ;;
+               DOCS=".";                         RESOURCES="." ;;
 esac
 for required in "$ENTRY" "$SIDECAR"; do
   [ -f "$STAGE/$required" ] || {
@@ -72,6 +72,21 @@ for required in "$ENTRY" "$SIDECAR"; do
     exit 1
   }
 done
+
+# The Library is the selected immutable release set. A tree without its
+# bootstrap declarations installs successfully and then honestly reports no
+# Worlds; refuse that artifact here, at the boundary that can still prevent it
+# from reaching a channel. World ids and versions remain independently owned,
+# so the check requires declarations rather than hard-coding today's catalog.
+WORLD_ROOT="$STAGE/$RESOURCES/worlds"
+[ -d "$WORLD_ROOT" ] || {
+  echo "make-tree: $STAGE is missing the bundled Worlds resource tree" >&2
+  exit 1
+}
+[ -n "$(find "$WORLD_ROOT" -type f -name world.json -print -quit)" ] || {
+  echo "make-tree: $WORLD_ROOT contains no immutable World declaration" >&2
+  exit 1
+}
 for required in "$DOCS/LICENSE" "$DOCS/THIRD-PARTY-NOTICES.md"; do
   [ -f "$STAGE/$required" ] || {
     echo "make-tree: $STAGE is missing $required — a tree that drops the terms on the first self-update" >&2
@@ -96,6 +111,11 @@ cp -a "$STAGE/." "$STAGED/"
 find "$STAGED" -type d -exec chmod 0755 {} +
 find "$STAGED" -type f -exec chmod 0644 {} +
 chmod 0755 "$STAGED/$ENTRY" "$STAGED/$SIDECAR"
+# World runners are executables too. They are discovered from independently
+# versioned releases under worlds/*/*/bin rather than enumerated by product id.
+# Resetting every payload to 0644 without restoring these made a Unix client
+# carry a complete World that the OS would still refuse to launch.
+find "$STAGED/$RESOURCES/worlds" -type f -path '*/bin/*' -exec chmod 0755 {} +
 
 # Determinism, portably. GNU tar has --sort and --mtime; bsdtar (macOS, where
 # the .app tree is packed) has neither, so the two properties are established
