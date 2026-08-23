@@ -1836,11 +1836,27 @@ fn main() {
             astrolabe::client::update::identify_running_version(
                 app.package_info().version.to_string(),
             );
-            let worlds = app
+            let resources = app
                 .path()
                 .resource_dir()
-                .map_err(std::io::Error::other)?
-                .join("worlds");
+                .map_err(std::io::Error::other)?;
+            let mut worlds = resources.join("worlds");
+            // The canonical Linux package is a relocatable stable-root tree,
+            // not a system package under /usr/lib. Tauri therefore resolves
+            // its conventional resource directory outside that tree. The
+            // release builder carries the same `worlds/` resource beside the
+            // host on Windows and Linux; prefer Tauri's platform location and
+            // fall back to that owned sibling only when it is the one present.
+            if !worlds.is_dir() {
+                if let Some(beside) = std::env::current_exe()
+                    .map_err(std::io::Error::other)?
+                    .parent()
+                    .map(|parent| parent.join("worlds"))
+                    .filter(|candidate| candidate.is_dir())
+                {
+                    worlds = beside;
+                }
+            }
             api::start_with_worlds(
                 None,
                 None,
