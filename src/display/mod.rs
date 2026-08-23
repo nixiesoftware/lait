@@ -18,6 +18,7 @@ pub use http::serve_display_on;
 /// is the HTTPS surface itself, which has one caller.
 pub(crate) use http::{bind_display, is_port_taken};
 mod live;
+pub mod overlay;
 mod pairing;
 mod runtime;
 mod store;

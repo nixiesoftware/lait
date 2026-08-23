@@ -978,6 +978,11 @@ pub struct Daemon {
     endpoint: Arc<Endpoint>,
     display: Arc<crate::display::DisplayRuntime>,
     relaunch_requested: Arc<AtomicBool>,
+    /// The identity's own seed, held for the overlay endpoint the serve path
+    /// stands up. The display custodian already carries it, so this is a
+    /// second reference to material this process necessarily holds, not a new
+    /// exposure.
+    device_seed: [u8; 32],
 }
 
 impl Daemon {
@@ -1001,6 +1006,7 @@ impl Daemon {
             display,
             router,
             relaunch_requested: Arc::new(AtomicBool::new(false)),
+            device_seed: *device_seed,
         })
     }
 
@@ -1063,6 +1069,54 @@ impl Daemon {
                 return Err(error).context("serve daemon display HTTPS");
             }
         };
+        // The same router the TCP path serves, reachable over the overlay:
+        // addressed by endpoint id, no port, no inbound hole. A failure here
+        // is a degradation — the LAN listener is already up — never a reason
+        // for the daemon not to exist.
+        let overlay_task = match comms::policy::Network::from_env() {
+            Ok(network) => {
+                let seed = self.device_seed;
+                let state = crate::display::DisplayHttpState {
+                    coordinator: self.display.coordinator.clone(),
+                    pairing: self.display.pairing.clone(),
+                };
+                let overlay_stop = self.endpoint.subscribe_stop();
+                Some(tokio::spawn(async move {
+                    let transport = match comms::DefaultTransport::new(
+                        &seed,
+                        &network,
+                        comms::Protocols {
+                            framed: &[],
+                            session: &[crate::display::overlay::DISPLAY_ALPN],
+                        },
+                    )
+                    .await
+                    {
+                        Ok(transport) => std::sync::Arc::new(transport),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "display overlay endpoint could not bind;                                  serving the LAN listener only"
+                            );
+                            return;
+                        }
+                    };
+                    if let Err(error) = crate::display::overlay::serve_display_overlay(
+                        transport,
+                        crate::display::display_http_router(state),
+                        overlay_stop,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "display overlay service stopped");
+                    }
+                }))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no overlay network policy; serving the LAN listener only");
+                None
+            }
+        };
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
@@ -1091,6 +1145,13 @@ impl Daemon {
                 }
             }
         };
+        // The overlay stops on the same watch every sibling uses; joining is
+        // what keeps its endpoint from outliving the daemon that owns it.
+        if let Some(overlay) = overlay_task {
+            if let Err(error) = overlay.await {
+                tracing::error!(%error, "display overlay task ended abnormally");
+            }
+        }
         Self::join_staging(staging).await;
         Self::join_world_upgrades(world_upgrades).await;
         outcome
