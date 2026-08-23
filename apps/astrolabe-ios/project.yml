@@ -44,10 +44,6 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        # The head serves on loopback; without this ATS refuses the WebKit
-        # load of http://127.0.0.1.
-        NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
         NSCameraUsageDescription: "Astrolabe scans invite QR codes shown on another device."
         NSLocalNetworkUsageDescription: "Astrolabe finds your other devices on this network to sync your Spaces directly."
     settings:
@@ -88,7 +84,6 @@ targets:
         outputFiles:
           - "$(PROJECT_DIR)/Core/$(PLATFORM_NAME)-$(CONFIGURATION)/libastrolabe_ios.a"
     dependencies:
-      - sdk: WebKit.framework
       # The Rust core's Apple-side dependencies (hickory-resolver reads DNS
       # config through SCDynamicStore; netdev enumerates interfaces through
       # Network.framework on iOS). cargo's framework link flags do not

@@ -16,20 +16,6 @@ enum Core {
         nodeStart()
     }
 
-    /// The background transition: the head steps down before suspension
-    /// reclaims its listener. Blocks briefly on the drain; call off the main
-    /// thread, under a background-task assertion.
-    static func background() {
-        nodeBackground()
-    }
-
-    /// The foreground transition: the head serving again after a wake, with
-    /// a fresh announcement every open tab must re-authenticate against.
-    /// Blocks; call off the main thread.
-    static func foreground() -> NodeStart {
-        nodeForeground()
-    }
-
     /// Parse and verify an invite without creating anything.
     static func ticket(_ link: String) -> TicketRead {
         readTicket(link: link)

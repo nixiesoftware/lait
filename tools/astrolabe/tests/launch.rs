@@ -49,6 +49,37 @@ fn reference_receiver() -> Option<PathBuf> {
     built_binary("astrolabe-display-reference")
 }
 
+/// Install the Worlds this process seam exercises from an explicit signed
+/// channel. The helper is product-blind; the test names the two declarations
+/// it intends to drive, and the production installer verifies and records
+/// their immutable releases before the client starts its daemon.
+fn install_independent_test_worlds(identity: &Path) {
+    let channels = std::env::var_os("WORLD_FIXTURE_CHANNELS")
+        .map(PathBuf::from)
+        .expect("WORLD_FIXTURE_CHANNELS must name the signed process-test channels");
+    let installer = std::env::var_os("WORLD_FIXTURE_INSTALLER")
+        .map(PathBuf::from)
+        .expect("WORLD_FIXTURE_INSTALLER must name the product-blind installer");
+    let output = Command::new(&installer)
+        .arg("--channels")
+        .arg(&channels)
+        .arg("--identity")
+        .arg(identity)
+        .arg("--world")
+        .arg("com.lait.issues")
+        .arg("--world")
+        .arg("com.lait.signage")
+        .output()
+        .unwrap_or_else(|error| panic!("start {}: {error}", installer.display()));
+    assert!(
+        output.status.success(),
+        "signed World installation failed ({}):\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn built_binary(name: &str) -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
     let profile = current.parent()?.parent()?;
@@ -1009,6 +1040,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
+    install_independent_test_worlds(identity.path());
     // Declared before the client, so it drops after it: the daemon is asked to
     // stop once nothing is still speaking to it, and before the temporary homes
     // it is holding open are removed.
@@ -1042,7 +1074,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         displays.surfaces.iter().any(|surface| {
             surface.world == "com.lait.signage" && surface.surface == "signage.program"
         }),
-        "the process serving Astrolabe omitted the bundled Signage display surface"
+        "the independently installed Signage runner omitted its display surface"
     );
     let first_pid = lait::config::daemon_pid(daemon.home()).expect("the started daemon's pid");
 

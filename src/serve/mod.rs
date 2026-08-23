@@ -236,36 +236,6 @@ pub async fn run_until(
     .await
 }
 
-/// Run an embedded head with a platform-supplied first-party client registry.
-///
-/// Native iOS cannot spawn or dynamically install executable code. Its signed
-/// application therefore adapts the reviewed first-party Worlds in-process,
-/// while desktop uses [`run_until`] and independently selected runner
-/// processes. Keeping this exception at the platform boundary avoids reviving
-/// a product dependency in the host crate.
-pub async fn run_embedded_until(
-    port: u16,
-    open: bool,
-    selection: crate::config::Selection,
-    world: Option<String>,
-    registry: world_interface::WorldClientRegistry,
-    head: head::Source,
-    announce: impl FnOnce(&Ready) + Send,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<()> {
-    run_until_with_registry(
-        port,
-        open,
-        selection,
-        world,
-        Arc::new(registry),
-        move |_| head,
-        announce,
-        shutdown,
-    )
-    .await
-}
-
 async fn run_until_with_registry(
     port: u16,
     open: bool,
