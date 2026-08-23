@@ -256,9 +256,11 @@ pub fn daemon_home(config: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Stop one daemon and wait for its control channel to go quiet.
+/// Stop one daemon and wait for its control channel teardown to finish.
 pub fn stop_daemon(config: &Path, home: Option<&Path>) {
     let daemon_home = daemon_home(config, home);
+    #[cfg(unix)]
+    let socket = lait::config::socket_path(&daemon_home);
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     runtime.block_on(async {
         let client = lait::daemon::Client::at(daemon_home.clone());
@@ -270,10 +272,22 @@ pub fn stop_daemon(config: &Path, home: Option<&Path>) {
             )
             .await;
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !matches!(
-            lait::control::probe(&daemon_home).await,
-            lait::control::Probe::Absent
-        ) {
+        loop {
+            let absent = matches!(
+                lait::control::probe(&daemon_home).await,
+                lait::control::Probe::Absent
+            );
+            // On Unix the listener stops accepting before the daemon finishes
+            // draining placements and unlinks its pathname socket.  A failed
+            // connect therefore proves only that the front door is shut; wait
+            // for the unlink as the observable completion of graceful teardown.
+            #[cfg(unix)]
+            let cleaned = !socket.exists();
+            #[cfg(not(unix))]
+            let cleaned = true;
+            if absent && cleaned {
+                return;
+            }
             if Instant::now() >= deadline {
                 return;
             }
