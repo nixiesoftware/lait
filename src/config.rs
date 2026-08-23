@@ -646,6 +646,57 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// One rule for every hosted service: env override, then the key, then
+    /// the built-in — and present-but-empty env is explicitly offline, not a
+    /// fallthrough. The cloud pole itself lives in `built_in` and is
+    /// release-only, so this debug-built test asserts the layers above it.
+    #[test]
+    fn a_service_url_resolves_env_then_key_and_empty_is_offline() {
+        let with_key = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("post.url", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+
+        // A bespoke env name per case: the real overrides are process-global
+        // and the suite is parallel.
+        std::env::set_var("LAIT_TEST_SVC_A", "https://override.example/");
+        assert_eq!(
+            with_key("https://key.example").service_url("post.url", "LAIT_TEST_SVC_A"),
+            Some("https://override.example".to_string()),
+            "the env override wins over the key"
+        );
+        std::env::set_var("LAIT_TEST_SVC_B", "");
+        assert_eq!(
+            with_key("https://key.example").service_url("post.url", "LAIT_TEST_SVC_B"),
+            None,
+            "present-but-empty is explicitly offline"
+        );
+        assert_eq!(
+            with_key("https://key.example/").service_url("post.url", "LAIT_TEST_SVC_UNSET"),
+            Some("https://key.example".to_string()),
+            "the key answers when nothing overrides"
+        );
+        assert_eq!(
+            with_key("not-a-url").service_url("post.url", "LAIT_TEST_SVC_UNSET"),
+            None,
+            "an explicit non-URL is off, never a fallthrough to the cloud"
+        );
+        std::env::remove_var("LAIT_TEST_SVC_A");
+        std::env::remove_var("LAIT_TEST_SVC_B");
+
+        // The built-in pole: debug builds carry none, so a bare default here
+        // is offline — the release product's cloud default rides `built_in`
+        // and is exercised by the release smoke, not invented here.
+        if cfg!(debug_assertions) {
+            assert_eq!(Settings::default().post_url(), None);
+            assert_eq!(Settings::default().directory_url(), None);
+        }
+    }
+
     /// A coordinator answers where it is told to, and a typo does not cost a
     /// daemon that will not start.
     #[test]
@@ -938,6 +989,28 @@ pub struct KeySpec {
     pub built_in: fn() -> Option<String>,
 }
 
+/// The Foundation cloud's service host: the Post, the directory, and the
+/// registry are three mounts on one deployment (`/`, `/directory`,
+/// `/registry`), so they share one base and one default.
+pub const FOUNDATION_SERVICES: &str = "https://post.foundation.pub";
+
+/// The cloud default for a hosted-service endpoint.
+///
+/// Present only in release builds — the product connects out of the box, and
+/// a self-hosted or air-gapped install opts *out* by setting the key (or its
+/// env override) empty. Development builds default to nothing, because every
+/// test in this tree spawns real daemons and a built-in host would put the
+/// network under suites that promise hermeticity. The same debug/release
+/// split the client's image staging already uses, for the same reason: the
+/// two audiences genuinely want different poles.
+fn cloud_default(url: &'static str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
 /// The closed set of recognized config keys.
 pub const KEYS: &[KeySpec] = &[
     KeySpec {
@@ -955,9 +1028,10 @@ pub const KEYS: &[KeySpec] = &[
         built_in: || None,
     },
     // The identity's public label on the deployment root — `acme` answering
-    // at acme.<root>. Read at daemon start beside the registry URL; both set
-    // is what turns route self-publication on, and neither has a built-in
-    // because a default label is somebody else's.
+    // at acme.<root>. Read at daemon start beside the registry URL; the label
+    // has no built-in because a default label is somebody else's, and it is
+    // the one thing that keeps publication opt-in now that the service URLs
+    // default to the cloud.
     KeySpec {
         name: "identity.label",
         layers: KeyLayers::GlobalAndStore,
@@ -965,12 +1039,30 @@ pub const KEYS: &[KeySpec] = &[
         help: "Public label this identity answers at (applies at next daemon start).",
         built_in: || None,
     },
+    // The three hosted-service endpoints, one resolution rule each: the env
+    // override wins when present (empty = explicitly offline), then this key,
+    // then the Foundation cloud in release builds. `lait config` lists them,
+    // which the env-only ancestors of the first two never managed.
     KeySpec {
         name: "registry.url",
         layers: KeyLayers::GlobalAndStore,
         daemon_read: false,
-        help: "Registry base URL routes publish to (applies at next daemon start).",
-        built_in: || None,
+        help: "Registry base URL routes publish to (applies at next daemon start; release default is the Foundation cloud, empty opts out).",
+        built_in: || cloud_default(FOUNDATION_SERVICES),
+    },
+    KeySpec {
+        name: "post.url",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Hosted Post correspondence is carried over (applies at next daemon start; LAIT_POST_URL overrides; release default is the Foundation cloud, empty opts out).",
+        built_in: || cloud_default(FOUNDATION_SERVICES),
+    },
+    KeySpec {
+        name: "directory.url",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Identity directory addresses publish and resolve against (applies at next daemon start; LAIT_DIRECTORY_URL overrides; release default is the Foundation cloud, empty opts out).",
+        built_in: || cloud_default(FOUNDATION_SERVICES),
     },
     // Not `daemon_read`: the port is spent at bind, so a live daemon cannot
     // honour a change without dropping the listener every receiver is on. The
@@ -1092,13 +1184,48 @@ impl Settings {
         self.get("project.default").map(str::to_string)
     }
 
+    /// One hosted-service endpoint, resolved by the one rule every service
+    /// shares: the env override wins when present — and **present-but-empty
+    /// is explicitly offline**, the escape hatch a test harness or an
+    /// air-gapped install reaches for — then the config key, then the cloud
+    /// built-in release builds carry. A value that is not an HTTP(S) URL is
+    /// off, never a fallback: an explicit setting that silently fell through
+    /// to the cloud would point an install at a host its operator just tried
+    /// to leave.
+    fn service_url(&self, key: &str, env_override: &str) -> Option<String> {
+        let candidate = match std::env::var(env_override) {
+            Ok(value) => Some(value),
+            Err(_) => self
+                .get(key)
+                .map(str::to_string)
+                .or_else(|| (key_spec(key).ok()?.built_in)()),
+        }?;
+        let candidate = candidate.trim();
+        (candidate.starts_with("http://") || candidate.starts_with("https://"))
+            .then(|| candidate.trim_end_matches('/').to_string())
+    }
+
+    /// The hosted Post this identity carries correspondence over, if any.
+    pub fn post_url(&self) -> Option<String> {
+        self.service_url("post.url", "LAIT_POST_URL")
+    }
+
+    /// The identity directory addresses publish and resolve against, if any.
+    pub fn directory_url(&self) -> Option<String> {
+        self.service_url("directory.url", "LAIT_DIRECTORY_URL")
+    }
+
     /// The identity's public label and the registry it publishes routes to.
-    /// Both or nothing: a label with nowhere to publish is a hope, and a
-    /// registry with no label has nothing to say.
+    /// The label is the opt-in: with the registry URL defaulting to the cloud,
+    /// choosing a label is what turns publication on, and a label with the
+    /// registry explicitly emptied is a hope with nowhere to go.
     pub fn route_publication(&self) -> Option<(String, String)> {
         let label = self.get("identity.label")?.trim().to_string();
-        let registry = self.get("registry.url")?.trim().to_string();
-        (!label.is_empty() && !registry.is_empty()).then_some((label, registry))
+        if label.is_empty() {
+            return None;
+        }
+        let registry = self.service_url("registry.url", "LAIT_REGISTRY_URL")?;
+        Some((label, registry))
     }
 
     /// The port the display coordinator serves on.

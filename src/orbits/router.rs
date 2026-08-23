@@ -639,7 +639,7 @@ impl Router {
         // Carried over a hosted Post when one is named. Absent, the plane stands
         // but carries nothing, and every operation says so — which is a
         // different fact from an empty mailbox and the only one worth acting on.
-        if let Some(base) = crate::daemon::correspondence::configured_carrier() {
+        if let Some(base) = crate::daemon::correspondence::configured_carrier(&identity) {
             if let Err(error) =
                 correspondence.carry_over(base, crate::daemon::correspondence::now_secs())
             {

@@ -39,30 +39,29 @@ use crate::control::{Request, Response};
 /// the carrier gives one function down and one this service is even more
 /// exposed to: a directory that answers "not available" because it was
 /// misconfigured is indistinguishable, at the surface, from a person who does
-/// not exist. An absent directory refuses in words instead.
+/// not exist. An absent directory refuses in words instead — and absence is
+/// now a *choice*: the endpoint resolves through `Settings::directory_url`
+/// (env override, then the config key, then the cloud built-in release
+/// builds carry), so the packaged product connects and an operator opts out
+/// by emptying it.
 #[must_use]
-pub fn configured_directory() -> Option<Box<dyn Directory + Send>> {
-    let base = std::env::var("LAIT_DIRECTORY_URL").ok()?;
-    let base = base.trim();
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return None;
-    }
-    Some(Box::new(lait_directory::Remote::at(base)))
+pub fn configured_directory(identity: &std::path::Path) -> Option<Box<dyn Directory + Send>> {
+    let base = crate::config::Settings::load(Some(identity)).directory_url()?;
+    Some(Box::new(lait_directory::Remote::at(&base)))
 }
 
 /// The carrier this deployment is pointed at, if any.
 ///
-/// `LAIT_POST_URL` names a hosted Post. Nothing is assumed absent it: a default
-/// would point every install at a host, and an unreachable host read as an empty
-/// mailbox is the defect this plane is most careful about.
+/// The Post this identity carries over, resolved through
+/// `Settings::post_url` — env override, config key, then the cloud built-in
+/// release builds carry. An unreachable host read as an empty mailbox is
+/// still the defect this plane is most careful about; the default moving to
+/// the cloud changes who chooses the host, not what an unreachable one is
+/// allowed to look like.
 #[must_use]
-pub fn configured_carrier() -> Option<Box<dyn Contractor>> {
-    let base = std::env::var("LAIT_POST_URL").ok()?;
-    let base = base.trim();
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return None;
-    }
-    Some(Box::new(correspondence::post::PostContractor::new(base)))
+pub fn configured_carrier(identity: &std::path::Path) -> Option<Box<dyn Contractor>> {
+    let base = crate::config::Settings::load(Some(identity)).post_url()?;
+    Some(Box::new(correspondence::post::PostContractor::new(&base)))
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -143,7 +142,7 @@ impl CorrespondenceService {
     /// a person hands out names them on every start. Durable reach state is
     /// read here and written back by anything that changes it.
     pub fn carry_over(&self, contractor: Box<dyn Contractor>, now: u64) -> Result<(), String> {
-        self.carry_over_with(contractor, configured_directory(), now)
+        self.carry_over_with(contractor, configured_directory(&self.identity), now)
     }
 
     /// The same, with the directory named rather than read from the
