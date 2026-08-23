@@ -1082,6 +1082,73 @@ mod tests {
         );
     }
 
+    /// The user-facing consequence of adoption: a correspondent's address
+    /// book learns the placement. Not automatic — the *next announcement*
+    /// avows the whole current device set, adopted device included, and the
+    /// correspondent's `resolve` answers with it. If this test fails, joins
+    /// are real but invisible, which is the worse defect.
+    #[test]
+    fn a_correspondents_address_book_learns_an_adopted_device() {
+        let (a, b) = ([81u8; 32], [82u8; 32]);
+        let placement: [u8; 32] = [84u8; 32];
+        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+
+        let reader = Standing {
+            device: Some(device_from_seed(&[91u8; 32])),
+            ..Standing::default()
+        };
+        // The correspondent holds the pre-adoption card.
+        let before = plane.announce(Audience::Public, &reader).expect("announce");
+        let mut theirs = Registry::new();
+        theirs
+            .absorb(before.projection, &before.genesis, &reader)
+            .expect("absorb the pre-adoption card");
+        let placement_device = device_from_seed(&placement);
+        assert!(
+            !theirs
+                .resolve(plane.profile())
+                .expect("held")
+                .contains(&placement_device),
+            "not yet adopted, not yet resolvable"
+        );
+
+        // Adopt, then announce again — the epoch advances, the avowals cover
+        // the grown device set, and the correspondent's view follows.
+        let (nonce, epoch) = ([13u8; 16], 9);
+        let link = mechanics::kinship::DeviceLink::assemble(
+            (
+                device_from_seed(&a),
+                mechanics::kinship::DeviceLink::half(&a, &placement_device, nonce, epoch),
+            ),
+            (
+                placement_device.clone(),
+                mechanics::kinship::DeviceLink::half(
+                    &placement,
+                    &device_from_seed(&a),
+                    nonce,
+                    epoch,
+                ),
+            ),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        plane.adopt_device(link).expect("adopt");
+        let after = plane
+            .announce(Audience::Public, &reader)
+            .expect("announce again");
+        theirs
+            .absorb(after.projection, &after.genesis, &reader)
+            .expect("absorb the post-adoption card");
+        assert!(
+            theirs
+                .resolve(plane.profile())
+                .expect("held")
+                .contains(&placement_device),
+            "the correspondent's address book resolves the placement"
+        );
+    }
+
     /// The sponsorship round trip: halves signed on two machines, assembled,
     /// adopted — and the adopted device signs a head a stranger takes. The
     /// full remote-join flow minus only the transport that carries the half.

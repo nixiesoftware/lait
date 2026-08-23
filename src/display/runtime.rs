@@ -596,6 +596,7 @@ impl DisplayRuntime {
         Ok(DisplayCoordinatorView {
             instance: self.tls.instance().instance.clone(),
             label: self.tls.instance().label.clone(),
+            coordinator_profile: Some(self.profile.as_str().to_string()),
             origin,
             certificate_sha256: fingerprint,
             certificate_pem: self.tls.certificate_pem().to_string(),

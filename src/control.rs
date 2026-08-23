@@ -350,6 +350,13 @@ pub const AGENT_GROUP: &str = "Agents";
 pub struct DisplayCoordinatorView {
     pub instance: String,
     pub label: String,
+    /// The identity's kinship profile this coordinator answers for — the
+    /// anchor receivers pair against, so a controller can show *who* a
+    /// coordinator is rather than where it happens to be.
+    ///
+    /// Additive and optional, per `docs/COMPATIBILITY.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_profile: Option<String>,
     pub origin: String,
     pub certificate_sha256: String,
     pub certificate_pem: String,
