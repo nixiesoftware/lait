@@ -599,15 +599,40 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
     let route = lait::control::ControlRoute::Orbit {
         address: lait::control::OrbitAddress::for_store(std::path::Path::new(&store), space_id),
     };
-    let mut upload = lait::control::ContentUpload::open(
+    let upload = lait::control::ContentUpload::open(
         home,
         route,
         [0xC1; 16],
         None,
         u64::try_from(film.len()).expect("film length"),
     )
-    .await
-    .expect("open the film upload");
+    .await;
+    let mut upload = match upload {
+        Ok(upload) => upload,
+        Err(error) => {
+            let selection = lait::config::Selection::for_identity(home);
+            let (daemon_home, pid, probe) = match lait::daemon::Client::for_selection(&selection) {
+                Ok(daemon) => (
+                    daemon.home().display().to_string(),
+                    lait::config::daemon_pid(daemon.home()),
+                    format!("{:?}", daemon.probe().await),
+                ),
+                Err(resolve) => (
+                    "<unresolved>".to_owned(),
+                    None,
+                    format!("could not resolve daemon client: {resolve:#}"),
+                ),
+            };
+            let log = daemon_log_tail(home, 80);
+            panic!(
+                "open the film upload: {error:#}\n\
+                 daemon home: {daemon_home}\n\
+                 recorded pid: {pid:?}\n\
+                 probe after failure: {probe}\n\
+                 --- daemon log tail ---\n{log}"
+            );
+        }
+    };
     upload.push(&film).await.expect("push the film");
     let reply = upload.finish().await.expect("seal the film");
     let lait::control::ContentReply::ContentWritten {
