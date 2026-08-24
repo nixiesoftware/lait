@@ -1680,8 +1680,19 @@ impl CoreInner {
     fn install_world_publication(&mut self, world: WorldId, publication: Arc<WorldPublication>) {
         self.world_read_heads
             .insert((world.clone(), publication.id), WorldReadHead::Ready);
-        self.world_publications
-            .insert(world.clone(), publication.clone());
+        // A build can finish after another implementation has become the
+        // registered current package. Preserve that exact publication for
+        // historical reads, but never let its late completion displace the
+        // implementation/extractor pair selected by the current builder.
+        let selects_current_builder = self.world_builders.get(&world).is_some_and(|builder| {
+            builder.implementation == publication.id.publication.implementation_digest
+                && builder.extractor_schema_digest
+                    == publication.id.publication.extractor_schema_digest
+        });
+        if selects_current_builder {
+            self.world_publications
+                .insert(world.clone(), publication.clone());
+        }
         self.retain_world_publication(world, publication);
         if self.sync_read_memory().is_err() {
             tracing::error!("Station read-memory envelope exceeded while installing publication");

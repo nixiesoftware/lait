@@ -2655,6 +2655,7 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
         marker: &'static str,
         block: Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
         started: Option<std::sync::mpsc::Sender<()>>,
+        finished: Option<std::sync::mpsc::Sender<()>>,
         submit_block: Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
         submit_started: Option<std::sync::mpsc::Sender<()>>,
     }
@@ -2670,6 +2671,7 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
                 marker,
                 block: None,
                 started: None,
+                finished: None,
                 submit_block: None,
                 submit_started: None,
             }
@@ -2679,9 +2681,11 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
             mut self,
             block: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
             started: std::sync::mpsc::Sender<()>,
+            finished: std::sync::mpsc::Sender<()>,
         ) -> Self {
             self.block = Some(block);
             self.started = Some(started);
+            self.finished = Some(finished);
             self
         }
 
@@ -2731,6 +2735,9 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
                 while !*released {
                     released = wake.wait(released).unwrap();
                 }
+            }
+            if let Some(finished) = &self.finished {
+                let _ = finished.send(());
             }
             let value = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
             let text = format!(
@@ -2798,12 +2805,13 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
     });
     let block = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let submit_block = Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new()));
     let (submit_started_tx, submit_started_rx) = std::sync::mpsc::channel();
     let old: Arc<dyn World> = Arc::new(VersionedNoteWorld::new(0x41, "old"));
     let current: Arc<dyn World> = Arc::new(
         VersionedNoteWorld::new(0x42, "new")
-            .blocking(block.clone(), started_tx)
+            .blocking(block.clone(), started_tx, finished_tx)
             .blocking_submit(submit_block.clone(), submit_started_tx),
     );
     let world = old.id();
@@ -2862,6 +2870,9 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
     let (released, wake) = &*block;
     *released.lock().unwrap() = true;
     wake.notify_all();
+    finished_rx
+        .recv_timeout(ENTERED)
+        .expect("new package extractor left its gate");
     frontier.join().unwrap();
     let current_session = Arc::new(dock.join().unwrap().unwrap());
     assert!(
