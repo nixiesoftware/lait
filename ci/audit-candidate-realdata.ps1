@@ -2,14 +2,32 @@
 # verified live-data snapshot, with the exact Issues World candidate installed.
 #
 # Everything here is disposable: the snapshot is extracted into a fresh audit
-# root, the World candidate is installed only there, and the audit ends by
+# home, the World candidate is installed only there, and the audit ends by
 # proving every original snapshot file byte-identical. The live Space is never
 # touched.
+#
+# The snapshot archive holds the ORBIT STORE — the contents of the live home's
+# orbital/<space>/ directory. It is extracted to that same place under the
+# audit home, because a Space store is discovered at <home>/orbital/<ws_...>
+# and nowhere else; a registry row whose path holds no such store is
+# navigation for a store that is "gone", and every use of it fails.
+#
+# Two acts cross the migration, and the audit performs both the way the
+# fleet does. The representation rebuild (implicit prior journal -> explicit
+# verified generation) is requested explicitly (host_orbit_rebuild) so its
+# counts can be pinned to the verified replay. The World implementation
+# adoption (the Space's active implementation advancing to the installed
+# release's, with the 0.9.3 runner migrating its own records) is driven by
+# the daemon's own consent lifecycle: the harness writes the durable
+# upgrade.json consent record already naming the staged release, because the
+# lifecycle's fetch phase resolves the real channel — which an isolated
+# pre-publication audit deliberately cannot reach — and the staged release
+# here IS the installed candidate.
 #
 # Usage:
 #   ci/audit-candidate-realdata.ps1 `
 #     -Candidate <lait.exe from the verified host candidate> `
-#     -Archive <live-data snapshot .tar> `
+#     -Archive <live-data snapshot .tar of the orbit store> `
 #     -WorldBundle <world-bundles-x86_64-pc-windows-msvc.tar.gz from the
 #                   verified world-candidate artifact> `
 #     -IssuesVersion 0.9.3 `
@@ -25,7 +43,12 @@ param(
     [Parameter(Mandatory = $true)] [string] $WorldBundle,
     [Parameter(Mandatory = $true)] [string] $IssuesVersion,
     [Parameter(Mandatory = $true)] [string] $IdentityKey,
-    [Parameter(Mandatory = $true)] [string] $AuditRoot
+    [Parameter(Mandatory = $true)] [string] $AuditRoot,
+    [string] $Space = "ws_38TLCQUD96NG9376CBELI5I5V2",
+    [int] $ExpectedFiles = 9189,
+    [int] $ExpectedEffects = 56,
+    [int] $ExpectedBodies = 463,
+    [int] $ExpectedReceipts = 5292
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,8 +56,9 @@ if (Test-Path -LiteralPath $AuditRoot) {
     throw "audit root already exists: $AuditRoot"
 }
 
-New-Item -ItemType Directory -Path $AuditRoot | Out-Null
-tar.exe -xf $Archive -C $AuditRoot
+$orbitDir = Join-Path $AuditRoot "orbital\$Space"
+New-Item -ItemType Directory -Path $orbitDir | Out-Null
+tar.exe -xf $Archive -C $orbitDir
 Copy-Item -LiteralPath $IdentityKey -Destination (Join-Path $AuditRoot "secret.key")
 
 # Install the exact Issues candidate the way the product records an
@@ -80,12 +104,13 @@ foreach ($recordPath in @(
     )
 }
 
-$excludedWorlds = "$AuditRoot\world-bundles-v1\*"
-$original = @(Get-ChildItem -LiteralPath $AuditRoot -Recurse -File | Where-Object {
-    $_.FullName -notlike $excludedWorlds -and $_.Name -ne "secret.key"
-})
-if ($original.Count -ne 9189) {
-    throw "expected 9189 source files, got $($original.Count)"
+# The census covers the prior store exactly: everything the snapshot put under
+# orbital/. The rebuild must only ADD (a generation directory, its selection);
+# any change to or loss of a prior file is a hard audit failure.
+$storeRoot = Join-Path $AuditRoot "orbital"
+$original = @(Get-ChildItem -LiteralPath $storeRoot -Recurse -File)
+if ($original.Count -ne $ExpectedFiles) {
+    throw "expected $ExpectedFiles source files, got $($original.Count)"
 }
 
 $before = @{}
@@ -98,7 +123,7 @@ foreach ($file in $original) {
 }
 
 $catalog = @([ordered]@{
-    space = "ws_38TLCQUD96NG9376CBELI5I5V2"
+    space = $Space
     name = "ISSUEWORLD"
     path = (Get-Item -LiteralPath $AuditRoot).FullName
     origin = "founded"
@@ -161,14 +186,75 @@ try {
         throw "expected the self-contained legacy Space, got $($spaces | ConvertTo-Json -Compress)"
     }
     $orbit = $spaces[0].id
+
+    # Cross the representation boundary with the exact candidate binary: the
+    # implicit prior journal becomes an explicit, verified, activated
+    # generation. This is the migration the fleet performs through the World
+    # upgrade lifecycle, and its counts are pinned to the verified replay.
+    $rebuild = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:$($announcement.port)/api/host/rpc" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body (@{ cmd = "host_orbit_rebuild"; orbit = $orbit } | ConvertTo-Json -Compress)
+    if ([int]$rebuild.effects -ne $ExpectedEffects `
+        -or [int]$rebuild.bodies -ne $ExpectedBodies `
+        -or [int]$rebuild.receipts -ne $ExpectedReceipts) {
+        throw "rebuild diverged from the verified replay: $($rebuild | ConvertTo-Json -Compress)"
+    }
+
+    # Consent to the World update the way the fleet records it, with the
+    # staged release already named: the daemon's lifecycle loop picks the
+    # durable record up within a tick and advances the Space's active World
+    # implementation under the installed candidate runner.
+    $operation = [byte[]]::new(16)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($operation)
+    $jobPath = Join-Path $worldRoot "upgrade.json"
+    $job = [ordered]@{
+        format = 2
+        world = $worldId
+        operation = @($operation)
+        phase = "migrating"
+        staged_version = $IssuesVersion
+        current_orbit = $null
+        after_orbit = $null
+        completed_spaces = 0
+        total_spaces = 0
+        completed_records = 0
+        remaining_records = $null
+        message = $null
+        updated_at = [uint64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    } | ConvertTo-Json -Compress
+    $jobStaging = "$jobPath.staging"
+    [System.IO.File]::WriteAllText($jobStaging, $job, [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $jobStaging -Destination $jobPath -Force
+
+    $adoptionDeadline = [DateTime]::UtcNow.AddMinutes(4)
+    $finalPhase = $null
+    do {
+        Start-Sleep -Milliseconds 500
+        try {
+            $state = Get-Content -LiteralPath $jobPath -Raw | ConvertFrom-Json
+            if ($state.phase -in @("verified", "refused")) { $finalPhase = $state }
+        } catch {
+            # The daemon replaces the record atomically; a read may land between.
+        }
+    } while (-not $finalPhase -and [DateTime]::UtcNow -lt $adoptionDeadline)
+    if (-not $finalPhase) {
+        throw "the World update lifecycle did not conclude: $(Get-Content -LiteralPath $jobPath -Raw)"
+    }
+    if ($finalPhase.phase -ne "verified") {
+        throw "the World update lifecycle refused: $($finalPhase | ConvertTo-Json -Compress)"
+    }
+
     $issueList = Invoke-RestMethod `
         -Method Post `
         -Uri "http://127.0.0.1:$($announcement.port)/api/spaces/$orbit/worlds/issues/rpc" `
         -Headers $headers `
         -ContentType "application/json" `
         -Body '{"cmd":"list","page":{}}'
-    if (-not $issueList) {
-        throw "the migrated Issues view was empty"
+    if (-not $issueList -or -not @($issueList.issues).Count) {
+        throw "the migrated Issues view was empty: $($issueList | ConvertTo-Json -Compress)"
     }
 
     $response = Invoke-RestMethod `
@@ -209,7 +295,7 @@ if ($missing.Count -or $changed.Count) {
     throw "source mutation: missing=$($missing.Count), changed=$($changed.Count)"
 }
 
-$activeGeneration = Join-Path $AuditRoot "active-generation"
+$activeGeneration = Join-Path $orbitDir "active-generation"
 if (-not (Test-Path -LiteralPath $activeGeneration)) {
     throw "active-generation absent after migration"
 }
@@ -218,12 +304,14 @@ if (-not (Test-Path -LiteralPath $activeGeneration)) {
     ReadyPort = $announcement.port
     Orbit = $orbit
     IssuesRelease = "$worldId $IssuesVersion ($releaseFiles files, sha256 $bundleDigest)"
+    Rebuild = ($rebuild | ConvertTo-Json -Compress)
+    Adoption = ($finalPhase | ConvertTo-Json -Compress)
     MigratedIssueRows = @($issueList.issues).Count
     HostRestart = ($response | ConvertTo-Json -Compress)
     OriginalFiles = $before.Count
     Missing = $missing.Count
     Changed = $changed.Count
     ActiveGeneration = (Get-Content -LiteralPath $activeGeneration -Raw).Trim()
-    GenerationDirectories = @(Get-ChildItem -LiteralPath (Join-Path $AuditRoot "generations") -Directory).Count
+    GenerationDirectories = @(Get-ChildItem -LiteralPath (Join-Path $orbitDir "generations") -Directory).Count
     TotalFiles = @(Get-ChildItem -LiteralPath $AuditRoot -Recurse -File).Count
 } | Format-List
