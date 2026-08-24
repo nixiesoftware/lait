@@ -797,8 +797,21 @@ fn prior_body_snapshot(body: &PriorBodyEvidence) -> Result<fabric::BodySnapshot,
         return Err(Failure::BodyKeyUnavailable);
     }
     let mut engine = fabric::Engine::new();
-    for head in &body.heads {
-        let material = head.material.as_ref().ok_or(Failure::BodyKeyUnavailable)?;
+    let material = body
+        .heads
+        .iter()
+        .filter_map(|head| head.material.as_ref())
+        .filter(|material| {
+            body.binding.mutation_model == super::MUTATION_COLLABORATIVE
+                || material.resulting_frontier == body.chain
+        })
+        .collect::<Vec<_>>();
+    if material.is_empty()
+        || (body.binding.mutation_model != super::MUTATION_COLLABORATIVE && material.len() != 1)
+    {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    for material in material {
         let status = engine
             .import_body(&fabric_key(&body.key), &material.payload)
             .map_err(Failure::Engine)?;
@@ -903,10 +916,11 @@ impl Replica {
             return Err(Failure::BodyKeyUnavailable);
         }
 
-        let snapshots = rows
+        let mut snapshots = rows
             .iter()
             .map(|(body, snapshot)| (fabric_key(&body.key), snapshot.clone()))
             .collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| left.0.cmp(&right.0));
         let fabric = lock_fabric(&self.fabric)
             .prepare_verified_snapshots(&snapshots)
             .map_err(Failure::Engine)?;
@@ -1971,6 +1985,170 @@ mod tests {
         )
         .unwrap();
         (root, key, value)
+    }
+
+    fn prior_head(material: PriorOpenedMaterial, byte: u8) -> PriorHeadEvidence {
+        PriorHeadEvidence {
+            descriptor_hash: [byte; 32],
+            transaction_commitment: [byte; 32],
+            transaction: PriorTransactionEvidence {
+                id: [byte; 32],
+                bytes: Arc::from([byte]),
+                parent_manifest_root: [byte; 32],
+                replica_frontier: material.resulting_frontier,
+                authority_frontier: AuthorityFrontier::from_canonical_bytes(Vec::new()),
+                actor: "act_0000000000000000000000000000000000000000000000000000000000000000"
+                    .into(),
+                signer: [byte; 32],
+                intent_digest: [byte; 32],
+                operations_digest: [byte; 32],
+                demand: vec![byte],
+            },
+            material: Some(material),
+        }
+    }
+
+    fn prior_body(
+        mutation_model: u8,
+        chain: ReplicaFrontier,
+        heads: Vec<PriorHeadEvidence>,
+    ) -> PriorBodyEvidence {
+        PriorBodyEvidence {
+            key: BodyKey::new(
+                crate::body::WorldId::parse("com.example.prior").unwrap(),
+                crate::body::BodyId::from_bytes([0x79; 16]),
+            ),
+            binding: super::super::BodyBinding {
+                schema: crate::body::SchemaId::parse("fact").unwrap(),
+                schema_version: 1,
+                encoding: crate::body::EncodingId::parse("bytes").unwrap(),
+                mutation_model,
+            },
+            chain,
+            interpreted: true,
+            heads,
+            content_refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prior_atomic_snapshot_selects_only_the_committed_winner() {
+        let stale = ReplicaFrontier::new([0x10; 32], 1);
+        let winner = ReplicaFrontier::new([0x20; 32], 2);
+        let body = prior_body(
+            super::super::MUTATION_ATOMIC,
+            winner,
+            vec![
+                prior_head(
+                    PriorOpenedMaterial {
+                        epoch: PRIOR_EPOCH,
+                        payload: fabric::BodyExport::Atomic(b"stale".to_vec()),
+                        base_frontier: ReplicaFrontier::EMPTY,
+                        resulting_frontier: stale,
+                    },
+                    0x10,
+                ),
+                prior_head(
+                    PriorOpenedMaterial {
+                        epoch: PRIOR_EPOCH,
+                        payload: fabric::BodyExport::Atomic(b"winner".to_vec()),
+                        base_frontier: stale,
+                        resulting_frontier: winner,
+                    },
+                    0x20,
+                ),
+            ],
+        );
+        assert_eq!(
+            prior_body_snapshot(&body).unwrap().read().unwrap(),
+            b"winner"
+        );
+
+        let duplicate_winner = prior_head(
+            PriorOpenedMaterial {
+                epoch: PRIOR_EPOCH,
+                payload: fabric::BodyExport::Atomic(b"counterfeit".to_vec()),
+                base_frontier: stale,
+                resulting_frontier: winner,
+            },
+            0x21,
+        );
+        let mut ambiguous = body;
+        ambiguous.heads.push(duplicate_winner);
+        assert_eq!(
+            prior_body_snapshot(&ambiguous).unwrap_err(),
+            Failure::Integrity(Defect::CorruptMaterial)
+        );
+    }
+
+    #[test]
+    fn prior_collaborative_snapshot_merges_every_committed_head() {
+        let key = fabric::Key::from_bytes(b"prior-collaborative".to_vec());
+        let export = |text: &str| {
+            let mut engine = fabric::Engine::new();
+            engine
+                .commit(fabric::Transaction::new(
+                    text,
+                    vec![fabric::Op::TextSplice {
+                        key: key.clone(),
+                        path: "description".into(),
+                        index: 0,
+                        delete: 0,
+                        insert: text.into(),
+                    }],
+                ))
+                .unwrap();
+            engine.export_body(&key).unwrap()
+        };
+        let left = export("left");
+        let right = export("right");
+        let left_frontier = ReplicaFrontier::new([0x30; 32], 1);
+        let right_frontier = ReplicaFrontier::new([0x40; 32], 1);
+        let chain = super::super::combine_chains(&left_frontier, &right_frontier);
+        let body = prior_body(
+            super::super::MUTATION_COLLABORATIVE,
+            chain,
+            vec![
+                prior_head(
+                    PriorOpenedMaterial {
+                        epoch: PRIOR_EPOCH,
+                        payload: left.clone(),
+                        base_frontier: ReplicaFrontier::EMPTY,
+                        resulting_frontier: left_frontier,
+                    },
+                    0x30,
+                ),
+                prior_head(
+                    PriorOpenedMaterial {
+                        epoch: PRIOR_EPOCH,
+                        payload: right.clone(),
+                        base_frontier: ReplicaFrontier::EMPTY,
+                        resulting_frontier: right_frontier,
+                    },
+                    0x40,
+                ),
+            ],
+        );
+        let actual = prior_body_snapshot(&body).unwrap();
+        let projected = actual.read_collaborative().unwrap();
+        let text = projected.texts.get("description").unwrap();
+        assert!(text.contains("left"));
+        assert!(text.contains("right"));
+
+        let mut expected = fabric::Engine::new();
+        expected.import_body(&fabric_key(&body.key), &left).unwrap();
+        expected
+            .import_body(&fabric_key(&body.key), &right)
+            .unwrap();
+        assert_eq!(
+            actual.canonical_export_shared().as_ref(),
+            expected
+                .body_snapshot(&fabric_key(&body.key))
+                .unwrap()
+                .unwrap()
+                .canonical_export_shared()
+                .as_ref()
+        );
     }
 
     #[test]
