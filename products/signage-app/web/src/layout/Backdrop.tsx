@@ -3,14 +3,9 @@ import React from "react";
 
 const Backdrop: React.FC = () => {
   const { isMobileOpen, toggleMobileSidebar } = useSidebar();
-
   if (!isMobileOpen) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-9999 bg-gray-900/50 lg:hidden"
-      onClick={toggleMobileSidebar}
-    />
+    <div className="ds-backdrop" style={{ zIndex: 40 }} onClick={toggleMobileSidebar} />
   );
 };
 

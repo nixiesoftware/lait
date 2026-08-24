@@ -1,11 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import Button from "@/components/ui/button/Button";
-import Input from "@/components/form/input/InputField";
-import { useModal } from "@/hooks/useModal";
-import { ConfirmationModal } from "@/components/ui/ConfirmationModal";
-import { ArrowLeft, Calendar, Check, Plus, Trash2, X } from "lucide-react";
-import { PencilIcon } from "../../../../../../public/images/icons/theme-icons";
+import { ArrowLeft, Monitor, Plus, Trash2 } from "lucide-react";
+import { Confirm, Inspector, Page, haptic, useToast } from "@/ds";
 import {
   fetchScreen,
   saveScreen,
@@ -36,32 +32,15 @@ interface ScreenDetailProps {
   screenId: string;
 }
 
-interface AlertProps {
-  variant: "success" | "error";
-  children: React.ReactNode;
-  onClose?: () => void;
-}
-
-const Alert: React.FC<AlertProps> = ({ variant, children, onClose }) => {
-  const bgColor = variant === "success" ? "bg-green-50 border-green-200 text-green-800 dark:bg-green-900/50 dark:border-green-800 dark:text-green-200" : "bg-red-50 border-red-200 text-red-800 dark:bg-red-900/50 dark:border-red-800 dark:text-red-200";
-
-  return (
-    <div className={`absolute bottom-3 mx-auto border rounded-lg p-4 ${bgColor}`}>
-      <div className="flex justify-between items-start">
-        <div>{children}</div>
-        {onClose && (
-          <button onClick={onClose} className="ml-2 text-current opacity-70 hover:opacity-100">
-            ×
-          </button>
-        )}
-      </div>
-    </div>
-  );
-};
-
 const RECURRENCES: Recurrence[] = ["none", "daily", "weekly", "monthly"];
 
-/** datetime-local carries a civil datetime; the wire wants seconds too. */
+const RECURRENCE_LABEL: Record<Recurrence, string> = {
+  none: "Once",
+  daily: "Daily",
+  weekly: "Weekly",
+  monthly: "Monthly",
+};
+
 function toCivil(value: string): string {
   return value.length === 16 ? `${value}:00` : value;
 }
@@ -74,29 +53,30 @@ function formatDuration(ms: number): string {
   return ms % 60000 === 0 ? `${ms / 60000} min` : `${ms / 1000} s`;
 }
 
+function formatWindowWhen(row: ProgramWindow): string {
+  const start = row.start_local.replace("T", " ").slice(0, 16);
+  return `${RECURRENCE_LABEL[row.recurrence]} · ${start} · ${formatDuration(row.duration_ms)}`;
+}
+
 export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
   const navigate = useNavigate();
-  const deleteModal = useModal();
+  const toast = useToast();
 
   const [screen, setScreen] = useState<SignageScreen | null>(null);
   const [programs, setPrograms] = useState<SignageProgram[]>([]);
   const [groups, setGroups] = useState<SignageGroup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
 
-  // Form states
   const [name, setName] = useState("");
   const [selectedProgramId, setSelectedProgramId] = useState<string>("");
 
-  // Override form
   const [overrideProgramId, setOverrideProgramId] = useState<string>("");
   const [overrideUntil, setOverrideUntil] = useState("");
   const [settingOverride, setSettingOverride] = useState(false);
 
-  // Schedule window form
   const [showWindowForm, setShowWindowForm] = useState(false);
   const [editingWindowId, setEditingWindowId] = useState<string | null>(null);
   const [wfProgram, setWfProgram] = useState("");
@@ -104,7 +84,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
   const [wfDurationMin, setWfDurationMin] = useState("60");
   const [wfRecurrence, setWfRecurrence] = useState<Recurrence>("none");
   const [wfTimezone, setWfTimezone] = useState(
-    Intl.DateTimeFormat().resolvedOptions().timeZone
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
   );
   const [wfPriority, setWfPriority] = useState("0");
   const [wfEnabled, setWfEnabled] = useState(true);
@@ -113,7 +93,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
 
   const programNames = useMemo(
     () => new Map(programs.map((p) => [p.id, p.name])),
-    [programs]
+    [programs],
   );
 
   const refreshScreen = useCallback(async () => {
@@ -136,20 +116,14 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
       setLoading(true);
       await Promise.all([
         refreshScreen(),
-        fetchPrograms().then(setPrograms).catch((err) => {
-          console.error("Failed to fetch broadcasts:", err);
-        }),
-        fetchGroups().then(setGroups).catch((err) => {
-          console.error("Failed to fetch networks:", err);
-        }),
+        fetchPrograms().then(setPrograms).catch(() => undefined),
+        fetchGroups().then(setGroups).catch(() => undefined),
       ]);
       setLoading(false);
     };
-
-    loadData();
+    void loadData();
   }, [refreshScreen]);
 
-  // The ladder's inputs — resolution belongs to the engine
   const activeOverride =
     screen?.intent.over && screen.intent.over.until_unix_ms > Date.now()
       ? screen.intent.over
@@ -158,41 +132,18 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
     ? groups.find((g) => g.id === screen.group) ?? null
     : null;
 
-  const handleSaveAll = async () => {
+  const saveName = async () => {
     if (!screen) return;
-    setSaving(true);
+    const next = name.trim();
+    if (!next || next === screen.name) return;
     setError("");
-    setSuccess("");
-
     try {
-      const successMessages: string[] = [];
-
-      if (name.trim() && name.trim() !== screen.name) {
-        await saveScreen({ ...screen, name: name.trim() });
-        successMessages.push("Screen renamed");
-      }
-
-      const currentDirect = screen.intent.base?.member ?? "";
-      if (selectedProgramId !== currentDirect) {
-        if (selectedProgramId) {
-          await assignProgramToScreen(screenId, selectedProgramId);
-          successMessages.push("Broadcast assigned");
-        } else {
-          await removeProgramFromScreen(screenId);
-          successMessages.push("Broadcast cleared");
-        }
-      }
-
-      if (successMessages.length > 0) {
-        setSuccess(successMessages.join(" and ") + " successfully");
-        await refreshScreen();
-      } else {
-        setSuccess("No changes to save");
-      }
+      await saveScreen({ ...screen, name: next });
+      haptic("save");
+      await refreshScreen();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save changes");
-    } finally {
-      setSaving(false);
+      setError(err instanceof Error ? err.message : "Failed to rename screen");
+      haptic("error");
     }
   };
 
@@ -200,25 +151,31 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
     setError("");
     try {
       await setScreenGroup(screenId, groupId || null);
+      haptic("save");
       await refreshScreen();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to move screen");
+      haptic("error");
     }
   };
 
-  const handleClearDirect = async () => {
+  const handleProgramChange = async (programId: string) => {
+    setSelectedProgramId(programId);
     setError("");
     try {
-      await removeProgramFromScreen(screenId);
+      if (programId) await assignProgramToScreen(screenId, programId);
+      else await removeProgramFromScreen(screenId);
+      haptic("save");
       await refreshScreen();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear broadcast");
+      setError(err instanceof Error ? err.message : "Failed to assign program");
+      haptic("error");
     }
   };
 
   const handleSetOverride = async () => {
     if (!overrideProgramId || !overrideUntil) {
-      setError("Pick a broadcast and an end time for the override");
+      setError("Pick a program and an end time for the override");
       return;
     }
     setSettingOverride(true);
@@ -227,13 +184,15 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
       await setScreenOverride(
         screenId,
         overrideProgramId,
-        new Date(overrideUntil).getTime()
+        new Date(overrideUntil).getTime(),
       );
       setOverrideProgramId("");
       setOverrideUntil("");
+      haptic("save");
       await refreshScreen();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to set override");
+      haptic("error");
     } finally {
       setSettingOverride(false);
     }
@@ -243,9 +202,11 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
     setError("");
     try {
       await clearScreenOverride(screenId);
+      haptic("save");
       await refreshScreen();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to clear override");
+      haptic("error");
     }
   };
 
@@ -258,6 +219,12 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
     setWfPriority("0");
     setWfEnabled(true);
     setWindowFormError("");
+  };
+
+  const closeWindowForm = () => {
+    setShowWindowForm(false);
+    setEditingWindowId(null);
+    resetWindowForm();
   };
 
   const handleEditWindow = (row: ProgramWindow) => {
@@ -276,7 +243,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
   const handleSaveWindow = async () => {
     setWindowFormError("");
     if (!wfProgram || !wfStart || !wfTimezone.trim()) {
-      setWindowFormError("Broadcast, start, and timezone are required");
+      setWindowFormError("Program, start, and timezone are required");
       return;
     }
     const durationMin = Number(wfDurationMin);
@@ -314,12 +281,12 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
       } else {
         await addScheduleWindow(screenId, wfProgram, window);
       }
-      setShowWindowForm(false);
-      setEditingWindowId(null);
-      resetWindowForm();
+      closeWindowForm();
+      haptic("save");
       await refreshScreen();
     } catch (err) {
       setWindowFormError(err instanceof Error ? err.message : "Failed to save window");
+      haptic("error");
     } finally {
       setSavingWindow(false);
     }
@@ -328,410 +295,389 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
   const handleDeleteWindow = async (windowId: string) => {
     try {
       await deleteScheduleWindow(screenId, windowId);
+      haptic("delete");
       await refreshScreen();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete window");
+      haptic("error");
     }
   };
 
   const handleDelete = async () => {
     setDeleting(true);
     setError("");
-
     try {
       await deleteScreen(screenId);
+      haptic("delete");
       navigate({ to: "/screen-list" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete screen");
+      haptic("error");
       setDeleting(false);
     }
   };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-lg">Loading screen details...</div>
-      </div>
+      <Page>
+        <p className="ds-hint">Loading screen…</p>
+      </Page>
     );
   }
 
   if (!screen) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-lg text-red-500">Screen not found</div>
-      </div>
+      <Page>
+        <p className="ds-danger-text">Screen not found</p>
+      </Page>
     );
   }
 
-  const handleBackClick = () => {
-    window.history.back();
-  };
-
   const directProgramName = screen.intent.base
-    ? programNames.get(screen.intent.base.member) ?? "Unknown broadcast"
+    ? programNames.get(screen.intent.base.member) ?? "Unknown program"
     : null;
   const groupProgramName = group?.intent.base
-    ? programNames.get(group.intent.base.member) ?? "Unknown broadcast"
+    ? programNames.get(group.intent.base.member) ?? "Unknown program"
+    : null;
+  const overrideProgramName = activeOverride
+    ? programNames.get(activeOverride.choice.member) ?? "Unknown program"
     : null;
 
+  const playingName = overrideProgramName ?? directProgramName ?? groupProgramName;
+  const playingKicker = activeOverride
+    ? `Override until ${new Date(activeOverride.until_unix_ms).toLocaleString()}`
+    : directProgramName
+      ? "This screen’s own choice"
+      : group
+        ? `Following ${group.name}`
+        : "Nothing assigned";
+
   return (
-    <div className="space-y-6">
-      {error && (
-        <Alert variant="error" onClose={() => setError("")}>
-          {error}
-        </Alert>
-      )}
-
-      {success && (
-        <Alert variant="success" onClose={() => setSuccess("")}>
-          {success}
-        </Alert>
-      )}
-
-      <div className="flex flex-row justify-between items-center">
-        <div className="flex flex-row items-center gap-4">
-          {/* Back Button */}
+    <Page>
+      <header className="ds-page-head">
+        <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
           <button
-            onClick={handleBackClick}
-            className="p-2 hover:bg-gray-800/20 dark:hover:bg-gray-50/20 rounded-md transition-colors"
+            type="button"
+            className="ds-icon"
+            aria-label="Back"
+            onClick={() => navigate({ to: "/screen-list" })}
           >
-            <ArrowLeft className="w-5 h-5 text-gray-800 dark:text-white" />
+            <ArrowLeft size={20} />
           </button>
-          <h2 className="text-3xl font-semibold dark:text-white">{screen.name}</h2>
+          <h1 className="ds-page-title">{screen.name}</h1>
         </div>
         <button
-          onClick={deleteModal.openModal}
-          className="text-red-600 !border-none hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20 mr-2 p-2 rounded-md"
+          type="button"
+          className="ds-icon"
+          aria-label="Delete screen"
+          onClick={() => setDeleteOpen(true)}
         >
-          <Trash2 className="w-5 h-5"/>
+          <Trash2 size={18} />
         </button>
-      </div>
+      </header>
 
-      {/* Screen settings: name, network, direct broadcast */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
-            <Input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="!h-11"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Network</label>
-            <select
-              className="h-11 w-full appearance-none rounded-md border border-gray-300 px-4 py-2.5 text-sm shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
-              value={screen.group ?? ""}
-              onChange={(e) => handleGroupChange(e.target.value)}
-            >
-              <option value="">No network</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Broadcast</label>
-            <select
-              className="h-11 w-full appearance-none rounded-md border border-gray-300 px-4 py-2.5 text-sm shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
-              value={selectedProgramId}
-              onChange={(e) => setSelectedProgramId(e.target.value)}
-            >
-              <option value="">None (follow network)</option>
-              {programs.map((program) => (
-                <option key={program.id} value={program.id}>
-                  {program.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            onClick={handleSaveAll}
-            disabled={saving || !name.trim()}
-            className="px-8"
-          >
-            {saving ? "Saving..." : "Save"}
-          </Button>
-          {screen.intent.base && (
-            <Button variant="outline" onClick={handleClearDirect}>
-              Clear broadcast
-            </Button>
-          )}
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            {directProgramName
-              ? `This screen chooses "${directProgramName}" itself.`
-              : group
-                ? groupProgramName
-                  ? `No choice of its own — follows "${group.name}" (${groupProgramName}).`
-                  : `No choice of its own — follows "${group.name}", which has no broadcast either.`
-                : "No broadcast chosen and no network to fall back to."}
-          </p>
-        </div>
-      </div>
+      {error && <p className="ds-danger-text">{error}</p>}
 
-      {/* Override — beats everything until a stated moment */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
-        <div className="flex items-center gap-2">
-          <h3 className="text-lg font-medium dark:text-white">Override</h3>
-          {activeOverride && (
-            <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200 rounded-full">
-              Active
+      <div className="ds-hero">
+        <span className="ds-bezel">
+          {playingName ? (
+            <span className="ds-bezel-copy">
+              <em>{activeOverride ? "Override" : "Playing"}</em>
+              <strong>{playingName}</strong>
             </span>
+          ) : (
+            <Monitor size={22} strokeWidth={1.6} />
           )}
+        </span>
+        <div className="ds-hero-copy">
+          <h2>{playingName ?? "Idle"}</h2>
+          <p>{playingKicker}</p>
+        </div>
+      </div>
+
+      <section className="ds-set">
+        <div className="ds-set-head">
+          <div>
+            <h2>Screen</h2>
+            <p>Name, network, and the standing program.</p>
+          </div>
+        </div>
+        <label className="ds-set-row">
+          <span>Name</span>
+          <input
+            className="ds-input"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            onBlur={() => void saveName()}
+          />
+        </label>
+        <label className="ds-set-row">
+          <span>Network</span>
+          <select
+            className="ds-input"
+            value={screen.group ?? ""}
+            onChange={(event) => void handleGroupChange(event.target.value)}
+          >
+            <option value="">No network</option>
+            {groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ds-set-row">
+          <span>Program</span>
+          <select
+            className="ds-input"
+            value={selectedProgramId}
+            onChange={(event) => void handleProgramChange(event.target.value)}
+          >
+            <option value="">None (follow network)</option>
+            {programs.map((program) => (
+              <option key={program.id} value={program.id}>
+                {program.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      <section className="ds-set">
+        <div className="ds-set-head">
+          <div>
+            <h2>
+              Override{" "}
+              {activeOverride && <span className="ds-badge is-warn">Active</span>}
+            </h2>
+            <p>Takes the screen until a stated moment, then the standing choice returns.</p>
+          </div>
         </div>
         {activeOverride ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <p className="text-sm text-gray-700 dark:text-gray-300">
-              {programNames.get(activeOverride.choice.member) ?? "Unknown broadcast"}
-              {" "}until {new Date(activeOverride.until_unix_ms).toLocaleString()}
-            </p>
-            <Button size="sm" variant="outline" onClick={handleClearOverride}>
-              <X className="w-4 h-4 mr-1" />
-              Clear override
-            </Button>
+          <div className="ds-event">
+            <div>
+              <strong>{overrideProgramName}</strong>
+              <em>Until {new Date(activeOverride.until_unix_ms).toLocaleString()}</em>
+            </div>
+            <button
+              type="button"
+              className="ds-btn ds-btn-ghost"
+              onClick={() => void handleClearOverride()}
+            >
+              Clear
+            </button>
           </div>
         ) : (
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Broadcast</label>
+          <>
+            <label className="ds-set-row">
+              <span>Program</span>
               <select
+                className="ds-input"
                 value={overrideProgramId}
-                onChange={(e) => setOverrideProgramId(e.target.value)}
-                className="h-9 rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
+                onChange={(event) => setOverrideProgramId(event.target.value)}
               >
-                <option value="">Select broadcast...</option>
+                <option value="">Select…</option>
                 {programs.map((program) => (
-                  <option key={program.id} value={program.id}>{program.name}</option>
+                  <option key={program.id} value={program.id}>
+                    {program.name}
+                  </option>
                 ))}
               </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Until</label>
-              <input
-                type="datetime-local"
-                value={overrideUntil}
-                onChange={(e) => setOverrideUntil(e.target.value)}
-                className="h-9 rounded-md border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-              />
-            </div>
-            <Button
-              size="sm"
-              onClick={handleSetOverride}
-              disabled={settingOverride || !overrideProgramId || !overrideUntil}
-            >
-              {settingOverride ? "Setting..." : "Set override"}
-            </Button>
-          </div>
-        )}
-      </div>
-
-      {/* Schedule Section */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <Calendar className="w-4 h-4 text-gray-500 dark:text-gray-400" />
-            <h3 className="text-lg font-medium dark:text-white">Scheduled Broadcasts</h3>
-          </div>
-          {!showWindowForm && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setEditingWindowId(null);
-                resetWindowForm();
-                setShowWindowForm(true);
-              }}
-            >
-              <Plus className="w-4 h-4 mr-1" />
-              Add Window
-            </Button>
-          )}
-        </div>
-
-        {/* Window form (add or edit) */}
-        {showWindowForm && (
-          <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-md border border-gray-200 dark:border-gray-700 space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Broadcast</label>
-                <select
-                  value={wfProgram}
-                  onChange={(e) => setWfProgram(e.target.value)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                >
-                  <option value="">Select broadcast...</option>
-                  {programs.map((program) => (
-                    <option key={program.id} value={program.id}>{program.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Start (local time)</label>
+            </label>
+            <div className="ds-set-row">
+              <span>Until</span>
+              <div className="ds-page-actions">
                 <input
+                  className="ds-input"
                   type="datetime-local"
-                  value={wfStart}
-                  onChange={(e) => setWfStart(e.target.value)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
+                  value={overrideUntil}
+                  onChange={(event) => setOverrideUntil(event.target.value)}
                 />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Duration (minutes)</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={wfDurationMin}
-                  onChange={(e) => setWfDurationMin(e.target.value)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Recurrence</label>
-                <select
-                  value={wfRecurrence}
-                  onChange={(e) => setWfRecurrence(e.target.value as Recurrence)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
+                <button
+                  type="button"
+                  className="ds-btn ds-btn-solid"
+                  disabled={settingOverride || !overrideProgramId || !overrideUntil}
+                  onClick={() => void handleSetOverride()}
                 >
-                  {RECURRENCES.map((r) => (
-                    <option key={r} value={r}>{r}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Timezone (IANA)</label>
-                <input
-                  type="text"
-                  value={wfTimezone}
-                  onChange={(e) => setWfTimezone(e.target.value)}
-                  placeholder="America/Chicago"
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                />
-              </div>
-              <div className="flex items-end gap-3">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Priority</label>
-                  <input
-                    type="number"
-                    value={wfPriority}
-                    onChange={(e) => setWfPriority(e.target.value)}
-                    className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                  />
-                </div>
-                <label className="flex items-center gap-2 h-9 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={wfEnabled}
-                    onChange={(e) => setWfEnabled(e.target.checked)}
-                    className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500 dark:border-gray-600 dark:bg-gray-800"
-                  />
-                  <span className="text-sm text-gray-700 dark:text-gray-300">Enabled</span>
-                </label>
+                  {settingOverride ? "Setting…" : "Set"}
+                </button>
               </div>
             </div>
-            {windowFormError && (
-              <p className="text-xs text-red-600 dark:text-red-400">{windowFormError}</p>
-            )}
-            <div className="flex gap-2">
-              <Button size="sm" onClick={handleSaveWindow} disabled={savingWindow}>
-                <Check className="w-4 h-4 mr-1" />
-                {savingWindow ? "Saving..." : editingWindowId ? "Update" : "Create"}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { setShowWindowForm(false); setEditingWindowId(null); resetWindowForm(); }}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
+          </>
         )}
+      </section>
 
-        {/* Window table — the schedule as data; what plays now is the engine's call */}
+      <section className="ds-set">
+        <div className="ds-set-head">
+          <div>
+            <h2>Schedule</h2>
+            <p>Windows that take the screen at a time. Resolution stays with the engine.</p>
+          </div>
+          <button
+            type="button"
+            className="ds-btn ds-btn-ghost"
+            onClick={() => {
+              setEditingWindowId(null);
+              resetWindowForm();
+              setShowWindowForm(true);
+            }}
+          >
+            <Plus size={16} />
+            Add
+          </button>
+        </div>
         {screen.schedule.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-                  <th className="py-2 pr-3 font-medium">Broadcast</th>
-                  <th className="py-2 pr-3 font-medium">Start (local)</th>
-                  <th className="py-2 pr-3 font-medium">Duration</th>
-                  <th className="py-2 pr-3 font-medium">Recurrence</th>
-                  <th className="py-2 pr-3 font-medium">Timezone</th>
-                  <th className="py-2 pr-3 font-medium">Priority</th>
-                  <th className="py-2 pr-3 font-medium">Enabled</th>
-                  <th className="py-2 font-medium"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                {screen.schedule.map((row) => (
-                  <tr key={row.id} className={row.enabled ? "" : "opacity-50"}>
-                    <td className="py-2 pr-3 font-medium dark:text-white">
-                      {programNames.get(row.program) ?? "Unknown broadcast"}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {row.start_local.replace("T", " ")}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {formatDuration(row.duration_ms)}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.recurrence}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {row.timezone}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.priority}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.enabled ? "Yes" : "No"}
-                    </td>
-                    <td className="py-2">
-                      <div className="flex items-center gap-1 justify-end">
-                        <button
-                          onClick={() => handleEditWindow(row)}
-                          className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800"
-                          title="Edit"
-                        >
-                          <PencilIcon className="w-4 h-4" viewBox="0 0 22 22" />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteWindow(row.id)}
-                          className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800"
-                          title="Delete"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          screen.schedule.map((row) => (
+            <div
+              key={row.id}
+              className={`ds-event${row.enabled ? "" : " is-off"}`}
+            >
+              <div>
+                <strong>{programNames.get(row.program) ?? "Unknown program"}</strong>
+                <em>{formatWindowWhen(row)}</em>
+              </div>
+              <div className="ds-page-actions">
+                <button
+                  type="button"
+                  className="ds-btn ds-btn-quiet"
+                  onClick={() => handleEditWindow(row)}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="ds-icon"
+                  aria-label="Delete window"
+                  onClick={() => void handleDeleteWindow(row.id)}
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))
         ) : (
-          !showWindowForm && (
-            <p className="text-sm text-gray-400 dark:text-gray-500 text-center py-4">
-              No scheduled broadcasts. Add a window to schedule content.
-            </p>
-          )
+          <p className="ds-hint" style={{ padding: "4px 16px 16px" }}>
+            No scheduled windows.
+          </p>
         )}
-      </div>
+      </section>
 
-      <ConfirmationModal
-        isOpen={deleteModal.isOpen}
-        onClose={deleteModal.closeModal}
-        showCloseButton={false}
+      <Inspector
+        open={showWindowForm}
+        onOpenChange={(open) => {
+          if (!open) closeWindowForm();
+        }}
+        className="ds-app-setup"
+        title={editingWindowId ? "Edit window" : "Add window"}
+        actions={
+          <>
+            <button
+              type="button"
+              className="ds-btn ds-btn-quiet"
+              onClick={closeWindowForm}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="ds-btn ds-btn-solid"
+              disabled={savingWindow}
+              onClick={() => void handleSaveWindow()}
+            >
+              {savingWindow ? "Saving…" : editingWindowId ? "Update" : "Create"}
+            </button>
+          </>
+        }
+      >
+        <label className="ds-field">
+          <span>Program</span>
+          <select
+            className="ds-input"
+            value={wfProgram}
+            onChange={(event) => setWfProgram(event.target.value)}
+          >
+            <option value="">Select…</option>
+            {programs.map((program) => (
+              <option key={program.id} value={program.id}>
+                {program.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ds-field">
+          <span>Start (local)</span>
+          <input
+            className="ds-input"
+            type="datetime-local"
+            value={wfStart}
+            onChange={(event) => setWfStart(event.target.value)}
+          />
+        </label>
+        <label className="ds-field">
+          <span>Duration (minutes)</span>
+          <input
+            className="ds-input"
+            type="number"
+            min={1}
+            value={wfDurationMin}
+            onChange={(event) => setWfDurationMin(event.target.value)}
+          />
+        </label>
+        <label className="ds-field">
+          <span>Recurrence</span>
+          <select
+            className="ds-input"
+            value={wfRecurrence}
+            onChange={(event) => setWfRecurrence(event.target.value as Recurrence)}
+          >
+            {RECURRENCES.map((r) => (
+              <option key={r} value={r}>
+                {RECURRENCE_LABEL[r]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ds-field">
+          <span>Timezone (IANA)</span>
+          <input
+            className="ds-input"
+            value={wfTimezone}
+            placeholder="America/Chicago"
+            onChange={(event) => setWfTimezone(event.target.value)}
+          />
+        </label>
+        <label className="ds-field">
+          <span>Priority</span>
+          <input
+            className="ds-input"
+            type="number"
+            value={wfPriority}
+            onChange={(event) => setWfPriority(event.target.value)}
+          />
+        </label>
+        <label
+          className="ds-field"
+          style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+        >
+          <input
+            type="checkbox"
+            checked={wfEnabled}
+            onChange={(event) => setWfEnabled(event.target.checked)}
+          />
+          <span>Enabled</span>
+        </label>
+        {windowFormError && <p className="ds-danger-text">{windowFormError}</p>}
+      </Inspector>
+
+      <Confirm
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title={`Delete “${screen.name}”?`}
+        description="This cannot be undone."
+        confirmLabel={deleting ? "Deleting…" : "Delete"}
+        danger
         onConfirm={handleDelete}
-        title={`Delete "${screen.name}"`}
-        message={`This action cannot be undone.`}
-        confirmText={deleting ? "Deleting..." : "Delete"}
-        variant="danger"
       />
-    </div>
+    </Page>
   );
 };

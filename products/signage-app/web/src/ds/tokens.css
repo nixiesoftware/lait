@@ -63,6 +63,10 @@
   padding: 0 14px;
   border-radius: var(--ds-radius-md);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   transition:
     background var(--ds-duration-sm) var(--ds-ease-out),
     color var(--ds-duration-sm) var(--ds-ease-out),

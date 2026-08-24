@@ -6,7 +6,7 @@ interface ScreenListSearch {
 }
 
 function ScreenListPage() {
-  document.title = 'Screens | AD2SP';
+  document.title = 'Screens | Signage';
   return <ScreenList />;
 }
 
