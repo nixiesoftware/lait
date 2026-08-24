@@ -366,6 +366,27 @@ impl ReachPlane {
         audience: Audience,
         reader: &Standing,
     ) -> Result<Announcement, Failure> {
+        self.publish(audience, reader, None)
+    }
+
+    /// [`Self::announce`], presenting: the portrait's avowals are sealed at
+    /// the same bumped epoch, so who-this-is rides the identical rail as
+    /// which-devices-are-it and supersedes the same way.
+    pub fn announce_presenting(
+        &mut self,
+        audience: Audience,
+        reader: &Standing,
+        portrait: &addressbook::Portrait,
+    ) -> Result<Announcement, Failure> {
+        self.publish(audience, reader, Some(portrait))
+    }
+
+    fn publish(
+        &mut self,
+        audience: Audience,
+        reader: &Standing,
+        portrait: Option<&addressbook::Portrait>,
+    ) -> Result<Announcement, Failure> {
         self.epoch = self.epoch.saturating_add(1);
         // Derived from the epoch rather than sampled, so a republication is
         // reproducible from durable state alone. It carries 8 bits and repeats
@@ -375,6 +396,16 @@ impl ReachPlane {
         // secret and must never become one; a real source belongs here the
         // moment anything depends on it being unguessable.
         let nonce = [u8::try_from(self.epoch & 0xff).unwrap_or(0); 16];
+        if let Some(portrait) = portrait {
+            self.registry.avow_portrait(
+                &self.profile,
+                portrait,
+                audience.clone(),
+                &self.canonical_seed(),
+                self.epoch,
+                nonce,
+            )?;
+        }
         self.registry.avow_reachable(
             &self.profile,
             audience,
@@ -883,6 +914,16 @@ impl PostReach {
         reader: &Standing,
     ) -> Result<Announcement, Failure> {
         self.plane.announce(audience, reader)
+    }
+
+    /// [`Self::announce`], carrying the identity's portrait on the same rail.
+    pub fn announce_presenting(
+        &mut self,
+        audience: Audience,
+        reader: &Standing,
+        portrait: &addressbook::Portrait,
+    ) -> Result<Announcement, Failure> {
+        self.plane.announce_presenting(audience, reader, portrait)
     }
 
     /// Take in a correspondent's announcement, anchored to its genesis.
@@ -1496,5 +1537,56 @@ mod tests {
             ReachPlane::found(vec![ALICE_A], NOW),
             Err(Failure::TooFewDevices)
         ));
+    }
+
+    /// The portrait rides the announcement rail: whoever can learn the
+    /// devices learns the presentation, from the same anchored projection,
+    /// and a later announcement supersedes it the same way the device set
+    /// does.
+    #[test]
+    fn an_announcement_carries_the_portrait_to_whoever_can_learn_it() {
+        let (a, b) = ([61u8; 32], [62u8; 32]);
+        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+        let reader = Standing {
+            device: Some(device_from_seed(&[71u8; 32])),
+            ..Standing::default()
+        };
+
+        let card = plane
+            .announce_presenting(
+                Audience::Public,
+                &reader,
+                &addressbook::Portrait {
+                    name: Some("Alice".to_string()),
+                    picture: Some([7u8; 32]),
+                    detail: "keeps the lighthouse".to_string(),
+                },
+            )
+            .expect("announce presenting");
+
+        let mut theirs = Registry::new();
+        theirs
+            .absorb(card.projection, &card.genesis, &reader)
+            .expect("absorb");
+        assert_eq!(
+            theirs.declared_name(plane.profile(), &reader).as_deref(),
+            Some("Alice")
+        );
+        let portrait = theirs
+            .portrait(plane.profile(), &reader)
+            .expect("the portrait arrived with the devices");
+        assert_eq!(portrait.picture, Some([7u8; 32]));
+        assert_eq!(portrait.detail, "keeps the lighthouse");
+
+        // A plain announce later does not erase the presentation — absence
+        // of a portrait in one publication is not the cleared portrait.
+        let replaced = plane.announce(Audience::Public, &reader).expect("announce");
+        theirs
+            .absorb(replaced.projection, &replaced.genesis, &reader)
+            .expect("absorb again");
+        assert!(
+            theirs.portrait(plane.profile(), &reader).is_some(),
+            "not presenting is not un-presenting"
+        );
     }
 }

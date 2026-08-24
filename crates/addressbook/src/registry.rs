@@ -30,6 +30,17 @@ use mechanics::kinship::{
 };
 use serde::{Deserialize, Serialize};
 
+/// What an identity presents, as the inputs to its own avowals: a declared
+/// name, a picture by content hash, and a detail line. The whole value is
+/// sealed each time — presenting is superseding, never patching — so an
+/// all-`None`-and-empty portrait *is* the cleared one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Portrait {
+    pub name: Option<String>,
+    pub picture: Option<[u8; 32]>,
+    pub detail: String,
+}
+
 /// Why a registry operation did not apply.
 ///
 /// Named for what it is and qualified by where it lives: callers say
@@ -237,6 +248,99 @@ impl Registry {
             avowed = avowed.saturating_add(1);
         }
         Ok(avowed)
+    }
+
+    /// Avow how this identity presents, to `audience`: its declared name (one
+    /// name channel — [`crate::names_of`]'s ranking still governs what a
+    /// reader *believes*), and its portrait. Sealing `Portrait { picture:
+    /// None, detail: "" }` is the deliberate act of clearing one — which is
+    /// why this takes the whole input rather than patching fields.
+    pub fn avow_portrait(
+        &mut self,
+        profile: &ProfileId,
+        portrait: &Portrait,
+        audience: Audience,
+        seed: &[u8; 32],
+        epoch: u64,
+        nonce: [u8; 16],
+    ) -> Result<(), Failure> {
+        if !matches!(self.holdings.get(profile), Some(Holding::Authored(_))) {
+            return Err(Failure::NotHeld);
+        }
+        let subject = Party::Device(mechanics::actor::device_from_seed(seed));
+        if let Some(name) = &portrait.name {
+            let avowal = Avowal::seal(
+                seed,
+                subject.clone(),
+                Claim::Called(name.clone()),
+                audience.clone(),
+                epoch,
+                nonce,
+            )?;
+            self.extend(profile, Entry::Avow(avowal))?;
+        }
+        let avowal = Avowal::seal(
+            seed,
+            subject,
+            Claim::Portrait {
+                picture: portrait.picture,
+                detail: portrait.detail.clone(),
+            },
+            audience,
+            epoch,
+            nonce,
+        )?;
+        self.extend(profile, Entry::Avow(avowal))?;
+        Ok(())
+    }
+
+    /// The name a held profile declares for itself, as `reader` may read it.
+    #[must_use]
+    pub fn declared_name(&self, profile: &ProfileId, reader: &Standing) -> Option<String> {
+        let (avowals, devices) = self.spoken_of(profile)?;
+        crate::attest::declared_by(&avowals, reader, &devices)
+    }
+
+    /// A held profile's portrait, as `reader` may read it.
+    #[must_use]
+    pub fn portrait(
+        &self,
+        profile: &ProfileId,
+        reader: &Standing,
+    ) -> Option<crate::attest::ResolvedPortrait> {
+        let (avowals, devices) = self.spoken_of(profile)?;
+        crate::attest::portrait_of(&avowals, reader, &devices)
+    }
+
+    /// A holding's avowals and the device set that counts as the subject
+    /// speaking. For an authored profile that is the live link set; for a
+    /// known one it is the avowed reachable set — the same set every other
+    /// read of that holding trusts, anchored by the head at absorb time.
+    fn spoken_of(&self, profile: &ProfileId) -> Option<(Vec<Avowal>, Vec<DeviceId>)> {
+        match self.holdings.get(profile)? {
+            Holding::Authored(log) => {
+                let avowals = log
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Avow(avowal) => Some(avowal.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((avowals, log.devices()))
+            }
+            Holding::Known(projection) => {
+                let avowals = projection
+                    .bodies
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Avow(avowal) => Some(avowal.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((avowals, reachable_devices(profile, projection)))
+            }
+        }
     }
 
     /// Project one of this identity's authored profiles for a reader — the
@@ -799,6 +903,115 @@ mod tests {
             live.as_slice(),
             [device_from_seed(&A)].as_slice(),
             "B dropped"
+        );
+    }
+
+    #[test]
+    fn a_portrait_travels_to_its_audience_and_supersedes_by_epoch() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link.clone()).expect("found");
+        let audience = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+        alice
+            .avow_portrait(
+                &profile,
+                &Portrait {
+                    name: Some("Alice".to_string()),
+                    picture: Some([7u8; 32]),
+                    detail: "keeps the lighthouse".to_string(),
+                },
+                audience.clone(),
+                &A,
+                2,
+                [2u8; 16],
+            )
+            .expect("avow portrait");
+        alice
+            .avow_reachable(&profile, audience.clone(), &A, 2, [2u8; 16])
+            .expect("avow reachable");
+
+        let projection = alice
+            .project(&profile, &A, 2, &bob_standing())
+            .expect("project");
+        let mut bob = Registry::new();
+        bob.absorb(projection, &link, &bob_standing())
+            .expect("absorb");
+
+        assert_eq!(
+            bob.declared_name(&profile, &bob_standing()).as_deref(),
+            Some("Alice")
+        );
+        let portrait = bob
+            .portrait(&profile, &bob_standing())
+            .expect("a portrait was avowed to this reader");
+        assert_eq!(portrait.picture, Some([7u8; 32]));
+        assert_eq!(portrait.detail, "keeps the lighthouse");
+
+        // A reader outside the audience resolves nothing — never "no
+        // portrait exists", only "none you may read".
+        let stranger = Standing {
+            device: Some(device_from_seed(&C)),
+            ..Standing::default()
+        };
+        assert!(bob.portrait(&profile, &stranger).is_none());
+
+        // A newer epoch supersedes: clearing the picture is a claim, and it
+        // replaces rather than merges.
+        alice
+            .avow_portrait(
+                &profile,
+                &Portrait {
+                    name: Some("Alice".to_string()),
+                    picture: None,
+                    detail: String::new(),
+                },
+                audience.clone(),
+                &A,
+                3,
+                [3u8; 16],
+            )
+            .expect("avow again");
+        alice
+            .avow_reachable(&profile, audience, &A, 3, [3u8; 16])
+            .expect("avow reachable again");
+        let newer = alice
+            .project(&profile, &A, 3, &bob_standing())
+            .expect("project");
+        bob.absorb(newer, &link, &bob_standing()).expect("absorb");
+        let cleared = bob
+            .portrait(&profile, &bob_standing())
+            .expect("still a portrait — the cleared one");
+        assert_eq!(cleared.picture, None);
+        assert_eq!(cleared.detail, "");
+        assert_eq!(cleared.epoch, 3);
+    }
+
+    #[test]
+    fn somebody_elses_signature_cannot_dress_a_subject() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link).expect("found");
+        // A forged portrait about one of Alice's devices, signed by Bob:
+        // an attestation-shaped artifact, and for a portrait there is no
+        // weight that makes it admissible.
+        let forged = Avowal::seal(
+            &BOB,
+            Party::Device(device_from_seed(&A)),
+            Claim::Portrait {
+                picture: Some([66u8; 32]),
+                detail: "not hers to say".to_string(),
+            },
+            Audience::Public,
+            9,
+            [9u8; 16],
+        )
+        .expect("seal");
+        alice
+            .extend(&profile, Entry::Avow(forged))
+            .expect("the log records what was said");
+        assert!(
+            alice.portrait(&profile, &bob_standing()).is_none(),
+            "a portrait only its subject did not sign resolves to nothing"
         );
     }
 }
