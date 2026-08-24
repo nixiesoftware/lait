@@ -1653,7 +1653,7 @@ fn map_journal(failure: journal::Failure) -> Failure {
 mod tests {
     use super::*;
     use crate::frontier::AuthorityFrontier;
-    use crate::transaction::{SeedSigner, Signer};
+    use crate::transaction::{SeedSigner, Signer, StaticAuthorizer};
     use mechanics::authorization::AuthorizedBodyKey;
     use mechanics::ids::SpaceId;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1708,6 +1708,14 @@ mod tests {
         fn opening_key(&self, epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
             (epoch == &PRIOR_EPOCH)
                 .then(|| AuthorizedBodyKey::for_authorized_epoch(PRIOR_EPOCH, PRIOR_KEY))
+        }
+    }
+
+    struct AnyStanding;
+
+    impl AuthoritySource for AnyStanding {
+        fn signer_authorized(&self, _signer: &[u8; 32], _frontier: &AuthorityFrontier) -> bool {
+            true
         }
     }
 
@@ -2049,6 +2057,78 @@ mod tests {
             build_prior(&source, &target, &context, Arc::new(PriorKeys)).unwrap_err(),
             Failure::NeedsSemanticMigration { bodies: 1 }
         );
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn nonempty_prior_facts_cross_only_as_fresh_current_transactions() {
+        use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
+
+        let (source, key, value) = indexed_prior_fixture("semantic-source");
+        let target = directory("semantic-current");
+        let source_manifest = std::fs::read(source.join("current-manifest")).unwrap();
+        let space = SpaceId::from_digest([0x51; 16]);
+        let seed = [0x77; 32];
+        let signer = SeedSigner(&seed);
+        let context = CommitContext {
+            space: &space,
+            signer: &signer,
+            authority_frontier: AuthorityFrontier::from_canonical_bytes(Vec::new()),
+        };
+        let actor = mechanics::ids::ActorId::from_incept_hash(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let device = mechanics::actor::device_from_seed(&seed);
+        let run = || {
+            migrate_prior(
+                &source,
+                &target,
+                &context,
+                Arc::new(PriorKeys),
+                &AnyStanding,
+                &actor,
+                &device,
+                |world| {
+                    AuthorizationDemand::require(
+                        PolicyCapability::new(world.as_str(), "space.admin"),
+                        Resource::root(world.as_str()),
+                    )
+                    .encode_canonical()
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))
+                },
+                |world, core| {
+                    StaticAuthorizer {
+                        world: world.clone(),
+                        implementation_id: [0; 32],
+                    }
+                    .authorize(core)
+                },
+            )
+        };
+        let first = run().unwrap();
+        assert_eq!(first.bodies(), 1);
+        assert_eq!(first.receipts(), 0);
+        assert_eq!(
+            std::fs::read(source.join("current-manifest")).unwrap(),
+            source_manifest
+        );
+
+        let rebuilt = Replica::open(&target, Arc::new(PriorKeys)).unwrap();
+        assert_eq!(rebuilt.body_count(), 1);
+        let snapshot = rebuilt.read_snapshot();
+        assert_eq!(snapshot.read(&key).unwrap(), value);
+        assert_eq!(rebuilt.declared_content(&key).len(), 1);
+
+        let replay = run().unwrap();
+        assert_eq!(replay.evidence(), first.evidence());
+        assert_eq!(
+            Replica::open(&target, Arc::new(PriorKeys))
+                .unwrap()
+                .body_count(),
+            1
+        );
+
         let _ = std::fs::remove_dir_all(source);
         let _ = std::fs::remove_dir_all(target);
     }
