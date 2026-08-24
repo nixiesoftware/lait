@@ -352,10 +352,9 @@ fn validate_prior_advertisement(
             Defect::Index,
             "validate prior manifest advertisement",
             format!(
-                "body {key:?}: advertised_key={:?}, record_heads={}, advertised_heads={}",
+                "body {key:?}: advertised_key={:?}, record_heads={expected_heads:?}, advertised_heads={:?}",
                 advertised.key,
-                expected_heads.len(),
-                advertised.heads.len()
+                advertised.heads
             ),
         ));
     }
