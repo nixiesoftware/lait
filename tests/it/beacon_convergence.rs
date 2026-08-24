@@ -734,6 +734,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
     // offline while A remains reachable, then author against the settled
     // survivor ring.
     let a_device = mechanics::actor::device_from_seed(&MEMBER_A_SEED).to_string();
+    let mut last_survivor_ring = Vec::new();
     let survivor_ring = poll_until(Duration::from_secs(30), || {
         let Response::Who { peers } = req(&client, &b_home, Request::Who) else {
             return None;
@@ -742,11 +743,12 @@ fn surviving_members_converge_after_the_approach_station_dies() {
             .iter()
             .any(|peer| peer.id == founder_device && !peer.online);
         let a_online = peers.iter().any(|peer| peer.id == a_device && peer.online);
+        last_survivor_ring = peers;
         (founder_offline && a_online).then_some(())
     });
     assert!(
         survivor_ring.is_some(),
-        "B never observed the settled survivor ring after founder shutdown"
+        "B never observed the settled survivor ring after founder shutdown: {last_survivor_ring:#?}"
     );
 
     // Founder loss advances authority/liveness publications before the two

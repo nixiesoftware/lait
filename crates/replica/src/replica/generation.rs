@@ -1248,11 +1248,12 @@ fn row_evidence(
     let coordinates = postcard::to_stdvec(&(&body.key, &body.binding))
         .map_err(|_| Failure::Integrity(Defect::Encoding))?;
     hash.update(&coordinates);
-    // Loro snapshot bytes are a storage representation, not its canonical
-    // semantic or causal identity. An import/export cycle can re-encode those
-    // bytes while retaining both the complete Loro-free view (including stable
-    // list/tree identities) and its version vector. Compare those two explicit
-    // contracts for collaborative Bodies and exact bytes for atomics.
+    // Collaborative snapshot bytes are a storage representation, not the
+    // canonical semantic or causal identity. An import/export cycle can
+    // re-encode those bytes while retaining both Fabric's complete typed view
+    // (including stable list/tree identities) and its version vector. Compare
+    // those two explicit contracts for collaborative Bodies and exact bytes
+    // for atomics.
     let bytes = match body.binding.mutation_model {
         super::MUTATION_ATOMIC => snapshot
             .read_shared()
