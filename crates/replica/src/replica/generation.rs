@@ -674,17 +674,31 @@ impl PriorReplicaSource {
                 .transaction
                 .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
             if protected.len != head.protected_len || transaction_ref.len != head.tx_len {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "validate prior head object lengths",
+                    format!("body {key:?}"),
+                ));
             }
             let transaction_bytes = self
                 .source
                 .read_object(&transaction_ref)
                 .map_err(map_journal)?;
-            let transaction = decode_legacy_transaction(&transaction_bytes)?;
+            let transaction = decode_legacy_transaction(&transaction_bytes).map_err(|error| {
+                super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "decode prior signed transaction",
+                    format!("body {key:?}: {error:?}"),
+                )
+            })?;
             if legacy_transaction_id(&transaction_bytes) != head.tx
                 || *blake3::hash(&transaction_bytes).as_bytes() != head.tx_commitment
             {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior transaction commitments",
+                    format!("body {key:?}"),
+                ));
             }
             let descriptor = transaction
                 .core
@@ -699,18 +713,39 @@ impl PriorReplicaSource {
                 || descriptor.schema_version != record.binding.schema_version
                 || descriptor.encoding != record.binding.encoding
             {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior Body descriptor",
+                    format!("body {key:?}"),
+                ));
             }
             let envelope = self.source.read_object(&protected).map_err(map_journal)?;
             if crate::body::ContentCommitment::over_protected_payload(&envelope).as_bytes()
                 != descriptor.content_commitment
             {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior protected material commitment",
+                    format!("body {key:?}"),
+                ));
             }
-            let epoch = mechanics::authorization::body_epoch_id(&envelope)
-                .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+            let epoch = mechanics::authorization::body_epoch_id(&envelope).ok_or_else(|| {
+                super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "read prior protected material epoch",
+                    format!("body {key:?}"),
+                )
+            })?;
             let material = match self.keys.opening_key(&epoch) {
-                Some(opening) => Some(open_legacy_material(&opening, &envelope, &record)?),
+                Some(opening) => Some(open_legacy_material(&opening, &envelope, &record).map_err(
+                    |error| {
+                        super::integrity_cause(
+                            Defect::CorruptMaterial,
+                            "open prior protected material",
+                            format!("body {key:?}: {error:?}"),
+                        )
+                    },
+                )?),
                 None if record.interpreted => return Err(Failure::BodyKeyUnavailable),
                 None => None,
             };
@@ -754,7 +789,11 @@ impl PriorReplicaSource {
                 });
             }
             if derived != Some(record.chain) {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior Body frontier",
+                    format!("body {key:?}"),
+                ));
             }
         }
         Ok(PriorBodyEvidence {
@@ -1193,7 +1232,13 @@ where
                     ));
                 }
             }
-            let snapshot = prior_body_snapshot(&body)?;
+            let snapshot = prior_body_snapshot(&body).map_err(|error| {
+                super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "compose prior Body snapshot",
+                    format!("body {:?}: {error:?}", body.key),
+                )
+            })?;
             expected_rows.push(row_evidence(&body, &snapshot)?);
             by_world
                 .entry(body.key.world.clone())
