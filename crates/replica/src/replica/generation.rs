@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     advance, advance_chain, body_index_key, fabric_key, lock_fabric, object_ref,
-    ownership_index_key, receipt_index_key, validate_receipt_for_storage, ActionOutcome,
-    BodyBinding, BodyHead, BodyKey, BodyRecord, CommitAuthorization, CommitContext, Defect,
-    Failure, IndexedBody, IndexedOwnership, IndexedReceipt, ManifestRoot, Object, OwnedObjectClass,
+    ownership_index_key, receipt_index_key, validate_receipt_for_storage, ActionOutcome, BodyHead,
+    BodyKey, BodyRecord, CommitAuthorization, CommitContext, Defect, Failure, IndexedBody,
+    IndexedOwnership, IndexedReceipt, ManifestRoot, Object, OwnedObjectClass,
     PriorIndexedStoreMeta, QuotaConfig, Replica, ReplicaFrontier, SignRequest, StoreMeta,
     Transaction, STORE_META_FORMAT_VERSION,
 };
@@ -804,7 +804,7 @@ fn prior_body_snapshot(body: &PriorBodyEvidence) -> Result<fabric::BodySnapshot,
             .map_err(Failure::Engine)?;
         if status
             .as_ref()
-            .is_some_and(|receipt| receipt.accepted() == 0)
+            .is_some_and(|receipt| receipt.applied() == 0)
         {
             continue;
         }
