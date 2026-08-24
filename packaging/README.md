@@ -67,12 +67,21 @@ unsigned local disk image is deliberately labelled unsafe to publish.
 
 Worlds do not ride host tags. `.github/workflows/publish-worlds.yml` builds
 first-party World runners when their source or shared runtime changes and
-publishes only previously unoccupied product versions to their own `test`
-channels. An existing version is never rebuilt or overwritten: product
-versions must be bumped before changed bytes can occupy a new immutable World
-release coordinate. Stable World promotion is an explicit manual dispatch
-that fetches each tested manifest and moves only its signed pointer; it does
-not rebuild a runner.
+assembles one commit-addressed `world-candidate-<short-sha>` artifact: the
+native bundles, their SHA-256 sidecars, provenance attestations, and a
+`world-candidate-provenance.env` recording the exact source coordinate. The
+workflow moves no channel and holds no signing key — the candidate is the
+immutable byte set the real-data audits exercise before anything ships.
+
+Publication is a local act. `ci/publish-world.sh --from-run <run-id>
+--artifact-name world-candidate-<short-sha>` downloads the audited run's
+artifact, refuses it unless its recorded source SHA, checksums, provenance
+attestations, and signing workflow identity all verify, and publishes only
+previously unoccupied product versions to their own `test` channels. An
+existing version is never rebuilt or overwritten: product versions must be
+bumped before changed bytes can occupy a new immutable World release
+coordinate. Stable World promotion (`--promote`) fetches each tested manifest
+and moves only its signed pointer; it does not rebuild a runner.
 
 Astrolabe's signed host package carries only a reviewed first-party World
 catalog (declarations and artwork). A catalog row may be uninstalled. Choosing
