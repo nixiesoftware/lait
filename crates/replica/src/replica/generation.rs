@@ -7,13 +7,16 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    body_index_key, object_ref, ownership_index_key, receipt_index_key, BodyKey, BodyRecord,
-    CommitContext, Defect, Failure, IndexedBody, IndexedOwnership, IndexedReceipt, ManifestRoot,
-    Object, OwnedObjectClass, PriorIndexedStoreMeta, QuotaConfig, Replica, ReplicaFrontier,
-    StoreMeta, STORE_META_FORMAT_VERSION,
+    advance, advance_chain, body_index_key, fabric_key, lock_fabric, object_ref,
+    ownership_index_key, receipt_index_key, validate_receipt_for_storage, ActionOutcome,
+    BodyBinding, BodyHead, BodyKey, BodyRecord, CommitAuthorization, CommitContext, Defect,
+    Failure, IndexedBody, IndexedOwnership, IndexedReceipt, ManifestRoot, Object, OwnedObjectClass,
+    PriorIndexedStoreMeta, QuotaConfig, Replica, ReplicaFrontier, SignRequest, StoreMeta,
+    Transaction, STORE_META_FORMAT_VERSION,
 };
 use crate::protected::BodyKeySource;
-use crate::receipt::RequestReceipt;
+use crate::receipt::{Interpretation, RequestReceipt};
+use crate::transaction::{AuthoritySource, Core, TransactionAuthorizer};
 
 const PRIOR_META_VERSION: u8 = 1;
 
@@ -763,6 +766,527 @@ impl PriorReplicaSource {
             content_refs: advertised.content_refs,
         })
     }
+}
+
+const SEMANTIC_MIGRATION_BATCH: usize = 64;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorMigrationEffect {
+    version: u8,
+    source_manifest: [u8; 32],
+    world: crate::body::WorldId,
+    bodies: Vec<BodyKey>,
+}
+
+struct MigrationAuthorizer<'a, F> {
+    world: &'a crate::body::WorldId,
+    authorize: &'a F,
+}
+
+impl<F> TransactionAuthorizer for MigrationAuthorizer<'_, F>
+where
+    F: Fn(&crate::body::WorldId, &Core) -> Result<Vec<u8>, mechanics::authorization::Refusal>,
+{
+    fn authorize(&self, core: &Core) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
+        (self.authorize)(self.world, core)
+    }
+}
+
+fn prior_body_snapshot(body: &PriorBodyEvidence) -> Result<fabric::BodySnapshot, Failure> {
+    if !body.interpreted || body.heads.iter().any(|head| head.material.is_none()) {
+        return Err(Failure::BodyKeyUnavailable);
+    }
+    let mut engine = fabric::Engine::new();
+    for head in &body.heads {
+        let material = head.material.as_ref().ok_or(Failure::BodyKeyUnavailable)?;
+        let status = engine
+            .import_body(&fabric_key(&body.key), &material.payload)
+            .map_err(Failure::Engine)?;
+        if status
+            .as_ref()
+            .is_some_and(|receipt| receipt.accepted() == 0)
+        {
+            continue;
+        }
+    }
+    engine
+        .body_snapshot(&fabric_key(&body.key))
+        .map_err(Failure::Engine)?
+        .ok_or(Failure::Integrity(Defect::MissingMaterial))
+}
+
+fn migration_digest(
+    source_manifest: &[u8; 32],
+    rows: &[(PriorBodyEvidence, fabric::BodySnapshot)],
+) -> Result<[u8; 32], Failure> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"lait/prior-semantic-migration/1");
+    hash.update(source_manifest);
+    for (body, snapshot) in rows {
+        let coordinates = postcard::to_stdvec(&(&body.key, &body.binding, &body.chain))
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        hash.update(
+            &u64::try_from(coordinates.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        hash.update(&coordinates);
+        let bytes = snapshot.canonical_export_shared();
+        hash.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hash.update(&bytes);
+        for reference in &body.content_refs {
+            hash.update(reference);
+        }
+    }
+    Ok(*hash.finalize().as_bytes())
+}
+
+impl Replica {
+    /// Author one bounded current transaction from verified prior signed
+    /// whole-Body evidence. This is the sole representation bridge: it accepts
+    /// no World operations and only the evidence type constructed by
+    /// [`PriorReplicaSource`].
+    #[allow(clippy::too_many_arguments)]
+    fn commit_prior_batch(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        auth: &CommitAuthorization<'_>,
+        world: &crate::body::WorldId,
+        device: &mechanics::ids::DeviceId,
+        request: &[u8; 16],
+        digest: &[u8; 32],
+        effect: Vec<u8>,
+        rows: &[(PriorBodyEvidence, fabric::BodySnapshot)],
+    ) -> Result<ActionOutcome, Failure> {
+        self.mutation_available()?;
+        if let Some(receipt) = self.lookup_action(ctx.space, world, device, request, digest)? {
+            return Ok(ActionOutcome::Replayed(receipt));
+        }
+        if rows.is_empty()
+            || rows.iter().any(|(body, _)| &body.key.world != world)
+            || rows
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left.0.key >= right.0.key))
+            || rows
+                .iter()
+                .any(|(body, _)| self.bodies.contains_key(&body.key))
+        {
+            return Err(Failure::Illegitimate(
+                "prior migration batch is not a fresh, ordered single-World set".into(),
+            ));
+        }
+        if effect.len() > crate::receipt::MAX_EFFECT_BYTES {
+            return Err(Failure::EffectTooLarge);
+        }
+        match &self.space {
+            None => self.space = Some(ctx.space.clone()),
+            Some(space) if space == ctx.space => {}
+            Some(_) => {
+                return Err(Failure::Illegitimate(
+                    "prior migration addressed to a different Space".into(),
+                ));
+            }
+        }
+        if u64::try_from(self.bodies.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+            > self.quota.max_space_bodies
+        {
+            return Err(Failure::QuotaExceeded);
+        }
+        if self
+            .keys
+            .as_ref()
+            .and_then(|keys| keys.sealing_key())
+            .is_none()
+        {
+            return Err(Failure::BodyKeyUnavailable);
+        }
+
+        let snapshots = rows
+            .iter()
+            .map(|(body, snapshot)| (fabric_key(&body.key), snapshot.clone()))
+            .collect::<Vec<_>>();
+        let fabric = lock_fabric(&self.fabric).prepare_verified_snapshots(&snapshots)?;
+        let assembled = (|| -> Result<super::PreparedMutation, Failure> {
+            let next_frontier = advance(self.frontier, fabric.receipt().causal().as_bytes());
+            let chain_seed = super::mint_chain_seed()?;
+            let mut new_records = BTreeMap::new();
+            let mut sealed = Vec::new();
+            let mut new_artifacts = Vec::new();
+            let mut declared = BTreeMap::new();
+            for (body, _) in rows {
+                let mut record = BodyRecord {
+                    binding: body.binding.clone(),
+                    chain: advance_chain(ReplicaFrontier::EMPTY, &chain_seed),
+                    heads: smallvec::smallvec![BodyHead {
+                        tx: [0u8; 32],
+                        descriptor_hash: [0u8; 32],
+                        tx_commitment: [0u8; 32],
+                        artifacts: Some(Vec::new().into_boxed_slice()),
+                        transaction: None,
+                        artifact_bytes: 0,
+                        tx_len: 0,
+                    }],
+                    causal: None,
+                    interpreted: true,
+                };
+                let (material, artifacts) =
+                    self.next_causal_material(&body.key, &record, None, &new_artifacts)?;
+                let pack = super::encode_artifact_pack(&artifacts)?;
+                new_artifacts.extend(artifacts);
+                record.causal = Some(Arc::new(material.clone()));
+                sealed.push((body.key.clone(), pack, material));
+                let mut refs = body.content_refs.clone();
+                refs.sort_unstable();
+                refs.dedup();
+                declared.insert(body.key.clone(), refs);
+                new_records.insert(body.key.clone(), Some(record));
+            }
+
+            let mut descriptors = Vec::with_capacity(sealed.len());
+            for (key, _, material) in &sealed {
+                let record = new_records
+                    .get(key)
+                    .and_then(Option::as_ref)
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                descriptors.push(crate::transaction::Descriptor {
+                    world: key.world.clone(),
+                    body: key.body.clone(),
+                    schema: record.binding.schema.clone(),
+                    schema_version: record.binding.schema_version,
+                    encoding: record.binding.encoding.clone(),
+                    mutation_model: record.binding.mutation_model,
+                    base_frontier: ReplicaFrontier::EMPTY,
+                    resulting_frontier: record.chain,
+                    material: material.clone(),
+                });
+            }
+            descriptors.sort_by_key(crate::transaction::Descriptor::key);
+            let transaction = Transaction::sign_with(
+                SignRequest {
+                    space: ctx.space,
+                    parent_manifest_root: auth.parent_manifest_root,
+                    replica_frontier: next_frontier,
+                    authority_frontier: ctx.authority_frontier.clone(),
+                    actor: auth.actor,
+                    operation: *request,
+                    intent_digest: auth.intent_digest,
+                    operations_digest: *digest,
+                    demand: auth.demand.clone(),
+                    descriptors,
+                },
+                ctx.signer,
+                |core| auth.authorizer.authorize(core),
+            )
+            .map_err(Failure::Unauthorized)?;
+            if transaction.encode().len() > crate::transaction::MAX_TRANSACTION {
+                return Err(Failure::OpLimit);
+            }
+            let tx_id = transaction.id();
+            for record in new_records.values_mut().flatten() {
+                record.head_mut()?.tx = tx_id;
+            }
+            Self::populate_local_record_refs(
+                &transaction,
+                &sealed,
+                &mut new_records,
+                self.durable.is_some(),
+            )?;
+
+            let keys = rows
+                .iter()
+                .map(|(body, _)| body.key.clone())
+                .collect::<Vec<_>>();
+            let mut receipt = RequestReceipt {
+                version: 2,
+                space: ctx.space.clone(),
+                world: world.clone(),
+                device: device.clone(),
+                request: *request,
+                payload_hash: *digest,
+                effect,
+                bodies: keys,
+                frontier: next_frontier,
+                manifest_root: [0u8; 32],
+                implementation_digest: Interpretation::UNSPECIFIED.implementation_digest,
+                extractor_schema_digest: Interpretation::UNSPECIFIED.extractor_schema_digest,
+                transaction: tx_id,
+            };
+            let receipt_bytes = validate_receipt_for_storage(&receipt)?;
+            let (mut projected, _) = self.usage();
+            for (key, pack, _) in &sealed {
+                let artifact_len = new_records
+                    .get(key)
+                    .and_then(Option::as_ref)
+                    .map(BodyRecord::protected_total)
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                if artifact_len > self.quota.max_body_bytes
+                    || u64::try_from(pack.len()).unwrap_or(u64::MAX) > self.quota.max_body_bytes
+                {
+                    return Err(Failure::QuotaExceeded);
+                }
+                projected = projected.saturating_add(artifact_len);
+            }
+            projected = projected
+                .saturating_add(u64::try_from(transaction.encode().len()).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(receipt_bytes.len()).unwrap_or(u64::MAX));
+            if projected > self.quota.max_space_bytes {
+                return Err(Failure::QuotaExceeded);
+            }
+            let candidate_root =
+                self.preview_manifest_root(ctx, &new_records, &declared, next_frontier)?;
+            receipt.manifest_root = candidate_root;
+            validate_receipt_for_storage(&receipt)?;
+            Ok(super::PreparedMutation {
+                new_records,
+                sealed,
+                transaction: Some(transaction),
+                receipt,
+                next_frontier,
+                declared,
+                candidate_root,
+                manifest_space: ctx.space.clone(),
+                manifest_authority_frontier: ctx.authority_frontier.clone(),
+                manifest_signer: ctx.signer.signer_key(),
+            })
+        })();
+
+        match assembled {
+            Ok(data) => self
+                .finalize_prepared_action(
+                    ctx,
+                    super::PreparedActionState::Mutation { fabric, data },
+                )
+                .map(ActionOutcome::Committed),
+            Err(error) => {
+                if lock_fabric(&self.fabric).rollback(fabric).is_err() {
+                    self.poisoned = true;
+                    Err(Failure::OutcomeUnknown)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+fn row_evidence(
+    body: &PriorBodyEvidence,
+    snapshot: &fabric::BodySnapshot,
+) -> Result<[u8; 32], Failure> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"lait/prior-semantic-row/1");
+    let coordinates = postcard::to_stdvec(&(&body.key, &body.binding))
+        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    hash.update(&coordinates);
+    let bytes = snapshot.canonical_export_shared();
+    hash.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hash.update(&bytes);
+    let mut refs = body.content_refs.clone();
+    refs.sort_unstable();
+    refs.dedup();
+    for reference in refs {
+        hash.update(&reference);
+    }
+    Ok(*hash.finalize().as_bytes())
+}
+
+/// Stream an indexed prior Replica into fresh current signed transactions,
+/// verify exact semantic equivalence, and leave the source untouched.
+#[allow(clippy::too_many_arguments)]
+pub fn migrate_prior<F>(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+    context: &CommitContext<'_>,
+    keys: Arc<dyn BodyKeySource>,
+    authority: &dyn AuthoritySource,
+    actor: &mechanics::ids::ActorId,
+    device: &mechanics::ids::DeviceId,
+    demand: impl Fn(&crate::body::WorldId) -> Result<Vec<u8>, Failure>,
+    authorize: F,
+) -> Result<Verification, Failure>
+where
+    F: Fn(&crate::body::WorldId, &Core) -> Result<Vec<u8>, mechanics::authorization::Refusal>,
+{
+    let source = PriorReplicaSource::open(source, keys.clone())?;
+    if source.space() != Some(context.space) {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    if !authority.signer_authorized(
+        &source.manifest().signer,
+        &source.manifest().authority_frontier,
+    ) {
+        return Err(Failure::Unauthorized(
+            mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::Internal(
+                    "prior manifest signer has no standing at its frontier",
+                ),
+            ),
+        ));
+    }
+    let source_manifest = *blake3::hash(&source.manifest().bytes).as_bytes();
+    let mut target = Replica::open(target.as_ref(), keys.clone())?;
+    if target.body_count() != 0
+        || target
+            .space
+            .as_ref()
+            .is_some_and(|space| space != context.space)
+    {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+
+    let mut after = None;
+    loop {
+        let page = source.content_page(after, 4096)?;
+        let missing = page
+            .descriptors
+            .iter()
+            .filter(|descriptor| {
+                target
+                    .content_descriptor(&descriptor.content_ref())
+                    .is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            target.commit_content(context, &missing)?;
+        }
+        let Some(next) = page.next else { break };
+        after = Some(next);
+    }
+
+    let mut expected_rows = Vec::new();
+    let mut after = None;
+    loop {
+        let page = source.body_page(after, 4096)?;
+        let mut by_world =
+            BTreeMap::<crate::body::WorldId, Vec<(PriorBodyEvidence, fabric::BodySnapshot)>>::new();
+        for body in page.bodies {
+            for head in &body.heads {
+                if !authority.signer_authorized(
+                    &head.transaction.signer,
+                    &head.transaction.authority_frontier,
+                ) {
+                    return Err(Failure::Unauthorized(
+                        mechanics::authorization::Refusal::Denied(
+                            mechanics::authorization::DenialReason::Internal(
+                                "prior transaction signer has no standing at its frontier",
+                            ),
+                        ),
+                    ));
+                }
+            }
+            let snapshot = prior_body_snapshot(&body)?;
+            expected_rows.push(row_evidence(&body, &snapshot)?);
+            by_world
+                .entry(body.key.world.clone())
+                .or_default()
+                .push((body, snapshot));
+        }
+        for (world, mut rows) in by_world {
+            rows.sort_by(|left, right| left.0.key.cmp(&right.0.key));
+            for batch in rows.chunks(SEMANTIC_MIGRATION_BATCH) {
+                let digest = migration_digest(&source_manifest, batch)?;
+                let mut request = [0u8; 16];
+                request.copy_from_slice(&digest[..16]);
+                let effect = PriorMigrationEffect {
+                    version: 1,
+                    source_manifest,
+                    world: world.clone(),
+                    bodies: batch.iter().map(|(body, _)| body.key.clone()).collect(),
+                };
+                let effect = postcard::to_stdvec(&effect)
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let authorizer = MigrationAuthorizer {
+                    world: &world,
+                    authorize: &authorize,
+                };
+                let authorization = CommitAuthorization {
+                    actor: actor.as_str(),
+                    parent_manifest_root: target.current_manifest_root(),
+                    demand: demand(&world)?,
+                    intent_digest: digest,
+                    authorizer: &authorizer,
+                };
+                target.commit_prior_batch(
+                    context,
+                    &authorization,
+                    &world,
+                    device,
+                    &request,
+                    &digest,
+                    effect,
+                    batch,
+                )?;
+            }
+        }
+        let Some(next) = page.next else { break };
+        after = Some(next);
+    }
+
+    let receipt_count = source.receipt_count();
+    let mut after = None;
+    let mut verified_receipts = 0u64;
+    loop {
+        let page = source.receipt_page(after, 4096)?;
+        verified_receipts = verified_receipts
+            .checked_add(u64::try_from(page.receipts.len()).unwrap_or(u64::MAX))
+            .ok_or(Failure::Integrity(Defect::Encoding))?;
+        let Some(next) = page.next else { break };
+        after = Some(next);
+    }
+    if verified_receipts != receipt_count {
+        return Err(Failure::Integrity(Defect::Index));
+    }
+
+    drop(target);
+    let rebuilt = Replica::open(target.as_ref(), keys)?;
+    let snapshot = rebuilt.read_snapshot();
+    if rebuilt.body_count() != source.body_count() {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    let mut actual_rows = Vec::new();
+    for key in snapshot.body_keys() {
+        let body = snapshot
+            .body_ix(&key)
+            .ok_or(Failure::Integrity(Defect::Index))?;
+        let image = snapshot
+            .resolve_body_image(body)
+            .map_err(|_| Failure::Integrity(Defect::MissingMaterial))?;
+        let prior = PriorBodyEvidence {
+            key: key.clone(),
+            binding: snapshot
+                .binding(&key)
+                .cloned()
+                .ok_or(Failure::Integrity(Defect::Index))?,
+            chain: ReplicaFrontier::EMPTY,
+            interpreted: true,
+            heads: Vec::new(),
+            content_refs: rebuilt
+                .declared_content(&key)
+                .into_iter()
+                .map(|reference| *reference.as_bytes())
+                .collect(),
+        };
+        actual_rows.push(row_evidence(&prior, &image)?);
+    }
+    expected_rows.sort_unstable();
+    actual_rows.sort_unstable();
+    if expected_rows != actual_rows {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    let mut evidence = blake3::Hasher::new();
+    evidence.update(b"lait/prior-semantic-equivalence/1");
+    evidence.update(&source_manifest);
+    for row in &actual_rows {
+        evidence.update(row);
+    }
+    Ok(Verification {
+        evidence: *evidence.finalize().as_bytes(),
+        bodies: source.body_count(),
+        receipts: verified_receipts,
+    })
 }
 
 /// Evidence that the rebuilt catalogs encode the same committed logical view.
