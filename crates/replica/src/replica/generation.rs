@@ -1243,7 +1243,24 @@ fn row_evidence(
     let coordinates = postcard::to_stdvec(&(&body.key, &body.binding))
         .map_err(|_| Failure::Integrity(Defect::Encoding))?;
     hash.update(&coordinates);
-    let bytes = snapshot.canonical_export_shared();
+    // A representation rebuild necessarily authors fresh causal history.
+    // Loro snapshot bytes therefore need not survive an import/export cycle
+    // byte-for-byte even when the complete Loro-free view (including stable
+    // list/tree identities) is unchanged. Compare the application-visible
+    // canonical view for collaborative Bodies and exact bytes for atomics.
+    let bytes = match body.binding.mutation_model {
+        super::MUTATION_ATOMIC => snapshot
+            .read_shared()
+            .ok_or(Failure::Integrity(Defect::CorruptMaterial))?
+            .to_vec(),
+        super::MUTATION_COLLABORATIVE => postcard::to_stdvec(
+            &snapshot
+                .read_collaborative()
+                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?,
+        )
+        .map_err(|_| Failure::Integrity(Defect::Encoding))?,
+        _ => return Err(Failure::Integrity(Defect::Encoding)),
+    };
     let snapshot_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     hash.update(&snapshot_bytes.to_be_bytes());
     hash.update(&bytes);
@@ -2370,6 +2387,51 @@ mod tests {
                 .unwrap()
                 .canonical_export_shared()
                 .as_ref()
+        );
+    }
+
+    #[test]
+    fn semantic_evidence_compares_the_collaborative_view_not_causal_container_bytes() {
+        let body = prior_body(
+            super::super::MUTATION_COLLABORATIVE,
+            ReplicaFrontier::EMPTY,
+            Vec::new(),
+        );
+        let key = fabric_key(&body.key);
+        let write_same_value = |intent: &str| {
+            let mut engine = fabric::Engine::new();
+            engine
+                .commit(fabric::Transaction::new(
+                    intent,
+                    vec![fabric::Op::RegisterSet {
+                        key: key.clone(),
+                        path: "title".into(),
+                        value: b"same logical value".to_vec(),
+                    }],
+                ))
+                .unwrap();
+            engine
+        };
+        let left = write_same_value("left history");
+        let left_snapshot = left.body_snapshot(&key).unwrap().unwrap();
+        let mut merged = left;
+        let right = write_same_value("right history");
+        merged
+            .import_body(&key, &right.export_body(&key).unwrap())
+            .unwrap();
+        let merged_snapshot = merged.body_snapshot(&key).unwrap().unwrap();
+
+        assert_ne!(
+            left_snapshot.canonical_export_shared().as_ref(),
+            merged_snapshot.canonical_export_shared().as_ref()
+        );
+        assert_eq!(
+            left_snapshot.read_collaborative().unwrap(),
+            merged_snapshot.read_collaborative().unwrap()
+        );
+        assert_eq!(
+            row_evidence(&body, &left_snapshot).unwrap(),
+            row_evidence(&body, &merged_snapshot).unwrap()
         );
     }
 
