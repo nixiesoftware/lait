@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2610
-pr-platform    2130
-nightly        2638
+pr             2614
+pr-platform    2134
+nightly        2642
 mutants        106
 
 [gates]
@@ -236,6 +236,7 @@ astrolabe::packaging the_dmg_ships_the_notices_inside_the_bundle
 astrolabe::packaging the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep
 astrolabe::packaging the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed
 astrolabe::packaging the_dmg_staples_assesses_and_keeps_identity_out_of_the_project
+astrolabe::packaging the_first_party_catalog_is_a_self_contained_host_input
 astrolabe::packaging the_installer_asks_for_no_elevation
 astrolabe::packaging the_installer_carries_nothing_from_the_retired_stacks
 astrolabe::packaging the_installer_carries_the_c_runtime
@@ -1900,7 +1901,10 @@ replica replica::body_directory_tests::source_fingerprint_is_slot_independent_an
 replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_current_store
 replica replica::generation::tests::indexed_prior_source_pages_verified_signed_evidence_without_rewriting_it
 replica replica::generation::tests::interpreted_prior_body_never_collapses_a_missing_epoch_into_opaque
+replica replica::generation::tests::nonempty_prior_facts_cross_only_as_fresh_current_transactions
 replica replica::generation::tests::prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order
+replica replica::generation::tests::prior_atomic_snapshot_selects_only_the_committed_winner
+replica replica::generation::tests::prior_collaborative_snapshot_merges_every_committed_head
 replica replica::generation::tests::prior_transaction_and_material_tampering_are_typed_integrity_failures
 replica replica::generation_format_tests::an_unreadable_version_names_itself_and_what_this_build_reads
 replica replica::generation_format_tests::the_previous_generation_opens_and_keeps_its_generation_root

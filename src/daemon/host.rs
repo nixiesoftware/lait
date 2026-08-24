@@ -1388,6 +1388,45 @@ async fn advance_world_upgrade_job(
             .await?;
     }
 
+    if crate::orbits::bootstrap::needs_representation_rebuild(&router, &orbit)? {
+        job.phase = Phase::Migrating;
+        job.message = Some(format!(
+            "Space {orbit} is crossing the signed representation boundary"
+        ));
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        let staged = job.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &staged))
+            .await?;
+        match crate::orbits::bootstrap::rebuild(&router, &orbit).await {
+            Ok(rebuilt) => {
+                tracing::info!(
+                    world = %world,
+                    orbit = %orbit,
+                    generation = %rebuilt.generation,
+                    bodies = rebuilt.bodies,
+                    receipts = rebuilt.receipts,
+                    "authenticated prior Space facts into a current generation"
+                );
+                return Ok(WorldUpgradeAdvance::Progressed);
+            }
+            Err(error) => {
+                tracing::warn!(world = %world, orbit = %orbit, %error, "Space representation rebuild refused");
+                job.phase = Phase::Refused;
+                job.message = Some(format!(
+                    "Space {orbit} cannot cross this compatibility floor: {error}. The prior store remains unchanged"
+                ));
+                job.updated_at = mechanics::wallclock::now_secs();
+                let worlds_for_save = worlds;
+                router
+                    .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+                    .await?;
+                return Ok(WorldUpgradeAdvance::Progressed);
+            }
+        }
+    }
+
     let step = match router
         .advance_world_upgrade(&orbit, world.clone(), job.operation)
         .await

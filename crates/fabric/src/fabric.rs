@@ -2046,6 +2046,57 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// Prepare a bounded set of already-verified whole-Body images for a
+    /// representation rebuild.
+    ///
+    /// This is deliberately not an operation in [`Op`]: ordinary callers and
+    /// Worlds must express edits through the semantic algebra. The only caller
+    /// is Replica's prior-generation composition, after it has authenticated
+    /// and opened the old signed heads. Requiring an empty target prevents this
+    /// recovery seam from becoming a second merge/update path.
+    pub fn prepare_verified_snapshots(
+        &mut self,
+        snapshots: &[(Key, BodySnapshot)],
+    ) -> Result<Prepared, Failure> {
+        if snapshots.is_empty()
+            || snapshots
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left.0 >= right.0))
+            || snapshots
+                .iter()
+                .any(|(key, _)| self.bodies.contains_key(key))
+        {
+            return Err(Failure::Invalid(commit::Invalid::Import));
+        }
+
+        let touched: std::collections::BTreeSet<Key> =
+            snapshots.iter().map(|(key, _)| key.clone()).collect();
+        let prior = touched
+            .iter()
+            .map(|key| (key.clone(), None))
+            .collect::<BTreeMap<_, _>>();
+        for (key, snapshot) in snapshots {
+            let status = match self.import_verified_snapshot(key, snapshot) {
+                Ok(status) if status.applied && !status.pending => status,
+                Ok(_) => {
+                    self.restore(prior)?;
+                    return Err(Failure::Invalid(commit::Invalid::Import));
+                }
+                Err(error) => {
+                    self.restore(prior)?;
+                    return Err(error);
+                }
+            };
+            debug_assert!(status.applied && !status.pending);
+        }
+        let applied = u32::try_from(snapshots.len())
+            .map_err(|_| Failure::Invalid(commit::Invalid::Bounds))?;
+        Ok(Prepared {
+            receipt: Receipt::new(self.causal_for(&touched)?, applied),
+            prior,
+        })
+    }
+
     /// Apply a transaction into the live candidate image without publishing
     /// it. Reads and exports observe the candidate until it is finalized or
     /// rolled back.

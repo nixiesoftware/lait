@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "id": "com.lait.issues",
+  "version": "0.9.2",
+  "mount": "issues",
+  "name": "Issues",
+  "tagline": "Plans, issues, and the Specs that govern them",
+  "implementation_version": 4,
+  "mark": "art/mark.png",
+  "hero": "art/hero.png",
+  "accent": 5009141,
+  "launch": [
+    {
+      "id": "app",
+      "present": "primary",
+      "target": {
+        "type": "web",
+        "path": "/"
+      }
+    }
+  ]
+}

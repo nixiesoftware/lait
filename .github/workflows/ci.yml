@@ -786,10 +786,14 @@ jobs:
             .github/workflows/dev-release.yml
             .github/scripts/archive-unix.sh
             .github/scripts/archive-windows.sh
+            packaging/build-astrolabe.sh
+            apps/astrolabe-web/scripts/stage-sidecar.mjs
+            apps/astrolabe-web/src-tauri/Cargo.toml
+            apps/astrolabe-web/src-tauri/tauri.conf.json
           )
           for path in "${host_distribution[@]}"; do
-            if grep -Eq 'lait-(issues|signage)-runner|stage-worlds\.sh|[ /]worlds([ /]|$)' "$path"; then
-              echo "::error::$path still builds or carries a World in a host release"
+            if grep -Eq 'products/(issues|signage)|lait-(issues|signage)-runner|stage-worlds\.sh|[ /]worlds([ /]|$)' "$path"; then
+              echo "::error::$path still depends on, builds, or carries a World in a host release"
               exit 1
             fi
           done

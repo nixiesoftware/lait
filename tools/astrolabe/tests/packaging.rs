@@ -855,8 +855,8 @@ fn the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs() {
 }
 
 /// The staging script may carry first-party metadata and artwork, but never a
-/// runner or web payload. Installation obtains those bytes from the World's
-/// own signed channel.
+/// product dependency, runner, or web payload. Installation obtains those
+/// bytes from the World's own signed channel.
 #[test]
 fn the_native_client_stages_a_catalog_without_world_payloads() {
     let script =
@@ -864,15 +864,57 @@ fn the_native_client_stages_a_catalog_without_world_payloads() {
             .expect("read the native staging script");
     assert!(
         script.contains("src-tauri\", \"world-catalog")
-            && script.contains("writeFileSync(join(root, \"world.json\")"),
-        "the staging script does not build the first-party catalog"
+            && script.contains("const catalogSource = resolve(here, \"..\", \"catalog\")")
+            && script.contains("cpSync(catalogSource, worldCatalog"),
+        "the staging script does not stage the independent first-party catalog"
     );
     assert!(
-        !script.contains("lait-world-issues-runner")
+        !script.contains("products/")
+            && !script.contains("products\\")
+            && !script.contains("lait-world-issues-runner")
             && !script.contains("lait-world-signage-runner")
             && !script.contains("issues-app/dist"),
-        "the native staging script still builds or copies a World payload"
+        "the native staging script still depends on or copies a World product"
     );
+}
+
+/// Catalog declarations are host release inputs, not projections of whatever
+/// World products happen to share this checkout. Keep the checked-in source
+/// self-contained and presentation-only so the release builder can consume it
+/// without compiling, inspecting, or locating a World product.
+#[test]
+fn the_first_party_catalog_is_a_self_contained_host_input() {
+    let root = repo_root().join("apps/astrolabe-web/catalog");
+    let entries = std::fs::read_dir(&root).expect("read the first-party catalog");
+    let mut worlds = 0_usize;
+
+    for entry in entries {
+        let entry = entry.expect("read a catalog entry");
+        assert!(entry.file_type().expect("catalog entry type").is_dir());
+        let declared = std::fs::read(entry.path().join("world.json"))
+            .expect("every catalog entry carries world.json");
+        let manifest = world_interface::manifest::WorldManifest::parse(&declared)
+            .expect("catalog world.json is a valid declaration");
+        assert_eq!(
+            entry.file_name().to_string_lossy(),
+            manifest.id,
+            "catalog directory and declared World disagree"
+        );
+        assert!(
+            manifest.runners.is_empty() && manifest.requires.is_empty(),
+            "host catalog declarations may not carry executable or compatibility claims"
+        );
+        for (kind, relative) in [("mark", manifest.mark), ("hero", manifest.hero)] {
+            let Some(relative) = relative else { continue };
+            let bytes = std::fs::read(entry.path().join(&relative))
+                .unwrap_or_else(|error| panic!("read catalog {kind} {relative}: {error}"));
+            world_interface::manifest::artwork_bounds(kind, &bytes)
+                .unwrap_or_else(|error| panic!("invalid catalog {kind} {relative}: {error}"));
+        }
+        worlds += 1;
+    }
+
+    assert!(worlds > 0, "the first-party catalog is empty");
 }
 
 // --- The terms --------------------------------------------------------------
