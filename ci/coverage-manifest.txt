@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2614
-pr-platform    2134
-nightly        2642
+pr             2616
+pr-platform    2136
+nightly        2644
 mutants        106
 
 [gates]
@@ -657,6 +657,7 @@ lait mcp::scope_tests::an_unknown_world_pin_is_refused_rather_than_served_empty
 lait mcp::scope_tests::the_issues_mount_is_a_legal_explicit_pin
 lait mcp::scope_tests::the_live_router_composes_shell_and_namespaced_world_tools
 lait mcp::scope_tests::world_upgrade_names_the_pinned_world
+lait orbital::generation::real_data_diagnostic::copied_prior_space_reports_the_exact_rebuild_failure
 lait orbital::hosting::nudge_delivery::a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names
 lait orbital::hosting::nudge_delivery::actor_matching_is_equality_and_not_a_prefix
 lait orbital::hosting::nudge_delivery::an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error
@@ -1902,10 +1903,12 @@ replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_cu
 replica replica::generation::tests::indexed_prior_source_pages_verified_signed_evidence_without_rewriting_it
 replica replica::generation::tests::interpreted_prior_body_never_collapses_a_missing_epoch_into_opaque
 replica replica::generation::tests::nonempty_prior_facts_cross_only_as_fresh_current_transactions
-replica replica::generation::tests::prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order
+replica replica::generation::tests::prior_advertised_heads_authenticate_the_stored_set_independent_of_order
 replica replica::generation::tests::prior_atomic_snapshot_selects_only_the_committed_winner
+replica replica::generation::tests::prior_collaborative_frontier_accepts_the_historical_duplicate_fold_only_at_its_height
 replica replica::generation::tests::prior_collaborative_snapshot_merges_every_committed_head
 replica replica::generation::tests::prior_transaction_and_material_tampering_are_typed_integrity_failures
+replica replica::generation::tests::semantic_evidence_is_merge_order_independent_and_binds_causal_history
 replica replica::generation_format_tests::an_unreadable_version_names_itself_and_what_this_build_reads
 replica replica::generation_format_tests::the_previous_generation_opens_and_keeps_its_generation_root
 replica replica::generation_format_tests::version_two_store_meta_is_a_lossless_input_to_generation_journaling
