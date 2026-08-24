@@ -856,7 +856,7 @@ fn migration_digest(
 
 impl Replica {
     /// Author one bounded current transaction from verified prior signed
-    /// whole-Body evidence. This is the sole representation bridge: it accepts
+    /// whole-Body evidence. This is the sole representation composition seam: it accepts
     /// no World operations and only the evidence type constructed by
     /// [`PriorReplicaSource`].
     #[allow(clippy::too_many_arguments)]
