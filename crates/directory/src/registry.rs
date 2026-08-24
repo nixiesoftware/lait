@@ -21,15 +21,35 @@
 //! A mirror that holds no key cannot author — but it can serve two readers
 //! two different worlds, silently. So the registrar keeps a
 //! [`mechanics::chronicle`]: every accepted publication is appended to a
-//! committed log, and answers carry a signed head over it, with inclusion
-//! and consistency paths a reader checks against the head it pinned. That
-//! key signs **which publications were recorded, in which order** — never
-//! their contents, which remain self-signed by their subjects and verified
-//! against their own geneses exactly as before. The asymmetry survives the
-//! key: a compromise can still only deny or equivocate, and equivocation is
-//! now non-repudiable instead of silent, because two irreconcilable signed
-//! heads are the proof of it. The key that could impersonate a *person*
-//! still does not exist here.
+//! committed log **before** its route goes live, and the surface signs a head
+//! over that log. That key signs **which publications were recorded, in which
+//! order** — never their contents, which remain self-signed by their subjects
+//! and verified against their own geneses exactly as before. The asymmetry
+//! survives the key: a compromise can still only deny or equivocate, and
+//! equivocation against anyone who pins is now non-repudiable instead of
+//! silent, because two irreconcilable heads *from the pinned signer* are the
+//! proof of it. The key that could impersonate a *person* still does not
+//! exist here.
+//!
+//! What each answer carries, precisely, because the strength differs by
+//! surface:
+//!
+//! - A **publish receipt** ([`Chronicled`] from [`Registrar::publish`]) carries
+//!   the head, the entry index, and the inclusion path for that entry, so the
+//!   publisher proves *its own* publication was recorded — and reconciles that
+//!   receipt against the canonical chronicle so a head minted over a private
+//!   side branch cannot stand in for it.
+//! - The **chronicle surface** ([`Registrar::answer`]) serves the current head
+//!   and, from a pinned size, the consistency path — the equivocation ratchet
+//!   any pinning follower runs.
+//! - A **label resolution** ([`Registrar::resolve`]) carries the current head
+//!   but **not** yet an inclusion path binding the resolved route to it: a
+//!   resolver would need the publication's bytes to recompute the leaf, and
+//!   the shipped read path (the `reach` bridge) holds no pin to check one
+//!   against — route-level substitution is caught downstream at pairing, where
+//!   the confirmation phrase commits the destination *profile*. Binding a
+//!   resolved route to the chronicle is future work for a pinning resolver,
+//!   and deliberately not claimed here until one exists.
 //!
 //! Allocation is curated for the first wave: a label→profile binding is an
 //! operator act on the store, not a route. Open registration arrives with the
