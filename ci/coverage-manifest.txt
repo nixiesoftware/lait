@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2613
-pr-platform    2133
-nightly        2641
+pr             2614
+pr-platform    2134
+nightly        2642
 mutants        106
 
 [gates]
@@ -236,6 +236,7 @@ astrolabe::packaging the_dmg_ships_the_notices_inside_the_bundle
 astrolabe::packaging the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep
 astrolabe::packaging the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed
 astrolabe::packaging the_dmg_staples_assesses_and_keeps_identity_out_of_the_project
+astrolabe::packaging the_first_party_catalog_is_a_self_contained_host_input
 astrolabe::packaging the_installer_asks_for_no_elevation
 astrolabe::packaging the_installer_carries_nothing_from_the_retired_stacks
 astrolabe::packaging the_installer_carries_the_c_runtime
