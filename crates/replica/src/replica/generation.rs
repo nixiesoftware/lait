@@ -1232,7 +1232,9 @@ where
 
     let mut after = None;
     loop {
-        let page = source.content_page(after, 4096)?;
+        let page = source.content_page(after, 4096).map_err(|error| {
+            super::annotate_integrity(error, "read prior content page", format!("after={after:?}"))
+        })?;
         let missing = page
             .descriptors
             .iter()
@@ -1253,7 +1255,9 @@ where
     let mut expected_rows = Vec::new();
     let mut after = None;
     loop {
-        let page = source.body_page(after, 4096)?;
+        let page = source.body_page(after, 4096).map_err(|error| {
+            super::annotate_integrity(error, "read prior Body page", format!("after={after:?}"))
+        })?;
         let mut by_world =
             BTreeMap::<crate::body::WorldId, Vec<(PriorBodyEvidence, fabric::BodySnapshot)>>::new();
         for body in page.bodies {
@@ -1309,16 +1313,24 @@ where
                     intent_digest: digest,
                     authorizer: &authorizer,
                 };
-                target.commit_prior_batch(
-                    context,
-                    &authorization,
-                    &world,
-                    device,
-                    &request,
-                    &digest,
-                    effect,
-                    batch,
-                )?;
+                target
+                    .commit_prior_batch(
+                        context,
+                        &authorization,
+                        &world,
+                        device,
+                        &request,
+                        &digest,
+                        effect,
+                        batch,
+                    )
+                    .map_err(|error| {
+                        super::annotate_integrity(
+                            error,
+                            "commit prior semantic batch",
+                            format!("world={world:?}, bodies={}", batch.len()),
+                        )
+                    })?;
             }
         }
         let Some(next) = page.next else { break };
@@ -1329,7 +1341,9 @@ where
     let mut after = None;
     let mut verified_receipts = 0u64;
     loop {
-        let page = source.receipt_page(after, 4096)?;
+        let page = source.receipt_page(after, 4096).map_err(|error| {
+            super::annotate_integrity(error, "read prior receipt page", format!("after={after:?}"))
+        })?;
         verified_receipts = verified_receipts
             .checked_add(u64::try_from(page.receipts.len()).unwrap_or(u64::MAX))
             .ok_or(Failure::Integrity(Defect::Encoding))?;
@@ -1341,7 +1355,9 @@ where
     }
 
     drop(target);
-    let rebuilt = Replica::open(target_path, keys)?;
+    let rebuilt = Replica::open(target_path, keys).map_err(|error| {
+        super::annotate_integrity(error, "reopen rebuilt Replica", "semantic migration target")
+    })?;
     let snapshot = rebuilt.read_snapshot();
     if rebuilt.body_count() != source.body_count() {
         return Err(Failure::Integrity(Defect::Encoding));

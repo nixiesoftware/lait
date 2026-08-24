@@ -255,6 +255,17 @@ fn integrity_cause(
     }
 }
 
+fn annotate_integrity(
+    failure: Failure,
+    operation: &'static str,
+    reason: impl std::fmt::Debug,
+) -> Failure {
+    match failure {
+        Failure::Integrity(defect) => integrity_cause(defect, operation, reason),
+        other => other,
+    }
+}
+
 /// The outcome of committing a request through the persistent-idempotency
 /// scope: either a fresh commit or a replay of the original receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
