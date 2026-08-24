@@ -1311,7 +1311,7 @@ where
         after = Some(next);
     }
 
-    let mut expected_rows = Vec::new();
+    let mut expected_rows = BTreeMap::new();
     let mut after = None;
     loop {
         let page = source.body_page(after, 4096).map_err(|error| {
@@ -1341,7 +1341,14 @@ where
                     format!("body {:?}: {error:?}", body.key),
                 )
             })?;
-            expected_rows.push(row_evidence(&body, &snapshot)?);
+            let row = row_evidence(&body, &snapshot)?;
+            if expected_rows.insert(body.key.clone(), row).is_some() {
+                return Err(super::integrity_cause(
+                    Defect::Index,
+                    "collect prior semantic evidence",
+                    format!("duplicate body {:?}", body.key),
+                ));
+            }
             by_world
                 .entry(body.key.world.clone())
                 .or_default()
@@ -1421,7 +1428,7 @@ where
     if rebuilt.body_count() != source.body_count() {
         return Err(Failure::Integrity(Defect::Encoding));
     }
-    let mut actual_rows = Vec::new();
+    let mut actual_rows = BTreeMap::new();
     for key in snapshot.body_keys() {
         let body = snapshot
             .body_ix(&key)
@@ -1444,18 +1451,50 @@ where
                 .map(|reference| *reference.as_bytes())
                 .collect(),
         };
-        actual_rows.push(row_evidence(&prior, &image)?);
+        let row = row_evidence(&prior, &image)?;
+        if actual_rows.insert(key.clone(), row).is_some() {
+            return Err(super::integrity_cause(
+                Defect::Index,
+                "collect rebuilt semantic evidence",
+                format!("duplicate body {key:?}"),
+            ));
+        }
     }
-    expected_rows.sort_unstable();
-    actual_rows.sort_unstable();
     if expected_rows != actual_rows {
-        return Err(Failure::Integrity(Defect::CorruptMaterial));
+        let mismatch = expected_rows
+            .iter()
+            .find_map(|(key, expected)| match actual_rows.get(key) {
+                Some(actual) if actual == expected => None,
+                actual => Some(format!(
+                    "body {key:?}: expected={expected:?}, actual={actual:?}"
+                )),
+            })
+            .or_else(|| {
+                actual_rows
+                    .keys()
+                    .find(|key| !expected_rows.contains_key(*key))
+                    .map(|key| format!("unexpected rebuilt body {key:?}"))
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "row count differs: expected={}, actual={}",
+                    expected_rows.len(),
+                    actual_rows.len()
+                )
+            });
+        return Err(super::integrity_cause(
+            Defect::CorruptMaterial,
+            "verify rebuilt semantic evidence",
+            mismatch,
+        ));
     }
     let mut evidence = blake3::Hasher::new();
     evidence.update(b"lait/prior-semantic-equivalence/1");
     evidence.update(&source_manifest);
-    for row in &actual_rows {
-        evidence.update(row);
+    let mut evidence_rows = actual_rows.values().copied().collect::<Vec<_>>();
+    evidence_rows.sort_unstable();
+    for row in evidence_rows {
+        evidence.update(&row);
     }
     Ok(Verification {
         evidence: *evidence.finalize().as_bytes(),
