@@ -773,6 +773,14 @@ jobs:
           done
           grep -q -- '--from-run' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
+          grep -q -- '--artifact-name' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot consume an audited SHA candidate"; exit 1; }
+          grep -q -- 'candidate-provenance.env' .github/workflows/release.yml \
+            || { echo "::error::candidate does not attest its exact source coordinate"; exit 1; }
+          if grep -Eq '^[[:space:]]+push:' .github/workflows/release.yml; then
+            echo "::error::a semantic tag must not trigger a second release build"
+            exit 1
+          fi
           grep -q -- '--promote' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot promote exact tested bytes"; exit 1; }
           grep -q -- '--if-generation-match=0' ci/publish-feed.sh \
