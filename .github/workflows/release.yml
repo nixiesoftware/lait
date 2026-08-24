@@ -37,10 +37,10 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
-          case "$version" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::workspace version '$version' is not semver"; exit 1 ;;
-          esac
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::workspace version '$version' is not a final semantic version"
+            exit 1
+          fi
           if git show-ref --verify --quiet "refs/tags/v$version"; then
             echo "::error::v$version already exists; candidates must precede the one release tag"
             exit 1
@@ -48,10 +48,12 @@ jobs:
           sha="$(git rev-parse HEAD)"
           short_sha="${sha:0:12}"
           artifact="candidate-$version-$short_sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$sha"
+            echo "short_sha=$short_sha"
+            echo "version=$version"
+            echo "artifact=$artifact"
+          } >> "$GITHUB_OUTPUT"
 
   host:
     name: native host archives
@@ -92,17 +94,17 @@ jobs:
         run: |
           set -euo pipefail
           required=(
-            lait-x86_64-unknown-linux-gnu.tar.gz
-            lait-aarch64-unknown-linux-gnu.tar.gz
-            lait-aarch64-apple-darwin.tar.gz
-            lait-x86_64-apple-darwin.tar.gz
-            lait-x86_64-pc-windows-msvc.zip
-            astrolabe-$VERSION-setup.exe
-            astrolabe-$VERSION.dmg
-            astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz
-            astrolabe-tree-$VERSION-aarch64-apple-darwin.tar.gz
-            astrolabe-tree-$VERSION-x86_64-pc-windows-msvc.tar.gz
-            astrolabe-tree-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+            "lait-x86_64-unknown-linux-gnu.tar.gz"
+            "lait-aarch64-unknown-linux-gnu.tar.gz"
+            "lait-aarch64-apple-darwin.tar.gz"
+            "lait-x86_64-apple-darwin.tar.gz"
+            "lait-x86_64-pc-windows-msvc.zip"
+            "astrolabe-$VERSION-setup.exe"
+            "astrolabe-$VERSION.dmg"
+            "astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+            "astrolabe-tree-$VERSION-aarch64-apple-darwin.tar.gz"
+            "astrolabe-tree-$VERSION-x86_64-pc-windows-msvc.tar.gz"
+            "astrolabe-tree-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
           )
           for file in "${required[@]}"; do
             [ -f "release/$file" ] || { echo "::error::missing $file"; exit 1; }
@@ -137,10 +139,12 @@ jobs:
           SOURCE_SHA: ${{ needs.gate.outputs.sha }}
           ARTIFACT: ${{ needs.gate.outputs.artifact }}
         run: |
-          echo "### Commit-addressed candidate" >> "$GITHUB_STEP_SUMMARY"
-          echo "Audit artifact \`$ARTIFACT\` from commit \`$SOURCE_SHA\` before creating \`v$VERSION\`." >> "$GITHUB_STEP_SUMMARY"
-          echo '```sh' >> "$GITHUB_STEP_SUMMARY"
-          echo "git tag -a v$VERSION $SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          echo "ci/publish-feed.sh --from-run $RUN_ID --artifact-name $ARTIFACT --version $VERSION --channel test --seed ~/.lait-feed-signing.seed" >> "$GITHUB_STEP_SUMMARY"
-          echo "ci/publish-feed.sh --version $VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Commit-addressed candidate"
+            echo "Audit artifact \`$ARTIFACT\` from commit \`$SOURCE_SHA\` before creating \`v$VERSION\`."
+            echo '```sh'
+            echo "git tag -a v$VERSION $SOURCE_SHA"
+            echo "ci/publish-feed.sh --from-run $RUN_ID --artifact-name $ARTIFACT --version $VERSION --channel test --seed ~/.lait-feed-signing.seed"
+            echo "ci/publish-feed.sh --version $VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

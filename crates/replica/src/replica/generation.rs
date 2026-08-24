@@ -351,7 +351,11 @@ fn validate_prior_advertisement(
     // manifest canonicalized the same logical head set before publishing it.
     // Authenticate set equality here; ordering was never semantic evidence.
     expected_heads.sort_unstable();
-    if expected_heads.windows(2).any(|pair| pair[0] == pair[1]) {
+    if expected_heads.windows(2).any(|pair| {
+        pair.first()
+            .zip(pair.get(1))
+            .is_some_and(|(left, right)| left == right)
+    }) {
         return Err(super::integrity_cause(
             Defect::Index,
             "validate prior manifest advertisement",
@@ -1244,11 +1248,11 @@ fn row_evidence(
     let coordinates = postcard::to_stdvec(&(&body.key, &body.binding))
         .map_err(|_| Failure::Integrity(Defect::Encoding))?;
     hash.update(&coordinates);
-    // A representation rebuild necessarily authors fresh causal history.
-    // Loro snapshot bytes therefore need not survive an import/export cycle
-    // byte-for-byte even when the complete Loro-free view (including stable
-    // list/tree identities) is unchanged. Compare the application-visible
-    // canonical view for collaborative Bodies and exact bytes for atomics.
+    // Loro snapshot bytes are a storage representation, not its canonical
+    // semantic or causal identity. An import/export cycle can re-encode those
+    // bytes while retaining both the complete Loro-free view (including stable
+    // list/tree identities) and its version vector. Compare those two explicit
+    // contracts for collaborative Bodies and exact bytes for atomics.
     let bytes = match body.binding.mutation_model {
         super::MUTATION_ATOMIC => snapshot
             .read_shared()
