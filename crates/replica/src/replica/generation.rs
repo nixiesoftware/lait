@@ -907,7 +907,9 @@ impl Replica {
             .iter()
             .map(|(body, snapshot)| (fabric_key(&body.key), snapshot.clone()))
             .collect::<Vec<_>>();
-        let fabric = lock_fabric(&self.fabric).prepare_verified_snapshots(&snapshots)?;
+        let fabric = lock_fabric(&self.fabric)
+            .prepare_verified_snapshots(&snapshots)
+            .map_err(Failure::Engine)?;
         let assembled = (|| -> Result<super::PreparedMutation, Failure> {
             let next_frontier = advance(self.frontier, fabric.receipt().causal().as_bytes());
             let chain_seed = super::mint_chain_seed()?;
@@ -1126,7 +1128,8 @@ where
         ));
     }
     let source_manifest = *blake3::hash(&source.manifest().bytes).as_bytes();
-    let mut target = Replica::open(target.as_ref(), keys.clone())?;
+    let target_path = target.as_ref().to_path_buf();
+    let mut target = Replica::open(&target_path, keys.clone())?;
     if target.body_count() != 0
         || target
             .space
@@ -1241,7 +1244,7 @@ where
     }
 
     drop(target);
-    let rebuilt = Replica::open(target.as_ref(), keys)?;
+    let rebuilt = Replica::open(target_path, keys)?;
     let snapshot = rebuilt.read_snapshot();
     if rebuilt.body_count() != source.body_count() {
         return Err(Failure::Integrity(Defect::Encoding));
