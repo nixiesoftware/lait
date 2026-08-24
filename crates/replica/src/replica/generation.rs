@@ -348,7 +348,16 @@ fn validate_prior_advertisement(
         })
         .collect::<Vec<_>>();
     if advertised.key != *key || advertised.heads != expected_heads {
-        return Err(Failure::Integrity(Defect::Index));
+        return Err(super::integrity_cause(
+            Defect::Index,
+            "validate prior manifest advertisement",
+            format!(
+                "body {key:?}: advertised_key={:?}, record_heads={}, advertised_heads={}",
+                advertised.key,
+                expected_heads.len(),
+                advertised.heads.len()
+            ),
+        ));
     }
     Ok(())
 }
@@ -554,15 +563,33 @@ impl PriorReplicaSource {
             .map_err(map_journal)?;
         let mut bodies = Vec::with_capacity(page.entries.len());
         for entry in page.entries {
-            let indexed: LegacyIndexedBody = postcard::from_bytes(&entry.value)
-                .map_err(|_| Failure::Integrity(Defect::Index))?;
+            let indexed: LegacyIndexedBody =
+                postcard::from_bytes(&entry.value).map_err(|error| {
+                    super::integrity_cause(
+                        Defect::Index,
+                        "decode prior Body index entry",
+                        format!("key={:?}: {error:?}", entry.key),
+                    )
+                })?;
             if postcard::to_stdvec(&indexed).ok().as_deref() != Some(entry.value.as_slice())
                 || body_index_key(&indexed.key) != entry.key
                 || indexed.record.heads.is_empty()
             {
-                return Err(Failure::Integrity(Defect::Index));
+                return Err(super::integrity_cause(
+                    Defect::Index,
+                    "validate prior Body index entry",
+                    format!(
+                        "index_key={:?}, body={:?}, heads={}",
+                        entry.key,
+                        indexed.key,
+                        indexed.record.heads.len()
+                    ),
+                ));
             }
-            bodies.push(self.open_body(indexed)?);
+            let key = indexed.key.clone();
+            bodies.push(self.open_body(indexed).map_err(|error| {
+                super::annotate_integrity(error, "open prior indexed Body", format!("body {key:?}"))
+            })?);
         }
         Ok(PriorBodyPage {
             bodies,
@@ -670,10 +697,13 @@ impl PriorReplicaSource {
 
     fn open_body(&self, indexed: LegacyIndexedBody) -> Result<PriorBodyEvidence, Failure> {
         let LegacyIndexedBody { key, record } = indexed;
-        let manifest_root = self
-            .meta
-            .manifest_body_root
-            .ok_or(Failure::Integrity(Defect::Index))?;
+        let manifest_root = self.meta.manifest_body_root.ok_or_else(|| {
+            super::integrity_cause(
+                Defect::Index,
+                "locate prior manifest Body index",
+                format!("body {key:?}"),
+            )
+        })?;
         let manifest_bytes = self
             .source
             .caller_index_lookup(
@@ -681,15 +711,24 @@ impl PriorReplicaSource {
                 &body_index_key(&key),
             )
             .map_err(map_journal)?
-            .ok_or(Failure::Integrity(Defect::Index))?;
+            .ok_or_else(|| {
+                super::integrity_cause(
+                    Defect::Index,
+                    "lookup prior manifest advertisement",
+                    format!("body {key:?}"),
+                )
+            })?;
         let advertised = crate::manifest::ManifestEntry::decode_canonical(&manifest_bytes)
             .map_err(|_| Failure::Integrity(Defect::Encoding))?;
         validate_prior_advertisement(&key, &record, &advertised)?;
         for content in &advertised.content_refs {
-            let root = self
-                .meta
-                .content_index_root
-                .ok_or(Failure::Integrity(Defect::Index))?;
+            let root = self.meta.content_index_root.ok_or_else(|| {
+                super::integrity_cause(
+                    Defect::Index,
+                    "locate prior content index",
+                    format!("body {key:?}, content={content:?}"),
+                )
+            })?;
             let bytes = self
                 .source
                 .caller_index_lookup(
@@ -697,13 +736,23 @@ impl PriorReplicaSource {
                     &crate::manifest::content_index_key(content),
                 )
                 .map_err(map_journal)?
-                .ok_or(Failure::Integrity(Defect::Index))?;
+                .ok_or_else(|| {
+                    super::integrity_cause(
+                        Defect::Index,
+                        "lookup prior content descriptor",
+                        format!("body {key:?}, content={content:?}"),
+                    )
+                })?;
             let descriptor = crate::content::ContentDescriptor::decode_canonical(&bytes)
                 .map_err(|_| Failure::Integrity(Defect::Encoding))?;
             if descriptor.space != self.manifest.space.as_str()
                 || descriptor.content_ref().as_bytes() != content
             {
-                return Err(Failure::Integrity(Defect::Index));
+                return Err(super::integrity_cause(
+                    Defect::Index,
+                    "validate prior content descriptor index",
+                    format!("body {key:?}, content={content:?}"),
+                ));
             }
         }
         let mut heads = Vec::with_capacity(record.heads.len());
