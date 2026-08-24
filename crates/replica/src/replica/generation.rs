@@ -339,7 +339,7 @@ fn validate_prior_advertisement(
     record: &PriorBodyRecord,
     advertised: &crate::manifest::ManifestEntry,
 ) -> Result<(), Failure> {
-    let expected_heads = record
+    let mut expected_heads = record
         .heads
         .iter()
         .map(|head| crate::manifest::ManifestHead {
@@ -347,6 +347,17 @@ fn validate_prior_advertisement(
             transaction_commitment: head.tx_commitment,
         })
         .collect::<Vec<_>>();
+    // The durable Body record retained incorporation order. The signed
+    // manifest canonicalized the same logical head set before publishing it.
+    // Authenticate set equality here; ordering was never semantic evidence.
+    expected_heads.sort_unstable();
+    if expected_heads.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(super::integrity_cause(
+            Defect::Index,
+            "validate prior manifest advertisement",
+            format!("body {key:?}: duplicate stored head"),
+        ));
+    }
     if advertised.key != *key || advertised.heads != expected_heads {
         return Err(super::integrity_cause(
             Defect::Index,
@@ -2571,7 +2582,7 @@ mod tests {
     }
 
     #[test]
-    fn prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order() {
+    fn prior_advertised_heads_authenticate_the_stored_set_independent_of_order() {
         let key = BodyKey::new(
             crate::body::WorldId::parse("com.example.prior").unwrap(),
             crate::body::BodyId::from_bytes([0x78; 16]),
@@ -2618,7 +2629,7 @@ mod tests {
         );
         assert!(
             validate_prior_advertisement(&key, &record(vec![head(2), head(1)]), &advertised)
-                .is_err()
+                .is_ok()
         );
         assert!(
             validate_prior_advertisement(&key, &record(vec![head(1), head(1)]), &advertised)
