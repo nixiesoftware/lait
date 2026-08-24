@@ -90,6 +90,7 @@ pub fn is_correspondence_request(request: &Request) -> bool {
         request,
         Request::ReachShare
             | Request::ReachLearn { .. }
+            | Request::ReachResolve { .. }
             | Request::ReachView
             | Request::CorrespondSend { .. }
             | Request::CorrespondCollect
@@ -476,6 +477,12 @@ mod tests {
         assert!(is_correspondence_request(&Request::CorrespondCollect));
         assert!(is_correspondence_request(&Request::ReachLearn {
             announcement: "x".into()
+        }));
+        // Omitting a routed request here strands it on "no daemon-scoped
+        // handler" — ReachResolve shipped unreachable exactly this way.
+        assert!(is_correspondence_request(&Request::ReachResolve {
+            address: "tin-harbor-quiet-4417".into(),
+            accept_change: false,
         }));
         assert!(is_correspondence_request(&Request::CorrespondSend {
             to: "prf_x".into(),
