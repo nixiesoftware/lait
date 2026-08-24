@@ -479,6 +479,22 @@ impl ReachPlane {
         self.registry.resolve(profile)
     }
 
+    /// The name a held profile declares for itself, as `reader` may read it.
+    #[must_use]
+    pub fn declared_name(&self, profile: &ProfileId, reader: &Standing) -> Option<String> {
+        self.registry.declared_name(profile, reader)
+    }
+
+    /// A held profile's portrait, as `reader` may read it.
+    #[must_use]
+    pub fn portrait(
+        &self,
+        profile: &ProfileId,
+        reader: &Standing,
+    ) -> Option<addressbook::ResolvedPortrait> {
+        self.registry.portrait(profile, reader)
+    }
+
     /// Every profile this identity holds, its own included.
     #[must_use]
     /// The registry beneath, read-only — for a caller projecting with a seed

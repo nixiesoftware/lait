@@ -830,6 +830,84 @@ impl AddressBookService {
         self.list()
     }
 
+    /// What My Card presents, as portrait inputs — `None` when no card is
+    /// claimed. Authoring a card publishes nothing; this is read only at the
+    /// gestures that already mean presenting. The note deliberately does not
+    /// travel: notes are the book-keeper's own, and the bundle rule ("notes
+    /// that stay") governs here too. The picture rides as the content hash of
+    /// its raw bytes — the referent a fetch path will serve one day.
+    pub(crate) fn my_portrait(&self) -> Option<addressbook::Portrait> {
+        let engine = self.engine.lock().ok()?;
+        let book = engine.book().ok()?;
+        let card = book.cards.values().find(|card| card.self_claim.is_some())?;
+        let picture = card
+            .picture
+            .value
+            .split_once(";base64,")
+            .and_then(|(_, data)| data_encoding::BASE64.decode(data.as_bytes()).ok())
+            .map(|bytes| *blake3::hash(&bytes).as_bytes());
+        let name = card.name.value.clone();
+        Some(addressbook::Portrait {
+            name: (!name.is_empty()).then_some(name),
+            picture,
+            detail: String::new(),
+        })
+    }
+
+    /// Install a card for an introduced correspondent, unstaged.
+    ///
+    /// The consent already happened one gesture ago: learning an announcement
+    /// is accepting the introduction, and this is the book half of that one
+    /// act — no second question. What lands is `Declared` evidence, worth
+    /// what a self-claim is worth, and it lands only where the book is
+    /// silent: a handle any live card already carries means the person is
+    /// known, and auto-install never rewrites what somebody authored.
+    /// `Ok(false)` means the book was left alone.
+    pub(crate) fn install_introduced(
+        &self,
+        name: &str,
+        handles: &[Handle],
+    ) -> Result<bool, String> {
+        if name.is_empty() || handles.is_empty() {
+            return Ok(false);
+        }
+        let author = self.author()?;
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| "address book is poisoned".to_string())?;
+        let book = engine.book().map_err(|err| err.to_string())?;
+        if handles
+            .iter()
+            .any(|handle| !book.authored_cards_for(handle).is_empty())
+        {
+            return Ok(false);
+        }
+        let id = CardId::mint(&SystemUlidSource);
+        let mut actions = vec![Action::Create {
+            id: id.clone(),
+            name: name.to_string(),
+        }];
+        for handle in handles {
+            actions.push(Action::AddHandle {
+                id: id.clone(),
+                handle: handle.clone(),
+                evidence: addressbook::Evidence::Declared,
+            });
+        }
+        for action in actions {
+            if let Err(err) = engine.apply(&author, action) {
+                self.resync(&mut engine);
+                return Err(err.to_string());
+            }
+        }
+        if let Err(err) = self.store.replace(&engine) {
+            self.resync(&mut engine);
+            return Err(err.to_string());
+        }
+        Ok(true)
+    }
+
     /// Re-read the envelope after a failed multi-action application, so the
     /// in-memory book never drifts from disk. When even the re-read fails the
     /// old state is kept: a broken disk is not a licence to invent one.

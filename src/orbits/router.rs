@@ -636,6 +636,12 @@ impl Router {
         let correspondence = Arc::new(crate::daemon::correspondence::CorrespondenceService::open(
             &identity,
         ));
+        // The one seam between the two identity services, hooked at
+        // construction: learning a correspondent is the gesture that installs
+        // their card, and sharing reach is the gesture that presents My Card.
+        if let Ok(book) = &book {
+            correspondence.hook_book(book.clone());
+        }
         // Carried over a hosted Post when one is named. Absent, the plane stands
         // but carries nothing, and every operation says so — which is a
         // different fact from an empty mailbox and the only one worth acting on.
