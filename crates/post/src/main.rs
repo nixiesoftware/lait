@@ -110,10 +110,21 @@ async fn main() -> Result<()> {
         // the same deployment, and an operator who mounted no directory has
         // no registry to speak of either. Same project, its own collections —
         // `registry-bindings` holds the curated allocation, `registry-routes`
-        // what identities publish.
+        // what identities publish, `registry-chronicle` the committed log the
+        // registrar signs its heads over.
         let registry_store =
             lait_directory::FirestoreStore::open(&project, lait_directory::Credentials::Metadata);
-        let registry = Arc::new(Mutex::new(registry_store));
+        let (seed, ephemeral) = lait_directory::registry::chronicle_seed_from_env()
+            .context("registry chronicle seed")?;
+        if ephemeral {
+            tracing::warn!(
+                "REGISTRY_CHRONICLE_SEED is unset — the chronicle signs under an identity \
+                 that will not survive a restart"
+            );
+        }
+        let registrar = lait_directory::registry::Registrar::open(registry_store, seed)
+            .context("open registrar")?;
+        let registry = Arc::new(Mutex::new(registrar));
         app = app.merge(lait_directory::registry::router(registry));
         tracing::info!(project, "the registry is mounted under /registry");
     }

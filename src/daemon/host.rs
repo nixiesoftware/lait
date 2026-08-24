@@ -1125,8 +1125,12 @@ impl Daemon {
                         })
                         .await;
                         match outcome {
-                            Ok(Ok(resolved)) => {
-                                tracing::info!(label = %resolved.label.as_str(), "route published");
+                            Ok(Ok(receipt)) => {
+                                tracing::info!(
+                                    label = %receipt.resolved.label.as_str(),
+                                    chronicled = receipt.entry.is_some(),
+                                    "route published"
+                                );
                             }
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "route publication refused; serving anyway");

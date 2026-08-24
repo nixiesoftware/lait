@@ -9,18 +9,26 @@
 //! The epoch is the wall clock in milliseconds: monotonic across restarts
 //! without a counter to persist, and the registry's only use for it is
 //! refusing rollback.
+//!
+//! The registrar answers with a chronicle receipt — a signed head and the
+//! inclusion path for the entry this publication became. Both are checked
+//! here, at the one place the raw answer enters: a receipt that does not
+//! verify is a registrar claiming to have recorded something it can not
+//! prove it recorded, and that is a refusal, not a warning.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use lait_directory::registry::{publish_over_http, Label, Resolved, RoutePublish};
+use lait_directory::registry::{
+    chronicle_entry, publish_over_http, Chronicled, Label, RoutePublish,
+};
 
 pub fn publish_route(
     identity_home: &Path,
     label: &str,
     registry_base: &str,
     endpoint: &str,
-) -> Result<Resolved> {
+) -> Result<Chronicled> {
     let label = Label::parse(label).map_err(|refusal| {
         anyhow::anyhow!("identity.label is not a publishable label: {refusal}")
     })?;
@@ -42,5 +50,25 @@ pub fn publish_route(
         .encode()
         .context("encode announcement")?;
     let publish = RoutePublish::sign(label, announcement, endpoint.to_string(), epoch, &first);
-    publish_over_http(registry_base, &publish)
+    let receipt = publish_over_http(registry_base, &publish)?;
+    check_receipt(&publish, &receipt)?;
+    Ok(receipt)
+}
+
+/// A receipt without a head is a registrar that keeps no chronicle — allowed
+/// while the fleet turns over. A receipt *with* one must prove itself whole.
+fn check_receipt(publish: &RoutePublish, receipt: &Chronicled) -> Result<()> {
+    let Some(head) = &receipt.head else {
+        return Ok(());
+    };
+    head.verify()
+        .map_err(|refusal| anyhow::anyhow!("the chronicle receipt's head: {refusal}"))?;
+    let Some(entry) = receipt.entry else {
+        anyhow::bail!("the chronicle receipt names no entry for this publication");
+    };
+    let leaf = mechanics::chronicle::Chronicle::leaf_of(&chronicle_entry(publish));
+    mechanics::chronicle::verify_inclusion(&leaf, entry, head.size, &head.root, &receipt.inclusion)
+        .map_err(|refusal| {
+            anyhow::anyhow!("the registrar could not prove it recorded this publication: {refusal}")
+        })
 }

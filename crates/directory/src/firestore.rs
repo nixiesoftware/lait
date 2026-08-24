@@ -51,6 +51,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const ADDRESSES: &str = "addresses";
 const REGISTRY_BINDINGS: &str = "registry-bindings";
 const REGISTRY_ROUTES: &str = "registry-routes";
+const REGISTRY_CHRONICLE: &str = "registry-chronicle";
 const PROFILES: &str = "profiles";
 const CHALLENGES: &str = "challenges";
 const RESOLVES: &str = "resolves";
@@ -225,6 +226,45 @@ impl FirestoreStore {
             Err(error) => Err(anyhow!("firestore delete {collection}: {error}")),
         }
     }
+
+    /// Every document in `collection`, as `(id, document)` pairs in document
+    /// name order — which, for ids minted as zero-padded indices, is append
+    /// order. Pages until the listing is exhausted, so the one caller reads a
+    /// whole small collection rather than a window of a big one.
+    fn list(&mut self, collection: &str) -> Result<Vec<(String, Value)>> {
+        let mut collected = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let token = self.token()?;
+            let mut url = format!("{}/{collection}?pageSize=300", self.base);
+            if let Some(next) = &page_token {
+                url.push_str("&pageToken=");
+                url.push_str(&encode(next));
+            }
+            let response: Value = self
+                .agent
+                .get(&url)
+                .set("Authorization", &format!("Bearer {token}"))
+                .call()
+                .map_err(|error| anyhow!("firestore list {collection}: {error}"))?
+                .into_json()
+                .map_err(|error| anyhow!("firestore list {collection}: {error}"))?;
+            if let Some(documents) = response["documents"].as_array() {
+                for document in documents {
+                    let Some(name) = document["name"].as_str() else {
+                        return Err(anyhow!("firestore list {collection}: unnamed document"));
+                    };
+                    let id = name.rsplit('/').next().unwrap_or(name).to_string();
+                    collected.push((id, document.clone()));
+                }
+            }
+            match response["nextPageToken"].as_str() {
+                Some(next) if !next.is_empty() => page_token = Some(next.to_string()),
+                _ => break,
+            }
+        }
+        Ok(collected)
+    }
 }
 
 /// Percent-encode a path segment. Addresses and hex ids are already safe, but a
@@ -324,6 +364,43 @@ impl crate::registry::RegistryStore for FirestoreStore {
             }),
         )?;
         Ok(true)
+    }
+
+    fn chronicle_leaves(&mut self) -> Result<Vec<[u8; 32]>> {
+        let documents = self.list(REGISTRY_CHRONICLE)?;
+        let mut leaves = Vec::with_capacity(documents.len());
+        for (position, (id, document)) in documents.iter().enumerate() {
+            // Ids are zero-padded indices, so name order is append order —
+            // but a gap or a stray id means a chronicle this store cannot
+            // vouch for, and that fails closed rather than reading around it.
+            if *id != format!("{position:020}") {
+                return Err(anyhow!(
+                    "registry chronicle is not contiguous at {position}: found {id}"
+                ));
+            }
+            let leaf = string(document, "leaf")
+                .and_then(|raw| {
+                    data_encoding::HEXLOWER_PERMISSIVE
+                        .decode(raw.as_bytes())
+                        .ok()
+                })
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                .ok_or_else(|| anyhow!("registry chronicle entry {position} is not a leaf"))?;
+            leaves.push(leaf);
+        }
+        Ok(leaves)
+    }
+
+    fn append_chronicle(&mut self, index: u64, leaf: [u8; 32]) -> Result<bool> {
+        // The same atomic mint the address claim and the label binding rest
+        // on: create-with-chosen-id refuses an existing id consistently, so
+        // two holders can never write different leaves at one index and the
+        // chronicle's roots cannot fork, however many replicas race.
+        self.create(
+            REGISTRY_CHRONICLE,
+            &format!("{index:020}"),
+            json!({ "leaf": { "stringValue": data_encoding::HEXLOWER.encode(&leaf) } }),
+        )
     }
 }
 

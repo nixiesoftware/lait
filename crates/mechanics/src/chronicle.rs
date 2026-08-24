@@ -491,11 +491,17 @@ impl Chronicle {
         if entry.len() > MAX_ENTRY_BYTES {
             return Err(Refusal::Bound("entry bytes"));
         }
+        self.append_leaf(leaf_hash(entry))
+    }
+
+    /// Append an already-derived leaf hash — the restore-and-sync half, for a
+    /// holder whose durable store is the authority on what was appended.
+    pub fn append_leaf(&mut self, leaf: [u8; 32]) -> Result<u64, Refusal> {
         let index = self.size();
         if index >= MAX_CHRONICLE_ENTRIES {
             return Err(Refusal::Bound("chronicle entries"));
         }
-        self.leaves.push(leaf_hash(entry));
+        self.leaves.push(leaf);
         Ok(index)
     }
 

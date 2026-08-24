@@ -16,6 +16,21 @@
 //! cannot author. A compromise is a denial, which is detectable, not an
 //! impersonation.
 //!
+//! # The registrar keeps a chronicle, and that is the one key it holds
+//!
+//! A mirror that holds no key cannot author — but it can serve two readers
+//! two different worlds, silently. So the registrar keeps a
+//! [`mechanics::chronicle`]: every accepted publication is appended to a
+//! committed log, and answers carry a signed head over it, with inclusion
+//! and consistency paths a reader checks against the head it pinned. That
+//! key signs **which publications were recorded, in which order** — never
+//! their contents, which remain self-signed by their subjects and verified
+//! against their own geneses exactly as before. The asymmetry survives the
+//! key: a compromise can still only deny or equivocate, and equivocation is
+//! now non-repudiable instead of silent, because two irreconcilable signed
+//! heads are the proof of it. The key that could impersonate a *person*
+//! still does not exist here.
+//!
 //! Allocation is curated for the first wave: a label→profile binding is an
 //! operator act on the store, not a route. Open registration arrives with the
 //! rendezvous design or not at all, and nothing here forecloses either.
@@ -41,6 +56,7 @@ pub const RESERVED: &[&str] = &[
     "admin",
     "api",
     "astrolabe",
+    "chronicle",
     "directory",
     "dist",
     "foundation",
@@ -162,6 +178,55 @@ impl RoutePublish {
     }
 }
 
+/// Domain separator for a chronicle entry. The entry commits to the whole
+/// accepted publication — announcement and signature included — so inclusion
+/// proves *the evidence was recorded*, not merely that something was.
+const CHRONICLE_ENTRY_DOMAIN: &[u8] = b"lait-registry/chronicle-entry/v1";
+
+/// The canonical bytes one accepted publication contributes to the chronicle.
+/// Deterministic and serde-free, so any holder of the publication recomputes
+/// the same leaf.
+#[must_use]
+pub fn chronicle_entry(publish: &RoutePublish) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256 + publish.announcement.len());
+    framed(&mut out, CHRONICLE_ENTRY_DOMAIN);
+    framed(&mut out, publish.label.as_str().as_bytes());
+    framed(&mut out, &publish.announcement);
+    framed(&mut out, publish.endpoint.as_bytes());
+    framed(&mut out, &publish.epoch.to_be_bytes());
+    framed(&mut out, publish.device.as_str().as_bytes());
+    framed(&mut out, &publish.signature);
+    out
+}
+
+/// A registry answer, wearing the chronicle's memory beside it.
+///
+/// The `Resolved` fields are flattened, so a reader that knows nothing of
+/// chronicles decodes the answer it always did and ignores the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chronicled {
+    #[serde(flatten)]
+    pub resolved: Resolved,
+    /// The signed chronicle head at answer time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<mechanics::chronicle::Head>,
+    /// This publication's entry index — publish receipts only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<u64>,
+    /// Inclusion path for `entry` under `head` — publish receipts only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inclusion: Vec<[u8; 32]>,
+}
+
+/// The chronicle surface's answer: the current signed head, and — when a
+/// reader named the size it pinned — the path proving this head extends it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChronicleAnswer {
+    pub head: mechanics::chronicle::Head,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consistency: Vec<[u8; 32]>,
+}
+
 /// The registry's persistence surface. `&mut` for the same reason the
 /// directory's store is: the network-backed implementation holds a credential
 /// it refreshes.
@@ -180,15 +245,26 @@ pub trait RegistryStore {
     /// Record a verified route. `Ok(false)` when `epoch` does not advance the
     /// held one — a replay is refused without an error a prober can read.
     fn record_route(&mut self, resolved: &Resolved) -> anyhow::Result<bool>;
+
+    /// Every chronicle leaf hash, in append order. Read once at open, and
+    /// again after a raced append.
+    fn chronicle_leaves(&mut self) -> anyhow::Result<Vec<[u8; 32]>>;
+
+    /// Append a leaf at `index`. `Ok(false)` when the index is already taken
+    /// — another holder appended first; the caller reloads and takes the next
+    /// slot. Refusing a taken index is the linearization point: two holders
+    /// can never write different leaves at one index, so roots cannot fork.
+    fn append_chronicle(&mut self, index: u64, leaf: [u8; 32]) -> anyhow::Result<bool>;
 }
 
 /// Verify and apply one route publication against a store.
 ///
-/// The registry holds no key and consults no authority: the announcement's
+/// Verification consults no authority and needs no key: the announcement's
 /// profile id is re-derived from the genesis it carries, the presenting
 /// device must be one that genesis roots, and the label must already be bound
 /// to that profile by the curated act. Everything checkable is checked; what
-/// is not checkable is not stored.
+/// is not checkable is not stored. The chronicle's key lives one layer up, in
+/// [`Registrar`], and signs only what this function accepted.
 pub fn publish_route<S: RegistryStore>(
     store: &mut S,
     publish: &RoutePublish,
@@ -246,6 +322,128 @@ pub fn publish_route<S: RegistryStore>(
     Ok(resolved)
 }
 
+/// How many times an append retries after losing an index race before the
+/// answer is "unavailable". Each loss means another holder appended; losing
+/// this many in a row means the store is churning faster than one request
+/// deserves to wait.
+const MAX_APPEND_RACES: usize = 8;
+
+/// The registrar: the store, the chronicle over it, and the one key — which
+/// signs the chronicle's heads and nothing else.
+pub struct Registrar<S> {
+    store: S,
+    chronicle: mechanics::chronicle::Chronicle,
+    seed: [u8; 32],
+}
+
+impl<S: RegistryStore> Registrar<S> {
+    /// Open over a store, restoring the chronicle from its persisted leaves.
+    pub fn open(mut store: S, seed: [u8; 32]) -> anyhow::Result<Self> {
+        let leaves = store.chronicle_leaves()?;
+        let chronicle = mechanics::chronicle::Chronicle::from_leaves(leaves)
+            .map_err(|refusal| anyhow::anyhow!("chronicle restore: {refusal}"))?;
+        Ok(Self {
+            store,
+            chronicle,
+            seed,
+        })
+    }
+
+    /// The store, for the operator acts that bypass the request surface.
+    pub fn store(&mut self) -> &mut S {
+        &mut self.store
+    }
+
+    fn reload(&mut self) -> Result<(), Refusal> {
+        let leaves = self
+            .store
+            .chronicle_leaves()
+            .map_err(|error| Refusal::Unavailable(error.to_string()))?;
+        self.chronicle = mechanics::chronicle::Chronicle::from_leaves(leaves)
+            .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?;
+        Ok(())
+    }
+
+    fn head(&self) -> Result<mechanics::chronicle::Head, Refusal> {
+        self.chronicle
+            .head(&self.seed)
+            .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))
+    }
+
+    /// Verify, record, and chronicle one publication. The receipt carries the
+    /// signed head and the inclusion path for the entry just appended.
+    pub fn publish(&mut self, publish: &RoutePublish) -> Result<Chronicled, Refusal> {
+        let resolved = publish_route(&mut self.store, publish)?;
+        let leaf = mechanics::chronicle::Chronicle::leaf_of(&chronicle_entry(publish));
+        let mut races = 0;
+        let entry = loop {
+            let index = self.chronicle.size();
+            match self.store.append_chronicle(index, leaf) {
+                Ok(true) => {
+                    self.chronicle
+                        .append_leaf(leaf)
+                        .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?;
+                    break index;
+                }
+                Ok(false) => {
+                    races += 1;
+                    if races > MAX_APPEND_RACES {
+                        return Err(Refusal::Unavailable("chronicle append raced out".into()));
+                    }
+                    self.reload()?;
+                }
+                Err(error) => return Err(Refusal::Unavailable(error.to_string())),
+            }
+        };
+        let head = self.head()?;
+        let inclusion = self
+            .chronicle
+            .inclusion(entry)
+            .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?;
+        Ok(Chronicled {
+            resolved,
+            head: Some(head),
+            entry: Some(entry),
+            inclusion,
+        })
+    }
+
+    /// Resolve a label. The answer wears the current signed head; a reader's
+    /// ratchet runs on that even when the route itself is what it wanted.
+    pub fn resolve(&mut self, label: &Label) -> Result<Option<Chronicled>, Refusal> {
+        let Some(resolved) = self
+            .store
+            .route(label)
+            .map_err(|error| Refusal::Unavailable(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let head = self.head()?;
+        Ok(Some(Chronicled {
+            resolved,
+            head: Some(head),
+            entry: None,
+            inclusion: Vec::new(),
+        }))
+    }
+
+    /// The chronicle surface: the current head, with a consistency path from
+    /// `first` when a reader named the size it pinned. `first` past the log is
+    /// `NotAvailable` — the reader is ahead of this holder, which is its own
+    /// fact and must not decode as a proof failure.
+    pub fn answer(&self, first: Option<u64>) -> Result<ChronicleAnswer, Refusal> {
+        let head = self.head()?;
+        let consistency = match first {
+            None => Vec::new(),
+            Some(first) => self
+                .chronicle
+                .consistency(first)
+                .map_err(|_| Refusal::NotAvailable)?,
+        };
+        Ok(ChronicleAnswer { head, consistency })
+    }
+}
+
 /// The registry's HTTP surface, mounted beside the directory's router.
 ///
 /// Resolution is a public `GET` because a label's existence is public by
@@ -253,52 +451,83 @@ pub fn publish_route<S: RegistryStore>(
 /// refusal shape borrows the directory's coarse wire form so a store failure
 /// never explains itself to a prober.
 pub fn router<S: RegistryStore + Send + 'static>(
-    store: std::sync::Arc<std::sync::Mutex<S>>,
+    registrar: std::sync::Arc<std::sync::Mutex<Registrar<S>>>,
 ) -> axum::Router {
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
     use axum::routing::{get, post};
     use axum::Json;
 
-    type Held<S> = std::sync::Arc<std::sync::Mutex<S>>;
+    type Held<S> = std::sync::Arc<std::sync::Mutex<Registrar<S>>>;
 
     async fn resolve<S: RegistryStore + Send + 'static>(
-        State(store): State<Held<S>>,
+        State(registrar): State<Held<S>>,
         Path(label): Path<String>,
-    ) -> Result<Json<Resolved>, StatusCode> {
+    ) -> Result<Json<Chronicled>, StatusCode> {
         let label = Label::parse(label).map_err(|_| StatusCode::NOT_FOUND)?;
-        let mut store = store.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        match store.route(&label) {
-            Ok(Some(resolved)) => Ok(Json(resolved)),
+        let mut registrar = registrar
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        match registrar.resolve(&label) {
+            Ok(Some(answer)) => Ok(Json(answer)),
             Ok(None) => Err(StatusCode::NOT_FOUND),
             Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
         }
     }
 
     async fn publish<S: RegistryStore + Send + 'static>(
-        State(store): State<Held<S>>,
+        State(registrar): State<Held<S>>,
         Json(publish): Json<RoutePublish>,
-    ) -> Result<Json<Resolved>, (StatusCode, Json<crate::http::Refused>)> {
-        let mut store = store.lock().map_err(|_| {
+    ) -> Result<Json<Chronicled>, (StatusCode, Json<crate::http::Refused>)> {
+        let mut registrar = registrar.lock().map_err(|_| {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(crate::http::Refused::Unavailable),
             )
         })?;
-        publish_route(&mut *store, &publish)
-            .map(Json)
-            .map_err(|refusal| {
-                (
-                    StatusCode::FORBIDDEN,
-                    Json(crate::http::Refused::from(&refusal)),
-                )
-            })
+        registrar.publish(&publish).map(Json).map_err(|refusal| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(crate::http::Refused::from(&refusal)),
+            )
+        })
+    }
+
+    async fn chronicle_head<S: RegistryStore + Send + 'static>(
+        State(registrar): State<Held<S>>,
+    ) -> Result<Json<ChronicleAnswer>, StatusCode> {
+        let registrar = registrar
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        match registrar.answer(None) {
+            Ok(answer) => Ok(Json(answer)),
+            Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+
+    async fn chronicle_consistency<S: RegistryStore + Send + 'static>(
+        State(registrar): State<Held<S>>,
+        Path(first): Path<u64>,
+    ) -> Result<Json<ChronicleAnswer>, StatusCode> {
+        let registrar = registrar
+            .lock()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        match registrar.answer(Some(first)) {
+            Ok(answer) => Ok(Json(answer)),
+            Err(Refusal::NotAvailable) => Err(StatusCode::NOT_FOUND),
+            Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        }
     }
 
     axum::Router::new()
+        .route("/registry/chronicle", get(chronicle_head::<S>))
+        .route(
+            "/registry/chronicle/{first}",
+            get(chronicle_consistency::<S>),
+        )
         .route("/registry/{label}", get(resolve::<S>))
         .route("/registry/route", post(publish::<S>))
-        .with_state(store)
+        .with_state(registrar)
 }
 
 /// Publish a route over the registry's HTTP surface, as a client.
@@ -306,7 +535,7 @@ pub fn router<S: RegistryStore + Send + 'static>(
 /// Blocking, like every network call in this tree — callers on an async
 /// runtime hop through `spawn_blocking`. The coarse error carries no more
 /// than an operator log needs.
-pub fn publish_over_http(base: &str, publish: &RoutePublish) -> anyhow::Result<Resolved> {
+pub fn publish_over_http(base: &str, publish: &RoutePublish) -> anyhow::Result<Chronicled> {
     let response = ureq::post(&format!("{}/registry/route", base.trim_end_matches('/')))
         .timeout(std::time::Duration::from_secs(10))
         .send_json(serde_json::to_value(publish)?)
@@ -314,11 +543,51 @@ pub fn publish_over_http(base: &str, publish: &RoutePublish) -> anyhow::Result<R
     Ok(response.into_json()?)
 }
 
+/// Ask the registrar's chronicle surface for its current head — and, when
+/// `pinned` names the size a reader holds, the path proving extension.
+pub fn chronicle_over_http(base: &str, pinned: Option<u64>) -> anyhow::Result<ChronicleAnswer> {
+    let base = base.trim_end_matches('/');
+    let url = match pinned {
+        None => format!("{base}/registry/chronicle"),
+        Some(first) => format!("{base}/registry/chronicle/{first}"),
+    };
+    let response = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|error| anyhow::anyhow!("chronicle could not be asked: {error}"))?;
+    Ok(response.into_json()?)
+}
+
+/// The chronicle seed, from `REGISTRY_CHRONICLE_SEED` (64 hex chars) — or a
+/// minted one, flagged ephemeral so the operator log can say the identity
+/// will not survive a restart. An ephemeral registrar still chronicles
+/// correctly — the leaf sequence in the store is the continuity, and a
+/// reader's ratchet runs on roots, not signers — but its head signer changes
+/// on restart, which anchoring above this will eventually care about.
+pub fn chronicle_seed_from_env() -> anyhow::Result<([u8; 32], bool)> {
+    match std::env::var("REGISTRY_CHRONICLE_SEED") {
+        Ok(raw) => {
+            let decoded = data_encoding::HEXLOWER_PERMISSIVE
+                .decode(raw.trim().as_bytes())
+                .map_err(|_| anyhow::anyhow!("REGISTRY_CHRONICLE_SEED is not hex"))?;
+            let seed = <[u8; 32]>::try_from(decoded.as_slice())
+                .map_err(|_| anyhow::anyhow!("REGISTRY_CHRONICLE_SEED is not 32 bytes"))?;
+            Ok((seed, false))
+        }
+        Err(_) => {
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).map_err(|error| anyhow::anyhow!("entropy: {error}"))?;
+            Ok((seed, true))
+        }
+    }
+}
+
 /// In-memory store, enforcing the same rules a backing store must.
 #[derive(Debug, Default)]
 pub struct MemRegistry {
     bindings: std::collections::BTreeMap<String, ProfileId>,
     routes: std::collections::BTreeMap<String, Resolved>,
+    chronicle: Vec<[u8; 32]>,
 }
 
 impl RegistryStore for MemRegistry {
@@ -347,6 +616,18 @@ impl RegistryStore for MemRegistry {
         }
         self.routes
             .insert(resolved.label.as_str().to_string(), resolved.clone());
+        Ok(true)
+    }
+
+    fn chronicle_leaves(&mut self) -> anyhow::Result<Vec<[u8; 32]>> {
+        Ok(self.chronicle.clone())
+    }
+
+    fn append_chronicle(&mut self, index: u64, leaf: [u8; 32]) -> anyhow::Result<bool> {
+        if index != u64::try_from(self.chronicle.len())? {
+            return Ok(false);
+        }
+        self.chronicle.push(leaf);
         Ok(true)
     }
 }
@@ -478,21 +759,27 @@ mod tests {
 
     /// The wire round trip: sign, publish over HTTP, resolve over HTTP — the
     /// same path the daemon and the reach router take, against the mounted
-    /// axum surface on a real listener.
+    /// axum surface on a real listener. And the chronicle chain over it,
+    /// asserted as a chain rather than as parts: the receipt proves the
+    /// publication was recorded, a reader pins the head, a second publication
+    /// extends it through the consistency surface.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_route_publishes_and_resolves_over_the_wire() {
         let (announcement, profile) = identity();
-        let store = std::sync::Arc::new(std::sync::Mutex::new(MemRegistry::default()));
+        let registrar = Registrar::open(MemRegistry::default(), [51u8; 32]).expect("open");
+        let registrar = std::sync::Arc::new(std::sync::Mutex::new(registrar));
         {
-            let mut held = store.lock().unwrap();
-            held.bind(&Label::parse("acme").unwrap(), &profile).unwrap();
+            let mut held = registrar.lock().unwrap();
+            held.store()
+                .bind(&Label::parse("acme").unwrap(), &profile)
+                .unwrap();
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            axum::serve(listener, router(store)).await.ok();
+            axum::serve(listener, router(registrar)).await.ok();
         });
 
         let publish = RoutePublish::sign(
@@ -504,24 +791,85 @@ mod tests {
         );
         let published = tokio::task::spawn_blocking({
             let base = base.clone();
+            let publish = publish.clone();
             move || publish_over_http(&base, &publish)
         })
         .await
         .expect("join")
         .expect("publish");
-        assert_eq!(published.endpoint, endpoint());
+        assert_eq!(published.resolved.endpoint, endpoint());
 
-        let resolved: Resolved = tokio::task::spawn_blocking(move || {
-            ureq::get(&format!("{base}/registry/acme"))
-                .call()
-                .expect("resolve")
-                .into_json()
-                .expect("decode")
+        // The receipt proves this very publication was recorded.
+        let head = published.head.expect("a chronicled receipt");
+        head.verify().expect("the head verifies");
+        let leaf = mechanics::chronicle::Chronicle::leaf_of(&chronicle_entry(&publish));
+        mechanics::chronicle::verify_inclusion(
+            &leaf,
+            published.entry.expect("an entry index"),
+            head.size,
+            &head.root,
+            &published.inclusion,
+        )
+        .expect("the inclusion path verifies");
+
+        // A reader pins what it was served.
+        let pin = mechanics::chronicle::PinnedHead::from(&head);
+
+        // The plain resolve still decodes for a reader that knows nothing of
+        // chronicles, and carries the head for one that does.
+        let resolved: Resolved = tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || {
+                ureq::get(&format!("{base}/registry/acme"))
+                    .call()
+                    .expect("resolve")
+                    .into_json()
+                    .expect("decode")
+            }
         })
         .await
         .expect("join");
         assert_eq!(resolved.profile, profile.as_str());
         assert_eq!(resolved.epoch, 5);
+
+        // A second publication moves the chronicle; the consistency surface
+        // proves the new head extends the pinned one, and the ratchet takes it.
+        let second = RoutePublish::sign(
+            Label::parse("acme").unwrap(),
+            announcement.encode().expect("encode"),
+            endpoint(),
+            6,
+            &SEED_A,
+        );
+        tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || publish_over_http(&base, &second).expect("second publish")
+        })
+        .await
+        .expect("join");
+
+        let answer = tokio::task::spawn_blocking({
+            let base = base.clone();
+            let pinned = pin.size;
+            move || chronicle_over_http(&base, Some(pinned)).expect("chronicle")
+        })
+        .await
+        .expect("join");
+        assert_eq!(
+            mechanics::chronicle::advance(Some(&pin), &answer.head, &answer.consistency),
+            Ok(mechanics::chronicle::Advance::Extended),
+            "the served head provably extends the pinned one"
+        );
+
+        // A reader ahead of the log is told so, coarsely — not handed a
+        // proof that cannot exist.
+        let ahead = tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || ureq::get(&format!("{base}/registry/chronicle/99")).call()
+        })
+        .await
+        .expect("join");
+        assert!(matches!(ahead, Err(ureq::Error::Status(404, _))));
     }
 
     #[test]
