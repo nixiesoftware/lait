@@ -1224,25 +1224,46 @@ impl Replica {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticRowEvidence {
+    evidence: [u8; 32],
+    coordinates: [u8; 32],
+    snapshot: [u8; 32],
+    snapshot_bytes: u64,
+    content: [u8; 32],
+    content_count: u64,
+}
+
 fn row_evidence(
     body: &PriorBodyEvidence,
     snapshot: &fabric::BodySnapshot,
-) -> Result<[u8; 32], Failure> {
+) -> Result<SemanticRowEvidence, Failure> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"lait/prior-semantic-row/1");
     let coordinates = postcard::to_stdvec(&(&body.key, &body.binding))
         .map_err(|_| Failure::Integrity(Defect::Encoding))?;
     hash.update(&coordinates);
     let bytes = snapshot.canonical_export_shared();
-    hash.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    let snapshot_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hash.update(&snapshot_bytes.to_be_bytes());
     hash.update(&bytes);
     let mut refs = body.content_refs.clone();
     refs.sort_unstable();
     refs.dedup();
-    for reference in refs {
+    let mut content = blake3::Hasher::new();
+    content.update(b"lait/prior-semantic-content/1");
+    for reference in &refs {
         hash.update(&reference);
+        content.update(reference);
     }
-    Ok(*hash.finalize().as_bytes())
+    Ok(SemanticRowEvidence {
+        evidence: *hash.finalize().as_bytes(),
+        coordinates: *blake3::hash(&coordinates).as_bytes(),
+        snapshot: *blake3::hash(&bytes).as_bytes(),
+        snapshot_bytes,
+        content: *content.finalize().as_bytes(),
+        content_count: u64::try_from(refs.len()).unwrap_or(u64::MAX),
+    })
 }
 
 /// Stream an indexed prior Replica into fresh current signed transactions,
@@ -1491,7 +1512,10 @@ where
     let mut evidence = blake3::Hasher::new();
     evidence.update(b"lait/prior-semantic-equivalence/1");
     evidence.update(&source_manifest);
-    let mut evidence_rows = actual_rows.values().copied().collect::<Vec<_>>();
+    let mut evidence_rows = actual_rows
+        .values()
+        .map(|row| row.evidence)
+        .collect::<Vec<_>>();
     evidence_rows.sort_unstable();
     for row in evidence_rows {
         evidence.update(&row);
