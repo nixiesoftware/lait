@@ -1253,7 +1253,7 @@ fn row_evidence(
     let mut content = blake3::Hasher::new();
     content.update(b"lait/prior-semantic-content/1");
     for reference in &refs {
-        hash.update(&reference);
+        hash.update(reference);
         content.update(reference);
     }
     Ok(SemanticRowEvidence {
