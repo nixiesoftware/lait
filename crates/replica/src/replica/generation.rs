@@ -353,6 +353,47 @@ fn validate_prior_advertisement(
     Ok(())
 }
 
+/// Validate the prior per-Body ordering coordinate without treating it as
+/// semantic content. Atomic Bodies use that coordinate to select one winner,
+/// so their exact root must be derivable from the retained signed heads.
+/// Collaborative state is instead the causal merge of every retained signed
+/// head. Its chain was bookkeeping only, and the prior bundle fold could hash
+/// an identical staged head into that bookkeeping twice while retaining the
+/// head once. The height still has to match the authenticated heads; the root
+/// must not be substituted for the signed Fabric state during composition.
+fn prior_frontier_matches(
+    mutation_model: u8,
+    record: ReplicaFrontier,
+    heads: &[PriorHeadEvidence],
+) -> bool {
+    let mut derived = None;
+    for head in heads {
+        let Some(material) = head.material.as_ref() else {
+            return false;
+        };
+        derived = Some(match (&material.payload, derived) {
+            (_, None) => material.resulting_frontier,
+            (fabric::BodyExport::Atomic(_), Some(current)) => {
+                if super::chain_order(&material.resulting_frontier, &current).is_gt() {
+                    material.resulting_frontier
+                } else {
+                    current
+                }
+            }
+            (fabric::BodyExport::Collaborative(_), Some(current)) => {
+                super::combine_chains(&current, &material.resulting_frontier)
+            }
+        });
+    }
+    match mutation_model {
+        super::MUTATION_COLLABORATIVE => {
+            derived.is_some_and(|frontier| frontier.transaction_count == record.transaction_count)
+        }
+        super::MUTATION_ATOMIC => derived == Some(record),
+        _ => false,
+    }
+}
+
 /// Validated, read-only streaming access to an actual indexed Journal-v2
 /// Replica. The source directory remains untouched. A caller may build a fresh
 /// target, verify it, and activate it atomically, but cannot reinterpret these
@@ -768,27 +809,7 @@ impl PriorReplicaSource {
             });
         }
         if record.interpreted {
-            let mut derived = None;
-            for head in &heads {
-                let material = head
-                    .material
-                    .as_ref()
-                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-                derived = Some(match (&material.payload, derived) {
-                    (_, None) => material.resulting_frontier,
-                    (fabric::BodyExport::Atomic(_), Some(current)) => {
-                        if super::chain_order(&material.resulting_frontier, &current).is_gt() {
-                            material.resulting_frontier
-                        } else {
-                            current
-                        }
-                    }
-                    (fabric::BodyExport::Collaborative(_), Some(current)) => {
-                        super::combine_chains(&current, &material.resulting_frontier)
-                    }
-                });
-            }
-            if derived != Some(record.chain) {
+            if !prior_frontier_matches(record.binding.mutation_model, record.chain, &heads) {
                 let head_frontiers = heads
                     .iter()
                     .map(|head| {
@@ -808,7 +829,7 @@ impl PriorReplicaSource {
                     Defect::CorruptMaterial,
                     "verify prior Body frontier",
                     format!(
-                        "body {key:?}: record={:?}, derived={derived:?}, heads={head_frontiers:?}",
+                        "body {key:?}: record={:?}, heads={head_frontiers:?}",
                         record.chain
                     ),
                 ));
@@ -2212,6 +2233,35 @@ mod tests {
                 .canonical_export_shared()
                 .as_ref()
         );
+    }
+
+    #[test]
+    fn prior_collaborative_frontier_accepts_the_historical_duplicate_fold_only_at_its_height() {
+        let frontier = ReplicaFrontier::new([0x31; 32], 5);
+        let material = PriorOpenedMaterial {
+            epoch: PRIOR_EPOCH,
+            payload: fabric::BodyExport::Collaborative(Vec::new()),
+            base_frontier: ReplicaFrontier::new([0x30; 32], 4),
+            resulting_frontier: frontier,
+        };
+        let head = prior_head(material, 0x31);
+        let duplicate_fold = super::super::combine_chains(&frontier, &frontier);
+        assert_ne!(duplicate_fold.root, frontier.root);
+        assert!(prior_frontier_matches(
+            super::super::MUTATION_COLLABORATIVE,
+            duplicate_fold,
+            std::slice::from_ref(&head),
+        ));
+        assert!(!prior_frontier_matches(
+            super::super::MUTATION_COLLABORATIVE,
+            ReplicaFrontier::new(duplicate_fold.root, 6),
+            std::slice::from_ref(&head),
+        ));
+        assert!(!prior_frontier_matches(
+            super::super::MUTATION_ATOMIC,
+            duplicate_fold,
+            &[head],
+        ));
     }
 
     #[test]
