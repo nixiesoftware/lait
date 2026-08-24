@@ -32,6 +32,17 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
+    dedupe: ['react', 'react-dom'],
+  },
+  optimizeDeps: {
+    include: [
+      '@base-ui/react/popover',
+      '@base-ui/react/context-menu',
+      '@base-ui/react/dialog',
+      '@base-ui/react/alert-dialog',
+      '@use-gesture/react',
+      'interactjs',
+    ],
   },
   server: {
     port: 3000,

@@ -33,7 +33,7 @@ export async function createAndNavigateToBroadcast(
 ): Promise<SignageProgram | null> {
   const { onSuccess, onError, router } = options;
   try {
-    const program = draftProgram(name ?? 'Untitled Broadcast');
+    const program = draftProgram(name ?? "Untitled program");
     sessionStorage.setItem(draftNameKey(program.id), program.name);
     go(navigateToBroadcast(program), router);
     onSuccess?.();

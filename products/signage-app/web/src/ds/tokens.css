@@ -1,0 +1,128 @@
+:root {
+  --ds-ink: #111318;
+  --ds-ink-2: #1a1c24;
+  --ds-ink-3: #2a2d38;
+  --ds-ink-4: #3a3e4c;
+  --ds-paper: #f4f1ea;
+  --ds-paper-muted: color-mix(in srgb, var(--ds-paper) 60%, transparent);
+  --ds-paper-faint: color-mix(in srgb, var(--ds-paper) 34%, transparent);
+  --ds-accent: #ff5a3c;
+  --ds-danger: #ffb4a8;
+  --ds-lift: #ffffff12;
+  --ds-lift-strong: #ffffff1c;
+  --ds-line: #ffffff18;
+  --ds-scrim: #00000088;
+  --ds-radius-sm: 8px;
+  --ds-radius-md: 10px;
+  --ds-radius-lg: 14px;
+  --ds-radius-xl: 16px;
+  --ds-space-1: 4px;
+  --ds-space-2: 8px;
+  --ds-space-3: 12px;
+  --ds-space-4: 16px;
+  --ds-space-5: 24px;
+  --ds-control: 40px;
+  --ds-control-lg: 48px;
+  --ds-duration-sm: 160ms;
+  --ds-duration-md: 220ms;
+  --ds-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ds-shadow-overlay: 0 16px 40px #00000088;
+  --ds-shadow-frame: 0 24px 64px #00000066;
+  --ds-font: ui-sans-serif, system-ui, sans-serif;
+  --ds-z-overlay: 100002;
+  --ds-z-scrim: 100001;
+}
+
+.ds-icon {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--ds-radius-md);
+  transition: background var(--ds-duration-sm) var(--ds-ease-out);
+}
+
+.ds-icon:hover,
+.ds-icon:active {
+  background: var(--ds-lift);
+}
+
+.ds-icon:disabled {
+  opacity: 0.35;
+}
+
+.ds-btn {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  height: var(--ds-control);
+  padding: 0 14px;
+  border-radius: var(--ds-radius-md);
+  cursor: pointer;
+  transition:
+    background var(--ds-duration-sm) var(--ds-ease-out),
+    color var(--ds-duration-sm) var(--ds-ease-out),
+    opacity var(--ds-duration-sm) var(--ds-ease-out);
+}
+
+.ds-btn-solid {
+  background: var(--ds-paper);
+  color: var(--ds-ink);
+  font-weight: 650;
+}
+
+.ds-btn-solid:disabled {
+  background: var(--ds-lift);
+  color: var(--ds-paper-faint);
+}
+
+.ds-btn-ghost {
+  background: var(--ds-lift);
+  color: inherit;
+}
+
+.ds-btn-ghost:hover {
+  background: var(--ds-lift-strong);
+}
+
+.ds-btn-quiet {
+  background: transparent;
+  color: var(--ds-paper-muted);
+}
+
+.ds-btn-quiet:hover {
+  background: var(--ds-lift);
+  color: var(--ds-paper);
+}
+
+.ds-hint {
+  font-size: 13px;
+  color: var(--ds-paper-muted);
+}
+
+.ds-danger-text {
+  font-size: 13px;
+  color: var(--ds-danger);
+}
+
+.ds-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ds-empty {
+  padding: var(--ds-space-5) var(--ds-space-2);
+  color: var(--ds-paper-muted);
+  text-align: center;
+}

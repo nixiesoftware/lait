@@ -61,11 +61,7 @@ function AdminLayoutContent() {
       )}
       <div
         className={`relative flex flex-col flex-1 min-w-0 sm:my-3 sm:mr-3
-          ${
-            isEditorRoute
-              ? 'min-md:ml-3 max-sm:mt-[calc(100vh-250px)]'
-              : 'sm:ml-18'
-          }
+          ${isEditorRoute ? "m-0" : "sm:ml-18"}
           animate-all duration-300 ease-[cubic-bezier(.12,.88,.68,1.11)]`}
       >
         {!isEditorRoute && <div className="hidden sm:block"><Navbar /></div>}

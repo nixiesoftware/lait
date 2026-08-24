@@ -1,167 +1,95 @@
-import { useState, useEffect } from "react";
-import { useParams } from "@tanstack/react-router";
-import BroadcastEditor from "@/components/broadcasts/broadcast-editor/BroadcastEditor";
-import { BroadcastRow } from "@/components/broadcasts/types";
-import { useAdminLayout } from "@/context/AdminLayoutContext";
+import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import { ProgramEditor } from "@/program-editor";
 import { fetchProgram, saveProgram } from "@/utils/broadcasts/api";
-import { draftNameKey } from "@/utils/navigation/actions";
 import { fetchLibrary } from "@/utils/content/api";
+import { draftNameKey } from "@/utils/navigation/actions";
+import { goBack } from "@/utils/navigation/goBack";
 import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
 
 export default function BroadcastPage() {
   const params = useParams({ strict: false });
-  const broadcastId = String(params.id ?? "");
-  const { setHideSidebar } = useAdminLayout();
+  const programId = String(params.id ?? "");
+  const navigate = useNavigate();
   const [program, setProgram] = useState<SignageProgram | null>(null);
-  const [allContent, setAllContent] = useState<SignageMedia[]>([]);
-  const [originalRows, setOriginalRows] = useState<BroadcastRow[]>([]);
+  const [library, setLibrary] = useState<SignageMedia[]>([]);
+  const [persisted, setPersisted] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false); // background fetch flag for route changes
   const [error, setError] = useState("");
 
-  const refreshContent = async () => {
-    try {
-      setAllContent(await fetchLibrary());
-    } catch (e) {
-      console.error('Failed to refresh library:', e);
-    }
+  const refreshLibrary = async (): Promise<SignageMedia[]> => {
+    const catalog = await fetchLibrary();
+    setLibrary(catalog);
+    return catalog;
   };
 
-  const loadData = async (opts?: { initial?: boolean }) => {
-    const initial = opts?.initial ?? false;
-    if (initial) setLoading(true); else setRefreshing(true);
-    setError("");
-    try {
-      // One fetch returns the program and the library entries its items
-      // name, in item order — the join happens here, not per item.
-      const [loaded, catalog] = await Promise.all([
-        fetchProgram(broadcastId),
-        fetchLibrary(),
-      ]);
-
-      if (!loaded) {
-        // A fresh broadcast is a draft the World has never seen: the engine
-        // refuses an empty program, so the first save with an item is the
-        // first put. The name rides over from the create action.
-        const draftName = sessionStorage.getItem(draftNameKey(broadcastId));
-        if (!draftName) {
-          setError("Broadcast not found");
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const [loaded, catalog] = await Promise.all([
+          fetchProgram(programId),
+          fetchLibrary(),
+        ]);
+        if (cancelled) return;
+        setLibrary(catalog);
+        if (loaded) {
+          setProgram(loaded.program);
+          setPersisted(true);
           return;
         }
+        const draftName = sessionStorage.getItem(draftNameKey(programId));
+        if (!draftName) {
+          setError("This program is not on the World, and no draft name was kept.");
+          return;
+        }
+        setPersisted(false);
         setProgram({
-          id: broadcastId,
+          id: programId,
           name: draftName,
-          cycle: 'loop',
+          cycle: "loop",
           items: [],
           windows: [],
         });
-        setAllContent(catalog);
-        setOriginalRows([]);
-        return;
-      }
-
-      setProgram(loaded.program);
-      setAllContent(catalog);
-
-      const mediaById = new Map(loaded.media.map(m => [m.id, m]));
-      const rows = loaded.program.items.flatMap((item): BroadcastRow[] => {
-        const media = mediaById.get(item.media);
-        if (!media) {
-          console.warn(`Library entry missing for item media: ${item.media}`);
-          return [];
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "The program could not be loaded.");
         }
-        return [{ item, media }];
-      });
-
-      setOriginalRows(rows);
-    } catch (e: unknown) {
-      console.error(e);
-      setError(e instanceof Error ? e.message : 'An error occurred');
-    } finally {
-      if (initial) setLoading(false); else setRefreshing(false);
-    }
-  };
-
-  useEffect(() => {
-    // First load shows skeleton, subsequent broadcastId changes do background refresh
-    loadData({ initial: true });
-  }, []);
-
-  // Background refresh on broadcastId change after initial mount
-  useEffect(() => {
-    if (originalRows.length > 0) {
-      loadData({ initial: false });
-    } else {
-      loadData({ initial: true });
-    }
-  }, [broadcastId]);
-
-  // Hide sidebar while the editor owns the viewport
-  useEffect(() => {
-    setHideSidebar(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
     return () => {
-      setHideSidebar(false);
+      cancelled = true;
     };
-  }, [setHideSidebar]);
+  }, [programId]);
 
-  // The editor saves the document: the ordered items[] rides one put.
-  const handleSave = async (rowsToSave: BroadcastRow[], newName?: string) => {
-    if (!program) return;
-    if (rowsToSave.length === 0) {
-      setError("A broadcast needs at least one item before it can be saved");
-      return;
-    }
-
-    const items = rowsToSave.map(r => r.item);
-    const itemIds = new Set(items.map(it => it.id));
-    const next: SignageProgram = {
-      ...program,
-      name: newName ?? program.name,
-      items,
-      // A program window chooses among the program's own items; drop
-      // references to items this save removes.
-      windows: program.windows.map(w => ({
-        ...w,
-        items: w.items.filter(id => itemIds.has(id)),
-      })),
-    };
-
-    await saveProgram(next);
-    sessionStorage.removeItem(draftNameKey(broadcastId));
-    setProgram(next);
-    setOriginalRows(rowsToSave);
-  };
-
-  if (loading) return (
-    <div className="fixed inset-0 top-0 bottom-0 z-40 overflow-hidden">
-      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-brand-400 to-brand-600 animate-pulse"></div>
-      <div className="h-full w-full flex items-center justify-center">
-        <div className="text-sm text-gray-500 dark:text-gray-300"></div>
-      </div>
-    </div>
-  );
-  if (error) return (
-    <div className="text-red-500 dark:text-white/90">{error}</div>
-  );
+  if (loading) {
+    return <p className="pe-hint">Loading program…</p>;
+  }
+  if (error || !program) {
+    return <p className="pe-error">{error || "Missing program."}</p>;
+  }
 
   return (
-    <div className="fixed inset-0 top-0 bottom-0 z-40 overflow-hidden">
-      {/* Background refresh indicator (thin progress bar) */}
-      {refreshing && (
-        <div className="absolute top-0 left-0 right-0">
-          <div className="h-0.5 w-full overflow-hidden bg-transparent">
-            <div className="h-full w-full animate-[progress_1.2s_ease-in-out_infinite] bg-gradient-to-r from-brand-400 via-brand-600 to-brand-400" style={{ backgroundSize: '200% 100%' }}></div>
-          </div>
-        </div>
-      )}
-      <BroadcastEditor
-        broadcastId={broadcastId}
-        broadcastName={program?.name ?? ""}
-        initialRows={originalRows}
-        allContent={allContent}
-        onContentUploaded={refreshContent}
-        onSave={handleSave}
-      />
-    </div>
+    <ProgramEditor
+      initial={program}
+      library={library}
+      persisted={persisted}
+      onRefreshLibrary={refreshLibrary}
+      onClose={() => goBack(navigate, "/broadcast-list")}
+      onSave={async (next) => {
+        if (next.items.length === 0) {
+          throw new Error("A program needs at least one item before it can be saved.");
+        }
+        await saveProgram(next);
+        sessionStorage.removeItem(draftNameKey(programId));
+        setProgram(next);
+        setPersisted(true);
+      }}
+    />
   );
 }
