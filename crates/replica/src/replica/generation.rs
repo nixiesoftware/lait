@@ -1230,6 +1230,7 @@ struct SemanticRowEvidence {
     coordinates: [u8; 32],
     snapshot: [u8; 32],
     snapshot_bytes: u64,
+    causal: [u8; 32],
     content: [u8; 32],
     content_count: u64,
 }
@@ -1264,6 +1265,16 @@ fn row_evidence(
     let snapshot_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     hash.update(&snapshot_bytes.to_be_bytes());
     hash.update(&bytes);
+    let causal = snapshot
+        .version()
+        .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?
+        .encode();
+    hash.update(
+        &u64::try_from(causal.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hash.update(&causal);
     let mut refs = body.content_refs.clone();
     refs.sort_unstable();
     refs.dedup();
@@ -1278,6 +1289,7 @@ fn row_evidence(
         coordinates: *blake3::hash(&coordinates).as_bytes(),
         snapshot: *blake3::hash(&bytes).as_bytes(),
         snapshot_bytes,
+        causal: *blake3::hash(&causal).as_bytes(),
         content: *content.finalize().as_bytes(),
         content_count: u64::try_from(refs.len()).unwrap_or(u64::MAX),
     })
@@ -2398,40 +2410,54 @@ mod tests {
             Vec::new(),
         );
         let key = fabric_key(&body.key);
-        let write_same_value = |intent: &str| {
+        let write = |intent: &str, op: fabric::Op| {
             let mut engine = fabric::Engine::new();
             engine
-                .commit(fabric::Transaction::new(
-                    intent,
-                    vec![fabric::Op::RegisterSet {
-                        key: key.clone(),
-                        path: "title".into(),
-                        value: b"same logical value".to_vec(),
-                    }],
-                ))
+                .commit(fabric::Transaction::new(intent, vec![op]))
                 .unwrap();
-            engine
+            engine.export_body(&key).unwrap()
         };
-        let left = write_same_value("left history");
-        let left_snapshot = left.body_snapshot(&key).unwrap().unwrap();
-        let mut merged = left;
-        let right = write_same_value("right history");
-        merged
-            .import_body(&key, &right.export_body(&key).unwrap())
-            .unwrap();
-        let merged_snapshot = merged.body_snapshot(&key).unwrap().unwrap();
+        let left = write(
+            "left history",
+            fabric::Op::RegisterSet {
+                key: key.clone(),
+                path: "title".into(),
+                value: b"same logical value".to_vec(),
+            },
+        );
+        let right = write(
+            "right history",
+            fabric::Op::MapSet {
+                key: key.clone(),
+                path: "metadata".into(),
+                entry: "priority".into(),
+                value: b"high".to_vec(),
+            },
+        );
+        let merge = |first: &fabric::BodyExport, second: &fabric::BodyExport| {
+            let mut engine = fabric::Engine::new();
+            engine.import_body(&key, first).unwrap();
+            engine.import_body(&key, second).unwrap();
+            engine.body_snapshot(&key).unwrap().unwrap()
+        };
+        let left_then_right = merge(&left, &right);
+        let right_then_left = merge(&right, &left);
 
         assert_ne!(
-            left_snapshot.canonical_export_shared().as_ref(),
-            merged_snapshot.canonical_export_shared().as_ref()
+            left_then_right.canonical_export_shared().as_ref(),
+            right_then_left.canonical_export_shared().as_ref()
         );
         assert_eq!(
-            left_snapshot.read_collaborative().unwrap(),
-            merged_snapshot.read_collaborative().unwrap()
+            left_then_right.read_collaborative().unwrap(),
+            right_then_left.read_collaborative().unwrap()
         );
         assert_eq!(
-            row_evidence(&body, &left_snapshot).unwrap(),
-            row_evidence(&body, &merged_snapshot).unwrap()
+            left_then_right.version().unwrap(),
+            right_then_left.version().unwrap()
+        );
+        assert_eq!(
+            row_evidence(&body, &left_then_right).unwrap(),
+            row_evidence(&body, &right_then_left).unwrap()
         );
     }
 
