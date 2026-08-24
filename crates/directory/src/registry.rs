@@ -269,6 +269,24 @@ pub fn publish_route<S: RegistryStore>(
     store: &mut S,
     publish: &RoutePublish,
 ) -> Result<Resolved, Refusal> {
+    let resolved = verify_route(store, publish)?;
+    if !store
+        .record_route(&resolved)
+        .map_err(|error| Refusal::Unavailable(error.to_string()))?
+    {
+        return Err(Refusal::NotAvailable);
+    }
+    Ok(resolved)
+}
+
+/// Verify a publication and derive the route it authorizes, **without**
+/// recording it. Split out so the registrar can chronicle a publication
+/// before making its route live, keeping the log a superset of every live
+/// route rather than a lagging shadow of it.
+pub fn verify_route<S: RegistryStore>(
+    store: &mut S,
+    publish: &RoutePublish,
+) -> Result<Resolved, Refusal> {
     if publish.label.reserved() {
         return Err(Refusal::NotAvailable);
     }
@@ -307,19 +325,12 @@ pub fn publish_route<S: RegistryStore>(
     if bound.as_ref() != Some(&announcement.profile) {
         return Err(Refusal::NotAvailable);
     }
-    let resolved = Resolved {
+    Ok(Resolved {
         label: publish.label.clone(),
         profile: announcement.profile.as_str().to_string(),
         endpoint: publish.endpoint.clone(),
         epoch: publish.epoch,
-    };
-    if !store
-        .record_route(&resolved)
-        .map_err(|error| Refusal::Unavailable(error.to_string()))?
-    {
-        return Err(Refusal::NotAvailable);
-    }
-    Ok(resolved)
+    })
 }
 
 /// How many times an append retries after losing an index race before the
@@ -370,14 +381,34 @@ impl<S: RegistryStore> Registrar<S> {
             .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))
     }
 
-    /// Verify, record, and chronicle one publication. The receipt carries the
-    /// signed head and the inclusion path for the entry just appended.
+    /// Verify, chronicle, then record one publication — in that order, so the
+    /// chronicle is a superset of every live route rather than a lagging
+    /// shadow. The receipt carries the signed head and the inclusion path for
+    /// the entry just appended, and (when the pin's size is offered) a
+    /// consistency path so the publisher's ratchet runs on this same act.
     pub fn publish(&mut self, publish: &RoutePublish) -> Result<Chronicled, Refusal> {
-        let resolved = publish_route(&mut self.store, publish)?;
+        let resolved = verify_route(&mut self.store, publish)?;
+        // Refuse a non-advancing epoch before touching the chronicle, so a
+        // replayed-but-valid publication cannot pad the log toward its cap.
+        // A publication that clears this and later loses the record race to a
+        // higher epoch is still honestly chronicled — it was accepted; only
+        // liveness is decided by the record's atomic guard.
+        if let Some(held) = self
+            .store
+            .route(&publish.label)
+            .map_err(|error| Refusal::Unavailable(error.to_string()))?
+        {
+            if publish.epoch <= held.epoch {
+                return Err(Refusal::NotAvailable);
+            }
+        }
         let leaf = mechanics::chronicle::Chronicle::leaf_of(&chronicle_entry(publish));
         let mut races = 0;
         let entry = loop {
             let index = self.chronicle.size();
+            if index >= mechanics::chronicle::MAX_CHRONICLE_ENTRIES {
+                return Err(Refusal::Unavailable("the chronicle is full".into()));
+            }
             match self.store.append_chronicle(index, leaf) {
                 Ok(true) => {
                     self.chronicle
@@ -395,6 +426,16 @@ impl<S: RegistryStore> Registrar<S> {
                 Err(error) => return Err(Refusal::Unavailable(error.to_string())),
             }
         };
+        // Now make the route live. A lost race here (a higher epoch landed in
+        // the window) leaves this publication chronicled but not live, which
+        // is honest — the log records what was accepted, not only what won.
+        if !self
+            .store
+            .record_route(&resolved)
+            .map_err(|error| Refusal::Unavailable(error.to_string()))?
+        {
+            return Err(Refusal::NotAvailable);
+        }
         let head = self.head()?;
         let inclusion = self
             .chronicle
@@ -427,18 +468,24 @@ impl<S: RegistryStore> Registrar<S> {
         }))
     }
 
-    /// The chronicle surface: the current head, with a consistency path from
-    /// `first` when a reader named the size it pinned. `first` past the log is
-    /// `NotAvailable` — the reader is ahead of this holder, which is its own
-    /// fact and must not decode as a proof failure.
+    /// The chronicle surface: always the current signed head, and — when the
+    /// reader named a pin size this log still covers — the consistency path
+    /// from it.
+    ///
+    /// A `first` *past* the current head is not an error and must not 404: a
+    /// chronicle now shorter than a reader's pin is a **rollback**, the
+    /// strongest signal of a rewritten log, and the reader's own [`advance`]
+    /// is what must see it. So the head goes back regardless (with an empty
+    /// path), and `offered.size < pinned.size` is judged where the pin lives,
+    /// not folded into "not found" here.
     pub fn answer(&self, first: Option<u64>) -> Result<ChronicleAnswer, Refusal> {
         let head = self.head()?;
         let consistency = match first {
-            None => Vec::new(),
-            Some(first) => self
+            Some(first) if first <= self.chronicle.size() && first > 0 => self
                 .chronicle
                 .consistency(first)
-                .map_err(|_| Refusal::NotAvailable)?,
+                .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?,
+            _ => Vec::new(),
         };
         Ok(ChronicleAnswer { head, consistency })
     }
@@ -861,15 +908,32 @@ mod tests {
             "the served head provably extends the pinned one"
         );
 
-        // A reader ahead of the log is told so, coarsely — not handed a
-        // proof that cannot exist.
-        let ahead = tokio::task::spawn_blocking({
+        // A reader ahead of the log is not 404'd — that would fold a rollback
+        // into "not found". It gets the current (smaller) head, and its own
+        // ratchet reads the shortfall as Rollback.
+        let ahead: ChronicleAnswer = tokio::task::spawn_blocking({
             let base = base.clone();
-            move || ureq::get(&format!("{base}/registry/chronicle/99")).call()
+            move || {
+                ureq::get(&format!("{base}/registry/chronicle/99"))
+                    .call()
+                    .expect("ahead resolves")
+                    .into_json()
+                    .expect("decode")
+            }
         })
         .await
         .expect("join");
-        assert!(matches!(ahead, Err(ureq::Error::Status(404, _))));
+        assert!(ahead.head.size < 99);
+        let far_ahead = mechanics::chronicle::PinnedHead {
+            size: 99,
+            root: [0u8; 32],
+            by: ahead.head.by.clone(),
+        };
+        assert_eq!(
+            mechanics::chronicle::advance(Some(&far_ahead), &ahead.head, &ahead.consistency),
+            Err(mechanics::chronicle::Refusal::Rollback),
+            "a chronicle shorter than the pin is a rollback, judged at the reader"
+        );
     }
 
     #[test]

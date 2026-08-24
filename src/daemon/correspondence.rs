@@ -204,6 +204,13 @@ impl CorrespondenceService {
         let Some(book) = self.book.get() else {
             return;
         };
+        // Never your own profile. Learning your own announcement (testing it,
+        // or a correspondent echoing it back) resolves your own name and
+        // devices, and would mint a phantom self-card — a duplicate that also
+        // becomes a send target.
+        if profile == plane.reach.profile() {
+            return;
+        }
         let reader = plane.reach.standing();
         let Some(name) = plane.reach.declared_name(profile, &reader) else {
             return;
@@ -215,7 +222,7 @@ impl CorrespondenceService {
             .into_iter()
             .map(addressbook::Handle::Device)
             .collect();
-        match book.install_introduced(&name, &handles) {
+        match book.install_introduced(profile, &name, &handles) {
             Ok(true) => tracing::info!(name, "an introduced correspondent joined the book"),
             Ok(false) => {}
             Err(error) => {

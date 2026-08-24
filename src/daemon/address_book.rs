@@ -54,6 +54,15 @@ struct SuggestionState {
     suggestions: Vec<StagedSuggestion>,
 }
 
+/// Profiles this identity has auto-installed a card for. Durable and
+/// append-only in practice: it records a decision ("I adopted this person
+/// once"), so a later deletion is honored — a re-learn of the same profile
+/// finds it here and installs nothing.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct AdoptedProfiles {
+    profiles: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StagedSuggestion {
     /// Content-derived (`sug_` + 16 hex of a hash over name, note and
@@ -854,21 +863,36 @@ impl AddressBookService {
         })
     }
 
-    /// Install a card for an introduced correspondent, unstaged.
+    /// Install a card for an introduced correspondent, unstaged — at most once
+    /// per profile, ever.
     ///
     /// The consent already happened one gesture ago: learning an announcement
     /// is accepting the introduction, and this is the book half of that one
-    /// act — no second question. What lands is `Declared` evidence, worth
-    /// what a self-claim is worth, and it lands only where the book is
-    /// silent: a handle any live card already carries means the person is
-    /// known, and auto-install never rewrites what somebody authored.
-    /// `Ok(false)` means the book was left alone.
+    /// act — no second question. What lands is `Declared` evidence, worth what
+    /// a self-claim is worth. Three refusals keep the convenience from
+    /// overriding a decision, and each returns `Ok(false)` — the book is left
+    /// alone:
+    ///
+    /// - **Already known**: a handle any live card carries means the person is
+    ///   authored; auto-install never rewrites that.
+    /// - **Name would collide**: a live card already bears this display name.
+    ///   Silently minting a second is the look-alike vector — an attacker's
+    ///   self-chosen name matching a trusted contact — so this stages nothing
+    ///   and installs nothing, leaving the collision for a person to see.
+    /// - **Already adopted**: this profile was auto-installed before. Recorded
+    ///   durably and consulted even after the card is deleted, so a deliberate
+    ///   deletion is a "no" that a later re-learn cannot quietly undo.
     pub(crate) fn install_introduced(
         &self,
+        profile: &mechanics::kinship::ProfileId,
         name: &str,
         handles: &[Handle],
     ) -> Result<bool, String> {
         if name.is_empty() || handles.is_empty() {
+            return Ok(false);
+        }
+        let mut adopted = self.load_adopted()?;
+        if adopted.profiles.iter().any(|held| held == profile.as_str()) {
             return Ok(false);
         }
         let author = self.author()?;
@@ -881,6 +905,9 @@ impl AddressBookService {
             .iter()
             .any(|handle| !book.authored_cards_for(handle).is_empty())
         {
+            return Ok(false);
+        }
+        if book.cards.values().any(|card| card.name.value == name) {
             return Ok(false);
         }
         let id = CardId::mint(&SystemUlidSource);
@@ -905,7 +932,37 @@ impl AddressBookService {
             self.resync(&mut engine);
             return Err(err.to_string());
         }
+        // Record the adoption last: only a profile that actually landed a card
+        // is marked, so a name-collision skip does not permanently block a
+        // later legitimate install under a different name.
+        adopted.profiles.push(profile.as_str().to_string());
+        drop(engine);
+        self.save_adopted(&adopted)?;
         Ok(true)
+    }
+
+    fn adopted_path(&self) -> PathBuf {
+        self.identity_dir.join("addressbook.adopted.json")
+    }
+
+    fn load_adopted(&self) -> Result<AdoptedProfiles, String> {
+        let path = self.adopted_path();
+        if !path.exists() {
+            return Ok(AdoptedProfiles::default());
+        }
+        let bytes =
+            std::fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            format!(
+                "adopted-profiles store unreadable at {}; fix or remove it",
+                path.display()
+            )
+        })
+    }
+
+    fn save_adopted(&self, adopted: &AdoptedProfiles) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(adopted).map_err(|err| err.to_string())?;
+        std::fs::write(self.adopted_path(), bytes).map_err(|err| err.to_string())
     }
 
     /// Re-read the envelope after a failed multi-action application, so the

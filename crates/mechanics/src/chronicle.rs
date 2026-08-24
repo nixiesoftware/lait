@@ -20,18 +20,25 @@
 //! exclusion [`crate::kinship::Head`] and [`crate::ledger`]'s checkpoint make,
 //! for the same reason. Inclusion means "this was said, then". Nothing more.
 //!
-//! # The reader's ratchet, and its three distinct refusals
+//! # The reader's ratchet, and its distinct refusals
 //!
 //! [`advance`] is the verifier-side monotonic ratchet: a reader pins the first
-//! head it accepts and thereafter only moves forward along proven extensions.
-//! Its refusals are deliberately three different facts:
+//! head it accepts (trust on first use) and thereafter only moves forward
+//! along proven extensions *of the same signer*. Its refusals are deliberately
+//! different facts:
 //!
+//! - [`Refusal::WrongSigner`] — the offered head is signed by a different
+//!   device than the pinned one. Checked before anything else, because it is
+//!   the whole trust anchor: without it every branch below is forgeable by a
+//!   stranger who mints a key, and a conflicting head from another signer is
+//!   not this holder equivocating.
 //! - [`Refusal::Rollback`] — the offered head is *older* than the pin. A
-//!   replayed copy, exactly the freeze a stale-pointer replay attempts against
-//!   an update feed, and refused the same way.
+//!   replayed or truncated copy, exactly the freeze a stale-pointer replay
+//!   attempts against an update feed, and refused the same way.
 //! - [`Refusal::Diverged`] — the offered head names the **same size** as the
-//!   pin with a different root. Both artifacts are signed; together they are
-//!   non-repudiable proof of equivocation. This is the caught lie.
+//!   pin with a different root, *under the pinned signer's own key*. Both
+//!   artifacts are signed by that device; together they are non-repudiable
+//!   proof of equivocation. This is the caught lie.
 //! - [`Refusal::Unproven`] — the offered head is larger but could not be shown
 //!   to extend the pin. Suspicion, not proof: a correct proof might exist and
 //!   the holder failed to produce it. The pin holds; the surface says "could
@@ -101,6 +108,13 @@ pub enum Refusal {
     /// The offered head could not be shown to extend the pin. Suspicion,
     /// never rendered as either "diverged" or "fine".
     Unproven,
+    /// The offered head is signed by a different device than the one pinned.
+    /// Distinct from [`Self::Diverged`] on purpose: two heads from *different*
+    /// signers are not proof the pinned signer equivocated — anyone can mint a
+    /// key and sign a conflicting head — so this is a refusal to be fooled, not
+    /// an accusation. Only a same-signer, same-size, different-root pair is
+    /// non-repudiable.
+    WrongSigner,
     /// A bound was exceeded, named.
     Bound(&'static str),
     /// The artifact does not parse as what it claims to be, named.
@@ -120,6 +134,9 @@ impl std::fmt::Display for Refusal {
             }
             Self::Unproven => {
                 f.write_str("the offered head could not be shown to extend the pinned one")
+            }
+            Self::WrongSigner => {
+                f.write_str("the offered head is signed by a different device than the pinned one")
             }
             Self::Bound(what) => write!(f, "bound exceeded: {what}"),
             Self::Malformed(what) => write!(f, "malformed: {what}"),
@@ -413,6 +430,15 @@ pub fn advance(
     let Some(held) = held else {
         return Ok(Advance::Pinned);
     };
+    // The pinned signer is the identity being followed. A head from any other
+    // device — however well-signed — is not this holder speaking, so it can
+    // neither move the pin nor stand as proof this holder equivocated. Bind it
+    // before any size comparison, or every branch below is forgeable by a
+    // stranger who mints a key. This is the reader's whole trust anchor once
+    // the first head is pinned (that first pin is trust-on-first-use).
+    if offered.by != held.by {
+        return Err(Refusal::WrongSigner);
+    }
     if offered.size < held.size {
         return Err(Refusal::Rollback);
     }
@@ -420,12 +446,15 @@ pub fn advance(
         return if offered.root == held.root {
             Ok(Advance::Unchanged)
         } else {
+            // Same signer, same size, different root: the one case that is
+            // non-repudiable, because the pinned device signed both.
             Err(Refusal::Diverged)
         };
     }
     if held.size == 0 {
         // The empty chronicle is a prefix of every chronicle — but only the
-        // empty root may claim to be it.
+        // empty root may claim to be it, and (checked above) only over the
+        // pinned signer's own signature.
         return if held.root == empty_root() {
             Ok(Advance::Extended)
         } else {
@@ -694,6 +723,53 @@ mod tests {
         let pin = PinnedHead::from(&bare);
         let grown = filled(6).head(&signer).expect("head");
         assert_eq!(advance(Some(&pin), &grown, &[]), Ok(Advance::Extended));
+    }
+
+    #[test]
+    fn a_stranger_cannot_move_the_pin_forge_a_fork_or_hijack_an_empty_pin() {
+        let honest = seed(3);
+        let attacker = seed(200);
+
+        // Pinned on an honest head at size 4.
+        let log = filled(4);
+        let pinned = log.head(&honest).expect("head");
+        let pin = PinnedHead::from(&pinned);
+
+        // Same size, different root, signed by a stranger: this is NOT proof
+        // the honest holder equivocated — it is a manufacturable accusation,
+        // and must read as WrongSigner, never Diverged.
+        let mut forger = filled(3);
+        forger.append(b"forged").expect("append");
+        let false_fork = forger.head(&attacker).expect("head");
+        assert_eq!(
+            advance(Some(&pin), &false_fork, &[]),
+            Err(Refusal::WrongSigner),
+            "a different signer's conflicting head is not a divergence proof"
+        );
+
+        // A stranger's *larger* head with a self-consistent proof cannot move
+        // the pin either: no signer check, and the attacker would own the log.
+        let mut grown = filled(4);
+        for index in 4..9 {
+            grown
+                .append(format!("entry-{index}").as_bytes())
+                .expect("append");
+        }
+        let attacker_head = grown.head(&attacker).expect("head");
+        assert_eq!(
+            advance(Some(&pin), &attacker_head, &[]),
+            Err(Refusal::WrongSigner)
+        );
+
+        // The empty-pin hijack: pinned on the honest empty head, a stranger
+        // offers an entire forged history. Without the signer bind this
+        // returned Extended and adopted it wholesale.
+        let empty_pin = PinnedHead::from(&Chronicle::new().head(&honest).expect("head"));
+        let forged_history = filled(5).head(&attacker).expect("head");
+        assert_eq!(
+            advance(Some(&empty_pin), &forged_history, &[]),
+            Err(Refusal::WrongSigner)
+        );
     }
 
     #[test]
