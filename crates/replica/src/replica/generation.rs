@@ -1130,11 +1130,10 @@ where
     let source_manifest = *blake3::hash(&source.manifest().bytes).as_bytes();
     let target_path = target.as_ref().to_path_buf();
     let mut target = Replica::open(&target_path, keys.clone())?;
-    if target.body_count() != 0
-        || target
-            .space
-            .as_ref()
-            .is_some_and(|space| space != context.space)
+    if target
+        .space
+        .as_ref()
+        .is_some_and(|space| space != context.space)
     {
         return Err(Failure::Integrity(Defect::Encoding));
     }
