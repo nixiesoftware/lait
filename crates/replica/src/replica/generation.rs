@@ -789,10 +789,28 @@ impl PriorReplicaSource {
                 });
             }
             if derived != Some(record.chain) {
+                let head_frontiers = heads
+                    .iter()
+                    .map(|head| {
+                        head.material.as_ref().map(|material| {
+                            (
+                                material.base_frontier,
+                                material.resulting_frontier,
+                                match &material.payload {
+                                    fabric::BodyExport::Atomic(_) => "atomic",
+                                    fabric::BodyExport::Collaborative(_) => "collaborative",
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 return Err(super::integrity_cause(
                     Defect::CorruptMaterial,
                     "verify prior Body frontier",
-                    format!("body {key:?}"),
+                    format!(
+                        "body {key:?}: record={:?}, derived={derived:?}, heads={head_frontiers:?}",
+                        record.chain
+                    ),
                 ));
             }
         }
