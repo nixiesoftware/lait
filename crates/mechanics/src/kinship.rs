@@ -86,6 +86,9 @@ pub const MAX_ENTRIES: usize = 4096;
 /// Cap on an avowed name, in bytes.
 pub const MAX_NAME_BYTES: usize = 128;
 
+/// Cap on a portrait's detail line, in bytes.
+pub const MAX_DETAIL_BYTES: usize = 256;
+
 /// A detached ed25519 signature.
 ///
 /// A named type rather than a bare `[u8; 64]` at every site: serde implements
@@ -265,6 +268,20 @@ pub enum Claim {
     Called(String),
     /// The subject sponsors this party.
     Sponsors(Party),
+    /// How the subject presents: a picture, by content hash, and a detail
+    /// line. The *name* stays [`Claim::Called`] — one name channel, so a
+    /// portrait never bypasses the ranked resolution names already have.
+    /// Self-signed only in practice: nobody else's signature can say how you
+    /// present, which readers enforce by requiring the self-signature, not
+    /// this type.
+    Portrait {
+        /// The picture's content hash, or `None` for none-or-cleared. Raw
+        /// bytes, never a rendering — two spellings of one hash would be two
+        /// claims.
+        picture: Option<[u8; 32]>,
+        /// A line of self-description. May be empty.
+        detail: String,
+    },
 }
 
 impl Claim {
@@ -273,25 +290,48 @@ impl Claim {
             Self::Profile(_) => b"profile",
             Self::Called(_) => b"called",
             Self::Sponsors(_) => b"sponsors",
+            Self::Portrait { .. } => b"portrait",
         }
     }
 
-    fn body(&self) -> String {
+    /// The claim's preimage bytes. For the single-field variants these are
+    /// the field's own bytes, unchanged since v1 — every signature already
+    /// minted stays valid. A variant with more than one variable-length field
+    /// frames them internally, because `a ‖ b` is ambiguous with `a' ‖ b'`
+    /// whenever the boundary can move.
+    fn body(&self) -> Vec<u8> {
         match self {
-            Self::Profile(profile) => profile.as_str().to_string(),
-            Self::Called(name) => name.clone(),
-            Self::Sponsors(party) => party.wire(),
+            Self::Profile(profile) => profile.as_str().as_bytes().to_vec(),
+            Self::Called(name) => name.as_bytes().to_vec(),
+            Self::Sponsors(party) => party.wire().into_bytes(),
+            Self::Portrait { picture, detail } => {
+                let mut out = Vec::with_capacity(64 + detail.len());
+                match picture {
+                    Some(hash) => framed(&mut out, &hash[..]),
+                    None => framed(&mut out, &[]),
+                }
+                framed(&mut out, detail.as_bytes());
+                out
+            }
         }
     }
 
     fn check(&self) -> Result<(), Refusal> {
-        if let Self::Called(name) = self {
-            if name.is_empty() {
-                return Err(Refusal::Malformed("empty name"));
+        match self {
+            Self::Called(name) => {
+                if name.is_empty() {
+                    return Err(Refusal::Malformed("empty name"));
+                }
+                if name.len() > MAX_NAME_BYTES {
+                    return Err(Refusal::Bound("name bytes"));
+                }
             }
-            if name.len() > MAX_NAME_BYTES {
-                return Err(Refusal::Bound("name bytes"));
+            Self::Portrait { detail, .. } => {
+                if detail.len() > MAX_DETAIL_BYTES {
+                    return Err(Refusal::Bound("detail bytes"));
+                }
             }
+            Self::Profile(_) | Self::Sponsors(_) => {}
         }
         Ok(())
     }
@@ -556,7 +596,7 @@ impl Avowal {
         framed(&mut out, by.as_str().as_bytes());
         framed(&mut out, subject.wire().as_bytes());
         framed(&mut out, claim.tag());
-        framed(&mut out, claim.body().as_bytes());
+        framed(&mut out, &claim.body());
         framed(&mut out, audience.tag());
         framed(&mut out, audience.body().as_bytes());
         framed(&mut out, &epoch.to_be_bytes());

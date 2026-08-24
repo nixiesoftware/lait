@@ -716,3 +716,87 @@ fn a_genesis_signer_disloses_no_chain() {
         "a genesis signer needs no chain, so none is disclosed"
     );
 }
+
+#[test]
+fn a_portrait_seals_verifies_and_is_bounded() {
+    let subject = Party::Device(device_from_seed(&FIRST));
+    let sealed = Avowal::seal(
+        &FIRST,
+        subject.clone(),
+        Claim::Portrait {
+            picture: Some([7u8; 32]),
+            detail: "keeps the lighthouse".to_string(),
+        },
+        Audience::Public,
+        2,
+        [5u8; 16],
+    )
+    .expect("a portrait seals");
+    sealed.verify().expect("and verifies");
+
+    // An empty detail is a portrait; an unbounded one is not.
+    Avowal::seal(
+        &FIRST,
+        subject.clone(),
+        Claim::Portrait {
+            picture: None,
+            detail: String::new(),
+        },
+        Audience::Public,
+        2,
+        [5u8; 16],
+    )
+    .expect("a bare portrait is legal");
+    assert_eq!(
+        Avowal::seal(
+            &FIRST,
+            subject,
+            Claim::Portrait {
+                picture: None,
+                detail: "d".repeat(1000),
+            },
+            Audience::Public,
+            2,
+            [5u8; 16],
+        )
+        .unwrap_err(),
+        Refusal::Bound("detail bytes")
+    );
+}
+
+#[test]
+fn a_portraits_fields_cannot_trade_bytes_across_their_boundary() {
+    // The framing property, pinned: a 32-byte detail that spells a hash and
+    // the hash itself are different claims, so the preimages must differ.
+    let subject = Party::Device(device_from_seed(&FIRST));
+    let hash = [9u8; 32];
+    let as_picture = Avowal::seal(
+        &FIRST,
+        subject.clone(),
+        Claim::Portrait {
+            picture: Some(hash),
+            detail: String::new(),
+        },
+        Audience::Public,
+        3,
+        [5u8; 16],
+    )
+    .expect("seal");
+    let as_detail = Avowal::seal(
+        &FIRST,
+        subject,
+        Claim::Portrait {
+            picture: None,
+            detail: String::from_utf8(vec![9u8; 32]).expect("utf8"),
+        },
+        Audience::Public,
+        3,
+        [5u8; 16],
+    )
+    .expect("seal");
+    assert_ne!(
+        as_picture.signature.bytes(),
+        as_detail.signature.bytes(),
+        "moving the boundary between the fields is a different signed statement"
+    );
+}
