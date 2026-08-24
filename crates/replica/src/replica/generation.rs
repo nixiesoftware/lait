@@ -2403,7 +2403,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_evidence_compares_the_collaborative_view_not_causal_container_bytes() {
+    fn semantic_evidence_is_merge_order_independent_and_binds_causal_history() {
         let body = prior_body(
             super::super::MUTATION_COLLABORATIVE,
             ReplicaFrontier::EMPTY,
@@ -2443,10 +2443,6 @@ mod tests {
         let left_then_right = merge(&left, &right);
         let right_then_left = merge(&right, &left);
 
-        assert_ne!(
-            left_then_right.canonical_export_shared().as_ref(),
-            right_then_left.canonical_export_shared().as_ref()
-        );
         assert_eq!(
             left_then_right.read_collaborative().unwrap(),
             right_then_left.read_collaborative().unwrap()
@@ -2458,6 +2454,26 @@ mod tests {
         assert_eq!(
             row_evidence(&body, &left_then_right).unwrap(),
             row_evidence(&body, &right_then_left).unwrap()
+        );
+
+        let same_view_other_history = write(
+            "independent same value",
+            fabric::Op::RegisterSet {
+                key: key.clone(),
+                path: "title".into(),
+                value: b"same logical value".to_vec(),
+            },
+        );
+        let left_only = merge(&left, &left);
+        let other_only = merge(&same_view_other_history, &same_view_other_history);
+        assert_eq!(
+            left_only.read_collaborative().unwrap(),
+            other_only.read_collaborative().unwrap()
+        );
+        assert_ne!(left_only.version().unwrap(), other_only.version().unwrap());
+        assert_ne!(
+            row_evidence(&body, &left_only).unwrap(),
+            row_evidence(&body, &other_only).unwrap()
         );
     }
 
