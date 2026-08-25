@@ -9,7 +9,7 @@
 
 import { useState } from "react";
 import { ArrowLeft, Pause, Play } from "lucide-react";
-import { useToast } from "@/ds";
+import { CommitMark, useToast } from "@/ds";
 import type { SignageMedia } from "@/utils/lait/types";
 import { ActionBar } from "./ActionBar";
 import { KindSheet, ProgramSheet } from "./ConfigSheet";
@@ -48,14 +48,13 @@ export function MobileShell({
           aria-label="Program name"
           onChange={(event) => editor.rename(event.target.value)}
         />
-        <button
-          type="button"
-          className="ds-btn ds-btn-solid"
-          disabled={!editor.canSave || editor.saving}
-          onClick={() => void editor.save()}
-        >
-          {editor.saving ? "Saving" : editor.dirty ? "Save" : "Saved"}
-        </button>
+        <CommitMark
+          state={
+            editor.saving ? "committing" : editor.error ? "refused" : editor.dirty ? "pending" : "settled"
+          }
+          error={editor.error}
+          onRetry={() => void editor.save()}
+        />
       </header>
 
       <div className={`pe-mobile${sheetOpen ? " has-sheet" : ""}`}>

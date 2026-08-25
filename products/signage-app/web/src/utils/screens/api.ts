@@ -13,12 +13,14 @@ import { rpc } from '../api/client';
 import { normalizeScreen } from '../lait/normalize';
 import { mintBodyId } from '../lait/ids';
 import type {
+  AsRunReply,
   Playback,
   PlaysReply,
   ScreenReply,
   ScreenSavedReply,
   ScreensReply,
   ShowingReply,
+  SignageAsRun,
   SignageScreen,
 } from '../lait/types';
 import { resolvePlayback, type ResolutionInputs } from '../lait/resolve';
@@ -116,4 +118,10 @@ export async function fetchScreenPlays(
 export async function fetchScreensShowing(program: string): Promise<string[]> {
   const reply = await rpc<ShowingReply>({ cmd: 'screen_showing', program });
   return reply.screens;
+}
+
+/** What a panel says it played, as the panel tells it. */
+export async function fetchAsRun(screen: string): Promise<SignageAsRun | null> {
+  const reply = await rpc<AsRunReply>({ cmd: 'as_run_get', screen });
+  return reply.asrun;
 }

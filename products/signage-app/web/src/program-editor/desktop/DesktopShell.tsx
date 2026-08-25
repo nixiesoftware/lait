@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import type { SignageMedia } from "@/utils/lait/types";
 import { uploadContentAll } from "@/utils/content/api";
-import { useToast } from "@/ds";
+import { CommitMark, useToast } from "@/ds";
 import { Filmstrip } from "../Filmstrip";
 import { Inspector } from "./Inspector";
 import { KIND_PANELS } from "../kinds/registry";
@@ -84,24 +84,14 @@ export function DesktopShell({
             <Redo2 size={18} />
           </button>
         </div>
-        {editor.dirty ? (
-          <button
-            type="button"
-            className="ds-btn ds-btn-ghost"
-            disabled={editor.saving}
-            onClick={editor.discard}
-          >
-            Discard
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="ds-btn ds-btn-solid"
-          disabled={!editor.canSave || editor.saving}
-          onClick={() => void editor.save()}
-        >
-          {editor.saving ? "Saving" : editor.dirty ? "Save" : "Saved"}
-        </button>
+        {/* No Save. The timeline writes itself; this only says so. */}
+        <CommitMark
+          state={
+            editor.saving ? "committing" : editor.error ? "refused" : editor.dirty ? "pending" : "settled"
+          }
+          error={editor.error}
+          onRetry={() => void editor.save()}
+        />
       </header>
 
       <div className={`pe-desk${source ? " has-source" : ""}`}>

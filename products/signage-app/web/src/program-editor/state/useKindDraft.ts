@@ -1,13 +1,22 @@
 /**
- * A kind panel being edited.
+ * A kind's presentation, being edited.
  *
- * The draft is pushed to the session on every keystroke so the stage redraws
- * from it, and committed only when asked. Nothing here writes through to the
- * World until `commit()`, and nothing here rewrites the committed model — the
- * overlay sits beside it.
+ * Two things happen on every keystroke and they are deliberately different
+ * speeds. The **draft** goes to the session immediately, so the card on the
+ * stage redraws under the cursor — that is the instant half, and it costs no
+ * round trip. The **write** follows on a debounce, because a preset is shared
+ * and committing sixty times while somebody types a city name is sixty
+ * replications for one decision.
+ *
+ * There is no Save button. A clip always points at a preset by the time this
+ * panel can be opened — `addKind` reuses one or creates one — so every edit
+ * here is an update to something that already exists, which is what makes
+ * commit-on-change safe rather than a way to litter a Space with half-named
+ * presets.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CommitState } from "@/ds";
 import type { KindPanel, Settings } from "../kinds/types";
 import { useEditorSession } from "./EditorContext";
 
@@ -18,104 +27,146 @@ function sameSettings(left: Settings, right: Settings): boolean {
   return keys.every((key) => left[key] === right[key]);
 }
 
+const DEBOUNCE_MS = 500;
+
 export function useKindDraft(panel: KindPanel, presetId: string | null) {
   const { kinds } = useEditorSession();
-  const config = kinds.byId(presetId);
-  const configId = config?.id ?? null;
+  const preset = kinds.byId(presetId);
+  const presetKey = preset?.id ?? null;
 
-  const [draft, setDraft] = useState<Settings>(() => panel.seed(config));
-  const [name, setName] = useState(() => config?.name ?? panel.label);
-  const [saving, setSaving] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
+  const [draft, setDraft] = useState<Settings>(() => panel.seed(preset));
+  const [name, setName] = useState(() => preset?.name ?? panel.label);
+  const [state, setState] = useState<CommitState>("settled");
   const [failure, setFailure] = useState<string | null>(null);
-  const seeded = useRef(configId);
+  const [submitted, setSubmitted] = useState(false);
+  const seeded = useRef(presetKey);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inflight = useRef(0);
 
   // Reseed only when the underlying document changes identity — not on every
   // refresh, which would throw away what somebody is typing.
   useEffect(() => {
-    if (seeded.current === configId) return;
-    seeded.current = configId;
-    setDraft(panel.seed(config));
-    setName(config?.name ?? panel.label);
-    setSubmitted(false);
+    if (seeded.current === presetKey) return;
+    seeded.current = presetKey;
+    setDraft(panel.seed(preset));
+    setName(preset?.name ?? panel.label);
+    setState("settled");
     setFailure(null);
-  }, [config, configId, panel]);
+    setSubmitted(false);
+  }, [preset, presetKey, panel]);
 
   const packed = useMemo(
-    () => panel.pack(draft, config?.settings ?? {}),
-    [panel, draft, config?.settings],
+    () => panel.pack(draft, preset?.settings ?? {}),
+    [panel, draft, preset?.settings],
   );
 
+  // The instant half: the stage redraws from this, every keystroke.
   const { setDraft: setSessionDraft } = kinds;
   useEffect(() => {
-    if (!configId) return;
-    setSessionDraft({ preset: configId, settings: packed });
-  }, [setSessionDraft, configId, packed]);
+    if (!presetKey) return;
+    setSessionDraft({ preset: presetKey, settings: packed });
+  }, [setSessionDraft, presetKey, packed]);
 
   const errors = useMemo(() => panel.validate(draft), [panel, draft]);
   const errorFor = useCallback(
     (key: string) => {
+      // Before a write has been attempted, a half-typed coordinate is not a
+      // mistake — it is somebody mid-thought.
       if (!submitted) return null;
       return errors.find((entry) => entry.key === key)?.message ?? null;
     },
     [errors, submitted],
   );
 
-  const patch = useCallback((next: Settings) => {
-    setDraft((current) => ({ ...current, ...next }));
-  }, []);
-
-  const commit = useCallback(async (): Promise<boolean> => {
-    setSubmitted(true);
-    if (errors.length > 0) {
-      setFailure(errors[0].message);
-      return false;
-    }
-    setSaving(true);
-    setFailure(null);
-    try {
-      if (!config) {
-        await kinds.create(panel.kind, name.trim() || panel.label, packed);
-      } else {
-        await kinds.save({ ...config, name: name.trim() || panel.label, settings: packed });
+  const write = useCallback(
+    async (settings: Settings, label: string) => {
+      if (!preset) return;
+      const ticket = ++inflight.current;
+      setSubmitted(true);
+      if (errors.length > 0) {
+        setState("refused");
+        setFailure(errors[0]?.message ?? "refused");
+        return;
       }
-      return true;
-    } catch (err) {
-      setFailure(err instanceof Error ? err.message : String(err));
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }, [config, errors, kinds, name, packed, panel.kind, panel.label]);
+      setState("committing");
+      setFailure(null);
+      try {
+        await kinds.save({ ...preset, name: label.trim() || panel.label, settings });
+        if (ticket !== inflight.current) return;
+        setState("settled");
+      } catch (err) {
+        if (ticket !== inflight.current) return;
+        setState("refused");
+        setFailure(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [errors, kinds, panel.label, preset],
+  );
+
+  const schedule = useCallback(
+    (settings: Settings, label: string) => {
+      setState("pending");
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => void write(settings, label), DEBOUNCE_MS);
+    },
+    [write],
+  );
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const patch = useCallback(
+    (next: Settings) => {
+      setDraft((current) => {
+        const merged = { ...current, ...next };
+        schedule(panel.pack(merged, preset?.settings ?? {}), name);
+        return merged;
+      });
+    },
+    [name, panel, preset?.settings, schedule],
+  );
+
+  const rename = useCallback(
+    (next: string) => {
+      setName(next);
+      schedule(packed, next);
+    },
+    [packed, schedule],
+  );
 
   const remove = useCallback(async (): Promise<boolean> => {
-    if (!config) return false;
-    setSaving(true);
+    if (!preset) return false;
+    setState("committing");
     try {
-      await kinds.remove(config.id);
+      await kinds.remove(preset.id);
+      setState("settled");
       return true;
     } catch (err) {
+      setState("refused");
       setFailure(err instanceof Error ? err.message : String(err));
       return false;
-    } finally {
-      setSaving(false);
     }
-  }, [config, kinds]);
+  }, [kinds, preset]);
 
   return {
-    config,
-    configured: config != null,
+    preset,
+    configured: preset != null,
     draft,
     packed,
     name,
-    setName,
+    rename,
     patch,
     errors,
     errorFor,
     failure,
-    saving,
-    commit,
+    state,
+    /** Try the same value again after a refusal. */
+    retry: () => void write(packed, name),
     remove,
-    dirty: config == null || !sameSettings(packed, config.settings),
+    dirty: preset == null || !sameSettings(packed, preset.settings),
   };
 }

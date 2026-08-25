@@ -1,15 +1,19 @@
 /**
  * Transmissions, and who they reach.
  *
- * The one rule this page exists to enforce: **you see the blast radius before
- * you send.** An expressive audience is worth having — the alternative is
- * groups that rot as the fleet grows — but expressiveness without a preview is
- * dangerous precisely because the emergency case is supposed to reach
- * everything. So the screen count, with names, is on the composer, live, and it
- * is computed by the same evaluator that will decide.
+ * One rule governs this page: **you see the blast radius before you send, and
+ * you see who you miss.**
  *
- * The count is a lower bound and says so. The World holds no clock and no
- * observations, so a reactive term reaches nobody from here.
+ * Every audience builder in the reference set counts who a message reaches —
+ * Shopify gives a percentage of base, Loops and Zendesk name the actual
+ * matches, Apollo does chips per facet. None of them show the complement,
+ * because for marketing an unreached contact is a wasted impression. For an
+ * evacuation it is the whole failure. So this states both, and the miss is not
+ * coloured as an error, because missing the office screen may well be intended.
+ *
+ * Facet chips carry their own size before you pick them, which is Partiful's
+ * move and strictly better than making somebody commit to a filter to find out
+ * how big it is.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -17,10 +21,13 @@ import { Megaphone, Plus, Radio, X } from "lucide-react";
 import {
   Confirm,
   Empty,
+  OnAir,
   Page,
   PageHeader,
   PageStatus,
   haptic,
+  useLive,
+  useRevision,
   useToast,
 } from "@/ds";
 import {
@@ -49,6 +56,7 @@ import type {
 
 export default function BroadcastHub() {
   const toast = useToast();
+  const revision = useRevision();
   const [broadcasts, setBroadcasts] = useState<SignageBroadcast[]>([]);
   const [audiences, setAudiences] = useState<SignageAudience[]>([]);
   const [screens, setScreens] = useState<SignageScreen[]>([]);
@@ -83,12 +91,9 @@ export default function BroadcastHub() {
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, revision]);
 
-  const audienceName = (id: string) =>
-    audiences.find((entry) => entry.id === id)?.name ?? "an audience";
-
-  const describeAction = (action: BroadcastAction) => {
+  const describe = (action: BroadcastAction) => {
     switch (action.action) {
       case "play":
         return programs.find((p) => p.id === action.program)?.name ?? "a program";
@@ -111,7 +116,7 @@ export default function BroadcastHub() {
       <PageHeader title="Broadcasts" icon={<Radio size={20} />}>
         <button
           type="button"
-          className="ds-btn ds-btn-solid"
+          className="ds-btn ds-btn-alarm"
           onClick={() => setComposing(true)}
         >
           <Plus size={16} />
@@ -121,62 +126,55 @@ export default function BroadcastHub() {
 
       <PageStatus loading={loading} error={error ?? ""} />
 
-      {!loading && broadcasts.length === 0 ? (
+      {!loading && broadcasts.length === 0 && (
         <Empty title="Nothing is being broadcast">
           <p className="ds-hint">
-            Screens are showing whatever channel they are tuned to. A broadcast
+            Every screen is showing the channel it is tuned to. A broadcast
             interrupts that for whoever it reaches, and stops on its own.
           </p>
         </Empty>
-      ) : null}
-
-      {live.length > 0 && (
-        <section className="ds-panel">
-          <h3>Live</h3>
-          {live.map((broadcast) => {
-            const rule = audiences.find((entry) => entry.id === broadcast.audience);
-            const reached = rule ? screensReached(rule.rule, screens, audiences) : [];
-            return (
-              <div className="ds-broadcast" key={broadcast.id}>
-                <div className="ds-broadcast-copy">
-                  <strong>{broadcast.name}</strong>
-                  <span>
-                    {describeAction(broadcast.action)} · {audienceName(broadcast.audience)} ·{" "}
-                    {reached.length === 1 ? "1 screen" : `${reached.length} screens`}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className="ds-btn ds-btn-quiet is-danger"
-                  onClick={() => setStopping(broadcast)}
-                >
-                  Stop
-                </button>
-              </div>
-            );
-          })}
-        </section>
       )}
 
-      {stopped.length > 0 && (
-        <section className="ds-panel">
-          <h3>Stopped</h3>
-          <p className="ds-hint">
-            Kept rather than deleted, so &ldquo;what interrupted the menus and who
-            stopped it&rdquo; stays answerable.
-          </p>
-          {stopped.map((broadcast) => (
-            <div className="ds-broadcast is-quiet" key={broadcast.id}>
-              <div className="ds-broadcast-copy">
+      <div className="ds-stack">
+        {live.map((broadcast) => {
+          const rule = audiences.find((entry) => entry.id === broadcast.audience);
+          const reached = rule ? screensReached(rule.rule, screens, audiences) : [];
+          return (
+            <div className="ds-unit is-onair" key={broadcast.id}>
+              <OnAir label="ON AIR" tone="alarm" />
+              <div className="ds-unit-copy">
                 <strong>{broadcast.name}</strong>
-                <span>{audienceName(broadcast.audience)}</span>
+                <span>
+                  {describe(broadcast.action)} · reaching {reached.length} of{" "}
+                  {screens.length}
+                </span>
               </div>
               <button
                 type="button"
+                className="ds-btn ds-btn-quiet is-danger"
+                onClick={() => setStopping(broadcast)}
+              >
+                Stop
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {stopped.length > 0 && (
+        <section className="ds-panel" style={{ marginTop: 18 }}>
+          <h3>Stopped</h3>
+          <p className="ds-hint">
+            Kept rather than deleted, so “what interrupted the menus at 14:30 and
+            who stopped it” stays answerable.
+          </p>
+          {stopped.map((broadcast) => (
+            <div className="ds-row-between" key={broadcast.id}>
+              <span style={{ fontSize: "var(--ds-text-sm)" }}>{broadcast.name}</span>
+              <button
+                type="button"
                 className="ds-btn ds-btn-quiet"
-                onClick={() => {
-                  void deleteBroadcast(broadcast.id).then(reload);
-                }}
+                onClick={() => void deleteBroadcast(broadcast.id).then(reload)}
               >
                 Delete
               </button>
@@ -194,7 +192,7 @@ export default function BroadcastHub() {
           onClose={() => setComposing(false)}
           onSend={async (audience, broadcast) => {
             try {
-              await saveAudience(audience);
+              if (audience) await saveAudience(audience);
               await saveBroadcast(broadcast);
               haptic("save");
               setComposing(false);
@@ -221,19 +219,17 @@ export default function BroadcastHub() {
         onConfirm={() => {
           const broadcast = stopping;
           if (!broadcast) return;
-          void cancelBroadcast(broadcast).then(reload).then(() => haptic("delete"));
+          void cancelBroadcast(broadcast)
+            .then(reload)
+            .then(() => haptic("delete"));
         }}
       />
     </Page>
   );
 }
 
-/**
- * Compose one transmission: what it does, who it reaches, how loudly.
- *
- * The audience is built as chips over what the fleet actually carries, and the
- * matching screens are named underneath as they are chosen.
- */
+type Reach = { reached: SignageScreen[]; missed: SignageScreen[] };
+
 function Composer({
   screens,
   audiences,
@@ -247,41 +243,61 @@ function Composer({
   programs: SignageProgram[];
   channels: SignageChannel[];
   onClose: () => void;
-  onSend: (audience: SignageAudience, broadcast: SignageBroadcast) => void | Promise<void>;
+  onSend: (
+    audience: SignageAudience | null,
+    broadcast: SignageBroadcast,
+  ) => void | Promise<void>;
 }) {
+  const { now } = useLive();
   const [name, setName] = useState("");
+  /** Explicit, never implied by an empty filter — Okta's everyone-vs-subset. */
   const [everyone, setEveryone] = useState(false);
+  const [reuse, setReuse] = useState<string>("");
   const [labels, setLabels] = useState<string[]>([]);
   const [region, setRegion] = useState("");
   const [action, setAction] = useState<BroadcastAction>({ action: "blank" });
   const [priority, setPriority] = useState(50);
 
-  const available = useMemo(
-    () => [...new Set(screens.flatMap((screen) => screen.labels ?? []))].sort(),
-    [screens],
-  );
-  const regions = useMemo(
-    () =>
-      [...new Set(screens.map((screen) => screen.place?.region).filter(Boolean))].sort() as string[],
-    [screens],
-  );
+  /** Facets carry their own size, so nobody has to choose one to learn it. */
+  const facets = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const screen of screens) {
+      for (const label of screen.labels ?? []) {
+        counts.set(label, (counts.get(label) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [screens]);
 
-  /** Implicit AND across the chosen terms; `all` short-circuits everything. */
-  const rule: Match = useMemo(() => {
+  const regions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const screen of screens) {
+      const held = screen.place?.region;
+      if (held) counts.set(held, (counts.get(held) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [screens]);
+
+  const rule: Match | null = useMemo(() => {
+    if (reuse) {
+      return audiences.find((entry) => entry.id === reuse)?.rule ?? null;
+    }
     if (everyone) return { match: "all" };
     const terms: Match[] = labels.map((label) => ({ match: "label", label }));
     if (region) terms.push({ match: "place", place: { kind: "region", region } });
-    if (terms.length === 0) return { match: "all" };
+    if (terms.length === 0) return null;
     if (terms.length === 1) return terms[0];
     return { match: "all_of", of: terms };
-  }, [everyone, labels, region]);
+  }, [reuse, everyone, labels, region, audiences]);
 
-  const reached = useMemo(
-    () => screensReached(rule, screens, audiences),
-    [rule, screens, audiences],
-  );
+  const reach: Reach = useMemo(() => {
+    if (!rule) return { reached: [], missed: screens };
+    const reached = screensReached(rule, screens, audiences);
+    const hit = new Set(reached.map((screen) => screen.id));
+    return { reached, missed: screens.filter((screen) => !hit.has(screen.id)) };
+  }, [rule, screens, audiences]);
 
-  const nothingChosen = !everyone && labels.length === 0 && !region;
+  const share = screens.length === 0 ? 0 : reach.reached.length / screens.length;
 
   return (
     <section className="ds-composer" aria-label="New broadcast">
@@ -293,7 +309,7 @@ function Composer({
       </header>
 
       <label className="ds-field">
-        <span>Name</span>
+        <span className="ds-field-label">Name</span>
         <input
           className="ds-input"
           value={name}
@@ -303,21 +319,16 @@ function Composer({
       </label>
 
       <label className="ds-field">
-        <span>What it does</span>
+        <span className="ds-field-label">What it does</span>
         <select
           className="ds-input"
           value={action.action}
           onChange={(event) => {
             const next = event.target.value;
-            if (next === "play") {
-              setAction({ action: "play", program: programs[0]?.id ?? "" });
-            } else if (next === "tune") {
-              setAction({ action: "tune", channel: channels[0]?.id ?? "" });
-            } else if (next === "restore") {
-              setAction({ action: "restore" });
-            } else {
-              setAction({ action: "blank" });
-            }
+            if (next === "play") setAction({ action: "play", program: programs[0]?.id ?? "" });
+            else if (next === "tune") setAction({ action: "tune", channel: channels[0]?.id ?? "" });
+            else if (next === "restore") setAction({ action: "restore" });
+            else setAction({ action: "blank" });
           }}
         >
           <option value="play">Play a program</option>
@@ -329,7 +340,7 @@ function Composer({
 
       {action.action === "play" && (
         <label className="ds-field">
-          <span>Program</span>
+          <span className="ds-field-label">Program</span>
           <select
             className="ds-input"
             value={action.program}
@@ -346,7 +357,7 @@ function Composer({
 
       {action.action === "tune" && (
         <label className="ds-field">
-          <span>Channel</span>
+          <span className="ds-field-label">Channel</span>
           <select
             className="ds-input"
             value={action.channel}
@@ -361,78 +372,130 @@ function Composer({
         </label>
       )}
 
-      <div className="ds-field is-block">
-        <span>Who it reaches</span>
-        <button
-          type="button"
-          className={`ds-chip${everyone ? " is-on" : ""}`}
-          onClick={() => setEveryone(!everyone)}
-        >
-          Every screen
-        </button>
-        {!everyone && (
+      <div className="ds-field">
+        <span className="ds-field-label">Who it reaches</span>
+
+        {audiences.length > 0 && (
+          <select
+            className="ds-input"
+            value={reuse}
+            onChange={(event) => {
+              setReuse(event.target.value);
+              setEveryone(false);
+            }}
+          >
+            <option value="">Build one below</option>
+            {audiences.map((audience) => (
+              <option key={audience.id} value={audience.id}>
+                Reuse: {audience.name}
+              </option>
+            ))}
+          </select>
+        )}
+
+        {!reuse && (
           <>
-            <div className="ds-chips">
-              {available.map((label) => (
-                <button
-                  type="button"
-                  key={label}
-                  className={`ds-chip${labels.includes(label) ? " is-on" : ""}`}
-                  onClick={() =>
-                    setLabels(
-                      labels.includes(label)
-                        ? labels.filter((held) => held !== label)
-                        : [...labels, label],
-                    )
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {regions.length > 0 && (
-              <select
-                className="ds-input"
-                value={region}
-                onChange={(event) => setRegion(event.target.value)}
+            <div className="ds-chips" style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                className={`ds-chip${everyone ? " is-on" : ""}`}
+                onClick={() => setEveryone(!everyone)}
               >
-                <option value="">Any region</option>
-                {regions.map((held) => (
-                  <option key={held} value={held}>
-                    {held}
-                  </option>
-                ))}
-              </select>
+                Every screen<em>{screens.length}</em>
+              </button>
+            </div>
+            {!everyone && (
+              <>
+                <div className="ds-chips" style={{ marginTop: 6 }}>
+                  {facets.map(([label, count]) => (
+                    <button
+                      type="button"
+                      key={label}
+                      className={`ds-chip${labels.includes(label) ? " is-on" : ""}`}
+                      onClick={() =>
+                        setLabels(
+                          labels.includes(label)
+                            ? labels.filter((held) => held !== label)
+                            : [...labels, label],
+                        )
+                      }
+                    >
+                      {label}
+                      <em>{count}</em>
+                    </button>
+                  ))}
+                </div>
+                {regions.length > 0 && (
+                  <select
+                    className="ds-input"
+                    style={{ marginTop: 6 }}
+                    value={region}
+                    onChange={(event) => setRegion(event.target.value)}
+                  >
+                    <option value="">Any region</option>
+                    {regions.map(([held, count]) => (
+                      <option key={held} value={held}>
+                        {held} ({count})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </>
             )}
           </>
         )}
       </div>
 
-      {/* The blast radius. Non-negotiable, and shown before anything is sent. */}
-      <div className={`ds-reach${reached.length > 0 ? " is-live" : ""}`}>
-        <Megaphone size={16} />
-        <div>
-          <strong>
-            {nothingChosen && !everyone
-              ? "Nothing chosen — this would reach every screen"
-              : reached.length === 1
-                ? "This will interrupt 1 screen"
-                : `This will interrupt ${reached.length} screens`}
-          </strong>
+      {/* The blast radius, both halves. */}
+      <div className="ds-reach">
+        <div className="ds-reach-count">
+          <Megaphone size={18} />
           <span>
-            {reached.length === 0
-              ? "No screen matches."
-              : reached
-                  .slice(0, 8)
-                  .map((screen) => screen.name)
-                  .join(", ") + (reached.length > 8 ? `, and ${reached.length - 8} more` : "")}
+            {reach.reached.length} of {screens.length}
           </span>
-          <small>At least these — a reactive term is not counted from here.</small>
+          <small>{Math.round(share * 100)}% of the fleet</small>
         </div>
+        <div className="ds-reach-bar">
+          <span style={{ width: `${share * 100}%` }} />
+        </div>
+
+        {reach.reached.length > 0 && (
+          <div className="ds-reach-names">
+            {reach.reached.map((screen) => (
+              <span className="ds-tag is-reached" key={screen.id}>
+                {screen.name}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* The half nobody else shows. Under-reach is the failure that matters
+            when the message is "evacuate". */}
+        {reach.missed.length > 0 && (
+          <div className="ds-reach-miss">
+            <strong>
+              Not reached — {reach.missed.length}
+            </strong>
+            <div className="ds-reach-names">
+              {reach.missed.map((screen) => (
+                <span className="ds-tag is-miss" key={screen.id}>
+                  {screen.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!rule && (
+          <p className="ds-hint">
+            Nothing chosen yet. Pick a slice, or say every screen — an empty
+            filter is not treated as “everyone”.
+          </p>
+        )}
       </div>
 
       <label className="ds-field">
-        <span>Priority</span>
+        <span className="ds-field-label">Priority</span>
         <input
           className="ds-input"
           type="number"
@@ -441,10 +504,10 @@ function Composer({
           value={priority}
           onChange={(event) => setPriority(Number(event.target.value))}
         />
-        <small className="ds-hint">
+        <span className="ds-field-hint">
           Higher wins when two broadcasts reach one screen. An emergency belongs
           near the top.
-        </small>
+        </span>
       </label>
 
       <footer>
@@ -453,22 +516,27 @@ function Composer({
         </button>
         <button
           type="button"
-          className="ds-btn ds-btn-solid"
-          disabled={reached.length === 0}
+          className="ds-btn ds-btn-alarm"
+          disabled={!rule || reach.reached.length === 0}
           onClick={() => {
-            const audience = draftAudience(name.trim() || "Audience", rule);
-            void onSend(audience, {
+            if (!rule) return;
+            const existing = reuse
+              ? (audiences.find((entry) => entry.id === reuse) ?? null)
+              : null;
+            const audience = existing ?? draftAudience(name.trim() || "Audience", rule);
+            void onSend(existing ? null : audience, {
               id: mintBodyId(),
               name: name.trim() || "Broadcast",
               audience: audience.id,
               action,
               timing: { timing: "when", of: { match: "all" }, priority },
               supersedes: [],
-              cancelled_at_unix_ms: null,
+              cancelled_at_unix_ms: now * 0 || null,
             });
           }}
         >
-          Send to {reached.length === 1 ? "1 screen" : `${reached.length} screens`}
+          Send to {reach.reached.length}{" "}
+          {reach.reached.length === 1 ? "screen" : "screens"}
         </button>
       </footer>
     </section>

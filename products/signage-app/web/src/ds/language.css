@@ -1,0 +1,399 @@
+/*
+ * The vocabulary the four rules need. Everything here is either a way of
+ * saying "that took", a way of saying "this is moving on its own", or a way of
+ * saying "here is who this reaches — and who it misses".
+ */
+
+/* ── Commit ───────────────────────────────────────────────────────────────
+ *
+ * The sweep is the whole motion language of this product: a hairline that
+ * travels once under the thing that changed. It is not a spinner — a spinner
+ * says "wait", and nobody is waiting; the write already happened locally and
+ * the field is usable throughout.
+ */
+
+.ds-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  position: relative;
+}
+
+.ds-field-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 16px;
+}
+
+.ds-field-label {
+  font-size: var(--ds-text-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--ds-paper-muted);
+}
+
+.ds-field-hint {
+  font-size: var(--ds-text-xs);
+  color: var(--ds-paper-faint);
+  line-height: 1.45;
+}
+
+.ds-field.is-refused .ds-input {
+  border-color: var(--ds-danger);
+}
+
+.ds-commit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ds-paper-faint);
+}
+
+.ds-commit.is-refused {
+  color: var(--ds-danger);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--ds-text-xs);
+  font-weight: 500;
+}
+
+.ds-commit.is-refused button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-paper);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ds-commit-sweep {
+  display: block;
+  width: 22px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--ds-commit),
+    transparent
+  );
+  animation: ds-sweep var(--ds-duration-commit) var(--ds-ease-out) infinite;
+}
+
+@keyframes ds-sweep {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* ── Alive ────────────────────────────────────────────────────────────────
+ *
+ * The accent means *now*. It is never on something a person presses, so a
+ * glance can tell what is moving from what is waiting to be operated.
+ */
+
+.ds-onair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  background: color-mix(in srgb, var(--ds-live) 16%, transparent);
+  color: var(--ds-live);
+  border: 1px solid color-mix(in srgb, var(--ds-live) 34%, transparent);
+}
+
+.ds-onair.is-alarm {
+  background: color-mix(in srgb, var(--ds-alarm) 18%, transparent);
+  color: var(--ds-alarm);
+  border-color: color-mix(in srgb, var(--ds-alarm) 40%, transparent);
+}
+
+.ds-onair em {
+  font-style: normal;
+  font-family: var(--ds-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  opacity: 0.85;
+}
+
+.ds-onair-dot,
+.ds-livevalue-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ds-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes ds-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ds-livevalue {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ds-live);
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-livevalue-dot {
+  align-self: center;
+}
+
+.ds-ago {
+  font-size: var(--ds-text-xs);
+  color: var(--ds-paper-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-ago.is-now {
+  color: var(--ds-live);
+}
+
+.ds-ago.is-never {
+  color: var(--ds-miss);
+}
+
+/* Whop's move: the nav carries live state, so nobody has to navigate to
+   discover that something is interrupting their fleet. */
+.ds-nav-live {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ds-alarm);
+  animation: ds-breathe 2.4s ease-in-out infinite;
+}
+
+/* Not being told is not the same as nothing happening. */
+.ds-detached {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--ds-text-xs);
+  color: var(--ds-miss);
+}
+
+/* ── Reach ────────────────────────────────────────────────────────────────
+ *
+ * Every reference shows who a message reaches. For an evacuation the question
+ * is the other one — who does it *miss* — because under-reach is the failure
+ * and over-reach is merely noise. So both are stated, and the miss is not an
+ * error colour, because missing somebody may well be intended.
+ */
+
+.ds-reach {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--ds-radius-lg);
+  border: 1px solid var(--ds-line);
+  background: var(--ds-ink);
+}
+
+.ds-reach-count {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--ds-text-lg);
+  font-weight: 650;
+}
+
+.ds-reach-count small {
+  font-size: var(--ds-text-sm);
+  font-weight: 500;
+  color: var(--ds-paper-muted);
+}
+
+.ds-reach-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--ds-ink-3);
+  overflow: hidden;
+}
+
+.ds-reach-bar span {
+  display: block;
+  height: 100%;
+  background: var(--ds-live);
+  transition: width var(--ds-duration-md) var(--ds-ease-out);
+}
+
+.ds-reach-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ds-reach-miss {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ds-line);
+}
+
+.ds-reach-miss > strong {
+  font-size: var(--ds-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ds-miss);
+}
+
+.ds-tag.is-miss {
+  color: var(--ds-miss);
+  border-color: color-mix(in srgb, var(--ds-miss) 34%, transparent);
+}
+
+.ds-tag.is-reached {
+  color: var(--ds-paper);
+  border-color: var(--ds-line-strong);
+}
+
+/* Partiful's move: a facet says how big it is before you choose it. */
+.ds-chip em {
+  font-style: normal;
+  margin-left: 5px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Surfaces ─────────────────────────────────────────────────────────── */
+
+.ds-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-4);
+  border: 1px solid var(--ds-line);
+  border-radius: var(--ds-radius-lg);
+  background: var(--ds-ink-2);
+}
+
+.ds-panel > h3 {
+  margin: 0;
+  font-size: var(--ds-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-paper-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ds-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+}
+
+.ds-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--ds-space-3);
+}
+
+.ds-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+}
+
+/* A screen, a channel, a broadcast — one row shape, live state on the left. */
+.ds-unit {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-3);
+  border: 1px solid var(--ds-line);
+  border-radius: var(--ds-radius-md);
+  background: var(--ds-ink-2);
+  transition: border-color var(--ds-duration-sm) var(--ds-ease-out);
+}
+
+.ds-unit:hover {
+  border-color: var(--ds-line-strong);
+}
+
+.ds-unit.is-onair {
+  border-color: color-mix(in srgb, var(--ds-alarm) 46%, transparent);
+}
+
+.ds-unit-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ds-unit-copy > strong {
+  font-size: var(--ds-text-md);
+  font-weight: 600;
+}
+
+.ds-unit-copy > span {
+  font-size: var(--ds-text-sm);
+  color: var(--ds-paper-muted);
+}
+
+.ds-unit-hit {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0;
+}
+
+.ds-title-input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--ds-text-xl);
+  font-weight: 650;
+  padding: 4px 2px;
+}
+
+.ds-title-input:focus {
+  outline: none;
+}

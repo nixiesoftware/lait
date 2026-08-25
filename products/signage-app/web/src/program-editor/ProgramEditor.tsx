@@ -9,7 +9,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useAdminLayout } from "@/context/AdminLayoutContext";
 import { useToast } from "@/ds";
 import { space } from "@/utils/api/client";
@@ -88,7 +87,6 @@ function Session({
 }) {
   const { editor } = useEditorSession();
   const toast = useToast();
-  const [leaveOpen, setLeaveOpen] = useState(false);
   const [source, setSource] = useState<SourcePage>(null);
 
   const actions: ClipActions = {
@@ -100,9 +98,16 @@ function Session({
     add: () => setSource("library"),
   };
 
+  /**
+   * Leaving flushes rather than asks.
+   *
+   * "Save this program?" is a question that only exists because a product can
+   * hold unsaved work. This one cannot: the edit already committed, or is
+   * about to, so leaving writes whatever is outstanding and goes.
+   */
   const back = () => {
-    if (editor.dirty) setLeaveOpen(true);
-    else onClose();
+    if (editor.dirty && editor.program.items.length > 0) void editor.save();
+    onClose();
   };
 
   useUndoShortcuts(editor.undo, editor.redo);
@@ -131,43 +136,6 @@ function Session({
         </p>
       ) : null}
 
-      <AlertDialog.Root open={leaveOpen} onOpenChange={setLeaveOpen}>
-        <AlertDialog.Portal container={container}>
-          <AlertDialog.Backdrop className="ds-backdrop" />
-          <AlertDialog.Popup className="ds-dialog ds-leave">
-            <AlertDialog.Title>Save this program?</AlertDialog.Title>
-            <AlertDialog.Description>
-              The World does not have these edits yet.
-            </AlertDialog.Description>
-            <menu>
-              <AlertDialog.Close className="ds-btn ds-btn-quiet">Keep editing</AlertDialog.Close>
-              <button
-                type="button"
-                className="ds-btn ds-btn-ghost"
-                onClick={() => {
-                  setLeaveOpen(false);
-                  onClose();
-                }}
-              >
-                Don&apos;t save
-              </button>
-              <button
-                type="button"
-                className="ds-btn ds-btn-solid"
-                disabled={!editor.canSave || editor.saving}
-                onClick={() => {
-                  void editor.save().then((ok) => {
-                    if (ok) onClose();
-                    else setLeaveOpen(false);
-                  });
-                }}
-              >
-                {editor.saving ? "Saving" : "Save"}
-              </button>
-            </menu>
-          </AlertDialog.Popup>
-        </AlertDialog.Portal>
-      </AlertDialog.Root>
     </>
   );
 }

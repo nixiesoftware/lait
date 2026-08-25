@@ -1,36 +1,62 @@
 /**
- * One panel: what is true of it, what somebody calls it, and what it is
- * showing right now — with the reason.
+ * One panel.
  *
- * The page is divided the way the model is. **Place** and **Facts** are true of
- * the screen and are the only things here that can make a card correct or
- * wrong. **Labels** are the operator's vocabulary and mean nothing to the
- * substrate. **Tuning** is what it falls back to when nothing is being
- * broadcast at it. Nothing on this page assigns a program to a panel, because
- * that wire is what made addressing a fleet expensive.
+ * Nothing on this page has a Save button, and nothing has an editing mode.
+ * Every field commits itself and says so on itself. What that leaves reads as
+ * a *description of a thing* rather than a form about it — which is what it
+ * is, because a screen is somewhere, is called something, and is tuned to
+ * something whether or not anybody is looking at this page.
+ *
+ * Divided the way the model is:
+ *   **Right now** — resolved live, recomputed on the shared tick.
+ *   **Place** and **Facts** — true of the panel, and the only fields here that
+ *   can make a card correct or wrong.
+ *   **Labels** — the operator's vocabulary, meaning nothing to the substrate.
+ *   **Tuned** — the fallback when nothing is addressed at it.
+ *   **As run** — what the panel says it actually played, in its own words.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Trash2, X } from "lucide-react";
-import { Confirm, Page, haptic, useToast } from "@/ds";
-import { deleteScreen, fetchScreenPlays, saveScreen } from "@/utils/screens/api";
-import { explain } from "@/utils/lait/resolve";
+import {
+  Ago,
+  CommitText,
+  Confirm,
+  Field,
+  OnAir,
+  Page,
+  useCommit,
+  useLive,
+  useRevision,
+  useToast,
+} from "@/ds";
+import {
+  deleteScreen,
+  fetchAsRun,
+  fetchScreenPlays,
+  saveScreen,
+} from "@/utils/screens/api";
+import { explain, resolvePlayback, type ResolutionInputs } from "@/utils/lait/resolve";
 import { KIND_PANELS } from "@/program-editor/kinds/registry";
-import type {
-  Playback,
-  SignageChannel,
-  SignageProgram,
-  SignageScreen,
-} from "@/utils/lait/types";
+import type { Place, SignageAsRun, SignageScreen } from "@/utils/lait/types";
+
+const EMPTY: ResolutionInputs = {
+  screen: null,
+  channels: [],
+  broadcasts: [],
+  audiences: [],
+  programs: [],
+  media: [],
+  presets: [],
+};
 
 export default function ScreenDetail({ screenId }: { screenId: string }) {
   const navigate = useNavigate();
   const toast = useToast();
-  const [screen, setScreen] = useState<SignageScreen | null>(null);
-  const [channels, setChannels] = useState<SignageChannel[]>([]);
-  const [programs, setPrograms] = useState<SignageProgram[]>([]);
-  const [playback, setPlayback] = useState<Playback | null>(null);
+  const { now } = useLive();
+  const revision = useRevision();
+  const [inputs, setInputs] = useState<ResolutionInputs>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -39,11 +65,8 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
   const reload = useCallback(async () => {
     try {
       setError(null);
-      const { inputs, playback } = await fetchScreenPlays(screenId);
-      setScreen(inputs.screen);
-      setChannels(inputs.channels);
-      setPrograms(inputs.programs);
-      setPlayback(playback);
+      const { inputs } = await fetchScreenPlays(screenId);
+      setInputs(inputs);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load this screen");
     } finally {
@@ -51,30 +74,38 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
     }
   }, [screenId]);
 
+  // Somebody else's change arrives the same way ours does.
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, revision]);
 
-  const commit = useCallback(
-    async (next: SignageScreen) => {
-      setScreen(next);
-      try {
-        await saveScreen(next);
-        haptic("save");
-        await reload();
-      } catch (err) {
-        toast.show("Could not save", err instanceof Error ? err.message : String(err));
-        await reload();
-      }
-    },
-    [reload, toast],
+  const screen = inputs.screen;
+
+  /** Every field on this page funnels through here. */
+  const put = useCallback(async (next: SignageScreen) => {
+    await saveScreen(next);
+    setInputs((held) => ({ ...held, screen: next }));
+  }, []);
+
+  /** Resolution, recomputed on the tick rather than on a fetch. */
+  const playback = useMemo(
+    () => (screen ? resolvePlayback(inputs, now) : null),
+    [inputs, screen, now],
   );
 
   const showingName = useMemo(() => {
     if (playback?.showing.showing !== "program") return undefined;
     const id = playback.showing.program;
-    return programs.find((program) => program.id === id)?.name;
-  }, [playback, programs]);
+    return inputs.programs.find((program) => program.id === id)?.name;
+  }, [playback, inputs.programs]);
+
+  const tuned = useCommit<string>({
+    committed: screen?.tuned ?? "",
+    write: async (next) => {
+      if (!screen) return;
+      await put({ ...screen, tuned: next || null });
+    },
+  });
 
   if (loading) return <Page>Loading…</Page>;
   if (!screen) {
@@ -86,10 +117,23 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
   }
 
   const place = screen.place;
+  const writePlace = (patch: Partial<Place>) =>
+    put({
+      ...screen,
+      place: {
+        latitude: place?.latitude ?? 0,
+        longitude: place?.longitude ?? 0,
+        timezone: place?.timezone ?? "",
+        region: place?.region ?? null,
+        ...patch,
+      },
+    });
+
+  const interrupted = playback?.source?.via === "broadcast";
 
   return (
     <Page>
-      <header className="ds-detail-bar">
+      <header className="ds-row-between" style={{ marginBottom: 18 }}>
         <button
           type="button"
           className="ds-icon"
@@ -98,13 +142,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
         >
           <ArrowLeft size={20} />
         </button>
-        <input
-          className="ds-detail-title"
-          value={screen.name}
-          aria-label="Screen name"
-          onChange={(event) => setScreen({ ...screen, name: event.target.value })}
-          onBlur={() => void commit(screen)}
-        />
+        <ScreenName screen={screen} put={put} />
         <button
           type="button"
           className="ds-btn ds-btn-quiet is-danger"
@@ -115,233 +153,177 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
         </button>
       </header>
 
-      {error ? <p className="ds-danger-text">{error}</p> : null}
+      {error && <p className="ds-danger-text">{error}</p>}
 
-      {/* What it is doing, and why. The sentence an operator needs when a
-          panel is showing the wrong thing — or nothing. */}
-      <section className="ds-panel">
-        <h3>Right now</h3>
-        <p className="ds-showing">{playback ? explain(playback, showingName) : "Unknown"}</p>
-        {playback?.showing.showing === "unaddressed" && !screen.tuned ? (
-          <p className="ds-hint">
-            Nothing reaches this screen. Tune it to a channel below, or address a
-            broadcast at it.
+      <div className="ds-stack">
+        <section className="ds-panel">
+          <h3>
+            Right now
+            {interrupted && <OnAir label="INTERRUPTED" tone="alarm" />}
+          </h3>
+          <p style={{ margin: 0, fontSize: "var(--ds-text-md)", lineHeight: 1.5 }}>
+            {playback ? explain(playback, showingName) : "Unknown"}
           </p>
-        ) : null}
-      </section>
+          {playback?.showing.showing === "unaddressed" && !screen.tuned && (
+            <p className="ds-hint">
+              Nothing reaches this screen. Tune it below, or address a broadcast
+              at it.
+            </p>
+          )}
+        </section>
 
-      <section className="ds-panel">
-        <h3>Tuned to</h3>
-        <select
-          className="ds-input"
-          value={screen.tuned ?? ""}
-          onChange={(event) =>
-            void commit({ ...screen, tuned: event.target.value || null })
-          }
-        >
-          <option value="">Nothing</option>
-          {channels.map((channel) => (
-            <option key={channel.id} value={channel.id}>
-              {channel.name}
-            </option>
-          ))}
-        </select>
-        <p className="ds-hint">
-          What it shows when no broadcast is addressed at it.
-        </p>
-      </section>
+        <section className="ds-panel">
+          <h3>Tuned to</h3>
+          <Field
+            label="Channel"
+            commit={tuned}
+            hint="What it shows when no broadcast is addressed at it."
+          >
+            <select
+              className="ds-input"
+              value={tuned.value}
+              onChange={(event) => tuned.setNow(event.target.value)}
+            >
+              <option value="">Nothing</option>
+              {inputs.channels.map((channel) => (
+                <option key={channel.id} value={channel.id}>
+                  {channel.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </section>
 
-      {/* Facts. The only fields here that can make a card correct or wrong. */}
-      <section className="ds-panel">
-        <h3>Place</h3>
-        <p className="ds-hint">
-          Where the panel physically is. Kinds that compute from a location —
-          prayer times, weather, a local clock — read this and nothing else.
-        </p>
-        <div className="ds-place-grid">
-          <label className="ds-field">
-            <span>Latitude</span>
-            <input
-              className="ds-input"
+        <section className="ds-panel">
+          <h3>Place</h3>
+          <p className="ds-hint">
+            Where the panel physically is. Kinds that compute from a location —
+            prayer times, weather, a local clock — read this and nothing else.
+          </p>
+          <div className="ds-pair">
+            <CommitText
+              label="Latitude"
+              value={place ? String(place.latitude) : ""}
+              placeholder="42.3314"
               inputMode="decimal"
-              placeholder="51.5074"
-              value={place?.latitude ?? ""}
-              onChange={(event) =>
-                setScreen({
-                  ...screen,
-                  place: {
-                    latitude: Number(event.target.value),
-                    longitude: place?.longitude ?? 0,
-                    timezone: place?.timezone ?? "",
-                    region: place?.region ?? null,
-                  },
-                })
-              }
-              onBlur={() => void commit(screen)}
+              onWrite={(next) => writePlace({ latitude: Number(next) })}
             />
-          </label>
-          <label className="ds-field">
-            <span>Longitude</span>
-            <input
-              className="ds-input"
+            <CommitText
+              label="Longitude"
+              value={place ? String(place.longitude) : ""}
+              placeholder="-83.0458"
               inputMode="decimal"
-              placeholder="-0.1278"
-              value={place?.longitude ?? ""}
-              onChange={(event) =>
-                setScreen({
-                  ...screen,
-                  place: {
-                    latitude: place?.latitude ?? 0,
-                    longitude: Number(event.target.value),
-                    timezone: place?.timezone ?? "",
-                    region: place?.region ?? null,
-                  },
-                })
-              }
-              onBlur={() => void commit(screen)}
+              onWrite={(next) => writePlace({ longitude: Number(next) })}
             />
-          </label>
-        </div>
-        <label className="ds-field">
-          <span>Time zone</span>
-          <input
-            className="ds-input"
-            list="ds-zones"
-            placeholder="Europe/London"
+          </div>
+          <CommitText
+            label="Time zone"
             value={place?.timezone ?? ""}
-            onChange={(event) =>
-              setScreen({
-                ...screen,
-                place: {
-                  latitude: place?.latitude ?? 0,
-                  longitude: place?.longitude ?? 0,
-                  timezone: event.target.value,
-                  region: place?.region ?? null,
-                },
-              })
-            }
-            onBlur={() => void commit(screen)}
+            placeholder="America/Detroit"
+            list="ds-zones"
+            hint="Required. A coordinate without one computes a plausible timetable for the wrong offset, and nothing looks wrong."
+            onWrite={(next) => writePlace({ timezone: next })}
           />
-        </label>
-        <ZoneOptions />
-        <label className="ds-field">
-          <span>Region</span>
-          <input
-            className="ds-input"
-            placeholder="MI"
+          <ZoneOptions />
+          <CommitText
+            label="Region"
             value={place?.region ?? ""}
-            onChange={(event) =>
-              setScreen({
-                ...screen,
-                place: {
-                  latitude: place?.latitude ?? 0,
-                  longitude: place?.longitude ?? 0,
-                  timezone: place?.timezone ?? "",
-                  region: event.target.value || null,
-                },
-              })
-            }
-            onBlur={() => void commit(screen)}
+            placeholder="MI"
+            hint="So an audience can say “every screen in Michigan” without anybody maintaining a label that drifts from the coordinates above."
+            onWrite={(next) => writePlace({ region: next || null })}
           />
-          <small className="ds-hint">
-            So an audience can say &ldquo;every screen in Michigan&rdquo; without
-            anybody maintaining a label that drifts from the coordinates above.
-          </small>
-        </label>
-      </section>
+        </section>
 
-      {KIND_PANELS.map((panel) => (
-        <section className="ds-panel" key={panel.kind}>
-          <h3>{panel.label} at this venue</h3>
-          <p className="ds-hint">
-            What this congregation practises, as distinct from how the card
-            looks. Two venues under one operator can differ here and share a
-            preset.
-          </p>
-          {panel.groups
-            .flatMap((group) => group.fields)
-            .filter((field) => field.control !== "place")
-            .map((field, index) => {
-              const key = "key" in field ? field.key : `${panel.kind}-${index}`;
-              if (!("key" in field)) return null;
-              const held = screen.facts?.[panel.kind]?.[field.key] ?? "";
-              return (
-                <label className="ds-field" key={key}>
-                  <span>{field.label}</span>
-                  <input
-                    className="ds-input"
+        {KIND_PANELS.map((panel) => (
+          <section className="ds-panel" key={panel.kind}>
+            <h3>{panel.label} at this venue</h3>
+            <p className="ds-hint">
+              What this congregation practises, as distinct from how the card
+              looks. Two venues under one operator can differ here and still
+              share a preset.
+            </p>
+            {panel.groups
+              .flatMap((group) => group.fields)
+              .map((field) =>
+                "key" in field ? (
+                  <CommitText
+                    key={field.key}
+                    label={field.label}
+                    value={screen.facts?.[panel.kind]?.[field.key] ?? ""}
                     placeholder="from the preset"
-                    value={held}
-                    onChange={(event) => {
-                      const kindFacts = {
-                        ...(screen.facts?.[panel.kind] ?? {}),
-                      };
-                      if (event.target.value) kindFacts[field.key] = event.target.value;
-                      else delete kindFacts[field.key];
-                      setScreen({
+                    onWrite={async (next) => {
+                      const facts = { ...(screen.facts?.[panel.kind] ?? {}) };
+                      if (next) facts[field.key] = next;
+                      else delete facts[field.key];
+                      await put({
                         ...screen,
-                        facts: { ...(screen.facts ?? {}), [panel.kind]: kindFacts },
+                        facts: { ...(screen.facts ?? {}), [panel.kind]: facts },
                       });
                     }}
-                    onBlur={() => void commit(screen)}
                   />
-                </label>
-              );
-            })}
-        </section>
-      ))}
+                ) : null,
+              )}
+          </section>
+        ))}
 
-      {/* Abstraction. Overlapping and arbitrary on purpose. */}
-      <section className="ds-panel">
-        <h3>Labels</h3>
-        <p className="ds-hint">
-          Yours. Overlapping and arbitrary — a screen can be
-          <code> biz:acme</code>, <code>role:menu</code> and <code>rented</code> at
-          once, and audiences address whichever slice matters today.
-        </p>
-        <div className="ds-label-row">
-          {(screen.labels ?? []).map((held) => (
-            <span className="ds-label" key={held}>
-              {held}
-              <button
-                type="button"
-                aria-label={`Remove ${held}`}
-                onClick={() =>
-                  void commit({
-                    ...screen,
-                    labels: (screen.labels ?? []).filter((other) => other !== held),
-                  })
-                }
-              >
-                <X size={12} />
-              </button>
-            </span>
-          ))}
-        </div>
-        <form
-          className="ds-label-add"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const next = label.trim();
-            if (!next) return;
-            void commit({
-              ...screen,
-              labels: [...new Set([...(screen.labels ?? []), next])].sort(),
-            });
-            setLabel("");
-          }}
-        >
-          <input
-            className="ds-input"
-            value={label}
-            placeholder="role:menu"
-            onChange={(event) => setLabel(event.target.value)}
-          />
-          <button type="submit" className="ds-btn ds-btn-quiet">
-            Add label
-          </button>
-        </form>
-      </section>
+        <section className="ds-panel">
+          <h3>Labels</h3>
+          <p className="ds-hint">
+            Yours. A screen can be <code>biz:acme</code>, <code>role:menu</code>{" "}
+            and <code>rented</code> at once, and audiences address whichever
+            slice matters today.
+          </p>
+          <div className="ds-chips">
+            {(screen.labels ?? []).map((held) => (
+              <span className="ds-tag" key={held}>
+                {held}
+                <button
+                  type="button"
+                  aria-label={`Remove ${held}`}
+                  className="ds-icon"
+                  style={{ width: 18, height: 18 }}
+                  onClick={() =>
+                    void put({
+                      ...screen,
+                      labels: (screen.labels ?? []).filter((other) => other !== held),
+                    })
+                  }
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+          <form
+            style={{ display: "flex", gap: 8 }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const next = label.trim();
+              if (!next) return;
+              void put({
+                ...screen,
+                labels: [...new Set([...(screen.labels ?? []), next])].sort(),
+              });
+              setLabel("");
+            }}
+          >
+            <input
+              className="ds-input"
+              value={label}
+              placeholder="role:menu"
+              onChange={(event) => setLabel(event.target.value)}
+            />
+            <button type="submit" className="ds-btn ds-btn-ghost">
+              Add
+            </button>
+          </form>
+        </section>
+
+        <section className="ds-panel">
+          <h3>As run</h3>
+          <AsRunList screenId={screen.id} />
+        </section>
+      </div>
 
       <Confirm
         open={removing}
@@ -354,7 +336,10 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
           void deleteScreen(screen.id)
             .then(() => navigate({ to: "/screen-list" }))
             .catch((err: unknown) =>
-              toast.show("Could not remove", err instanceof Error ? err.message : String(err)),
+              toast.show(
+                "Could not remove",
+                err instanceof Error ? err.message : String(err),
+              ),
             );
         }}
       />
@@ -362,10 +347,92 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
   );
 }
 
-/** Whatever this browser can enumerate, offered as completions. */
+/** The title is a field like any other, and commits like one. */
+function ScreenName({
+  screen,
+  put,
+}: {
+  screen: SignageScreen;
+  put: (next: SignageScreen) => Promise<void>;
+}) {
+  const name = useCommit<string>({
+    committed: screen.name,
+    write: (next) => put({ ...screen, name: next.trim() || screen.name }),
+  });
+  return (
+    <span style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
+      <input
+        className="ds-title-input"
+        value={name.value}
+        aria-label="Screen name"
+        onChange={(event) => name.set(event.target.value)}
+        onBlur={() => {
+          if (name.state === "pending") name.setNow(name.value);
+        }}
+      />
+      {name.state !== "settled" && (
+        <span className={`ds-commit is-${name.state}`}>
+          {name.state === "refused" ? name.error : "saving"}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * What the panel says it played.
+ *
+ * Empty means the screen has not spoken — which is not the same as it having
+ * played nothing, and the copy says so. Every telemetry table in this industry
+ * is written by the server *about* a player; this one is written by the player,
+ * under its own identity, which is the only version that attests anything.
+ */
+function AsRunList({ screenId }: { screenId: string }) {
+  const revision = useRevision();
+  const [record, setRecord] = useState<SignageAsRun | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void fetchAsRun(screenId)
+      .then((row) => {
+        if (live) setRecord(row);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [screenId, revision]);
+
+  const entries = (record?.entries ?? []).slice(-8).reverse();
+  if (entries.length === 0) {
+    return (
+      <p className="ds-hint">
+        Nothing reported. A panel writes this itself, so an empty list means this
+        screen has not spoken — not that it played nothing.
+      </p>
+    );
+  }
+
+  return (
+    <div className="ds-stack">
+      <p className="ds-hint">
+        Last reported <Ago at={entries[0]?.ended_unix_ms} />
+      </p>
+      {entries.map((entry, index) => (
+        <div className="ds-row-between" key={`${entry.item}-${index}`}>
+          <span style={{ fontSize: "var(--ds-text-sm)" }}>{entry.item}</span>
+          <Ago at={entry.ended_unix_ms} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ZoneOptions() {
   const zones =
-    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+    typeof Intl.supportedValuesOf === "function"
+      ? Intl.supportedValuesOf("timeZone")
+      : [];
   if (zones.length === 0) return null;
   return (
     <datalist id="ds-zones">

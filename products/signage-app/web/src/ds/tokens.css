@@ -1,48 +1,122 @@
+/*
+ * The language.
+ *
+ * Four rules, and every token below exists to serve one of them.
+ *
+ *   Change is commitment.  There is no Save button in this product. Editing a
+ *                          field *is* the edit; the interface's job is to show
+ *                          that it took. `--commit-*` is that vocabulary.
+ *   Direct feedback.       The state of a change appears on the thing changed,
+ *                          never in a toast across the room. Toasts are for
+ *                          things you did not do.
+ *   Instant reactivity.    Anything computable locally is computed on the
+ *                          keystroke. The network never gates a preview.
+ *   Alive.                 What a screen shows changes without anybody
+ *                          touching it — the clock moves, a broadcast opens,
+ *                          somebody else edits. `--live-*` is that vocabulary,
+ *                          and it is deliberately a different colour from
+ *                          anything a person can press.
+ *
+ * The accent no longer means "primary button". It means **now**: live values,
+ * things moving on their own, the present moment. A control a person operates
+ * is neutral. That reassignment is the single biggest change from the language
+ * this replaces, where the accent was on the Save button — the one control
+ * this product no longer has.
+ */
+
 :root {
-  --ds-ink: #111318;
-  --ds-ink-2: #1a1c24;
-  --ds-ink-3: #2a2d38;
-  --ds-ink-4: #3a3e4c;
-  --ds-paper: #f4f1ea;
-  --ds-paper-muted: color-mix(in srgb, var(--ds-paper) 60%, transparent);
+  /* Ground. Signage is authored in dark rooms and shown on bright glass. */
+  --ds-ink: #101216;
+  --ds-ink-2: #171a21;
+  --ds-ink-3: #21252f;
+  --ds-ink-4: #2d323f;
+
+  --ds-paper: #f2efe9;
+  --ds-paper-muted: color-mix(in srgb, var(--ds-paper) 62%, transparent);
   --ds-paper-faint: color-mix(in srgb, var(--ds-paper) 34%, transparent);
-  --ds-accent: #ff5a3c;
-  --ds-danger: #ffb4a8;
-  --ds-lift: #ffffff12;
-  --ds-lift-strong: #ffffff1c;
-  --ds-line: #ffffff18;
-  --ds-scrim: #00000088;
-  --ds-radius-sm: 8px;
-  --ds-radius-md: 10px;
-  --ds-radius-lg: 14px;
-  --ds-radius-xl: 16px;
+
+  /* Now. Never on a button. */
+  --ds-live: #4fd1a5;
+  --ds-live-dim: color-mix(in srgb, var(--ds-live) 40%, transparent);
+
+  /* A change taking. */
+  --ds-commit: #7aa2f7;
+
+  /* Loud, and reserved: an act with a blast radius, or a refusal. */
+  --ds-alarm: #ff5a3c;
+  --ds-danger: #ff8a76;
+  /* What a broadcast does *not* reach. Its own colour because "who am I
+     missing" is the question an emergency asks, and it is not an error. */
+  --ds-miss: #d8a657;
+
+  --ds-lift: #ffffff10;
+  --ds-lift-strong: #ffffff1a;
+  --ds-line: #ffffff16;
+  --ds-line-strong: #ffffff2e;
+  --ds-scrim: #000000aa;
+
+  --ds-radius-sm: 6px;
+  --ds-radius-md: 9px;
+  --ds-radius-lg: 13px;
+  --ds-radius-xl: 18px;
+
   --ds-space-1: 4px;
   --ds-space-2: 8px;
   --ds-space-3: 12px;
   --ds-space-4: 16px;
   --ds-space-5: 24px;
-  --ds-control: 40px;
-  --ds-control-lg: 48px;
-  --ds-duration-sm: 160ms;
+  --ds-space-6: 36px;
+
+  /* Five steps, not eleven. */
+  --ds-text-xs: 11px;
+  --ds-text-sm: 13px;
+  --ds-text-md: 15px;
+  --ds-text-lg: 19px;
+  --ds-text-xl: 26px;
+
+  --ds-control: 38px;
+  --ds-control-lg: 46px;
+
+  --ds-duration-sm: 140ms;
   --ds-duration-md: 220ms;
+  --ds-duration-commit: 520ms;
   --ds-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ds-shadow-overlay: 0 16px 40px #00000088;
-  --ds-shadow-frame: 0 24px 64px #00000066;
+
+  --ds-shadow-overlay: 0 18px 44px #000000aa;
+  --ds-shadow-frame: 0 26px 70px #00000077;
+
   --ds-font: ui-sans-serif, system-ui, sans-serif;
+  --ds-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
   --ds-z-overlay: 100002;
   --ds-z-scrim: 100001;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ds-duration-sm: 0ms;
+    --ds-duration-md: 0ms;
+    --ds-duration-commit: 0ms;
+  }
+}
+
+/* ── Controls ──────────────────────────────────────────────────────────────
+ *
+ * Neutral by default. The solid button is for acts, not for saving, because
+ * nothing here needs saving.
+ */
 
 .ds-icon {
   appearance: none;
   border: 0;
   background: transparent;
   color: inherit;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   display: grid;
   place-items: center;
   border-radius: var(--ds-radius-md);
+  cursor: pointer;
   transition: background var(--ds-duration-sm) var(--ds-ease-out);
 }
 
@@ -52,13 +126,15 @@
 }
 
 .ds-icon:disabled {
-  opacity: 0.35;
+  opacity: 0.3;
+  cursor: default;
 }
 
 .ds-btn {
   appearance: none;
-  border: 0;
+  border: 1px solid transparent;
   font: inherit;
+  font-size: var(--ds-text-sm);
   height: var(--ds-control);
   padding: 0 14px;
   border-radius: var(--ds-radius-md);
@@ -67,12 +143,14 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
+  white-space: nowrap;
   transition:
     background var(--ds-duration-sm) var(--ds-ease-out),
-    color var(--ds-duration-sm) var(--ds-ease-out),
-    opacity var(--ds-duration-sm) var(--ds-ease-out);
+    border-color var(--ds-duration-sm) var(--ds-ease-out),
+    color var(--ds-duration-sm) var(--ds-ease-out);
 }
 
+/* An act. Sending, stopping, removing — never saving. */
 .ds-btn-solid {
   background: var(--ds-paper);
   color: var(--ds-ink);
@@ -82,6 +160,7 @@
 .ds-btn-solid:disabled {
   background: var(--ds-lift);
   color: var(--ds-paper-faint);
+  cursor: default;
 }
 
 .ds-btn-ghost {
@@ -103,14 +182,68 @@
   color: var(--ds-paper);
 }
 
+.ds-btn.is-danger {
+  color: var(--ds-danger);
+}
+
+.ds-btn.is-danger:hover {
+  background: color-mix(in srgb, var(--ds-alarm) 16%, transparent);
+}
+
+/* An act that reaches screens. The only place alarm appears on something
+   pressable, and it is always paired with a stated blast radius. */
+.ds-btn-alarm {
+  background: var(--ds-alarm);
+  color: #1a0d09;
+  font-weight: 700;
+}
+
+.ds-btn-alarm:disabled {
+  background: var(--ds-lift);
+  color: var(--ds-paper-faint);
+  cursor: default;
+}
+
+.ds-input {
+  appearance: none;
+  width: 100%;
+  min-height: var(--ds-control);
+  padding: 0 10px;
+  border-radius: var(--ds-radius-sm);
+  border: 1px solid var(--ds-line);
+  background: var(--ds-ink);
+  color: var(--ds-paper);
+  font: inherit;
+  font-size: var(--ds-text-sm);
+  transition: border-color var(--ds-duration-sm) var(--ds-ease-out);
+}
+
+.ds-input:focus {
+  outline: none;
+  border-color: var(--ds-line-strong);
+}
+
+select.ds-input {
+  padding-right: 6px;
+}
+
+textarea.ds-input {
+  padding: 8px 10px;
+  min-height: 76px;
+  resize: vertical;
+}
+
 .ds-hint {
-  font-size: 13px;
+  font-size: var(--ds-text-sm);
   color: var(--ds-paper-muted);
+  margin: 0;
+  line-height: 1.5;
 }
 
 .ds-danger-text {
-  font-size: 13px;
+  font-size: var(--ds-text-sm);
   color: var(--ds-danger);
+  margin: 0;
 }
 
 .ds-sr {
@@ -120,7 +253,7 @@
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
@@ -129,4 +262,56 @@
   padding: var(--ds-space-5) var(--ds-space-2);
   color: var(--ds-paper-muted);
   text-align: center;
+}
+
+/* ── Chips ────────────────────────────────────────────────────────────────
+ * Labels on a row, facets in a builder. One primitive, both jobs.
+ */
+
+.ds-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ds-chip {
+  appearance: none;
+  border: 1px solid var(--ds-line);
+  background: transparent;
+  color: var(--ds-paper-muted);
+  font: inherit;
+  font-size: var(--ds-text-xs);
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--ds-duration-sm) var(--ds-ease-out),
+    color var(--ds-duration-sm) var(--ds-ease-out),
+    border-color var(--ds-duration-sm) var(--ds-ease-out);
+}
+
+.ds-chip:hover {
+  border-color: var(--ds-line-strong);
+  color: var(--ds-paper);
+}
+
+.ds-chip.is-on {
+  background: var(--ds-paper);
+  border-color: var(--ds-paper);
+  color: var(--ds-ink);
+}
+
+/* A chip that states rather than selects. */
+.ds-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--ds-text-xs);
+  font-weight: 600;
+  color: var(--ds-paper-muted);
+  border: 1px solid var(--ds-line);
+  border-radius: 999px;
+  padding: 3px 8px;
 }

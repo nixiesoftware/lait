@@ -65,6 +65,8 @@ export function useProgramEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pendingSeek = useRef<string | null>(null);
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inflight = useRef(0);
 
   const library = useMemo(() => resolve(rawLibrary), [resolve, rawLibrary]);
   const catalog = useMemo(() => mediaById(library), [library]);
@@ -162,24 +164,52 @@ export function useProgramEditor({
     [apply, clipboard, pause, program],
   );
 
+  /**
+   * Write the program as it stands.
+   *
+   * Kept as a promise because leaving the editor flushes it, but nothing in
+   * the interface calls it from a button any more — see the effect below.
+   */
   const save = useCallback(async (): Promise<boolean> => {
-    if (!canSave) return false;
+    if (program.items.length === 0) return false;
+    const ticket = ++inflight.current;
     setSaving(true);
     setError(null);
     try {
       await onSave(program);
+      if (ticket !== inflight.current) return true;
       setBaseline(program);
-      haptic("save");
       return true;
     } catch (err) {
+      if (ticket !== inflight.current) return false;
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       haptic("error");
       return false;
     } finally {
-      setSaving(false);
+      if (ticket === inflight.current) setSaving(false);
     }
-  }, [canSave, onSave, program]);
+  }, [onSave, program]);
+
+  /**
+   * Change is commitment.
+   *
+   * An edit to the timeline writes itself, debounced only enough that dragging
+   * a clip is one write rather than sixty. There is no Save button in this
+   * product: the engine commits durably before it returns, so the cost of
+   * doing this is a local journal write, not a round trip somebody waits on.
+   *
+   * A program with no items is the one state that cannot be written — the
+   * contract refuses it — so it is left alone rather than retried forever.
+   */
+  useEffect(() => {
+    if (!dirty || program.items.length === 0) return;
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => void save(), 600);
+    return () => {
+      if (commitTimer.current) clearTimeout(commitTimer.current);
+    };
+  }, [dirty, program, save]);
 
   const refreshLibrary = useCallback(async () => {
     const latest = await onRefreshLibrary();

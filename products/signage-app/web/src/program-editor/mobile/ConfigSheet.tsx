@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 import { X } from "lucide-react";
-import { Confirm } from "@/ds";
+import { CommitMark, Confirm } from "@/ds";
 import { FieldControl } from "../fields/FieldControl";
 import type { KindPanel } from "../kinds/types";
 import { useEditorSession } from "../state/EditorContext";
@@ -73,33 +73,22 @@ export function KindSheet({
             errorFor={draft.errorFor}
           />
         ))}
-        {draft.failure ? <p className="ds-danger-text">{draft.failure}</p> : null}
+        
       </div>
 
-      <footer className="pe-sheet-foot">
-        {draft.configured ? (
+      {/* No Save. The panel writes itself; this only reports. */}
+      <div className="pe-sheet-actions">
+        <CommitMark state={draft.state} error={draft.failure} onRetry={draft.retry} />
+        {draft.configured && (
           <button
             type="button"
             className="ds-btn ds-btn-quiet is-danger"
-            disabled={draft.saving}
             onClick={() => setRemoveOpen(true)}
           >
-            Remove
+            Remove preset
           </button>
-        ) : null}
-        <button
-          type="button"
-          className="ds-btn ds-btn-solid"
-          disabled={draft.saving || !draft.dirty}
-          onClick={() => {
-            void draft.commit().then((ok) => {
-              if (ok) closePanel();
-            });
-          }}
-        >
-          {draft.saving ? "Saving…" : draft.configured ? "Save preset" : "Create preset"}
-        </button>
-      </footer>
+        )}
+      </div>
 
       <Confirm
         open={removeOpen}
