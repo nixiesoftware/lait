@@ -685,7 +685,7 @@ impl Drop for AnalyticalRetainedLease {
 impl ReadMemoryGovernor {
     pub(crate) fn process_default() -> Arc<Self> {
         Arc::new(Self::with_limits(
-            4 * 1024 * 1024 * 1024,
+            112 * 1024 * 1024 * 1024,
             MAX_STATION_READ_RETAINED_BYTES,
         ))
     }
@@ -755,6 +755,21 @@ impl ReadMemoryGovernor {
             governor: self.clone(),
             station,
         }))
+    }
+
+    /// Bytes this Station holds in the governor beyond its retained read
+    /// cache: in-flight builds, analytical leases, and pinned Body images.
+    /// Cache eviction targets must subtract these, or a Station evicts exactly
+    /// to a ceiling the account has already partly spent and the following
+    /// reservation is refused forever.
+    fn station_overhead_bytes(&self, station: u64) -> u64 {
+        let state = self.state.lock_recovering();
+        state.get(&station).map_or(0, |account| {
+            account
+                .building
+                .saturating_add(account.analytical)
+                .saturating_add(account.body_images)
+        })
     }
 
     fn set_resident(&self, station: u64, resident: u64) -> Result<(), ()> {
@@ -1179,7 +1194,20 @@ const CURSOR_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(120
 /// Corpus. The reservation accounts for the future point where that unique Arc
 /// would otherwise leave the hot cache. The map has one entry per exact World
 /// publication, so concurrent cursors never double-charge the same allocation.
-const MAX_STATION_READ_RETAINED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// These figures gate deliberately conservative ESTIMATES, not measured
+/// allocations — corpus and projection charges run close to an order of
+/// magnitude above physical bytes for record-shaped stores. At 2 GiB the
+/// v3→v4 migration of a real 85 MiB Space starved itself: the retained
+/// current publication, the frozen migration source retained beside it, and
+/// one batch's transient build charge are all resident during a commit, and
+/// their summed accounting ramps to a peak near the end of a large migration
+/// that crossed even 4 GiB while actual process memory stayed an order of
+/// magnitude lower. The peak is bounded (final set + one source + one build),
+/// not a leak, so the backstop is sized to clear it with headroom. Until the
+/// estimates tighten (Fabric's O(1) view-size estimate is the known missing
+/// piece), this trades address space — never physical memory — for the
+/// ability to finish a bounded migration.
+const MAX_STATION_READ_RETAINED_BYTES: u64 = 96 * 1024 * 1024 * 1024;
 
 #[cfg(test)]
 mod read_memory_governor_tests {
@@ -1656,7 +1684,19 @@ impl CoreInner {
     /// otherwise a Station at its retained limit can no longer publish even a
     /// tiny delta despite having gigabytes of unpinned historical cache.
     fn make_read_room(&mut self, additional: u64) -> Result<(), ()> {
-        let limit = self.retained_cache_bytes_limit.saturating_sub(additional);
+        // The Station's governor ceiling covers more than the read cache:
+        // builds, analytical leases, and Body images spend it too. The
+        // eviction target has to leave room for them, or the cache evicts
+        // exactly to a line the account has already crossed and the follow-up
+        // reservation (`grow`) is refused on every retry — which stalled the
+        // real-data migration at a fixed record count.
+        let overhead = self
+            .read_memory
+            .station_overhead_bytes(self.station_memory.station);
+        let limit = self
+            .retained_cache_bytes_limit
+            .saturating_sub(additional)
+            .saturating_sub(overhead);
         self.evict_unpinned_read_cache_to(limit);
         if self.station_read_retained_bytes() > limit {
             return Err(());
@@ -4616,7 +4656,7 @@ fn commit_failure(error: replica::transaction::commit::Failure) -> Failure {
         }
         replica::transaction::commit::Failure::OutcomeUnknown => Failure::OutcomeUnknown,
         replica::transaction::commit::Failure::MutationBusy => Failure::Busy,
-        replica::transaction::commit::Failure::Illegitimate(_)
+        flattened @ (replica::transaction::commit::Failure::Illegitimate(_)
         | replica::transaction::commit::Failure::IllegitimateContact { .. }
         | replica::transaction::commit::Failure::Engine(_)
         | replica::transaction::commit::Failure::Integrity(_)
@@ -4624,7 +4664,13 @@ fn commit_failure(error: replica::transaction::commit::Failure) -> Failure {
         | replica::transaction::commit::Failure::CheckpointBackpressure
         | replica::transaction::commit::Failure::BodyKeyUnavailable
         | replica::transaction::commit::Failure::Durability(_)
-        | replica::transaction::commit::Failure::Poisoned => Failure::Persistence,
+        | replica::transaction::commit::Failure::Poisoned) => {
+            // The wire keeps the coarse variant, so this is the one place the
+            // exact refusal can still be named. A bare `Persistence` cost a
+            // real migration a day of diagnosis.
+            tracing::warn!(failure = ?flattened, "World transaction commit refused");
+            Failure::Persistence
+        }
     }
 }
 
@@ -6139,12 +6185,28 @@ impl Session {
     }
 
     /// The exact `(schema, version)` must be a declared, writable schema.
+    ///
+    /// Every declaration for the id is consulted, exactly as the readable
+    /// check below does: a World may declare several versions of one schema
+    /// (the Issues migrator declares its historical and current bindings side
+    /// by side, canonically sorted), and which entry happens to come first is
+    /// declaration order, not policy. `readable_predecessors` deliberately do
+    /// not make a version writable.
     fn ensure_writable_schema(&self, schema: &SchemaId, version: u32) -> Result<(), Rejection> {
-        let known = self.schemas.iter().find(|s| &s.id == schema);
-        match known {
-            None => Err(Rejection::UnsupportedSchema),
-            Some(s) if s.version == version => Ok(()),
-            Some(_) => Err(Rejection::UnsupportedSchemaVersion),
+        let mut saw_schema = false;
+        for s in &self.schemas {
+            if &s.id != schema {
+                continue;
+            }
+            saw_schema = true;
+            if s.version == version {
+                return Ok(());
+            }
+        }
+        if saw_schema {
+            Err(Rejection::UnsupportedSchemaVersion)
+        } else {
+            Err(Rejection::UnsupportedSchema)
         }
     }
 
@@ -6680,15 +6742,26 @@ impl Session {
         let readiness = self.semantic_readiness(&self.world_id, semantic);
         let status = match readiness {
             OperationPublication::Ready(id) => {
-                let publication = self
-                    .core
-                    .lock()
-                    .exact_world_publication(&(self.world_id.clone(), id));
+                let mut inner = self.core.lock();
+                let publication = inner.exact_world_publication(&(self.world_id.clone(), id));
                 match publication {
-                    Some(publication) => LifecycleSourceStatus::Ready(LifecycleSourceCoordinate {
-                        publication: publication.id,
-                        frontier: publication.snapshot.frontier(),
-                    }),
+                    Some(publication) => {
+                        // Between bounded lifecycle steps nothing else holds
+                        // the frozen source, and the migration's own commits
+                        // evict exactly the historical publication the next
+                        // step needs — rebuild, evict, rebuild, without end.
+                        // A cursor lease, refreshed on every status poll,
+                        // keeps the source resident while the lifecycle is
+                        // actively stepping and lapses on its own when it
+                        // stops. Best-effort: a capacity refusal here leaves
+                        // the old resolve-per-step behavior.
+                        let _ = inner
+                            .lease_world_publication(self.world_id.clone(), publication.clone());
+                        LifecycleSourceStatus::Ready(LifecycleSourceCoordinate {
+                            publication: publication.id,
+                            frontier: publication.snapshot.frontier(),
+                        })
+                    }
                     None => LifecycleSourceStatus::Building,
                 }
             }
@@ -6738,10 +6811,12 @@ impl Session {
             )
             .ok_or(Rejection::ImplementationUnavailable)?;
         let gates = self.context_find_gates_for(&principal, &descriptor.find_schemas)?;
-        let reader = SnapshotReader::interactive(
-            publication.snapshot.clone(),
-            self.core.body_images.clone(),
-        );
+        // The migration planner is a full source scan. Streaming shares an
+        // already-hot image but never inserts: filling the interactive hot
+        // set from here retained a governor lease per historical Body, and a
+        // real store's migration walked the whole budget into the ground.
+        let reader =
+            SnapshotReader::streaming(publication.snapshot.clone(), self.core.body_images.clone());
         let (read_memory, station_memory, publication_retention, admitted_retained_bytes) = {
             let inner = self.core.lock();
             if inner.closed {

@@ -40,6 +40,17 @@ pub fn serve(
     version: impl Into<String>,
     service: impl Service,
 ) -> Result<()> {
+    // stderr is inherited from the supervising host, so this is the one place
+    // a World process can explain a refusal. Without it every product-side
+    // `tracing` event is dropped on the floor and a migration that stops
+    // reports only the coarse wire code.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     let world = world.into();
     let version = version.into();
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))

@@ -55,6 +55,12 @@ pub(crate) const MAX_DECODED_BODY_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 /// hit the physical envelope first; tiny immutable records cannot create an
 /// unbounded map merely because their payloads are cheap.
 pub(crate) const MAX_HOT_BODY_IMAGES: usize = 4_096;
+/// Byte ceiling on the READY set's summed governor leases. The entry bound
+/// alone cannot hold the pool: a scan-shaped workload over many megabyte-sized
+/// Bodies sums past the Station budget long before 4,096 entries — a real
+/// store's migration walked ~1.6 GiB of hot-set leases into the governor and
+/// starved its own commits.
+const MAX_HOT_BODY_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 const RETAINED_ENTRY_OVERHEAD: u64 = 256;
 
 impl BodyImageAdmission {
@@ -199,6 +205,28 @@ impl std::fmt::Debug for PinnedBodyImage {
 }
 
 impl PinnedBodyImage {
+    /// The governor bytes this entry's leases hold while it stays cached.
+    ///
+    /// The projected collaborative view memoized on the image carries its own
+    /// lease, charged at the conservative decoded upper bound — counting only
+    /// the canonical image here let a cache "under" its byte ceiling hold
+    /// gigabytes of projection leases in the governor.
+    fn lease_bytes(&self) -> u64 {
+        let projection = match &*self.0.collaborative.lock_recovering() {
+            CollaborativeState::Ready(_) => self
+                .0
+                .admission
+                .decoded_upper_bound
+                .saturating_add(RETAINED_ENTRY_OVERHEAD),
+            _ => 0,
+        };
+        self.0
+            .image
+            .retained_bytes()
+            .saturating_add(RETAINED_ENTRY_OVERHEAD)
+            .saturating_add(projection)
+    }
+
     /// Borrow the exact canonical image while retaining this cache entry's
     /// image and memory leases. Callers must not let the returned reference
     /// escape the `PinnedBodyImage` guard.
@@ -369,6 +397,17 @@ impl CacheState {
             .map(|(_, key)| key);
         oldest.is_some_and(|key| self.entries.remove(&key).is_some())
     }
+
+    /// Summed governor leases of the READY set. Bounded by MAX_HOT_BODY_IMAGES
+    /// entries, so recomputing on demand stays cheap.
+    fn ready_lease_bytes(&self) -> u64 {
+        self.entries
+            .values()
+            .fold(0u64, |total, entry| match entry {
+                CacheEntry::Ready { image, .. } => total.saturating_add(image.lease_bytes()),
+                CacheEntry::Loading { .. } => total,
+            })
+    }
 }
 
 /// Station-shared bounded interactive Body cache.
@@ -463,6 +502,13 @@ impl BodyImageCache {
                 match &result {
                     Ok(image) => {
                         let used = state.tick();
+                        // Hold the READY set to its byte ceiling as well as
+                        // its entry ceiling before this entry joins it.
+                        let incoming = image.lease_bytes();
+                        while state.ready_lease_bytes().saturating_add(incoming)
+                            > MAX_HOT_BODY_IMAGE_BYTES
+                            && state.evict_one_ready()
+                        {}
                         state.entries.insert(
                             admission.key,
                             CacheEntry::Ready {
@@ -520,7 +566,12 @@ impl BodyImageCache {
         if let Some(flight) = shared {
             return flight.wait();
         }
-        self.load(admission, false, load)
+        // No-fill never inserts an owner, but byte pressure must still be
+        // shed: with eviction forbidden here, the one reader routed around
+        // the hot set — a full source scan — was also the one reader that
+        // could never make room, and a migration died on a Capacity read the
+        // cache could have absorbed by dropping a cold owner.
+        self.load(admission, true, load)
     }
 
     fn load(
