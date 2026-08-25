@@ -163,9 +163,15 @@ impl SignageRequest {
 pub enum SignageResponse {
     /// The program and the library entries its items name, together, because
     /// fetching the rows one by one is the round trip this surface removes.
+    ///
+    /// `configs` is the Space-wide kind map, joined here so a display prepare
+    /// that is one World Query can overlay live Athan settings without a
+    /// second ClientInvocation. Absent on older answers; default empty.
     Program {
         program: Option<signage::SignageProgram>,
         media: Vec<contract::SignageMedia>,
+        #[serde(default)]
+        configs: Vec<contract::SignageConfig>,
     },
     Programs {
         programs: Vec<signage::SignageProgram>,
@@ -545,7 +551,11 @@ impl SignageCallHandler {
     fn program_query(query: signage::SignageQuery, context: &Context<'_>) -> SignageResponse {
         match Self::ask::<Program>(query, context) {
             Ok(signage::SignageProjection::Program { program, media }) => {
-                SignageResponse::Program { program, media }
+                SignageResponse::Program {
+                    program,
+                    media,
+                    configs: Self::configs_or_empty(context),
+                }
             }
             Ok(signage::SignageProjection::Programs { programs }) => {
                 SignageResponse::Programs { programs }
@@ -596,6 +606,15 @@ impl SignageCallHandler {
                 SignageResponse::Configs { configs }
             }
             Err(message) => SignageResponse::Error { message },
+        }
+    }
+
+    /// Live kind configs, or none. A failed config query must not fail the
+    /// program the screen is trying to draw.
+    fn configs_or_empty(context: &Context<'_>) -> Vec<contract::SignageConfig> {
+        match Self::ask::<Config>(contract::ConfigQuery::Configs, context) {
+            Ok(contract::ConfigProjection::Configs { configs }) => configs,
+            _ => Vec::new(),
         }
     }
 
@@ -912,11 +931,26 @@ mod tests {
         let answer = serde_json::to_value(SignageResponse::Program {
             program: Some(program()),
             media: vec![media()],
+            configs: vec![config()],
         })
         .unwrap();
         assert_eq!(answer["kind"], "program");
         assert_eq!(answer["program"]["items"][0]["media"], media().id);
         assert_eq!(answer["media"][0]["id"], media().id);
+        assert_eq!(answer["configs"][0]["kind"], "weather");
+    }
+
+    #[test]
+    fn a_program_answer_without_configs_still_reads() {
+        let raw = serde_json::json!({
+            "kind": "program",
+            "program": program(),
+            "media": [media()],
+        });
+        let SignageResponse::Program { configs, .. } = serde_json::from_value(raw).unwrap() else {
+            panic!("a program answer deserializes as a program");
+        };
+        assert!(configs.is_empty());
     }
 
     /// One schema pair per document, and no two alike.

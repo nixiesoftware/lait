@@ -921,6 +921,96 @@ select.ds-input {
   .ds-app-setup.ds-sheet {
     width: min(480px, 92vw);
   }
+
+  .ds-athan-setup.ds-sheet {
+    width: min(560px, 92vw);
+  }
+}
+
+.ds-athan-live {
+  height: 148px;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--ds-line);
+}
+
+.ds-athan-live .pe-athan,
+.ds-athan-live .pe-placeholder {
+  height: 100%;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.ds-athan-live .pe-athan header {
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+
+.ds-athan-live .pe-athan li {
+  font-size: 13px;
+}
+
+.ds-athan-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.ds-athan-block h3 {
+  margin: 8px 0 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ds-paper-muted);
+}
+
+.ds-athan-grid {
+  display: grid;
+  grid-template-columns: minmax(4.5rem, 0.8fr) 1fr 1fr;
+  gap: 8px 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--ds-paper-muted);
+  font-weight: 650;
+}
+
+.ds-athan-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.ds-theme-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ds-theme-tile {
+  appearance: none;
+  border: 1px solid var(--ds-line);
+  border-radius: 10px;
+  height: 48px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.ds-theme-tile.is-on {
+  outline: 2px solid var(--ds-paper);
+  outline-offset: 2px;
+}
+
+.ds-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--ds-paper);
 }
 
 .ds-app-setup .ds-sheet-body {

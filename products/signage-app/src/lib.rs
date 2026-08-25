@@ -20,6 +20,7 @@
 //! Product-owned application and display package for Signage.
 
 pub mod application;
+mod athan;
 mod display;
 mod host;
 mod protocol;

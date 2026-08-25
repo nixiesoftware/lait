@@ -11,6 +11,7 @@ publish = false
 anyhow = "1"
 font8x8 = "0.3.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+jiff = "0.2.35"
 mechanics = { path = "../../crates/mechanics" }
 replica = { path = "../../crates/replica" }
 # The container reader: media_ingest derives a catalog before sealing.

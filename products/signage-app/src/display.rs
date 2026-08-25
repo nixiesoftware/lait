@@ -38,7 +38,7 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
     input_digest.update(b"signage.program.input.v1:{program:body-id}");
     let mut renderer_identity = Sha256::new();
     renderer_identity.update(
-        b"signage.program.renderer.v5:font8x8:png:library:content:lait-live:rolling-windows",
+        b"signage.program.renderer.v7:font8x8:png:library:content:lait-live:rolling-windows:athan-masjid",
     );
     let mut descriptor = DisplaySurfaceDescriptor {
         id: DisplaySurfaceId::new(SURFACE_ID)?,
@@ -103,6 +103,7 @@ impl DisplayRenderer for SignageRenderer {
             let crate::SignageResponse::Program {
                 program: Some(program),
                 media,
+                configs,
             } = response
             else {
                 return Err(Failure::new("Signage program is unavailable"));
@@ -117,28 +118,30 @@ impl DisplayRenderer for SignageRenderer {
             let scheduled = program
                 .scheduled_at(now_unix_ms)
                 .map_err(|error| Failure::new(format!("evaluate Signage schedule: {error}")))?;
-            let refresh_after_ms = scheduled.next_boundary_unix_ms.and_then(|boundary| {
-                let delay = boundary.saturating_sub(now_unix_ms).max(1);
-                u32::try_from(delay)
-                    .ok()
-                    .filter(|delay| *delay <= request.window_horizon_ms)
-            });
             let library: BTreeMap<&str, &SignageMedia> = media
                 .iter()
                 .map(|entry| (entry.id.as_str(), entry))
                 .collect();
             let idle = scheduled.items.is_empty();
             let mut items = Vec::with_capacity(scheduled.items.len().max(1));
+            let mut kind_refresh_unix_ms = None;
             for item in scheduled.items {
                 let entry = library.get(item.media.as_str()).copied();
+                let live = with_live_athan(entry, &configs);
+                let drawn = scene(live.as_ref(), request.width, request.height, now_unix_ms)?;
+                kind_refresh_unix_ms = match (kind_refresh_unix_ms, drawn.refresh_unix_ms) {
+                    (None, next) => next,
+                    (Some(left), Some(right)) => Some(left.min(right)),
+                    (Some(left), None) => Some(left),
+                };
                 items.push(RenderedProgramItem {
                     id: item.id.clone(),
                     duration_ms: item
                         .duration_ms
-                        .or_else(|| entry.and_then(|entry| entry.duration_ms)),
-                    scene: scene(entry, request.width, request.height)?,
+                        .or_else(|| live.as_ref().and_then(|entry| entry.duration_ms)),
+                    scene: drawn.scene,
                     assessment: DisplayAssessment::Current,
-                    spoken_summary: spoken_summary(entry),
+                    spoken_summary: spoken_summary(live.as_ref(), now_unix_ms),
                 });
             }
             if idle {
@@ -150,6 +153,16 @@ impl DisplayRenderer for SignageRenderer {
                     spoken_summary: Some("No content is scheduled".into()),
                 });
             }
+            let refresh_after_ms = [scheduled.next_boundary_unix_ms, kind_refresh_unix_ms]
+                .into_iter()
+                .flatten()
+                .map(|boundary| boundary.saturating_sub(now_unix_ms).max(1))
+                .min()
+                .and_then(|delay| {
+                    u32::try_from(delay)
+                        .ok()
+                        .filter(|delay| *delay <= request.window_horizon_ms)
+                });
             Ok(DisplayProjection {
                 program: RenderedProgram {
                     items,
@@ -180,11 +193,52 @@ fn cycle(value: signage::ProgramCycle) -> ProgramCycle {
 ///
 /// An entry this renderer cannot present blanks, and the rest of the program
 /// still plays. That covers a dangling item, whose reference resolved to
-/// nothing, and an integration, whose renderer lives in the app that owns the
-/// kind rather than here.
-fn scene(entry: Option<&SignageMedia>, width: u32, height: u32) -> Result<RenderedScene, Failure> {
+/// nothing, and a kind this app does not draw. Athan is drawn here because
+/// this application owns that kind.
+struct DrawnScene {
+    scene: RenderedScene,
+    refresh_unix_ms: Option<u64>,
+}
+
+fn drawn(scene: RenderedScene) -> DrawnScene {
+    DrawnScene {
+        scene,
+        refresh_unix_ms: None,
+    }
+}
+
+/// Space config wins for athan. Other kinds keep the row they were saved with.
+fn with_live_athan(
+    entry: Option<&SignageMedia>,
+    configs: &[signage::contract::SignageConfig],
+) -> Option<SignageMedia> {
+    let entry = entry?;
+    Some(match &entry.source {
+        MediaSource::Kind { kind, settings } if crate::athan::kind_is_athan(kind) => {
+            let space = configs
+                .iter()
+                .find(|config| config.kind == "athan")
+                .map(|config| &config.settings);
+            SignageMedia {
+                source: MediaSource::Kind {
+                    kind: kind.clone(),
+                    settings: crate::athan::overlay(space, settings),
+                },
+                ..entry.clone()
+            }
+        }
+        _ => entry.clone(),
+    })
+}
+
+fn scene(
+    entry: Option<&SignageMedia>,
+    width: u32,
+    height: u32,
+    now_unix_ms: u64,
+) -> Result<DrawnScene, Failure> {
     let Some(entry) = entry else {
-        return Ok(RenderedScene::Blank(BlankReason::Unsupported));
+        return Ok(drawn(RenderedScene::Blank(BlankReason::Unsupported)));
     };
     match &entry.source {
         MediaSource::Card {
@@ -192,24 +246,52 @@ fn scene(entry: Option<&SignageMedia>, width: u32, height: u32) -> Result<Render
             body,
             background,
             foreground,
-        } => Ok(RenderedScene::Frame(RenderedFrame {
+        } => Ok(drawn(RenderedScene::Frame(RenderedFrame {
             media_type: FrameMediaType::Png,
             width,
             height,
             bytes: render_card(title, body, background, foreground, width, height)?,
-        })),
-        MediaSource::Stored { .. } => Ok(entry
-            .source
-            .content_ref()
-            .map_or(RenderedScene::Blank(BlankReason::Unsupported), |content| {
-                media_scene(MediaOrigin::Stored(content))
-            })),
-        MediaSource::Live { resource } => Ok(DisplayResourceId::new(resource)
-            .map_or(RenderedScene::Blank(BlankReason::Unsupported), |resource| {
-                media_scene(MediaOrigin::Live(resource))
-            })),
-        MediaSource::Kind { .. } => Ok(RenderedScene::Blank(BlankReason::Unsupported)),
+        }))),
+        MediaSource::Stored { .. } => {
+            Ok(drawn(entry.source.content_ref().map_or(
+                RenderedScene::Blank(BlankReason::Unsupported),
+                |content| media_scene(MediaOrigin::Stored(content)),
+            )))
+        }
+        MediaSource::Live { resource } => {
+            Ok(drawn(DisplayResourceId::new(resource).map_or(
+                RenderedScene::Blank(BlankReason::Unsupported),
+                |resource| media_scene(MediaOrigin::Live(resource)),
+            )))
+        }
+        MediaSource::Kind { kind, settings } => {
+            athan_scene(kind, settings, width, height, now_unix_ms)
+        }
     }
+}
+
+fn athan_scene(
+    kind: &str,
+    settings: &BTreeMap<String, String>,
+    width: u32,
+    height: u32,
+    now_unix_ms: u64,
+) -> Result<DrawnScene, Failure> {
+    if !crate::athan::kind_is_athan(kind) {
+        return Ok(drawn(RenderedScene::Blank(BlankReason::Unsupported)));
+    }
+    let Some(day) = crate::athan::times_from_settings(settings, now_unix_ms) else {
+        return Ok(drawn(RenderedScene::Blank(BlankReason::Unsupported)));
+    };
+    Ok(DrawnScene {
+        scene: RenderedScene::Frame(RenderedFrame {
+            media_type: FrameMediaType::Png,
+            width,
+            height,
+            bytes: render_athan(&day, width, height)?,
+        }),
+        refresh_unix_ms: Some(day.next_change_unix_ms),
+    })
 }
 
 /// HLS is the only transport a receiver can declare without also declaring live
@@ -225,16 +307,164 @@ fn media_scene(origin: MediaOrigin) -> RenderedScene {
 
 /// A card speaks the words it was authored with; everything else speaks the
 /// name the library gave it, which is the only name a listener would recognise.
-fn spoken_summary(entry: Option<&SignageMedia>) -> Option<String> {
+fn spoken_summary(entry: Option<&SignageMedia>, now_unix_ms: u64) -> Option<String> {
     let entry = entry?;
-    let MediaSource::Card { title, body, .. } = &entry.source else {
-        return Some(entry.name.clone());
-    };
-    Some(if body.trim().is_empty() {
-        title.clone()
-    } else {
-        format!("{title}. {body}")
-    })
+    match &entry.source {
+        MediaSource::Card { title, body, .. } => Some(if body.trim().is_empty() {
+            title.clone()
+        } else {
+            format!("{title}. {body}")
+        }),
+        MediaSource::Kind { kind, settings } if crate::athan::kind_is_athan(kind) => {
+            crate::athan::times_from_settings(settings, now_unix_ms).and_then(|day| {
+                Some(match day.phase {
+                    crate::athan::Phase::Countdown { label, remain_s } => {
+                        format!("{label} in {remain_s} seconds.")
+                    }
+                    crate::athan::Phase::Silence => "Prayer in progress.".into(),
+                    crate::athan::Phase::Table => {
+                        let clock = day.next_event_clock()?;
+                        let when = crate::athan::format_clock(clock, day.clock_24h);
+                        if day.next_is_iqamah {
+                            format!("Prayer times. Next is Iqamah at {when}.")
+                        } else {
+                            let next = day.prayers.get(day.next)?;
+                            format!("Prayer times. Next is {} at {when}.", next.name)
+                        }
+                    }
+                })
+            })
+        }
+        _ => Some(entry.name.clone()),
+    }
+}
+
+fn theme_colors(theme: crate::athan::Theme) -> (Rgba<u8>, Rgba<u8>, Rgba<u8>) {
+    match theme {
+        crate::athan::Theme::Ink => (
+            Rgba([18, 14, 10, 255]),
+            Rgba([180, 160, 130, 255]),
+            Rgba([243, 192, 122, 255]),
+        ),
+        crate::athan::Theme::Paper => (
+            Rgba([246, 241, 232, 255]),
+            Rgba([90, 78, 64, 255]),
+            Rgba([36, 28, 20, 255]),
+        ),
+        crate::athan::Theme::Emerald => (
+            Rgba([12, 36, 28, 255]),
+            Rgba([150, 180, 160, 255]),
+            Rgba([220, 232, 210, 255]),
+        ),
+        crate::athan::Theme::Night => (
+            Rgba([8, 10, 16, 255]),
+            Rgba([140, 150, 170, 255]),
+            Rgba([210, 220, 235, 255]),
+        ),
+    }
+}
+
+fn render_athan(day: &crate::athan::DayTimes, width: u32, height: u32) -> Result<Vec<u8>, Failure> {
+    let (background, muted, accent) = theme_colors(day.theme);
+    let mut image = RgbaImage::from_pixel(width, height, background);
+    let inset = width.min(height) / 12;
+    match day.phase {
+        crate::athan::Phase::Silence => {
+            let scale = (width / 160).min(height / 60).clamp(3, 12);
+            draw_line(
+                &mut image,
+                "Prayer in progress",
+                inset,
+                height / 2 - scale.saturating_mul(4),
+                scale,
+                accent,
+            );
+        }
+        crate::athan::Phase::Countdown { label, remain_s } => {
+            let title_scale = (width / 160).min(height / 70).clamp(3, 12);
+            draw_line(&mut image, label, inset, height / 5, title_scale, muted);
+            let mins = remain_s / 60;
+            let secs = remain_s % 60;
+            let clock = format!("{mins}:{secs:02}");
+            draw_line(
+                &mut image,
+                &clock,
+                inset,
+                height / 5 + title_scale.saturating_mul(14),
+                title_scale.saturating_add(4).min(16),
+                accent,
+            );
+        }
+        crate::athan::Phase::Table => {
+            let title_scale = (width / 220).min(height / 90).clamp(2, 10);
+            draw_line(&mut image, "Athan", inset, height / 12, title_scale, accent);
+            let mut sub = day.now_label.clone();
+            if day.show_hijri && !day.hijri_label.is_empty() {
+                sub = format!("{}  {}", sub, day.hijri_label);
+            }
+            draw_line(
+                &mut image,
+                &sub,
+                inset,
+                height / 12 + title_scale.saturating_mul(12),
+                title_scale.saturating_sub(1).max(2),
+                muted,
+            );
+            let row_scale = (width / 300).min(height / 120).clamp(2, 8);
+            let row_height = row_scale.saturating_mul(12);
+            let start_y = height / 12
+                + title_scale.saturating_mul(12)
+                + title_scale.saturating_mul(8)
+                + row_height;
+            let iqamah_x = width
+                .saturating_sub(inset)
+                .saturating_sub(row_scale.saturating_mul(9).saturating_mul(5));
+            let adhan_x = if day.show_iqamah {
+                iqamah_x.saturating_sub(row_scale.saturating_mul(9).saturating_mul(6))
+            } else {
+                iqamah_x
+            };
+            for (index, prayer) in day.prayers.iter().enumerate() {
+                let y = start_y
+                    .saturating_add(row_height.saturating_mul(u32::try_from(index).unwrap_or(0)));
+                let color = if index == day.next { accent } else { muted };
+                draw_line(&mut image, prayer.name, inset, y, row_scale, color);
+                let adhan = crate::athan::format_clock(prayer.adhan, day.clock_24h);
+                draw_line(&mut image, &adhan, adhan_x, y, row_scale, color);
+                if day.show_iqamah {
+                    let iqamah = prayer.iqamah.map_or_else(
+                        || "--:--".into(),
+                        |clock| crate::athan::format_clock(clock, day.clock_24h),
+                    );
+                    draw_line(&mut image, &iqamah, iqamah_x, y, row_scale, color);
+                }
+            }
+        }
+    }
+    encode_png(image)
+}
+
+fn draw_line(image: &mut RgbaImage, text: &str, x: u32, y: u32, scale: u32, color: Rgba<u8>) {
+    let cell = scale.saturating_mul(9).max(1);
+    for (column, character) in text.chars().enumerate() {
+        let line_x = x.saturating_add(
+            u32::try_from(column)
+                .unwrap_or(u32::MAX)
+                .saturating_mul(cell),
+        );
+        if line_x >= image.width() {
+            break;
+        }
+        draw_character(image, character, line_x, y, scale, color);
+    }
+}
+
+fn encode_png(image: RgbaImage) -> Result<Vec<u8>, Failure> {
+    let mut cursor = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut cursor, ImageFormat::Png)
+        .map_err(|error| Failure::new(format!("encode Signage frame: {error}")))?;
+    Ok(cursor.into_inner())
 }
 
 fn render_card(
@@ -273,11 +503,7 @@ fn render_card(
         foreground,
         5,
     );
-    let mut cursor = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(image)
-        .write_to(&mut cursor, ImageFormat::Png)
-        .map_err(|error| Failure::new(format!("encode Signage frame: {error}")))?;
-    Ok(cursor.into_inner())
+    encode_png(image)
 }
 
 fn rgb(value: &str) -> Result<Rgba<u8>, Failure> {
@@ -407,14 +633,14 @@ mod tests {
     #[test]
     fn authored_slide_renders_to_a_real_png() {
         let card = card();
-        let RenderedScene::Frame(frame) = scene(Some(&card), 640, 360).unwrap() else {
+        let RenderedScene::Frame(frame) = scene(Some(&card), 640, 360, 0).unwrap().scene else {
             panic!("an authored card is rendered here, not fetched");
         };
         assert_eq!(frame.media_type, FrameMediaType::Png);
         assert_eq!(frame.bytes.get(..8), Some(b"\x89PNG\r\n\x1a\n".as_slice()));
         assert!(frame.bytes.len() > 1_000);
         assert_eq!(
-            spoken_summary(Some(&card)).as_deref(),
+            spoken_summary(Some(&card), 0).as_deref(),
             Some("Welcome. Open house at 6")
         );
     }
@@ -431,7 +657,8 @@ mod tests {
             mime: "video/mp4".into(),
         });
         assert!(stored.validate(), "a real id is admissible");
-        let RenderedScene::Media(rendered) = scene(Some(&stored), 640, 360).unwrap() else {
+        let RenderedScene::Media(rendered) = scene(Some(&stored), 640, 360, 0).unwrap().scene
+        else {
             panic!("durable bytes are fetched, not rasterised");
         };
         let MediaOrigin::Stored(content) = rendered.origin else {
@@ -443,7 +670,7 @@ mod tests {
             "the content id, never the entry that describes it"
         );
         assert_eq!(
-            spoken_summary(Some(&stored)).as_deref(),
+            spoken_summary(Some(&stored), 0).as_deref(),
             Some("Ribbon cutting")
         );
     }
@@ -455,7 +682,8 @@ mod tests {
         let masquerading = entry(MediaSource::Live {
             resource: REAL_CONTENT_ID.into(),
         });
-        let RenderedScene::Media(rendered) = scene(Some(&masquerading), 640, 360).unwrap() else {
+        let RenderedScene::Media(rendered) = scene(Some(&masquerading), 640, 360, 0).unwrap().scene
+        else {
             panic!("a live rendition is media whatever it is called");
         };
         assert!(
@@ -469,7 +697,7 @@ mod tests {
         let live = entry(MediaSource::Live {
             resource: "lobby-cam".into(),
         });
-        let RenderedScene::Media(rendered) = scene(Some(&live), 640, 360).unwrap() else {
+        let RenderedScene::Media(rendered) = scene(Some(&live), 640, 360, 0).unwrap().scene else {
             panic!("a live rendition is media");
         };
         let MediaOrigin::Live(rendition) = &rendered.origin else {
@@ -489,13 +717,13 @@ mod tests {
         });
         for absent in [Some(&integration), None] {
             assert!(matches!(
-                scene(absent, 640, 360).unwrap(),
+                scene(absent, 640, 360, 0).unwrap().scene,
                 RenderedScene::Blank(BlankReason::Unsupported)
             ));
         }
-        assert_eq!(spoken_summary(None), None);
+        assert_eq!(spoken_summary(None, 0), None);
         assert_eq!(
-            spoken_summary(Some(&integration)).as_deref(),
+            spoken_summary(Some(&integration), 0).as_deref(),
             Some("Ribbon cutting"),
             "an app draws it, and the library still named it"
         );
@@ -516,7 +744,8 @@ mod tests {
             mime: "video/mp4".into(),
         });
         assert!(admitted.validate(), "an admissible id");
-        let RenderedScene::Media(rendered) = scene(Some(&admitted), 640, 360).unwrap() else {
+        let RenderedScene::Media(rendered) = scene(Some(&admitted), 640, 360, 0).unwrap().scene
+        else {
             panic!("an admissible id renders rather than blanking");
         };
         assert!(matches!(rendered.origin, MediaOrigin::Stored(_)));
@@ -538,5 +767,86 @@ mod tests {
                 "{refused} is not an id any read could resolve"
             );
         }
+    }
+
+    #[test]
+    fn athan_with_a_location_is_a_schedule_card() {
+        let athan = entry(MediaSource::Kind {
+            kind: "athan".into(),
+            settings: [
+                ("latitude".into(), "51.5074".into()),
+                ("longitude".into(), "-0.1278".into()),
+                ("method".into(), "isna".into()),
+                ("timezone".into(), "Europe/London".into()),
+            ]
+            .into(),
+        });
+        let now = 1_704_110_400_000;
+        let drawn = scene(Some(&athan), 640, 360, now).unwrap();
+        let RenderedScene::Frame(frame) = drawn.scene else {
+            panic!("athan is rasterised here");
+        };
+        assert_eq!(frame.media_type, FrameMediaType::Png);
+        assert_eq!(frame.bytes.get(..8), Some(b"\x89PNG\r\n\x1a\n".as_slice()));
+        assert!(drawn.refresh_unix_ms.is_some());
+        let spoken = spoken_summary(Some(&athan), now).expect("spoken");
+        assert!(spoken.starts_with("Prayer times."), "{spoken}");
+    }
+
+    #[test]
+    fn emerald_theme_paints_the_emerald_ground() {
+        let athan = entry(MediaSource::Kind {
+            kind: "athan".into(),
+            settings: [
+                ("latitude".into(), "51.5074".into()),
+                ("longitude".into(), "-0.1278".into()),
+                ("method".into(), "isna".into()),
+                ("timezone".into(), "Europe/London".into()),
+                ("theme".into(), "emerald".into()),
+            ]
+            .into(),
+        });
+        let RenderedScene::Frame(frame) = scene(Some(&athan), 320, 180, 1_704_110_400_000)
+            .unwrap()
+            .scene
+        else {
+            panic!("athan is rasterised here");
+        };
+        let png = image::load_from_memory(&frame.bytes).unwrap().to_rgba8();
+        assert_eq!(*png.get_pixel(0, 0), Rgba([12, 36, 28, 255]));
+    }
+
+    #[test]
+    fn live_space_config_overlays_the_kind_row() {
+        let snapshot = entry(MediaSource::Kind {
+            kind: "athan".into(),
+            settings: BTreeMap::new(),
+        });
+        let configs = [signage::contract::SignageConfig {
+            id: replica::body::BodyId::from_bytes([9; 16]).render(),
+            kind: "athan".into(),
+            name: "Athan".into(),
+            settings: [
+                ("latitude".into(), "51.5074".into()),
+                ("longitude".into(), "-0.1278".into()),
+                ("method".into(), "isna".into()),
+                ("timezone".into(), "Europe/London".into()),
+                ("theme".into(), "emerald".into()),
+            ]
+            .into(),
+        }];
+        let live = with_live_athan(Some(&snapshot), &configs).expect("overlay");
+        let MediaSource::Kind { settings, .. } = &live.source else {
+            panic!("athan stays a kind");
+        };
+        let RenderedScene::Frame(frame) = scene(Some(&live), 320, 180, 1_704_110_400_000)
+            .unwrap()
+            .scene
+        else {
+            panic!("live config is enough to rasterise");
+        };
+        assert_eq!(settings.get("theme").map(String::as_str), Some("emerald"));
+        let png = image::load_from_memory(&frame.bytes).unwrap().to_rgba8();
+        assert_eq!(*png.get_pixel(0, 0), Rgba([12, 36, 28, 255]));
     }
 }

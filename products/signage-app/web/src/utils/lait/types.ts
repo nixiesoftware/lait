@@ -121,6 +121,8 @@ export interface ProgramReply {
   program: SignageProgram | null;
   /** The library entries the items name, in item order, deduplicated. */
   media: SignageMedia[];
+  /** Space-wide kind configs, joined onto a program answer for live overlay. */
+  configs?: SignageConfig[];
 }
 export interface ProgramsReply {
   kind: 'programs';

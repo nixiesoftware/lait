@@ -1,4 +1,5 @@
 import type { SignageMedia } from "@/utils/lait/types";
+import { THEMES, athanTimes, formatClock } from "./athan";
 import { storedContentUrl } from "./model";
 
 type Props = {
@@ -40,6 +41,26 @@ export function Thumb({ media, orbit }: Props) {
           if (video.currentTime === 0) video.currentTime = 0.08;
         }}
       />
+    );
+  }
+  if (media.source === "kind" && media.kind === "athan") {
+    const day = athanTimes(media.settings);
+    const next = day?.prayers[day.next];
+    const theme = THEMES[day?.theme ?? "ink"];
+    const clock = next
+      ? day?.nextIsIqamah && next.iqamah
+        ? next.iqamah
+        : next.adhan
+      : null;
+    return (
+      <div
+        className="pe-thumb pe-thumb-card pe-thumb-athan"
+        style={{ background: theme.bg, color: theme.accent }}
+      >
+        {next && clock
+          ? `${day?.nextIsIqamah ? "Iqamah" : next.name} ${formatClock(clock, day?.clock24h ?? true)}`
+          : "Athan"}
+      </div>
     );
   }
   return (

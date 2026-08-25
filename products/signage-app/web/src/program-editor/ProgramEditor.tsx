@@ -9,18 +9,21 @@ import {
   Play,
   Plus,
   Redo2,
+  Settings2,
   SkipBack,
   SkipForward,
   Trash2,
   Undo2,
 } from "lucide-react";
+import { AthanSheet } from "@/components/integrations/AthanSheet";
 import { useAdminLayout } from "@/context/AdminLayoutContext";
 import { useToast } from "@/ds";
 import { space } from "@/utils/api/client";
 import { fetchConfigs, type KindDefinition } from "@/utils/apps/api";
 import { saveMedia } from "@/utils/content/api";
 import { mintBodyId } from "@/utils/lait/ids";
-import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
+import type { SignageConfig, SignageMedia, SignageProgram } from "@/utils/lait/types";
+import { overlay } from "./athan";
 import { useClock } from "./clock";
 import { Filmstrip } from "./Filmstrip";
 import type { ClipActions } from "./ItemMenu";
@@ -69,6 +72,12 @@ export function ProgramEditor({
   const [program, setProgram] = useState(initial);
   const [baseline, setBaseline] = useState(initial);
   const [library, setLibrary] = useState(initialLibrary);
+  const [configs, setConfigs] = useState<SignageConfig[]>([]);
+  const [draftAthan, setDraftAthan] = useState<Record<string, string> | null>(
+    null,
+  );
+  const [athanOpen, setAthanOpen] = useState(false);
+  const pendingSeek = useRef<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(
     initial.items[0]?.id ?? null,
   );
@@ -87,7 +96,15 @@ export function ProgramEditor({
   const { setHideSidebar } = useAdminLayout();
   const toast = useToast();
 
-  const catalog = useMemo(() => mediaById(library), [library]);
+  const shownLibrary = useMemo(() => {
+    const saved = configs.find((entry) => entry.kind === "athan")?.settings;
+    const athan = draftAthan ?? saved;
+    return library.map((entry) => {
+      if (entry.source !== "kind" || entry.kind !== "athan") return entry;
+      return { ...entry, settings: overlay(athan, entry.settings) };
+    });
+  }, [library, configs, draftAthan]);
+  const catalog = useMemo(() => mediaById(shownLibrary), [shownLibrary]);
   const durationMs = programDurationMs(program, catalog);
   const clips = useMemo(() => layout(program, catalog), [program, catalog]);
   const { t, playing, seek, toggle, pause } = useClock(durationMs, program.cycle);
@@ -135,9 +152,25 @@ export function ProgramEditor({
   }, [initialLibrary]);
 
   useEffect(() => {
+    void fetchConfigs()
+      .then(setConfigs)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
     if (selectedId && program.items.some((item) => item.id === selectedId)) return;
     setSelectedId(program.items[0]?.id ?? null);
   }, [program.items, selectedId]);
+
+  useEffect(() => {
+    const id = pendingSeek.current;
+    if (!id) return;
+    const clip = clips.find((entry) => entry.item.id === id);
+    if (!clip) return;
+    pause();
+    seek(clip.startMs);
+    pendingSeek.current = null;
+  }, [clips]); // pause/seek are stable enough for a one-shot seek
 
   const save = async (): Promise<boolean> => {
     if (!canSave) return false;
@@ -165,7 +198,7 @@ export function ProgramEditor({
     else onClose();
   };
 
-  const add = (media: SignageMedia) => {
+  const add = (media: SignageMedia): string | null => {
     pause();
     const known = new Set(program.items.map((item) => item.id));
     const next = addMedia(program, media, addAfterRef.current);
@@ -174,6 +207,7 @@ export function ProgramEditor({
     const added = next.items.find((item) => !known.has(item.id));
     setSelectedId(added?.id ?? null);
     setAddOpen(false);
+    return added?.id ?? null;
   };
 
   const pasteAt = (afterId: string | null) => {
@@ -237,14 +271,15 @@ export function ProgramEditor({
 
   const addKind = async (kind: KindDefinition) => {
     try {
-      const configs = await fetchConfigs();
-      const config = configs.find((entry) => entry.kind === kind.kind);
+      const latest = await fetchConfigs();
+      setConfigs(latest);
+      const config = latest.find((entry) => entry.kind === kind.kind);
       const media: SignageMedia = {
         id: mintBodyId(),
         name: kind.label,
         source: "kind",
         kind: kind.kind,
-        settings: config?.settings ?? {},
+        settings: kind.kind === "athan" ? {} : (config?.settings ?? {}),
         duration_ms: 60_000,
         width: null,
         height: null,
@@ -252,7 +287,11 @@ export function ProgramEditor({
       };
       await saveMedia(media);
       setLibrary((current) => [media, ...current]);
-      add(media);
+      const itemId = add(media);
+      if (kind.kind === "athan") {
+        pendingSeek.current = itemId;
+        setAthanOpen(true);
+      }
     } catch (err) {
       toast.show(
         "Could not add the app",
@@ -346,15 +385,34 @@ export function ProgramEditor({
       ) : null}
       {error ? <p className="ds-danger-text pe-error">{error}</p> : null}
 
-      <Stage
-        clip={stageClip}
-        t={t}
-        playing={playing}
-        orbit={orbit}
-        trim={trim}
-        container={peRef}
-        actions={actions}
-      />
+      <div className={`pe-workspace${athanOpen ? " has-panel" : ""}`}>
+        <Stage
+          clip={stageClip}
+          t={t}
+          playing={playing}
+          orbit={orbit}
+          trim={trim}
+          container={peRef}
+          actions={actions}
+        />
+
+        <AthanSheet
+          embedded
+          open={athanOpen}
+          config={configs.find((entry) => entry.kind === "athan") ?? null}
+          onDraft={setDraftAthan}
+          onClose={() => setAthanOpen(false)}
+          onSaved={async () => {
+            const latest = await fetchConfigs();
+            setConfigs(latest);
+          }}
+          onRemoved={async () => {
+            const latest = await fetchConfigs();
+            setConfigs(latest);
+          }}
+          onError={(message) => toast.show("Save failed", message)}
+        />
+      </div>
 
       <div className="pe-dock">
         <div className={`pe-rail${wide ? "" : " is-narrow"}`}>
@@ -416,6 +474,23 @@ export function ProgramEditor({
                     apply(setDuration(program, selected.item.id, ms))
                   }
                 />
+                {selected.media?.source === "kind" &&
+                selected.media.kind === "athan" ? (
+                  <button
+                    type="button"
+                    className="pe-tool"
+                    title="Configure Athan"
+                    aria-label="Configure Athan"
+                    onClick={() => {
+                      pendingSeek.current = selected.item.id;
+                      pause();
+                      seek(selected.startMs);
+                      setAthanOpen(true);
+                    }}
+                  >
+                    <Settings2 size={18} />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="pe-tool"
@@ -451,7 +526,7 @@ export function ProgramEditor({
         <Filmstrip
         program={program}
         library={catalog}
-        media={library}
+        media={shownLibrary}
         t={t}
         selectedId={selectedId}
         orbit={orbit}
@@ -493,7 +568,7 @@ export function ProgramEditor({
         <LibrarySheet
           open={addOpen}
           onOpenChange={openAdd}
-          library={library}
+          library={shownLibrary}
           orbit={orbit}
           onAdd={add}
           onUploaded={(uploaded) => {

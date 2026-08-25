@@ -37,6 +37,7 @@ type FlowProps = {
   onUploaded: (media: SignageMedia[]) => void;
   onAddKind: (kind: KindDefinition) => void;
   onUploadError?: (message: string) => void;
+  onManageApps?: () => void;
 };
 
 export function AddFlow({
@@ -49,6 +50,7 @@ export function AddFlow({
   onUploaded,
   onAddKind,
   onUploadError,
+  onManageApps,
 }: FlowProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -133,6 +135,14 @@ export function AddFlow({
             </span>
           </button>
         ))}
+        {onManageApps ? (
+          <button type="button" className="ds-row" onClick={onManageApps}>
+            <span className="ds-row-copy">
+              Manage apps
+              <span>Remove a connection for this Space.</span>
+            </span>
+          </button>
+        ) : null}
       </div>
     );
   }

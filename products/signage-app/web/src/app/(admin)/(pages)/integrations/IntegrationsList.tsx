@@ -9,6 +9,7 @@ import {
   haptic,
   useToast,
 } from "@/ds";
+import { AthanSheet } from "@/components/integrations/AthanSheet";
 import { CityPicker, type CitySelection } from "@/components/integrations/CityPicker";
 import {
   KINDS,
@@ -125,23 +126,43 @@ export default function Integrations() {
           );
         })}
       </div>
-      <ConfigSheet
-        kind={editing}
-        config={editing ? configFor(editing.kind) : null}
-        onClose={() => setEditing(null)}
-        onSaved={() => {
-          haptic("save");
-          void reload();
-        }}
-        onRemoved={() => {
-          haptic("delete");
-          void reload();
-        }}
-        onError={(message) => {
-          toast.show("Save failed", message);
-          haptic("error");
-        }}
-      />
+      {editing?.kind === "athan" ? (
+        <AthanSheet
+          open
+          config={configFor("athan")}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            haptic("save");
+            void reload();
+          }}
+          onRemoved={() => {
+            haptic("delete");
+            void reload();
+          }}
+          onError={(message) => {
+            toast.show("Save failed", message);
+            haptic("error");
+          }}
+        />
+      ) : (
+        <ConfigSheet
+          kind={editing}
+          config={editing ? configFor(editing.kind) : null}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            haptic("save");
+            void reload();
+          }}
+          onRemoved={() => {
+            haptic("delete");
+            void reload();
+          }}
+          onError={(message) => {
+            toast.show("Save failed", message);
+            haptic("error");
+          }}
+        />
+      )}
     </Page>
   );
 }
