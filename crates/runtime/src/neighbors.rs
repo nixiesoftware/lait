@@ -157,6 +157,10 @@ pub struct NeighborRegistry {
     path: PathBuf,
     space: SpaceId,
     entries: BTreeMap<Key, NeighborRecord>,
+    /// Process-local ordering between observations and Contact attempts. A
+    /// result may return after a newer Beacon or swarm event; revisions keep
+    /// that stale result from overwriting the newer reachability/pending state.
+    revisions: BTreeMap<Key, u64>,
     /// Unpersisted freshness-only changes.
     dirty: bool,
     last_persist_ms: u64,
@@ -176,6 +180,7 @@ impl NeighborRegistry {
             path,
             space: space.clone(),
             entries,
+            revisions: BTreeMap::new(),
             dirty: false,
             last_persist_ms: 0,
         })
@@ -283,7 +288,20 @@ impl NeighborRegistry {
                 .map(|e| e.station.clone());
             let Some(victim) = victim else { break };
             self.entries.remove(&victim);
+            self.revisions.remove(&victim);
         }
+    }
+
+    fn bump_revision(&mut self, station: &Key) {
+        let revision = self.revisions.entry(station.clone()).or_default();
+        *revision = revision.saturating_add(1);
+    }
+
+    /// Capture the observation generation a Contact begins against.
+    pub(crate) fn attempt_revision(&self, station: &Key) -> Option<u64> {
+        self.entries
+            .contains_key(station)
+            .then(|| self.revisions.get(station).copied().unwrap_or(0))
     }
 
     /// Offer a **verified** Beacon (only [`VerifiedBeacon`] is accepted — a
@@ -308,6 +326,16 @@ impl NeighborRegistry {
         if is_new {
             self.evict_for_insert();
         }
+        // Forward-only: an old or equal coordinate is a replay, ignored. A
+        // brand-new entry (0,0) accepts any coordinate.
+        let fresh = self.entries.get(&station).is_none_or(|entry| {
+            (epoch, sequence) > (entry.epoch, entry.sequence)
+                || (entry.epoch == 0 && entry.sequence == 0 && entry.frontier_count == 0)
+        });
+        if !fresh {
+            return Ok(false);
+        }
+        self.bump_revision(&station);
         let entry = self
             .entries
             .entry(station.clone())
@@ -324,13 +352,6 @@ impl NeighborRegistry {
                 pending: false,
                 last_seen_ms: 0,
             });
-        // Forward-only: an old or equal coordinate is a replay, ignored. A
-        // brand-new entry (0,0) accepts any coordinate.
-        let fresh = (epoch, sequence) > (entry.epoch, entry.sequence)
-            || (entry.epoch == 0 && entry.sequence == 0 && entry.frontier_count == 0);
-        if !fresh {
-            return Ok(false);
-        }
         entry.epoch = epoch;
         entry.sequence = sequence;
         entry.last_seen_ms = now_ms;
@@ -397,6 +418,10 @@ impl NeighborRegistry {
     /// never routes — the eclipse fence still gates learning). Only known
     /// Neighbors are touched: a bare overlay event can never create an entry.
     pub fn note_swarm(&mut self, station: &Key, up: bool, now_ms: u64) -> Result<bool, Failure> {
+        if !self.entries.contains_key(station) {
+            return Ok(false);
+        }
+        self.bump_revision(station);
         let Some(entry) = self.entries.get_mut(station) else {
             return Ok(false);
         };
@@ -424,7 +449,13 @@ impl NeighborRegistry {
     /// it dials us — the holdings declaration it reads in [`note_reciprocable`].
     pub fn mark_all_pending(&mut self, now_ms: u64) -> Result<usize, Failure> {
         let mut flipped = 0;
-        for entry in self.entries.values_mut() {
+        let (entries, revisions) = (&mut self.entries, &mut self.revisions);
+        for (station, entry) in entries {
+            // Every durable local commit is a newer convergence request, even
+            // when this Neighbor was already pending. Its revision must move
+            // so an older in-flight Contact cannot clear that newer request.
+            let revision = revisions.entry(station.clone()).or_default();
+            *revision = revision.saturating_add(1);
             if !entry.pending {
                 entry.pending = true;
                 flipped += 1;
@@ -505,6 +536,7 @@ impl NeighborRegistry {
             Some(_) => return Ok(()),
             None => self.evict_for_insert(),
         }
+        self.bump_revision(station);
         let entry = self
             .entries
             .entry(station.clone())
@@ -594,21 +626,42 @@ impl NeighborRegistry {
     /// Record a successful Contact: backoff resets, the pending mark clears,
     /// reachability turns advisory-reachable.
     pub fn record_success(&mut self, station: &Key, now_ms: u64) -> Result<(), Failure> {
-        if let Some(e) = self.entries.get_mut(station) {
+        let changed = if let Some(e) = self.entries.get_mut(station) {
             e.failures = 0;
             e.pending = false;
             e.reachability = REACH_REACHABLE;
             e.next_attempt_ms = now_ms;
             e.last_seen_ms = now_ms;
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.bump_revision(station);
             self.persist_now(now_ms)?;
         }
         Ok(())
     }
 
+    /// Apply a Contact success only if no newer observation has superseded
+    /// the state against which that Contact began.
+    pub(crate) fn record_success_if_current(
+        &mut self,
+        station: &Key,
+        attempt_revision: u64,
+        now_ms: u64,
+    ) -> Result<bool, Failure> {
+        if self.attempt_revision(station) != Some(attempt_revision) {
+            return Ok(false);
+        }
+        self.record_success(station, now_ms)?;
+        Ok(true)
+    }
+
     /// Record a failed Contact attempt: exponential backoff from 1 s to 5 min
     /// with deterministic per-Station jitter; the Neighbor stays pending.
     pub fn record_failure(&mut self, station: &Key, now_ms: u64) -> Result<(), Failure> {
-        if let Some(e) = self.entries.get_mut(station) {
+        let changed = if let Some(e) = self.entries.get_mut(station) {
             e.failures = e.failures.saturating_add(1);
             e.reachability = REACH_UNREACHABLE;
             let base = RETRY_MIN_MS.saturating_mul(1u64 << e.failures.min(16));
@@ -629,9 +682,30 @@ impl NeighborRegistry {
                 .unwrap_or([0u8; 8]);
             let jitter = u64::from_le_bytes(prefix) % (capped / 8).max(1);
             e.next_attempt_ms = now_ms.saturating_add(capped.saturating_sub(jitter));
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.bump_revision(station);
             self.persist_now(now_ms)?;
         }
         Ok(())
+    }
+
+    /// Apply a Contact failure only if no newer observation has superseded
+    /// the state against which that Contact began.
+    pub(crate) fn record_failure_if_current(
+        &mut self,
+        station: &Key,
+        attempt_revision: u64,
+        now_ms: u64,
+    ) -> Result<bool, Failure> {
+        if self.attempt_revision(station) != Some(attempt_revision) {
+            return Ok(false);
+        }
+        self.record_failure(station, now_ms)?;
+        Ok(true)
     }
 
     /// Whether a Neighbor is currently marked pending.
@@ -857,6 +931,58 @@ mod tests {
         // A fresh live beacon revives it.
         assert!(reg
             .observe_beacon(&beacon(1, 3, [8u8; 32]), (&local, 0), 3_000, 60_000)
+            .unwrap());
+        assert!(reg.is_pending(&station));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contact_results_cannot_overwrite_newer_liveness_observations() {
+        let dir = temp_dir("contact-observation-order");
+        let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
+        let local = [0u8; 32];
+        reg.observe_beacon(&beacon(1, 1, [7u8; 32]), (&local, 0), 1_000, 60_000)
+            .unwrap();
+        let station = reg.eligible(1_001)[0].clone();
+        let live_attempt = reg.attempt_revision(&station).unwrap();
+
+        // This Contact began while the peer was live. Its success returns
+        // after signed dormancy and overlay departure, so it cannot resurrect
+        // the peer or re-arm work those newer observations cancelled.
+        let dormant = beacon_counted(1, 2, [7u8; 32], 1, crate::beacon::BEACON_FLAG_DORMANT);
+        reg.observe_beacon(&dormant, (&local, 0), 2_000, 60_000)
+            .unwrap();
+        reg.note_swarm(&station, false, 2_001).unwrap();
+        assert!(!reg
+            .record_success_if_current(&station, live_attempt, 2_002)
+            .unwrap());
+        assert_eq!(
+            reg.snapshot()[0].reachability,
+            crate::lifecycle::Reachability::Unreachable
+        );
+        assert!(!reg.is_pending(&station));
+
+        // The inverse ordering is protected too: a failed Contact that began
+        // before a fresh live Beacon cannot mark the newly observed peer down.
+        let dormant_attempt = reg.attempt_revision(&station).unwrap();
+        reg.observe_beacon(&beacon(1, 3, local), (&local, 1), 3_000, 60_000)
+            .unwrap();
+        assert!(!reg
+            .record_failure_if_current(&station, dormant_attempt, 3_001)
+            .unwrap());
+        assert_eq!(
+            reg.snapshot()[0].reachability,
+            crate::lifecycle::Reachability::Reachable
+        );
+        assert_eq!(reg.entries[&station].failures, 0);
+
+        // A durable local commit is also a newer convergence request. Even if
+        // the peer was already pending, an older Contact must not clear it.
+        assert_eq!(reg.mark_all_pending(4_000).unwrap(), 1);
+        let first_commit_attempt = reg.attempt_revision(&station).unwrap();
+        assert_eq!(reg.mark_all_pending(4_001).unwrap(), 0);
+        assert!(!reg
+            .record_success_if_current(&station, first_commit_attempt, 4_002)
             .unwrap());
         assert!(reg.is_pending(&station));
         let _ = std::fs::remove_dir_all(&dir);

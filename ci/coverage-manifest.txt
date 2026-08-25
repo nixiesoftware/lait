@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2614
-pr-platform    2134
-nightly        2642
+pr             2618
+pr-platform    2138
+nightly        2646
 mutants        106
 
 [gates]
@@ -258,6 +258,7 @@ comms iroh::tests::framing_golden_bytes
 comms iroh::tests::id_topic_conversions
 comms mem::tests::connect_fails_after_peer_shutdown
 comms mem::tests::finish_delivers_end_of_stream_after_drain
+comms mem::tests::shutdown_announces_departure_and_closes_every_dial_path
 comms mem::tests::two_mem_peers_gossip_and_dial
 comms mem::tests::wait_closed_parks_until_dialer_drops
 comms network_simulation_tests::a_different_seed_is_a_different_run
@@ -657,6 +658,7 @@ lait mcp::scope_tests::an_unknown_world_pin_is_refused_rather_than_served_empty
 lait mcp::scope_tests::the_issues_mount_is_a_legal_explicit_pin
 lait mcp::scope_tests::the_live_router_composes_shell_and_namespaced_world_tools
 lait mcp::scope_tests::world_upgrade_names_the_pinned_world
+lait orbital::generation::real_data_diagnostic::copied_prior_space_reports_the_exact_rebuild_failure
 lait orbital::hosting::nudge_delivery::a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names
 lait orbital::hosting::nudge_delivery::actor_matching_is_equality_and_not_a_prefix
 lait orbital::hosting::nudge_delivery::an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error
@@ -997,7 +999,7 @@ lait-issues record_store::migration_tests::final_head_projection_is_causal_when_
 lait-issues record_store::migration_tests::migration_status_reads_only_the_bounded_marker_and_audit_body
 lait-issues record_store::migration_tests::one_window_cannot_exceed_the_operation_or_byte_envelope
 lait-issues record_store::migration_tests::same_semantic_immutable_id_with_different_bytes_is_a_conflict
-lait-issues record_store::migration_tests::terminal_activation_remains_closed_while_migrator_reads_are_partial
+lait-issues record_store::migration_tests::terminal_activation_is_open_once_the_frozen_source_view_is_retained
 lait-issues records::tests::alias_coordinates_do_not_drift_when_ordinals_collide
 lait-issues records::tests::board_placement_is_one_canonical_value
 lait-issues records::tests::body_coordinates_are_domain_separated
@@ -1902,10 +1904,12 @@ replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_cu
 replica replica::generation::tests::indexed_prior_source_pages_verified_signed_evidence_without_rewriting_it
 replica replica::generation::tests::interpreted_prior_body_never_collapses_a_missing_epoch_into_opaque
 replica replica::generation::tests::nonempty_prior_facts_cross_only_as_fresh_current_transactions
-replica replica::generation::tests::prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order
+replica replica::generation::tests::prior_advertised_heads_authenticate_the_stored_set_independent_of_order
 replica replica::generation::tests::prior_atomic_snapshot_selects_only_the_committed_winner
+replica replica::generation::tests::prior_collaborative_frontier_accepts_the_historical_duplicate_fold_only_at_its_height
 replica replica::generation::tests::prior_collaborative_snapshot_merges_every_committed_head
 replica replica::generation::tests::prior_transaction_and_material_tampering_are_typed_integrity_failures
+replica replica::generation::tests::semantic_evidence_is_merge_order_independent_and_binds_causal_history
 replica replica::generation_format_tests::an_unreadable_version_names_itself_and_what_this_build_reads
 replica replica::generation_format_tests::the_previous_generation_opens_and_keeps_its_generation_root
 replica replica::generation_format_tests::version_two_store_meta_is_a_lossless_input_to_generation_journaling
@@ -2446,6 +2450,7 @@ runtime neighbors::tests::a_known_frontier_does_not_queue_and_duplicates_coalesc
 runtime neighbors::tests::a_v1_registry_file_migrates_in_place
 runtime neighbors::tests::an_established_peer_that_declares_news_re_arms_a_dial_back
 runtime neighbors::tests::backoff_grows_persists_and_route_expiry_suppresses_dialing
+runtime neighbors::tests::contact_results_cannot_overwrite_newer_liveness_observations
 runtime neighbors::tests::corrupt_and_foreign_registries_are_typed_errors_never_deleted
 runtime neighbors::tests::frontier_equality_is_the_full_pair_not_root_alone
 runtime neighbors::tests::high_water_is_forward_only_and_persists_across_restart

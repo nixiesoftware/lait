@@ -273,3 +273,18 @@ fn combined_evidence(mechanics: [u8; 32], replica: [u8; 32]) -> [u8; 32] {
     hash.update(&replica);
     *hash.finalize().as_bytes()
 }
+
+#[cfg(test)]
+mod real_data_diagnostic {
+    #[test]
+    #[ignore = "requires LAIT_REAL_REBUILD_HOME pointing at a disposable copied Space home"]
+    fn copied_prior_space_reports_the_exact_rebuild_failure() {
+        let home = std::env::var_os("LAIT_REAL_REBUILD_HOME")
+            .map(std::path::PathBuf::from)
+            .expect("LAIT_REAL_REBUILD_HOME");
+        let seed = crate::config::load_or_create_identity(&home).expect("identity seed");
+        let rebuilt = super::rebuild_prior(&home, &seed);
+        eprintln!("REAL_REBUILD_RESULT={rebuilt:?}");
+        rebuilt.expect("copied real Space rebuild");
+    }
+}

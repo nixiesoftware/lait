@@ -15,22 +15,35 @@
 # manifest the signing key never sealed — live in `lait-feed world`, which
 # refuses to seal; this script only sequences uploads.
 #
-# Usage:
+# Canonical release path (the run id and artifact name are printed by the
+# World Candidate workflow, which builds, checksums, and attests every native
+# bundle and moves no channel):
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
-#     --bundle x86_64-unknown-linux-gnu=target/linux/issues \
-#     --bundle x86_64-pc-windows-msvc=target/windows/issues \
+#     --from-run 123456789 --artifact-name world-candidate-abcdef123456 \
 #     --channel test --seed ~/.lait-feed-signing.seed
 #
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
 #     --channel stable --promote --seed ~/.lait-feed-signing.seed
+#
+# `--from-run` downloads the complete audited candidate, refuses it unless its
+# recorded source SHA, checksums, provenance attestations, and signing
+# workflow identity all verify, and publishes exactly those bytes. GitHub
+# Actions is transient build transport only; the signed GCS release and
+# channel pointer created below are the distribution.
+#
+# Local/recovery path:
+#   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
+#     --bundle x86_64-unknown-linux-gnu=target/linux/issues \
+#     --bundle x86_64-pc-windows-msvc=target/windows/issues \
+#     --channel test --seed ~/.lait-feed-signing.seed
 #
 # The bundle must carry `world.json` at its root: what the World is, how to
 # reach it, and the host facts it runs against. `lait-feed world` refuses
 # without one, so a publisher learns at publish time rather than a machine
 # learning after it has already downloaded.
 #
-# Requires: gcloud (authenticated with write access to the bucket), curl, and
-# a built `lait-feed` (cargo build -p lait-feed).
+# Requires: gcloud (authenticated with write access to the bucket), curl, gh
+# (for --from-run), and a built `lait-feed` (cargo build -p lait-feed).
 #
 # The seed never leaves the machine invoking this script.
 
@@ -39,7 +52,7 @@ set -euo pipefail
 BUCKET="gs://the-foundation-dist"
 BASE_URL="https://storage.googleapis.com/the-foundation-dist"
 
-WORLD="" VERSION="" CHANNEL="" SEED="" PROMOTE=""
+WORLD="" VERSION="" CHANNEL="" SEED="" PROMOTE="" FROM_RUN="" ARTIFACT_NAME=""
 BUNDLES=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +61,8 @@ while [ $# -gt 0 ]; do
     --bundle) BUNDLES+=("$2"); shift 2 ;;
     --channel) CHANNEL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
+    --from-run) FROM_RUN="$2"; shift 2 ;;
+    --artifact-name) ARTIFACT_NAME="$2"; shift 2 ;;
     --promote) PROMOTE=1; shift ;;
     *) echo "publish-world: unknown argument $1" >&2; exit 1 ;;
   esac
@@ -60,9 +75,98 @@ for required in WORLD VERSION CHANNEL SEED; do
   fi
 done
 
+if [ -n "$PROMOTE" ] && { [ -n "$FROM_RUN" ] || [ -n "$ARTIFACT_NAME" ] \
+  || [ "${#BUNDLES[@]}" -gt 0 ]; }; then
+  echo "publish-world: --promote cannot rebuild or alter an immutable release" >&2
+  exit 1
+fi
+if [ -n "$ARTIFACT_NAME" ] && [ -z "$FROM_RUN" ]; then
+  echo "publish-world: --artifact-name requires --from-run" >&2
+  exit 1
+fi
+
 FEED_TOOL="${FEED_TOOL:-cargo run -q -p lait-feed --}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+if [ -n "$FROM_RUN" ]; then
+  if [ "${#BUNDLES[@]}" -gt 0 ]; then
+    echo "publish-world: --from-run supplies every native bundle; --bundle contradicts it" >&2
+    exit 1
+  fi
+  # The candidate artifact is commit-addressed, not version-addressed, so its
+  # name cannot be derived here: take it from the candidate run's summary.
+  [ -n "$ARTIFACT_NAME" ] || {
+    echo "publish-world: --from-run requires --artifact-name world-candidate-<short-sha>" >&2
+    exit 1
+  }
+  CANDIDATE="$WORK/candidate"
+  mkdir -p "$CANDIDATE"
+  gh run download "$FROM_RUN" --repo nixiesoftware/lait \
+    --name "$ARTIFACT_NAME" --dir "$CANDIDATE"
+
+  # The candidate's own coordinate first: the recorded source SHA is what
+  # every attestation below must agree with, and the env's attestation binds
+  # the record itself to the workflow run that assembled the bytes.
+  [ -f "$CANDIDATE/world-candidate-provenance.env" ] || {
+    echo "publish-world: candidate artifact lacks world-candidate-provenance.env" >&2
+    exit 1
+  }
+  (cd "$CANDIDATE" && sha256sum -c world-candidate-provenance.env.sha256 >/dev/null)
+  source_sha="$(sed -n 's/^source_sha=//p' "$CANDIDATE/world-candidate-provenance.env")"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "publish-world: malformed candidate source SHA '$source_sha'" >&2
+    exit 1
+  }
+  case "$WORLD" in
+    com.lait.issues)
+      candidate_version="$(sed -n 's/^issues_version=//p' "$CANDIDATE/world-candidate-provenance.env")" ;;
+    com.lait.signage)
+      candidate_version="$(sed -n 's/^signage_version=//p' "$CANDIDATE/world-candidate-provenance.env")" ;;
+    *)
+      echo "publish-world: the candidate records no version for $WORLD" >&2
+      exit 1 ;;
+  esac
+  [ "$candidate_version" = "$VERSION" ] || {
+    echo "publish-world: the candidate built $WORLD $candidate_version, not $VERSION" >&2
+    exit 1
+  }
+
+  # Provenance is three claims and all must hold for every file published:
+  # built from this exact source commit, in our repository, by the World
+  # Candidate workflow — not any workflow that happens to run in our name.
+  SIGNER_WORKFLOW="nixiesoftware/lait/.github/workflows/publish-worlds.yml"
+  gh attestation verify "$CANDIDATE/world-candidate-provenance.env" \
+    --repo nixiesoftware/lait --source-digest "$source_sha" \
+    --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+  CANDIDATE_TARGETS=(
+    x86_64-unknown-linux-gnu
+    aarch64-unknown-linux-gnu
+    aarch64-apple-darwin
+    x86_64-apple-darwin
+    x86_64-pc-windows-msvc
+  )
+  for target in "${CANDIDATE_TARGETS[@]}"; do
+    archive="$CANDIDATE/world-bundles-$target.tar.gz"
+    [ -f "$archive" ] || {
+      echo "publish-world: candidate lacks world-bundles-$target.tar.gz" >&2
+      exit 1
+    }
+    (cd "$CANDIDATE" && sha256sum -c "world-bundles-$target.tar.gz.sha256" >/dev/null)
+    gh attestation verify "$archive" \
+      --repo nixiesoftware/lait --source-digest "$source_sha" \
+      --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+    mkdir -p "$CANDIDATE/$target"
+    tar xzf "$archive" -C "$CANDIDATE/$target"
+    bundle="$CANDIDATE/$target/worlds/$WORLD/$VERSION"
+    [ -d "$bundle" ] || {
+      echo "publish-world: the $target candidate tree carries no $WORLD $VERSION" >&2
+      exit 1
+    }
+    BUNDLES+=("$target=$bundle")
+  done
+  echo "==> candidate provenance verified at $source_sha"
+fi
 
 PREFIX="releases/worlds/$WORLD/$VERSION"
 POINTER_OBJECT="channels/worlds/$WORLD/$CHANNEL"
@@ -97,7 +201,7 @@ if [ -n "$PROMOTE" ]; then
     --promote yes --base-url "$BASE_URL" --seed "$SEED" --out "$WORK"
 else
   if [ "${#BUNDLES[@]}" -eq 0 ]; then
-    echo "publish-world: at least one --bundle target=directory is required unless --promote" >&2
+    echo "publish-world: a new release requires --from-run or --bundle target=directory; use --promote for an existing release" >&2
     exit 1
   fi
   FEED_BUNDLES=()

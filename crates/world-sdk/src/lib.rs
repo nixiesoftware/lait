@@ -1532,16 +1532,26 @@ impl BodyReader for RemoteReader {
         after: Option<&BodyKey>,
         limit: usize,
     ) -> Vec<BodyKey> {
-        self.call(
-            self.operation("context.body_keys_page", "context.lifecycle.body_keys_page"),
-            &PageRequest {
-                world: world.clone(),
-                schema: schema.clone(),
-                after: after.cloned(),
-                limit,
-            },
-        )
-        .unwrap_or_default()
+        let request = PageRequest {
+            world: world.clone(),
+            schema: schema.clone(),
+            after: after.cloned(),
+            limit,
+        };
+        // The two operations answer different shapes: the ordinary snapshot
+        // pages infallibly, the frozen lifecycle source reports read failures
+        // the way its point reads do.
+        if self.lifecycle {
+            self.call::<_, Result<Vec<BodyKey>, BodyReadFailure>>(
+                "context.lifecycle.body_keys_page",
+                &request,
+            )
+            .unwrap_or(Err(BodyReadFailure::CapabilityUnavailable))
+            .unwrap_or_default()
+        } else {
+            self.call("context.body_keys_page", &request)
+                .unwrap_or_default()
+        }
     }
 
     fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
@@ -1896,6 +1906,11 @@ impl SessionAccess for RemoteApplicationSession {
             source: source.clone(),
             fault: Arc::clone(&fault),
         };
+        let find = FindHandle::hosted(Arc::new(RemoteLifecycleFindReader {
+            host: Arc::clone(&self.host),
+            publication: source.publication,
+            fault: Arc::clone(&fault),
+        }));
         let context = Context::from_runner(
             &self.principal,
             None,
@@ -1904,7 +1919,7 @@ impl SessionAccess for RemoteApplicationSession {
             None,
             source.publication.publication.manifest_root,
             Some(source.publication),
-            None,
+            Some(find),
             Some(source.clone()),
         );
         let result = prepare(&context);
@@ -1918,6 +1933,60 @@ impl SessionAccess for RemoteApplicationSession {
             Err(_) => Err(runtime::world::Failure::CallbackPanicked),
         };
         outcome
+    }
+}
+
+/// Find over the exact frozen lifecycle source, for a migration planner
+/// running in a World process.
+///
+/// The in-process planner's Context carries Find over that publication; a
+/// runner's did not, so every product lookup during planning answered
+/// `Unavailable` — masked downstream as corruption — for installed Worlds
+/// only. The host already serves exactly this read as
+/// `application.session.find_at`.
+struct RemoteLifecycleFindReader {
+    host: Arc<dyn Host>,
+    publication: runtime::publication::WorldPublicationId,
+    fault: Arc<Mutex<Option<String>>>,
+}
+
+impl FindReader for RemoteLifecycleFindReader {
+    fn publication(&self) -> runtime::publication::WorldPublicationId {
+        self.publication
+    }
+
+    fn find(
+        &self,
+        query: runtime::find::Query,
+    ) -> Result<runtime::find::Answer, runtime::find::Failure> {
+        let result: Result<_, FindFailure> = host_call(
+            self.host.as_ref(),
+            "application.session.find_at",
+            &FindAtRequest {
+                publication: self.publication,
+                query,
+            },
+        )
+        .map_err(|error| {
+            if let Ok(mut fault) = self.fault.lock() {
+                *fault = Some(error);
+            }
+            runtime::find::Failure::Unavailable
+        })?;
+        result.map_err(Into::into)
+    }
+
+    fn acquire_deferred(&self) -> Result<Arc<dyn FindLease>, runtime::find::Failure> {
+        // Bounded planning steps page synchronously; deferred cursors are not
+        // part of the lifecycle read contract.
+        Err(runtime::find::Failure::Unavailable)
+    }
+
+    fn reserve_analysis(
+        &self,
+        _transient_bytes: u64,
+    ) -> Result<runtime::world::AnalyticalMemoryReservation, runtime::find::Failure> {
+        Err(runtime::find::Failure::Unavailable)
     }
 }
 
@@ -2071,7 +2140,9 @@ impl BodyReader for RemoteLifecycleReader {
         after: Option<&BodyKey>,
         limit: usize,
     ) -> Vec<BodyKey> {
-        self.call(
+        // The host answers the frozen lifecycle source's shape: a Result,
+        // like the point reads above, not the ordinary snapshot's bare page.
+        self.call::<_, Result<Vec<BodyKey>, BodyReadFailure>>(
             "application.lifecycle.body_keys_page",
             PageRequest {
                 world: world.clone(),
@@ -2080,6 +2151,7 @@ impl BodyReader for RemoteLifecycleReader {
                 limit,
             },
         )
+        .unwrap_or(Err(BodyReadFailure::CapabilityUnavailable))
         .unwrap_or_default()
     }
 

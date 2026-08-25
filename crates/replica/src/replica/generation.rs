@@ -339,7 +339,7 @@ fn validate_prior_advertisement(
     record: &PriorBodyRecord,
     advertised: &crate::manifest::ManifestEntry,
 ) -> Result<(), Failure> {
-    let expected_heads = record
+    let mut expected_heads = record
         .heads
         .iter()
         .map(|head| crate::manifest::ManifestHead {
@@ -347,10 +347,74 @@ fn validate_prior_advertisement(
             transaction_commitment: head.tx_commitment,
         })
         .collect::<Vec<_>>();
+    // The durable Body record retained incorporation order. The signed
+    // manifest canonicalized the same logical head set before publishing it.
+    // Authenticate set equality here; ordering was never semantic evidence.
+    expected_heads.sort_unstable();
+    if expected_heads.windows(2).any(|pair| {
+        pair.first()
+            .zip(pair.get(1))
+            .is_some_and(|(left, right)| left == right)
+    }) {
+        return Err(super::integrity_cause(
+            Defect::Index,
+            "validate prior manifest advertisement",
+            format!("body {key:?}: duplicate stored head"),
+        ));
+    }
     if advertised.key != *key || advertised.heads != expected_heads {
-        return Err(Failure::Integrity(Defect::Index));
+        return Err(super::integrity_cause(
+            Defect::Index,
+            "validate prior manifest advertisement",
+            format!(
+                "body {key:?}: advertised_key={:?}, record_heads={expected_heads:?}, advertised_heads={:?}",
+                advertised.key,
+                advertised.heads
+            ),
+        ));
     }
     Ok(())
+}
+
+/// Validate the prior per-Body ordering coordinate without treating it as
+/// semantic content. Atomic Bodies use that coordinate to select one winner,
+/// so their exact root must be derivable from the retained signed heads.
+/// Collaborative state is instead the causal merge of every retained signed
+/// head. Its chain was bookkeeping only, and the prior bundle fold could hash
+/// an identical staged head into that bookkeeping twice while retaining the
+/// head once. The height still has to match the authenticated heads; the root
+/// must not be substituted for the signed Fabric state during composition.
+fn prior_frontier_matches(
+    mutation_model: u8,
+    record: ReplicaFrontier,
+    heads: &[PriorHeadEvidence],
+) -> bool {
+    let mut derived = None;
+    for head in heads {
+        let Some(material) = head.material.as_ref() else {
+            return false;
+        };
+        derived = Some(match (&material.payload, derived) {
+            (_, None) => material.resulting_frontier,
+            (fabric::BodyExport::Atomic(_), Some(current)) => {
+                if super::chain_order(&material.resulting_frontier, &current).is_gt() {
+                    material.resulting_frontier
+                } else {
+                    current
+                }
+            }
+            (fabric::BodyExport::Collaborative(_), Some(current)) => {
+                super::combine_chains(&current, &material.resulting_frontier)
+            }
+        });
+    }
+    match mutation_model {
+        super::MUTATION_COLLABORATIVE => {
+            derived.is_some_and(|frontier| frontier.transaction_count == record.transaction_count)
+        }
+        super::MUTATION_ATOMIC => derived == Some(record),
+        _ => false,
+    }
 }
 
 /// Validated, read-only streaming access to an actual indexed Journal-v2
@@ -513,15 +577,33 @@ impl PriorReplicaSource {
             .map_err(map_journal)?;
         let mut bodies = Vec::with_capacity(page.entries.len());
         for entry in page.entries {
-            let indexed: LegacyIndexedBody = postcard::from_bytes(&entry.value)
-                .map_err(|_| Failure::Integrity(Defect::Index))?;
+            let indexed: LegacyIndexedBody =
+                postcard::from_bytes(&entry.value).map_err(|error| {
+                    super::integrity_cause(
+                        Defect::Index,
+                        "decode prior Body index entry",
+                        format!("key={:?}: {error:?}", entry.key),
+                    )
+                })?;
             if postcard::to_stdvec(&indexed).ok().as_deref() != Some(entry.value.as_slice())
                 || body_index_key(&indexed.key) != entry.key
                 || indexed.record.heads.is_empty()
             {
-                return Err(Failure::Integrity(Defect::Index));
+                return Err(super::integrity_cause(
+                    Defect::Index,
+                    "validate prior Body index entry",
+                    format!(
+                        "index_key={:?}, body={:?}, heads={}",
+                        entry.key,
+                        indexed.key,
+                        indexed.record.heads.len()
+                    ),
+                ));
             }
-            bodies.push(self.open_body(indexed)?);
+            let key = indexed.key.clone();
+            bodies.push(self.open_body(indexed).map_err(|error| {
+                super::annotate_integrity(error, "open prior indexed Body", format!("body {key:?}"))
+            })?);
         }
         Ok(PriorBodyPage {
             bodies,
@@ -629,10 +711,13 @@ impl PriorReplicaSource {
 
     fn open_body(&self, indexed: LegacyIndexedBody) -> Result<PriorBodyEvidence, Failure> {
         let LegacyIndexedBody { key, record } = indexed;
-        let manifest_root = self
-            .meta
-            .manifest_body_root
-            .ok_or(Failure::Integrity(Defect::Index))?;
+        let manifest_root = self.meta.manifest_body_root.ok_or_else(|| {
+            super::integrity_cause(
+                Defect::Index,
+                "locate prior manifest Body index",
+                format!("body {key:?}"),
+            )
+        })?;
         let manifest_bytes = self
             .source
             .caller_index_lookup(
@@ -640,15 +725,24 @@ impl PriorReplicaSource {
                 &body_index_key(&key),
             )
             .map_err(map_journal)?
-            .ok_or(Failure::Integrity(Defect::Index))?;
+            .ok_or_else(|| {
+                super::integrity_cause(
+                    Defect::Index,
+                    "lookup prior manifest advertisement",
+                    format!("body {key:?}"),
+                )
+            })?;
         let advertised = crate::manifest::ManifestEntry::decode_canonical(&manifest_bytes)
             .map_err(|_| Failure::Integrity(Defect::Encoding))?;
         validate_prior_advertisement(&key, &record, &advertised)?;
         for content in &advertised.content_refs {
-            let root = self
-                .meta
-                .content_index_root
-                .ok_or(Failure::Integrity(Defect::Index))?;
+            let root = self.meta.content_index_root.ok_or_else(|| {
+                super::integrity_cause(
+                    Defect::Index,
+                    "locate prior content index",
+                    format!("body {key:?}, content={content:?}"),
+                )
+            })?;
             let bytes = self
                 .source
                 .caller_index_lookup(
@@ -656,13 +750,23 @@ impl PriorReplicaSource {
                     &crate::manifest::content_index_key(content),
                 )
                 .map_err(map_journal)?
-                .ok_or(Failure::Integrity(Defect::Index))?;
+                .ok_or_else(|| {
+                    super::integrity_cause(
+                        Defect::Index,
+                        "lookup prior content descriptor",
+                        format!("body {key:?}, content={content:?}"),
+                    )
+                })?;
             let descriptor = crate::content::ContentDescriptor::decode_canonical(&bytes)
                 .map_err(|_| Failure::Integrity(Defect::Encoding))?;
             if descriptor.space != self.manifest.space.as_str()
                 || descriptor.content_ref().as_bytes() != content
             {
-                return Err(Failure::Integrity(Defect::Index));
+                return Err(super::integrity_cause(
+                    Defect::Index,
+                    "validate prior content descriptor index",
+                    format!("body {key:?}, content={content:?}"),
+                ));
             }
         }
         let mut heads = Vec::with_capacity(record.heads.len());
@@ -674,17 +778,31 @@ impl PriorReplicaSource {
                 .transaction
                 .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
             if protected.len != head.protected_len || transaction_ref.len != head.tx_len {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "validate prior head object lengths",
+                    format!("body {key:?}"),
+                ));
             }
             let transaction_bytes = self
                 .source
                 .read_object(&transaction_ref)
                 .map_err(map_journal)?;
-            let transaction = decode_legacy_transaction(&transaction_bytes)?;
+            let transaction = decode_legacy_transaction(&transaction_bytes).map_err(|error| {
+                super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "decode prior signed transaction",
+                    format!("body {key:?}: {error:?}"),
+                )
+            })?;
             if legacy_transaction_id(&transaction_bytes) != head.tx
                 || *blake3::hash(&transaction_bytes).as_bytes() != head.tx_commitment
             {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior transaction commitments",
+                    format!("body {key:?}"),
+                ));
             }
             let descriptor = transaction
                 .core
@@ -699,18 +817,39 @@ impl PriorReplicaSource {
                 || descriptor.schema_version != record.binding.schema_version
                 || descriptor.encoding != record.binding.encoding
             {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior Body descriptor",
+                    format!("body {key:?}"),
+                ));
             }
             let envelope = self.source.read_object(&protected).map_err(map_journal)?;
             if crate::body::ContentCommitment::over_protected_payload(&envelope).as_bytes()
                 != descriptor.content_commitment
             {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior protected material commitment",
+                    format!("body {key:?}"),
+                ));
             }
-            let epoch = mechanics::authorization::body_epoch_id(&envelope)
-                .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+            let epoch = mechanics::authorization::body_epoch_id(&envelope).ok_or_else(|| {
+                super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "read prior protected material epoch",
+                    format!("body {key:?}"),
+                )
+            })?;
             let material = match self.keys.opening_key(&epoch) {
-                Some(opening) => Some(open_legacy_material(&opening, &envelope, &record)?),
+                Some(opening) => Some(open_legacy_material(&opening, &envelope, &record).map_err(
+                    |error| {
+                        super::integrity_cause(
+                            Defect::CorruptMaterial,
+                            "open prior protected material",
+                            format!("body {key:?}: {error:?}"),
+                        )
+                    },
+                )?),
                 None if record.interpreted => return Err(Failure::BodyKeyUnavailable),
                 None => None,
             };
@@ -733,28 +872,30 @@ impl PriorReplicaSource {
             });
         }
         if record.interpreted {
-            let mut derived = None;
-            for head in &heads {
-                let material = head
-                    .material
-                    .as_ref()
-                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-                derived = Some(match (&material.payload, derived) {
-                    (_, None) => material.resulting_frontier,
-                    (fabric::BodyExport::Atomic(_), Some(current)) => {
-                        if super::chain_order(&material.resulting_frontier, &current).is_gt() {
-                            material.resulting_frontier
-                        } else {
-                            current
-                        }
-                    }
-                    (fabric::BodyExport::Collaborative(_), Some(current)) => {
-                        super::combine_chains(&current, &material.resulting_frontier)
-                    }
-                });
-            }
-            if derived != Some(record.chain) {
-                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            if !prior_frontier_matches(record.binding.mutation_model, record.chain, &heads) {
+                let head_frontiers = heads
+                    .iter()
+                    .map(|head| {
+                        head.material.as_ref().map(|material| {
+                            (
+                                material.base_frontier,
+                                material.resulting_frontier,
+                                match &material.payload {
+                                    fabric::BodyExport::Atomic(_) => "atomic",
+                                    fabric::BodyExport::Collaborative(_) => "collaborative",
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                return Err(super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "verify prior Body frontier",
+                    format!(
+                        "body {key:?}: record={:?}, heads={head_frontiers:?}",
+                        record.chain
+                    ),
+                ));
             }
         }
         Ok(PriorBodyEvidence {
@@ -1087,25 +1228,76 @@ impl Replica {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticRowEvidence {
+    evidence: [u8; 32],
+    coordinates: [u8; 32],
+    snapshot: [u8; 32],
+    snapshot_bytes: u64,
+    causal: [u8; 32],
+    content: [u8; 32],
+    content_count: u64,
+}
+
 fn row_evidence(
     body: &PriorBodyEvidence,
     snapshot: &fabric::BodySnapshot,
-) -> Result<[u8; 32], Failure> {
+) -> Result<SemanticRowEvidence, Failure> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"lait/prior-semantic-row/1");
     let coordinates = postcard::to_stdvec(&(&body.key, &body.binding))
         .map_err(|_| Failure::Integrity(Defect::Encoding))?;
     hash.update(&coordinates);
-    let bytes = snapshot.canonical_export_shared();
-    hash.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    // Collaborative snapshot bytes are a storage representation, not the
+    // canonical semantic or causal identity. An import/export cycle can
+    // re-encode those bytes while retaining both Fabric's complete typed view
+    // (including stable list/tree identities) and its version vector. Compare
+    // those two explicit contracts for collaborative Bodies and exact bytes
+    // for atomics.
+    let bytes = match body.binding.mutation_model {
+        super::MUTATION_ATOMIC => snapshot
+            .read_shared()
+            .ok_or(Failure::Integrity(Defect::CorruptMaterial))?
+            .to_vec(),
+        super::MUTATION_COLLABORATIVE => postcard::to_stdvec(
+            &snapshot
+                .read_collaborative()
+                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?,
+        )
+        .map_err(|_| Failure::Integrity(Defect::Encoding))?,
+        _ => return Err(Failure::Integrity(Defect::Encoding)),
+    };
+    let snapshot_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hash.update(&snapshot_bytes.to_be_bytes());
     hash.update(&bytes);
+    let causal = snapshot
+        .version()
+        .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?
+        .encode();
+    hash.update(
+        &u64::try_from(causal.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hash.update(&causal);
     let mut refs = body.content_refs.clone();
     refs.sort_unstable();
     refs.dedup();
-    for reference in refs {
-        hash.update(&reference);
+    let mut content = blake3::Hasher::new();
+    content.update(b"lait/prior-semantic-content/1");
+    for reference in &refs {
+        hash.update(reference);
+        content.update(reference);
     }
-    Ok(*hash.finalize().as_bytes())
+    Ok(SemanticRowEvidence {
+        evidence: *hash.finalize().as_bytes(),
+        coordinates: *blake3::hash(&coordinates).as_bytes(),
+        snapshot: *blake3::hash(&bytes).as_bytes(),
+        snapshot_bytes,
+        causal: *blake3::hash(&causal).as_bytes(),
+        content: *content.finalize().as_bytes(),
+        content_count: u64::try_from(refs.len()).unwrap_or(u64::MAX),
+    })
 }
 
 /// Stream an indexed prior Replica into fresh current signed transactions,
@@ -1154,7 +1346,9 @@ where
 
     let mut after = None;
     loop {
-        let page = source.content_page(after, 4096)?;
+        let page = source.content_page(after, 4096).map_err(|error| {
+            super::annotate_integrity(error, "read prior content page", format!("after={after:?}"))
+        })?;
         let missing = page
             .descriptors
             .iter()
@@ -1172,10 +1366,12 @@ where
         after = Some(next);
     }
 
-    let mut expected_rows = Vec::new();
+    let mut expected_rows = BTreeMap::new();
     let mut after = None;
     loop {
-        let page = source.body_page(after, 4096)?;
+        let page = source.body_page(after, 4096).map_err(|error| {
+            super::annotate_integrity(error, "read prior Body page", format!("after={after:?}"))
+        })?;
         let mut by_world =
             BTreeMap::<crate::body::WorldId, Vec<(PriorBodyEvidence, fabric::BodySnapshot)>>::new();
         for body in page.bodies {
@@ -1193,8 +1389,21 @@ where
                     ));
                 }
             }
-            let snapshot = prior_body_snapshot(&body)?;
-            expected_rows.push(row_evidence(&body, &snapshot)?);
+            let snapshot = prior_body_snapshot(&body).map_err(|error| {
+                super::integrity_cause(
+                    Defect::CorruptMaterial,
+                    "compose prior Body snapshot",
+                    format!("body {:?}: {error:?}", body.key),
+                )
+            })?;
+            let row = row_evidence(&body, &snapshot)?;
+            if expected_rows.insert(body.key.clone(), row).is_some() {
+                return Err(super::integrity_cause(
+                    Defect::Index,
+                    "collect prior semantic evidence",
+                    format!("duplicate body {:?}", body.key),
+                ));
+            }
             by_world
                 .entry(body.key.world.clone())
                 .or_default()
@@ -1225,16 +1434,24 @@ where
                     intent_digest: digest,
                     authorizer: &authorizer,
                 };
-                target.commit_prior_batch(
-                    context,
-                    &authorization,
-                    &world,
-                    device,
-                    &request,
-                    &digest,
-                    effect,
-                    batch,
-                )?;
+                target
+                    .commit_prior_batch(
+                        context,
+                        &authorization,
+                        &world,
+                        device,
+                        &request,
+                        &digest,
+                        effect,
+                        batch,
+                    )
+                    .map_err(|error| {
+                        super::annotate_integrity(
+                            error,
+                            "commit prior semantic batch",
+                            format!("world={world:?}, bodies={}", batch.len()),
+                        )
+                    })?;
             }
         }
         let Some(next) = page.next else { break };
@@ -1245,7 +1462,9 @@ where
     let mut after = None;
     let mut verified_receipts = 0u64;
     loop {
-        let page = source.receipt_page(after, 4096)?;
+        let page = source.receipt_page(after, 4096).map_err(|error| {
+            super::annotate_integrity(error, "read prior receipt page", format!("after={after:?}"))
+        })?;
         verified_receipts = verified_receipts
             .checked_add(u64::try_from(page.receipts.len()).unwrap_or(u64::MAX))
             .ok_or(Failure::Integrity(Defect::Encoding))?;
@@ -1257,12 +1476,14 @@ where
     }
 
     drop(target);
-    let rebuilt = Replica::open(target_path, keys)?;
+    let rebuilt = Replica::open(target_path, keys).map_err(|error| {
+        super::annotate_integrity(error, "reopen rebuilt Replica", "semantic migration target")
+    })?;
     let snapshot = rebuilt.read_snapshot();
     if rebuilt.body_count() != source.body_count() {
         return Err(Failure::Integrity(Defect::Encoding));
     }
-    let mut actual_rows = Vec::new();
+    let mut actual_rows = BTreeMap::new();
     for key in snapshot.body_keys() {
         let body = snapshot
             .body_ix(&key)
@@ -1285,18 +1506,53 @@ where
                 .map(|reference| *reference.as_bytes())
                 .collect(),
         };
-        actual_rows.push(row_evidence(&prior, &image)?);
+        let row = row_evidence(&prior, &image)?;
+        if actual_rows.insert(key.clone(), row).is_some() {
+            return Err(super::integrity_cause(
+                Defect::Index,
+                "collect rebuilt semantic evidence",
+                format!("duplicate body {key:?}"),
+            ));
+        }
     }
-    expected_rows.sort_unstable();
-    actual_rows.sort_unstable();
     if expected_rows != actual_rows {
-        return Err(Failure::Integrity(Defect::CorruptMaterial));
+        let mismatch = expected_rows
+            .iter()
+            .find_map(|(key, expected)| match actual_rows.get(key) {
+                Some(actual) if actual == expected => None,
+                actual => Some(format!(
+                    "body {key:?}: expected={expected:?}, actual={actual:?}"
+                )),
+            })
+            .or_else(|| {
+                actual_rows
+                    .keys()
+                    .find(|key| !expected_rows.contains_key(*key))
+                    .map(|key| format!("unexpected rebuilt body {key:?}"))
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "row count differs: expected={}, actual={}",
+                    expected_rows.len(),
+                    actual_rows.len()
+                )
+            });
+        return Err(super::integrity_cause(
+            Defect::CorruptMaterial,
+            "verify rebuilt semantic evidence",
+            mismatch,
+        ));
     }
     let mut evidence = blake3::Hasher::new();
     evidence.update(b"lait/prior-semantic-equivalence/1");
     evidence.update(&source_manifest);
-    for row in &actual_rows {
-        evidence.update(row);
+    let mut evidence_rows = actual_rows
+        .values()
+        .map(|row| row.evidence)
+        .collect::<Vec<_>>();
+    evidence_rows.sort_unstable();
+    for row in evidence_rows {
+        evidence.update(&row);
     }
     Ok(Verification {
         evidence: *evidence.finalize().as_bytes(),
@@ -2152,6 +2408,110 @@ mod tests {
     }
 
     #[test]
+    fn semantic_evidence_is_merge_order_independent_and_binds_causal_history() {
+        let body = prior_body(
+            super::super::MUTATION_COLLABORATIVE,
+            ReplicaFrontier::EMPTY,
+            Vec::new(),
+        );
+        let key = fabric_key(&body.key);
+        let write = |intent: &str, op: fabric::Op| {
+            let mut engine = fabric::Engine::new();
+            engine
+                .commit(fabric::Transaction::new(intent, vec![op]))
+                .unwrap();
+            engine.export_body(&key).unwrap()
+        };
+        let left = write(
+            "left history",
+            fabric::Op::RegisterSet {
+                key: key.clone(),
+                path: "title".into(),
+                value: b"same logical value".to_vec(),
+            },
+        );
+        let right = write(
+            "right history",
+            fabric::Op::MapSet {
+                key: key.clone(),
+                path: "metadata".into(),
+                entry: "priority".into(),
+                value: b"high".to_vec(),
+            },
+        );
+        let merge = |first: &fabric::BodyExport, second: &fabric::BodyExport| {
+            let mut engine = fabric::Engine::new();
+            engine.import_body(&key, first).unwrap();
+            engine.import_body(&key, second).unwrap();
+            engine.body_snapshot(&key).unwrap().unwrap()
+        };
+        let left_then_right = merge(&left, &right);
+        let right_then_left = merge(&right, &left);
+
+        assert_eq!(
+            left_then_right.read_collaborative().unwrap(),
+            right_then_left.read_collaborative().unwrap()
+        );
+        assert_eq!(
+            left_then_right.version().unwrap(),
+            right_then_left.version().unwrap()
+        );
+        assert_eq!(
+            row_evidence(&body, &left_then_right).unwrap(),
+            row_evidence(&body, &right_then_left).unwrap()
+        );
+
+        let same_view_other_history = write(
+            "independent same value",
+            fabric::Op::RegisterSet {
+                key: key.clone(),
+                path: "title".into(),
+                value: b"same logical value".to_vec(),
+            },
+        );
+        let left_only = merge(&left, &left);
+        let other_only = merge(&same_view_other_history, &same_view_other_history);
+        assert_eq!(
+            left_only.read_collaborative().unwrap(),
+            other_only.read_collaborative().unwrap()
+        );
+        assert_ne!(left_only.version().unwrap(), other_only.version().unwrap());
+        assert_ne!(
+            row_evidence(&body, &left_only).unwrap(),
+            row_evidence(&body, &other_only).unwrap()
+        );
+    }
+
+    #[test]
+    fn prior_collaborative_frontier_accepts_the_historical_duplicate_fold_only_at_its_height() {
+        let frontier = ReplicaFrontier::new([0x31; 32], 5);
+        let material = PriorOpenedMaterial {
+            epoch: PRIOR_EPOCH,
+            payload: fabric::BodyExport::Collaborative(Vec::new()),
+            base_frontier: ReplicaFrontier::new([0x30; 32], 4),
+            resulting_frontier: frontier,
+        };
+        let head = prior_head(material, 0x31);
+        let duplicate_fold = super::super::combine_chains(&frontier, &frontier);
+        assert_ne!(duplicate_fold.root, frontier.root);
+        assert!(prior_frontier_matches(
+            super::super::MUTATION_COLLABORATIVE,
+            duplicate_fold,
+            std::slice::from_ref(&head),
+        ));
+        assert!(!prior_frontier_matches(
+            super::super::MUTATION_COLLABORATIVE,
+            ReplicaFrontier::new(duplicate_fold.root, 6),
+            std::slice::from_ref(&head),
+        ));
+        assert!(!prior_frontier_matches(
+            super::super::MUTATION_ATOMIC,
+            duplicate_fold,
+            &[head],
+        ));
+    }
+
+    #[test]
     fn an_empty_prior_replica_becomes_a_verified_current_store() {
         let source = directory("source");
         let target = directory("target");
@@ -2394,7 +2754,7 @@ mod tests {
     }
 
     #[test]
-    fn prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order() {
+    fn prior_advertised_heads_authenticate_the_stored_set_independent_of_order() {
         let key = BodyKey::new(
             crate::body::WorldId::parse("com.example.prior").unwrap(),
             crate::body::BodyId::from_bytes([0x78; 16]),
@@ -2441,7 +2801,7 @@ mod tests {
         );
         assert!(
             validate_prior_advertisement(&key, &record(vec![head(2), head(1)]), &advertised)
-                .is_err()
+                .is_ok()
         );
         assert!(
             validate_prior_advertisement(&key, &record(vec![head(1), head(1)]), &advertised)

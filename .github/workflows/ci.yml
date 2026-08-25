@@ -773,6 +773,14 @@ jobs:
           done
           grep -q -- '--from-run' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
+          grep -q -- '--artifact-name' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot consume an audited SHA candidate"; exit 1; }
+          grep -q -- 'candidate-provenance.env' .github/workflows/release.yml \
+            || { echo "::error::candidate does not attest its exact source coordinate"; exit 1; }
+          if grep -Eq '^[[:space:]]+push:' .github/workflows/release.yml; then
+            echo "::error::a semantic tag must not trigger a second release build"
+            exit 1
+          fi
           grep -q -- '--promote' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot promote exact tested bytes"; exit 1; }
           grep -q -- '--if-generation-match=0' ci/publish-feed.sh \
@@ -797,6 +805,33 @@ jobs:
               exit 1
             fi
           done
+          # The World half of the same contract: candidate construction in CI,
+          # publication as a local, seed-holding act that verifies the exact
+          # audited bytes before any channel moves.
+          bash -n ci/publish-world.sh
+          bash -n .github/scripts/stage-worlds.sh
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            grep -q "$target" .github/workflows/publish-worlds.yml \
+              || { echo "::error::$target missing from World candidate builder"; exit 1; }
+          done
+          grep -q -- '--from-run' ci/publish-world.sh \
+            || { echo "::error::World publisher cannot consume an audited candidate run"; exit 1; }
+          grep -q -- '--artifact-name' ci/publish-world.sh \
+            || { echo "::error::World publisher cannot name the audited SHA candidate"; exit 1; }
+          grep -q -- '--signer-workflow' ci/publish-world.sh \
+            || { echo "::error::World publisher does not pin the candidate workflow identity"; exit 1; }
+          grep -q -- 'world-candidate-provenance.env' .github/workflows/publish-worlds.yml \
+            || { echo "::error::World candidate does not record its exact source coordinate"; exit 1; }
+          grep -q -- '--promote' ci/publish-world.sh \
+            || { echo "::error::World publisher cannot promote exact tested bytes"; exit 1; }
+          grep -q -- '--if-generation-match=0' ci/publish-world.sh \
+            || { echo "::error::World publisher can overwrite an immutable release"; exit 1; }
+          if grep -Eq 'WORLD_FEED_SIGNING_SEED|gcloud|google-github-actions' \
+            .github/workflows/publish-worlds.yml; then
+            echo "::error::the World candidate workflow can sign or move a channel; publication must stay a local act"
+            exit 1
+          fi
 
   # The self-updater's in-archive binary path is a claim about our feed's
   # layout, and the unit tests can only check it against our MODEL of that

@@ -10,11 +10,12 @@ use world_runner::{Instance, Release};
 
 fn fixture_binary() -> PathBuf {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("target")
-        .join("debug")
-        .join(format!("world-semantic-fixture{suffix}"))
+    let test_binary = std::env::current_exe().expect("running semantic test binary");
+    let profile_dir = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .expect("Cargo test binary under <target>/<profile>/deps");
+    profile_dir.join(format!("world-semantic-fixture{suffix}"))
 }
 
 struct Reads {

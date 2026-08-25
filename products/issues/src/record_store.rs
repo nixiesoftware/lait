@@ -228,39 +228,50 @@ fn exact_record_source_matching(
     };
     let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
     let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let mut steps = vec![find_api::Step {
+        id: seek,
+        input: Vec::new(),
+        op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+            field: crate::find::field_ref(seek_field),
+            test: find_api::Test::Equal,
+            value: seek_value,
+        })),
+        bound,
+    }];
+    // Runtime admits a Keep only as a canonical set: non-empty, strictly
+    // ascending, no duplicates. A lookup by one field alone is the Seek by
+    // itself; anything more is sorted before it is sent, because callers
+    // name predicates in semantic order, not canonical order.
+    let mut keep_predicates: Vec<find_api::Predicate> = predicates
+        .iter()
+        .map(|(field, value)| find_api::Predicate {
+            field: crate::find::field_ref(field),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Text((*value).into()),
+        })
+        .collect();
+    keep_predicates.sort();
+    keep_predicates.dedup();
+    let output = if keep_predicates.is_empty() {
+        seek
+    } else {
+        steps.push(find_api::Step {
+            id: keep,
+            input: vec![seek],
+            op: find_api::Op::Keep(find_api::Keep {
+                predicates: keep_predicates,
+            }),
+            bound,
+        });
+        keep
+    };
     let answer = ctx
         .find(find_api::Query {
             schema: crate::find::entity_schema_ref(),
             publication: ctx.world_publication_id().map(|id| id.publication),
             mode: find_api::Mode::Exact,
-            steps: vec![
-                find_api::Step {
-                    id: seek,
-                    input: Vec::new(),
-                    op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
-                        field: crate::find::field_ref(seek_field),
-                        test: find_api::Test::Equal,
-                        value: seek_value,
-                    })),
-                    bound,
-                },
-                find_api::Step {
-                    id: keep,
-                    input: vec![seek],
-                    op: find_api::Op::Keep(find_api::Keep {
-                        predicates: predicates
-                            .iter()
-                            .map(|(field, value)| find_api::Predicate {
-                                field: crate::find::field_ref(field),
-                                test: find_api::Test::Equal,
-                                value: find_api::Atom::Text((*value).into()),
-                            })
-                            .collect(),
-                    }),
-                    bound,
-                },
-            ],
-            output: keep,
+            steps,
+            output,
             bound,
             page_size: 2,
             cursor: None,
@@ -4124,16 +4135,24 @@ fn migration_comment_at(
 fn migration_issue_id(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
-) -> Result<String, Rejection> {
-    let doc = view
+) -> Result<Option<String>, Rejection> {
+    // An absent id and a wrong id are different facts. A Body carrying every
+    // scaffold register except its id is a create the flow abandoned before
+    // naming it — it was never a live issue, and the extractors already skip
+    // exactly this shape rather than guess an identity from a BodyId. A
+    // PRESENT id that does not derive this Body's key is corruption and stays
+    // a hard refusal.
+    let Some(doc) = view
         .registers
         .get(records::roots::ISSUE_ID)
         .map(|raw| String::from_utf8_lossy(raw).into_owned())
-        .ok_or(Rejection::StateCorrupt)?;
+    else {
+        return Ok(None);
+    };
     if contract::issue_key(&doc) != *body {
         return Err(Rejection::StateCorrupt);
     }
-    Ok(doc)
+    Ok(Some(doc))
 }
 
 fn migration_index(raw: &str) -> Result<usize, Rejection> {
@@ -4297,13 +4316,23 @@ fn classify_migration_immutable(
     }
 }
 
-/// Migrator Find intentionally excludes unbounded legacy aggregate Bodies.
-/// Hosting currently activates that package for the duration of migration,
-/// so ambient reads could otherwise swap from the complete legacy view to a
-/// partial v4 projection. Completion stays closed until the host retains the
-/// prior view as ambient throughout the bounded backfill.
+/// Whether the host keeps a coherent ambient read view for the whole bounded
+/// backfill, which is the precondition for marking the migration complete and
+/// activating preferred v4.
+///
+/// This was closed while the exact-source lifecycle capability did not exist:
+/// the migrator planner had to read the moving commit head, so an ambient
+/// reader could see a half-migrated projection. That capability is now in
+/// place — the planner reads one frozen source publication, retained by a
+/// self-renewing lease for the whole migration (`Session::with_lifecycle_source`,
+/// `lifecycle_source_status`), and the host keeps the migrator implementation
+/// active as the ambient view throughout, activating preferred v4 only on the
+/// verified terminal turn (`reconcile_implementations`,
+/// `lifecycle_read_continuity_refusal`). The migrator serves complete semantic
+/// reads the entire time; its Find corpus fills monotonically as records
+/// backfill and is whole at activation. Completion is therefore safe.
 pub(crate) const fn migration_ambient_view_safe() -> bool {
-    false
+    true
 }
 
 fn migration_window_within_bounds(batch: &Batch) -> bool {
@@ -4399,7 +4428,11 @@ pub(crate) fn migration_issue_window(
     subitem: &str,
     view: &fabric::CollaborativeView,
 ) -> Result<Batch, Rejection> {
-    let doc = migration_issue_id(body, view)?;
+    let Some(doc) = migration_issue_id(body, view)? else {
+        // Never a live issue (no id was ever written): the enumerator still
+        // visits and accounts the Body, and every window stages nothing.
+        return Ok(Batch::default());
+    };
     let issue = IssueState::from_view(view);
     if issue.project.is_empty() || !contract::valid_text(&issue.description) {
         return Err(Rejection::StateCorrupt);
@@ -5144,6 +5177,24 @@ fn migration_identity(
         .map(Some)
 }
 
+/// The migrated base transition of `doc`, or `None` when the doc migrated
+/// nothing at all: a legacy residue reference — an abandoned or deleted Issue
+/// still named by a board row, a hierarchy node, a link, a triage decision,
+/// or the catalog's own seq. Whatever names it stages nothing, because the
+/// Issue does not exist to be placed, parented, linked, or accepted. A doc
+/// with migrated meta but no transition is half-migrated and stays a hard
+/// refusal.
+fn migration_heads_if_migrated(
+    ctx: &Context<'_>,
+    doc: &str,
+) -> Result<Option<(String, records::IssueTransitionRecord)>, Rejection> {
+    match migration_heads(ctx, doc) {
+        Ok(heads) => Ok(Some(heads)),
+        Err(Rejection::StateCorrupt) if issue_meta_for(ctx, doc)?.is_none() => Ok(None),
+        Err(other) => Err(other),
+    }
+}
+
 fn migration_heads(
     ctx: &Context<'_>,
     doc: &str,
@@ -5183,7 +5234,7 @@ fn migration_project_from_path(
 fn migration_project_of_doc(
     view: &fabric::CollaborativeView,
     doc: &str,
-) -> Result<String, Rejection> {
+) -> Result<Option<String>, Rejection> {
     for (path, entries) in view.lists.iter() {
         if !path.starts_with("board/") {
             continue;
@@ -5193,10 +5244,13 @@ fn migration_project_of_doc(
             .filter_map(|entry| std::str::from_utf8(&entry.value).ok())
             .any(|entry| entry == doc || entry.split(':').any(|part| part == doc));
         if holds {
-            return migration_project_from_path(view, path);
+            return migration_project_from_path(view, path).map(Some);
         }
     }
-    Err(Rejection::StateCorrupt)
+    // On no board at all is a real legacy state — removed from its board
+    // without being deleted — not corruption. The caller resolves the project
+    // from the Issue's own migrated base transition instead.
+    Ok(None)
 }
 
 /// Stage one Catalog-owned coordinate after every frozen Issue base has been
@@ -5219,7 +5273,21 @@ pub(crate) fn migration_coordinate_window(
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .and_then(|raw| raw.parse::<u64>().ok())
             .ok_or(Rejection::StateCorrupt)?;
-        let project = migration_project_of_doc(view, doc)?;
+        // Every Issue base is copied before any coordinate window runs, so a
+        // doc that migrated no base migrated nothing: a catalog seq or board
+        // row that outlived its Issue. An identity record for an Issue that
+        // does not exist would dangle — and did, until the next window asked
+        // for the doc's coordinate. Board membership is not evidence of an
+        // Issue; the migrated base is.
+        let Some((_, head)) = migration_heads_if_migrated(ctx, doc)? else {
+            return Ok(Batch::default());
+        };
+        // A board names the project a legacy Issue sat in; a board-less Issue
+        // keeps the project its own `projectid` register carried into the base.
+        let project = match migration_project_of_doc(view, doc)? {
+            Some(project) => project,
+            None => head.placement.project.clone(),
+        };
         let expected = records::IssueIdentityRecord {
             issue: doc.into(),
             project: project.clone(),
@@ -5241,13 +5309,21 @@ pub(crate) fn migration_coordinate_window(
             .get("tombstones")
             .and_then(|entries| entries.get(doc))
             .ok_or(Rejection::StateCorrupt)?;
-        if raw.as_slice() != b"1" {
-            return Err(Rejection::StateCorrupt);
+        match raw.as_slice() {
+            b"1" => {}
+            // A cleared tombstone: the deletion was reverted, the Issue
+            // lives, and there is nothing to mark.
+            b"0" => return Ok(Batch::default()),
+            _ => return Err(Rejection::StateCorrupt),
         }
         let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
         let key = records::issue_meta_key(&issue);
         if ctx.body_version(&key).is_none() {
-            return Err(Rejection::StateCorrupt);
+            // A completed legacy deletion removed the Issue's body outright;
+            // only the catalog tombstone survives. Nothing was migrated for
+            // this doc, so there is nothing to mark — absence already carries
+            // the deletion's whole meaning.
+            return Ok(Batch::default());
         }
         let meta = read_view(ctx, &key)?;
         match meta.registers.get(records::roots::TOMBSTONE) {
@@ -5270,7 +5346,11 @@ pub(crate) fn migration_coordinate_window(
         let doc = std::str::from_utf8(&entry.value).map_err(|_| Rejection::StateCorrupt)?;
         DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
         let project = migration_project_from_path(view, path)?;
-        let (transition, head) = migration_heads(ctx, doc)?;
+        // A board row for a doc that migrated nothing has no placement to
+        // overlay a rank onto.
+        let Some((transition, head)) = migration_heads_if_migrated(ctx, doc)? else {
+            return Ok(Batch::default());
+        };
         if head.placement.project != project {
             return Err(Rejection::Conflict);
         }
@@ -5321,7 +5401,9 @@ pub(crate) fn migration_coordinate_window(
         (String::new(), None)
     };
     if !child.is_empty() {
-        let (_, head) = migration_heads(ctx, &child)?;
+        let Some((_, head)) = migration_heads_if_migrated(ctx, &child)? else {
+            return Ok(Batch::default());
+        };
         return match read_parent(ctx, &head.placement.project, &child)? {
             Some(existing) if existing.parent == parent => Ok(Batch::default()),
             Some(_) => Err(Rejection::Conflict),
@@ -5340,7 +5422,9 @@ pub(crate) fn migration_coordinate_window(
         let (Some(from), Some(kind), Some(to)) = (parts.next(), parts.next(), parts.next()) else {
             return Err(Rejection::StateCorrupt);
         };
-        let (_, head) = migration_heads(ctx, from)?;
+        let Some((_, head)) = migration_heads_if_migrated(ctx, from)? else {
+            return Ok(Batch::default());
+        };
         return match read_link(ctx, &head.placement.project, from, kind, to)? {
             Some(existing) if existing.present => Ok(Batch::default()),
             Some(_) => Err(Rejection::Conflict),
@@ -5359,7 +5443,9 @@ pub(crate) fn migration_coordinate_window(
             return Err(Rejection::StateCorrupt);
         }
         let accepted_project = if triage.outcome == "accepted" {
-            let (_, head) = migration_heads(ctx, &triage.doc)?;
+            let Some((_, head)) = migration_heads_if_migrated(ctx, &triage.doc)? else {
+                return Ok(Batch::default());
+            };
             Some(head.placement.project)
         } else {
             None
@@ -5831,9 +5917,12 @@ mod migration_tests {
     }
 
     #[test]
-    fn terminal_activation_remains_closed_while_migrator_reads_are_partial() {
+    fn terminal_activation_is_open_once_the_frozen_source_view_is_retained() {
+        // Both completion preconditions now hold: every preferred source has a
+        // migrator phase, and the exact-source lifecycle capability that keeps
+        // a coherent ambient view through the backfill is in place.
         assert!(migration_source_coverage_complete());
-        assert!(!migration_ambient_view_safe());
+        assert!(migration_ambient_view_safe());
     }
 
     #[test]

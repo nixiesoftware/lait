@@ -109,7 +109,13 @@ pub fn preferred_implementation() -> ImplementationCoordinate {
 }
 
 pub fn migrator_implementation() -> ImplementationCoordinate {
-    implementation_coordinate(issues::IssuesWorld::migrator_implementation_descriptor())
+    // The pinned historical v3 coordinate, never derived from this build's
+    // descriptor: the migrator continues the publication the Space already
+    // attests, so its identity is the one recorded there.
+    ImplementationCoordinate {
+        id: issues::IssuesWorld::MIGRATOR_IMPLEMENTATION_ID,
+        version: issues::IssuesWorld::MIGRATOR_IMPLEMENTATION_VERSION,
+    }
 }
 
 fn implementation_coordinate(

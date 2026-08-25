@@ -1,23 +1,14 @@
-name: Release
+name: Release Candidate
 
-# Build one complete, native release from a version tag. The output is a
-# short-lived Actions artifact; `ci/publish-feed.sh --from-run` seals and moves
-# it through the signed first-party GCS channels. GitHub Releases and
-# cargo-dist are not part of the distribution path.
+# Build one complete, native, commit-addressed candidate before a release tag
+# exists. The candidate is the immutable byte set that hostile-install and
+# real-data migration audits exercise. Once those exact bytes pass, tag this
+# commit and publish this run's artifact; tagging never rebuilds the release.
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing version tag to build (for example v0.9.1)
-        required: true
-        type: string
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: release-candidate-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -27,44 +18,49 @@ permissions:
 
 jobs:
   gate:
-    name: verify release coordinate
+    name: freeze candidate coordinate
     runs-on: ubuntu-24.04
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
       version: ${{ steps.version.outputs.version }}
+      artifact: ${{ steps.version.outputs.artifact }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Tag and workspace version must agree
+      - name: Version must be final and untagged
         id: version
-        env:
-          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="$REQUESTED_TAG"
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::'$tag' is not a v-prefixed semantic version"; exit 1 ;;
-          esac
-          git rev-parse --verify "refs/tags/$tag^{commit}" >/dev/null
           version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
-          [ "$tag" = "v$version" ] || {
-            echo "::error::tag $tag does not match workspace version $version"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::workspace version '$version' is not a final semantic version"
             exit 1
-          }
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+          if git show-ref --verify --quiet "refs/tags/v$version"; then
+            echo "::error::v$version already exists; candidates must precede the one release tag"
+            exit 1
+          fi
+          sha="$(git rev-parse HEAD)"
+          short_sha="${sha:0:12}"
+          artifact="candidate-$version-$short_sha"
+          {
+            echo "sha=$sha"
+            echo "short_sha=$short_sha"
+            echo "version=$version"
+            echo "artifact=$artifact"
+          } >> "$GITHUB_OUTPUT"
 
   host:
     name: native host archives
     needs: gate
     uses: ./.github/workflows/build-binaries.yml
     with:
-      ref: ${{ needs.gate.outputs.tag }}
+      ref: ${{ needs.gate.outputs.sha }}
     secrets: inherit
 
   astrolabe:
@@ -72,7 +68,7 @@ jobs:
     needs: gate
     uses: ./.github/workflows/build-astrolabe.yml
     with:
-      ref: ${{ needs.gate.outputs.tag }}
+      ref: ${{ needs.gate.outputs.sha }}
       version: ${{ needs.gate.outputs.version }}
     secrets: inherit
 
@@ -98,36 +94,57 @@ jobs:
         run: |
           set -euo pipefail
           required=(
-            lait-x86_64-unknown-linux-gnu.tar.gz
-            lait-aarch64-unknown-linux-gnu.tar.gz
-            lait-aarch64-apple-darwin.tar.gz
-            lait-x86_64-apple-darwin.tar.gz
-            lait-x86_64-pc-windows-msvc.zip
-            astrolabe-$VERSION-setup.exe
-            astrolabe-$VERSION.dmg
-            astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz
-            astrolabe-tree-$VERSION-aarch64-apple-darwin.tar.gz
-            astrolabe-tree-$VERSION-x86_64-pc-windows-msvc.tar.gz
-            astrolabe-tree-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+            "lait-x86_64-unknown-linux-gnu.tar.gz"
+            "lait-aarch64-unknown-linux-gnu.tar.gz"
+            "lait-aarch64-apple-darwin.tar.gz"
+            "lait-x86_64-apple-darwin.tar.gz"
+            "lait-x86_64-pc-windows-msvc.zip"
+            "astrolabe-$VERSION-setup.exe"
+            "astrolabe-$VERSION.dmg"
+            "astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+            "astrolabe-tree-$VERSION-aarch64-apple-darwin.tar.gz"
+            "astrolabe-tree-$VERSION-x86_64-pc-windows-msvc.tar.gz"
+            "astrolabe-tree-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
           )
           for file in "${required[@]}"; do
             [ -f "release/$file" ] || { echo "::error::missing $file"; exit 1; }
             [ -f "release/$file.sha256" ] || { echo "::error::missing $file.sha256"; exit 1; }
             (cd release && sha256sum -c "$file.sha256")
           done
+      - name: Record the immutable candidate coordinate
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'version=%s\nsource_sha=%s\n' "$VERSION" "$SOURCE_SHA" \
+            > release/candidate-provenance.env
+          (cd release && sha256sum candidate-provenance.env \
+            > candidate-provenance.env.sha256)
+      - name: Attest the candidate coordinate
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: release/candidate-provenance.env
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-${{ needs.gate.outputs.version }}
+          name: ${{ needs.gate.outputs.artifact }}
           path: release/
           if-no-files-found: error
           retention-days: 30
-      - name: Record the promotion command
+      - name: Record the audit and promotion coordinates
         env:
           RUN_ID: ${{ github.run_id }}
           VERSION: ${{ needs.gate.outputs.version }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+          ARTIFACT: ${{ needs.gate.outputs.artifact }}
         run: |
-          echo "### Sealed feed input" >> "$GITHUB_STEP_SUMMARY"
-          echo '```sh' >> "$GITHUB_STEP_SUMMARY"
-          echo "ci/publish-feed.sh --from-run $RUN_ID --version $VERSION --channel test --seed ~/.lait-feed-signing.seed" >> "$GITHUB_STEP_SUMMARY"
-          echo "ci/publish-feed.sh --version $VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Commit-addressed candidate"
+            echo "Audit artifact \`$ARTIFACT\` from commit \`$SOURCE_SHA\` before creating \`v$VERSION\`."
+            echo '```sh'
+            echo "git tag -a v$VERSION $SOURCE_SHA"
+            echo "ci/publish-feed.sh --from-run $RUN_ID --artifact-name $ARTIFACT --version $VERSION --channel test --seed ~/.lait-feed-signing.seed"
+            echo "ci/publish-feed.sh --version $VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
