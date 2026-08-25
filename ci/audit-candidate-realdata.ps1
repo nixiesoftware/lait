@@ -45,7 +45,7 @@ param(
     [Parameter(Mandatory = $true)] [string] $IdentityKey,
     [Parameter(Mandatory = $true)] [string] $AuditRoot,
     [string] $Space = "ws_38TLCQUD96NG9376CBELI5I5V2",
-    [int] $ExpectedFiles = 9189,
+    [int] $ExpectedFiles = 9188,
     [int] $ExpectedEffects = 56,
     [int] $ExpectedBodies = 463,
     [int] $ExpectedReceipts = 5292
@@ -105,12 +105,23 @@ foreach ($recordPath in @(
 }
 
 # The census covers the prior store exactly: everything the snapshot put under
-# orbital/. The rebuild must only ADD (a generation directory, its selection);
-# any change to or loss of a prior file is a hard audit failure.
+# orbital/. The migration must only ADD (a generation directory, its selection);
+# every durable ledger file must stay byte-identical.
+#
+# Node-local operational state is exempt: the store's `epoch` file is durably
+# incremented on every Station activation (Beacon freshness — a live Station
+# must never reuse an epoch it acted under), so starting the daemon at all
+# advances it by one, entirely independent of the migration. Lock files are
+# likewise runtime-only. These are not prior data; excluding them keeps the
+# census a test of the migration's non-destructiveness, not of whether a
+# daemon started.
 $storeRoot = Join-Path $AuditRoot "orbital"
-$original = @(Get-ChildItem -LiteralPath $storeRoot -Recurse -File)
+$nodeLocalNames = @("epoch", "epoch.tmp", "lock", "active-generation.lock")
+$original = @(Get-ChildItem -LiteralPath $storeRoot -Recurse -File | Where-Object {
+    $nodeLocalNames -notcontains $_.Name
+})
 if ($original.Count -ne $ExpectedFiles) {
-    throw "expected $ExpectedFiles source files, got $($original.Count)"
+    throw "expected $ExpectedFiles durable source files, got $($original.Count)"
 }
 
 $before = @{}
@@ -229,17 +240,28 @@ try {
     [System.IO.File]::WriteAllText($jobStaging, $job, [System.Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $jobStaging -Destination $jobPath -Force
 
-    $adoptionDeadline = [DateTime]::UtcNow.AddMinutes(4)
+    # The migration is size-proportional, so the wait is progress-aware: as
+    # long as completed_records advances the clock resets; only a genuine
+    # stall or the absolute ceiling fails the audit.
+    $absoluteDeadline = [DateTime]::UtcNow.AddMinutes(90)
+    $stallDeadline = [DateTime]::UtcNow.AddMinutes(5)
+    $lastProgress = -1
     $finalPhase = $null
     do {
         Start-Sleep -Milliseconds 500
         try {
             $state = Get-Content -LiteralPath $jobPath -Raw | ConvertFrom-Json
             if ($state.phase -in @("verified", "refused")) { $finalPhase = $state }
+            elseif ([int]$state.completed_records -gt $lastProgress) {
+                $lastProgress = [int]$state.completed_records
+                $stallDeadline = [DateTime]::UtcNow.AddMinutes(5)
+            }
         } catch {
             # The daemon replaces the record atomically; a read may land between.
         }
-    } while (-not $finalPhase -and [DateTime]::UtcNow -lt $adoptionDeadline)
+    } while (-not $finalPhase `
+        -and [DateTime]::UtcNow -lt $stallDeadline `
+        -and [DateTime]::UtcNow -lt $absoluteDeadline)
     if (-not $finalPhase) {
         throw "the World update lifecycle did not conclude: $(Get-Content -LiteralPath $jobPath -Raw)"
     }
