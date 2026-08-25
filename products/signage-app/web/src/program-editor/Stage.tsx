@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { SignageMedia } from "@/utils/lait/types";
-import { THEMES, athanTimes } from "./athan";
-import { AthanPreview } from "./AthanPreview";
+import { panelFor } from "./kinds/registry";
 import {
   formatDuration,
   storedContentUrl,
@@ -34,12 +33,8 @@ export function Stage({
   const media = shown?.media ?? null;
   const src = orbit && media ? storedContentUrl(orbit, media) : null;
   const intoClip = shown ? Math.max(0, (t - shown.startMs) / 1000) : 0;
-  const bleed =
-    media?.source === "card"
-      ? `#${media.background}`
-      : media?.source === "kind" && media.kind === "athan"
-        ? THEMES[athanTimes(media.settings)?.theme ?? "ink"].bg
-        : "transparent";
+  const kindPanel = media?.source === "kind" ? panelFor(media.kind) : null;
+  const bleed = media?.source === "card" ? `#${media.background}` : "transparent";
 
   useEffect(() => {
     const video = videoRef.current;
@@ -86,8 +81,8 @@ export function Stage({
         <img src={src} alt={media.name} />
       ) : media.source === "stored" && src && media.mime.startsWith("video/") ? (
         <video ref={videoRef} src={src} playsInline muted />
-      ) : media.source === "kind" && media.kind === "athan" ? (
-        <AthanPreview settings={media.settings} />
+      ) : media.source === "kind" && kindPanel ? (
+        <kindPanel.Preview settings={media.settings} density="stage" />
       ) : (
         <div className="pe-placeholder">
           <strong>{media.name}</strong>

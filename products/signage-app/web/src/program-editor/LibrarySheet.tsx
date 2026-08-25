@@ -3,7 +3,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { useDrag } from "@use-gesture/react";
 import { ArrowLeft, X } from "lucide-react";
 import type { SignageMedia } from "@/utils/lait/types";
-import type { KindDefinition } from "@/utils/apps/api";
+import { KIND_PANELS, type KindPanel } from "./kinds/registry";
 import { AddFlow, type AddPage } from "./AddPopover";
 
 type Props = {
@@ -13,7 +13,7 @@ type Props = {
   orbit: string | null;
   onAdd: (media: SignageMedia) => void;
   onUploaded: (media: SignageMedia[]) => void;
-  onAddKind: (kind: KindDefinition) => void;
+  onAddKind: (kind: KindPanel) => void;
   onUploadError?: (message: string) => void;
   container?: RefObject<HTMLElement | null>;
 };

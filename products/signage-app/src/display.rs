@@ -27,24 +27,32 @@ const SURFACE_ID: &str = "signage.program";
 const MAX_RENDER_WIDTH: u32 = 4_096;
 const MAX_RENDER_HEIGHT: u32 = 2_160;
 
+/// What a receiver is pointed at.
+///
+/// The screen, not the program. Naming a program here made every broadcast a
+/// fan-out: to interrupt a fleet you had to re-issue an assignment per panel,
+/// and a grant that carried the answer was a snapshot of it. Pointing at the
+/// screen moves resolution behind the one query a prepare is allowed, so an
+/// emergency is a single Body write and every receiver picks it up on the
+/// doorbell it is already waiting on.
 #[derive(Debug, Serialize, Deserialize)]
-struct ProgramInput {
-    program: String,
+struct ScreenInput {
+    screen: String,
 }
 
 pub fn program_surface() -> Result<DisplaySurface, Failure> {
     let world = signage::contract::world_id();
     let mut input_digest = Sha256::new();
-    input_digest.update(b"signage.program.input.v1:{program:body-id}");
+    input_digest.update(b"signage.program.input.v2:{screen:body-id}");
     let mut renderer_identity = Sha256::new();
     renderer_identity.update(
-        b"signage.program.renderer.v7:font8x8:png:library:content:lait-live:rolling-windows:athan-masjid",
+        b"signage.program.renderer.v8:font8x8:png:library:content:lait-live:channels:broadcasts:place-facts-preset",
     );
     let mut descriptor = DisplaySurfaceDescriptor {
         id: DisplaySurfaceId::new(SURFACE_ID)?,
         title: "Signage program".into(),
         runtime_implementation: crate::implementation_id(),
-        contract_version: 3,
+        contract_version: 4,
         input_contract_digest: input_digest.finalize().into(),
         renderer_identity: renderer_identity.finalize().into(),
         contract_digest: [0; 32],
@@ -60,10 +68,10 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
 }
 
 fn canonicalize_input(value: Value) -> Result<CanonicalDisplayInput, Failure> {
-    let input: ProgramInput = serde_json::from_value(value)
+    let input: ScreenInput = serde_json::from_value(value)
         .map_err(|error| Failure::new(format!("invalid Signage display input: {error}")))?;
-    if replica::body::BodyId::parse(&input.program).is_none() {
-        return Err(Failure::new("invalid Signage program id"));
+    if replica::body::BodyId::parse(&input.screen).is_none() {
+        return Err(Failure::new("invalid Signage screen id"));
     }
     let bytes = serde_json::to_vec(&input)
         .map_err(|error| Failure::new(format!("encode Signage display input: {error}")))?;
@@ -75,10 +83,10 @@ fn prepare(request: &DisplayRequest) -> Result<ClientInvocation, Failure> {
     if request.surface.as_str() != SURFACE_ID {
         return Err(Failure::new("Signage renderer received another surface"));
     }
-    let input: ProgramInput = serde_json::from_slice(request.input.as_bytes())
+    let input: ScreenInput = serde_json::from_slice(request.input.as_bytes())
         .map_err(|error| Failure::new(format!("decode Signage display input: {error}")))?;
-    let call = crate::encode_call(&crate::SignageRequest::ProgramGet {
-        program: input.program,
+    let call = crate::encode_call(&crate::SignageRequest::ScreenPlays {
+        screen: input.screen,
     })
     .map_err(|error| Failure::new(error.to_string()))?;
     Ok(ClientInvocation::world(call, ClientAccess::Query, None))
@@ -100,34 +108,65 @@ impl DisplayRenderer for SignageRenderer {
             }
             let response: crate::SignageResponse = serde_json::from_value(value)
                 .map_err(|error| Failure::new(format!("decode Signage projection: {error}")))?;
-            let crate::SignageResponse::Program {
-                program: Some(program),
+            let crate::SignageResponse::Plays {
+                screen: Some(screen),
+                channels,
+                broadcasts,
+                audiences,
+                programs,
                 media,
-                configs,
+                presets,
             } = response
             else {
-                return Err(Failure::new("Signage program is unavailable"));
+                return Err(Failure::new("Signage screen is unavailable"));
             };
-            if !program.validate() {
-                return Err(Failure::new("Signage program failed validation"));
-            }
             let now_unix_ms = request
                 .window_start_unix
                 .checked_mul(1_000)
                 .ok_or_else(|| Failure::new("Signage schedule time overflowed"))?;
-            let scheduled = program
-                .scheduled_at(now_unix_ms)
-                .map_err(|error| Failure::new(format!("evaluate Signage schedule: {error}")))?;
+
+            // The context a screen reports about itself is not in hand here —
+            // a prepare reads, it does not sample — so an `Observed` audience
+            // reaches nobody from this side. Absent, never false.
+            let lookup: BTreeMap<String, signage::Match> = audiences
+                .iter()
+                .map(|entry| (entry.id.clone(), entry.rule.clone()))
+                .collect();
+            let cx = signage::Context::at(now_unix_ms);
+            let playback = signage::fleet::resolve(&screen, &channels, &broadcasts, &cx, &lookup);
+
+            let chosen = match &playback.showing {
+                signage::Showing::Program { program } => {
+                    programs.iter().find(|candidate| &candidate.id == program)
+                }
+                // Told to go dark, or told something this build does not draw.
+                // Both are answers, and neither is an error to report.
+                signage::Showing::Blank
+                | signage::Showing::Unaddressed
+                | signage::Showing::Kind { .. } => None,
+            };
             let library: BTreeMap<&str, &SignageMedia> = media
                 .iter()
                 .map(|entry| (entry.id.as_str(), entry))
                 .collect();
-            let idle = scheduled.items.is_empty();
-            let mut items = Vec::with_capacity(scheduled.items.len().max(1));
+            let scheduled = match chosen {
+                Some(program) if program.validate() => {
+                    Some(program.scheduled_at(now_unix_ms).map_err(|error| {
+                        Failure::new(format!("evaluate Signage schedule: {error}"))
+                    })?)
+                }
+                _ => None,
+            };
+            let (scheduled_items, schedule_boundary) = match &scheduled {
+                Some(scheduled) => (scheduled.items.clone(), scheduled.next_boundary_unix_ms),
+                None => (Vec::new(), None),
+            };
+            let idle = scheduled_items.is_empty();
+            let mut items = Vec::with_capacity(scheduled_items.len().max(1));
             let mut kind_refresh_unix_ms = None;
-            for item in scheduled.items {
+            for item in scheduled_items {
                 let entry = library.get(item.media.as_str()).copied();
-                let live = with_live_athan(entry, &configs);
+                let live = resolved_entry(entry, &screen, &presets);
                 let drawn = scene(live.as_ref(), request.width, request.height, now_unix_ms)?;
                 kind_refresh_unix_ms = match (kind_refresh_unix_ms, drawn.refresh_unix_ms) {
                     (None, next) => next,
@@ -153,28 +192,41 @@ impl DisplayRenderer for SignageRenderer {
                     spoken_summary: Some("No content is scheduled".into()),
                 });
             }
-            let refresh_after_ms = [scheduled.next_boundary_unix_ms, kind_refresh_unix_ms]
-                .into_iter()
-                .flatten()
-                .map(|boundary| boundary.saturating_sub(now_unix_ms).max(1))
-                .min()
-                .and_then(|delay| {
-                    u32::try_from(delay)
-                        .ok()
-                        .filter(|delay| *delay <= request.window_horizon_ms)
-                });
+            let refresh_after_ms = [
+                schedule_boundary,
+                kind_refresh_unix_ms,
+                playback.next_boundary_unix_ms,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|boundary| boundary.saturating_sub(now_unix_ms).max(1))
+            .min()
+            .and_then(|delay| {
+                u32::try_from(delay)
+                    .ok()
+                    .filter(|delay| *delay <= request.window_horizon_ms)
+            });
             Ok(DisplayProjection {
                 program: RenderedProgram {
                     items,
-                    cycle: if idle {
-                        ProgramCycle::HoldLast
-                    } else {
-                        cycle(program.cycle)
+                    cycle: match chosen {
+                        Some(program) if !idle => cycle(program.cycle),
+                        // Nothing to cycle through: hold, rather than blank on
+                        // a boundary nobody set.
+                        _ => ProgramCycle::HoldLast,
                     },
                     refresh_after_ms,
                 },
                 assessment: DisplayAssessment::Current,
-                spoken_summary: Some(program.name),
+                // Why this screen is showing this, in the words the source
+                // used, so an operator hears the same sentence the interface
+                // shows them.
+                spoken_summary: Some(match (&playback.source, chosen) {
+                    (Some(signage::Resolved::Broadcast { name, .. }), _) => name.clone(),
+                    (_, Some(program)) => program.name.clone(),
+                    (Some(signage::Resolved::Channel { name, .. }), None) => name.clone(),
+                    (None, None) => "Nothing is addressed to this screen".into(),
+                }),
             })
         })
     }
@@ -207,27 +259,54 @@ fn drawn(scene: RenderedScene) -> DrawnScene {
     }
 }
 
-/// Space config wins for athan. Other kinds keep the row they were saved with.
-fn with_live_athan(
+/// One kind entry, resolved against where it is playing.
+///
+/// Three layers, and they are ordered by how widely each varies. The preset is
+/// the presentation, shared by every entry that points at it. The entry's own
+/// settings sit over that. The screen's facts sit over *both*, because what a
+/// congregation practises and where a panel stands are the narrowest truths in
+/// the stack and the only ones that make one card correct in two cities.
+///
+/// Geography rides separately, as typed fields, because every location-aware
+/// kind wants it and none of them agree on what to compute from it.
+fn resolved_entry(
     entry: Option<&SignageMedia>,
-    configs: &[signage::contract::SignageConfig],
+    screen: &signage::SignageScreen,
+    presets: &[signage::contract::SignagePreset],
 ) -> Option<SignageMedia> {
     let entry = entry?;
-    Some(match &entry.source {
-        MediaSource::Kind { kind, settings } if crate::athan::kind_is_athan(kind) => {
-            let space = configs
-                .iter()
-                .find(|config| config.kind == "athan")
-                .map(|config| &config.settings);
-            SignageMedia {
-                source: MediaSource::Kind {
-                    kind: kind.clone(),
-                    settings: crate::athan::overlay(space, settings),
-                },
-                ..entry.clone()
-            }
-        }
-        _ => entry.clone(),
+    let MediaSource::Kind {
+        kind,
+        preset,
+        settings,
+    } = &entry.source
+    else {
+        return Some(entry.clone());
+    };
+
+    let mut resolved: BTreeMap<String, String> = preset
+        .as_ref()
+        .and_then(|id| presets.iter().find(|candidate| &candidate.id == id))
+        .filter(|candidate| &candidate.kind == kind)
+        .map(|candidate| candidate.settings.clone())
+        .unwrap_or_default();
+    resolved.extend(settings.clone());
+    if let Some(facts) = screen.facts.get(kind) {
+        resolved.extend(facts.clone());
+    }
+    if let Some(place) = &screen.place {
+        resolved.insert("latitude".into(), place.latitude.to_string());
+        resolved.insert("longitude".into(), place.longitude.to_string());
+        resolved.insert("timezone".into(), place.timezone.clone());
+    }
+
+    Some(SignageMedia {
+        source: MediaSource::Kind {
+            kind: kind.clone(),
+            preset: preset.clone(),
+            settings: resolved,
+        },
+        ..entry.clone()
     })
 }
 
@@ -264,7 +343,7 @@ fn scene(
                 |resource| media_scene(MediaOrigin::Live(resource)),
             )))
         }
-        MediaSource::Kind { kind, settings } => {
+        MediaSource::Kind { kind, settings, .. } => {
             athan_scene(kind, settings, width, height, now_unix_ms)
         }
     }
@@ -315,7 +394,7 @@ fn spoken_summary(entry: Option<&SignageMedia>, now_unix_ms: u64) -> Option<Stri
         } else {
             format!("{title}. {body}")
         }),
-        MediaSource::Kind { kind, settings } if crate::athan::kind_is_athan(kind) => {
+        MediaSource::Kind { kind, settings, .. } if crate::athan::kind_is_athan(kind) => {
             crate::athan::times_from_settings(settings, now_unix_ms).and_then(|day| {
                 Some(match day.phase {
                     crate::athan::Phase::Countdown { label, remain_s } => {
@@ -713,6 +792,7 @@ mod tests {
     fn an_integration_and_a_dangling_item_both_blank_rather_than_vanish() {
         let integration = entry(MediaSource::Kind {
             kind: "weather".into(),
+            preset: None,
             settings: [("units".to_owned(), "metric".to_owned())].into(),
         });
         for absent in [Some(&integration), None] {
@@ -773,6 +853,7 @@ mod tests {
     fn athan_with_a_location_is_a_schedule_card() {
         let athan = entry(MediaSource::Kind {
             kind: "athan".into(),
+            preset: None,
             settings: [
                 ("latitude".into(), "51.5074".into()),
                 ("longitude".into(), "-0.1278".into()),
@@ -797,6 +878,7 @@ mod tests {
     fn emerald_theme_paints_the_emerald_ground() {
         let athan = entry(MediaSource::Kind {
             kind: "athan".into(),
+            preset: None,
             settings: [
                 ("latitude".into(), "51.5074".into()),
                 ("longitude".into(), "-0.1278".into()),
@@ -816,37 +898,97 @@ mod tests {
         assert_eq!(*png.get_pixel(0, 0), Rgba([12, 36, 28, 255]));
     }
 
+    /// Three layers, narrowest last. A preset supplies the look, the entry
+    /// supplies its own, and the screen's facts and place override both —
+    /// which is what makes one clip correct at two venues.
     #[test]
-    fn live_space_config_overlays_the_kind_row() {
-        let snapshot = entry(MediaSource::Kind {
-            kind: "athan".into(),
-            settings: BTreeMap::new(),
-        });
-        let configs = [signage::contract::SignageConfig {
+    fn the_screen_overrides_the_preset_and_supplies_the_place() {
+        let preset = signage::contract::SignagePreset {
             id: replica::body::BodyId::from_bytes([9; 16]).render(),
             kind: "athan".into(),
-            name: "Athan".into(),
+            name: "House style".into(),
             settings: [
-                ("latitude".into(), "51.5074".into()),
-                ("longitude".into(), "-0.1278".into()),
-                ("method".into(), "isna".into()),
-                ("timezone".into(), "Europe/London".into()),
                 ("theme".into(), "emerald".into()),
+                ("method".into(), "isna".into()),
             ]
             .into(),
-        }];
-        let live = with_live_athan(Some(&snapshot), &configs).expect("overlay");
+        };
+        let snapshot = entry(MediaSource::Kind {
+            kind: "athan".into(),
+            preset: Some(preset.id.clone()),
+            settings: BTreeMap::new(),
+        });
+        let screen = signage::SignageScreen {
+            id: replica::body::BodyId::from_bytes([4; 16]).render(),
+            name: "Prayer hall".into(),
+            place: Some(signage::Place {
+                latitude: 51.5074,
+                longitude: -0.1278,
+                timezone: "Europe/London".into(),
+                region: None,
+            }),
+            // This mosque reckons differently from the house preset.
+            facts: [(
+                "athan".to_string(),
+                BTreeMap::from([("method".to_string(), "makkah".to_string())]),
+            )]
+            .into(),
+            sync: None,
+            labels: Vec::new(),
+            tuned: None,
+        };
+
+        let live = resolved_entry(Some(&snapshot), &screen, &[preset]).expect("resolved");
         let MediaSource::Kind { settings, .. } = &live.source else {
             panic!("athan stays a kind");
         };
+        assert_eq!(
+            settings.get("theme").map(String::as_str),
+            Some("emerald"),
+            "the preset supplies the look"
+        );
+        assert_eq!(
+            settings.get("method").map(String::as_str),
+            Some("makkah"),
+            "the venue's practice outranks the preset's"
+        );
+        assert_eq!(
+            settings.get("timezone").map(String::as_str),
+            Some("Europe/London"),
+            "geography comes from the panel, not the clip"
+        );
+
         let RenderedScene::Frame(frame) = scene(Some(&live), 320, 180, 1_704_110_400_000)
             .unwrap()
             .scene
         else {
-            panic!("live config is enough to rasterise");
+            panic!("a sited athan entry rasterises");
         };
-        assert_eq!(settings.get("theme").map(String::as_str), Some("emerald"));
         let png = image::load_from_memory(&frame.bytes).unwrap().to_rgba8();
         assert_eq!(*png.get_pixel(0, 0), Rgba([12, 36, 28, 255]));
+    }
+
+    /// Aberdeen in June: isha's angle never arrives. The card used to blank
+    /// for weeks with nothing saying why.
+    #[test]
+    fn a_high_latitude_summer_still_has_a_timetable() {
+        let mut settings = BTreeMap::new();
+        settings.insert("latitude".to_string(), "57.1497".to_string());
+        settings.insert("longitude".to_string(), "-2.0943".to_string());
+        settings.insert("timezone".to_string(), "Europe/London".to_string());
+        settings.insert("method".to_string(), "isna".to_string());
+        // 2024-06-21 12:00 UTC
+        let day = crate::athan::times_from_settings(&settings, 1_718_971_200_000)
+            .expect("a rule fills what the angle never reached");
+        assert!(
+            day.prayers.iter().any(|row| row.name == "Isha"),
+            "isha is present under the default middle-of-night rule"
+        );
+
+        settings.insert("high_lat_rule".to_string(), "none".to_string());
+        assert!(
+            crate::athan::times_from_settings(&settings, 1_718_971_200_000).is_none(),
+            "opting out is still allowed, and still means no card"
+        );
     }
 }

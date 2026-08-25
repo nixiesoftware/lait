@@ -1,55 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+/**
+ * The editor root: session, chrome that both surfaces share, and the choice
+ * between them.
+ *
+ * It draws almost nothing. Desktop and mobile are separate components over one
+ * state, rather than one component with a `wide` boolean threaded through it —
+ * which is what made a desktop change require reasoning about the phone.
+ */
+
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
-import {
-  ArrowLeft,
-  Clock,
-  Copy,
-  Pause,
-  Play,
-  Plus,
-  Redo2,
-  Settings2,
-  SkipBack,
-  SkipForward,
-  Trash2,
-  Undo2,
-} from "lucide-react";
-import { AthanSheet } from "@/components/integrations/AthanSheet";
 import { useAdminLayout } from "@/context/AdminLayoutContext";
 import { useToast } from "@/ds";
 import { space } from "@/utils/api/client";
-import { fetchConfigs, type KindDefinition } from "@/utils/apps/api";
-import { saveMedia } from "@/utils/content/api";
-import { mintBodyId } from "@/utils/lait/ids";
-import type { SignageConfig, SignageMedia, SignageProgram } from "@/utils/lait/types";
-import { overlay } from "./athan";
-import { useClock } from "./clock";
-import { Filmstrip } from "./Filmstrip";
+import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
+import { DesktopShell, type SourcePage } from "./desktop/DesktopShell";
+import { MobileShell } from "./mobile/MobileShell";
+import { EditorProvider, useEditorSession } from "./state/EditorContext";
 import type { ClipActions } from "./ItemMenu";
-import { LibrarySheet } from "./LibrarySheet";
-import {
-  addMedia,
-  copyItem,
-  duplicateItem,
-  formatClock,
-  itemAtTime,
-  layout,
-  mediaById,
-  moveItem,
-  pasteItem,
-  programDurationMs,
-  removeItem,
-  rename,
-  sameProgram,
-  setDuration,
-  type ClipCopy,
-  type TrimPreview,
-} from "./model";
-import { haptic } from "./haptic";
 import { suppressCoarseContextMenu } from "./pointer";
-import { Stage } from "./Stage";
 import "./program-editor.css";
+import "./surfaces.css";
 
 type Props = {
   initial: SignageProgram;
@@ -62,70 +33,16 @@ type Props = {
 
 export function ProgramEditor({
   initial,
-  library: initialLibrary,
-  persisted,
+  library,
   onSave,
   onClose,
   onRefreshLibrary,
 }: Props) {
   const peRef = useRef<HTMLDivElement>(null);
-  const [program, setProgram] = useState(initial);
-  const [baseline, setBaseline] = useState(initial);
-  const [library, setLibrary] = useState(initialLibrary);
-  const [configs, setConfigs] = useState<SignageConfig[]>([]);
-  const [draftAthan, setDraftAthan] = useState<Record<string, string> | null>(
-    null,
-  );
-  const [athanOpen, setAthanOpen] = useState(false);
-  const pendingSeek = useRef<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(
-    initial.items[0]?.id ?? null,
-  );
   const [orbit, setOrbit] = useState<string | null>(null);
-  const [addOpen, setAddOpen] = useState(false);
-  const [leaveOpen, setLeaveOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [clipboard, setClipboard] = useState<ClipCopy | null>(null);
-  const [past, setPast] = useState<SignageProgram[]>([]);
-  const [future, setFuture] = useState<SignageProgram[]>([]);
-  const [trim, setTrim] = useState<TrimPreview | null>(null);
-  const addAfterRef = useRef<string | null>(null);
   const wide = useWide();
-  useVisualViewportBottom();
   const { setHideSidebar } = useAdminLayout();
-  const toast = useToast();
-
-  const shownLibrary = useMemo(() => {
-    const saved = configs.find((entry) => entry.kind === "athan")?.settings;
-    const athan = draftAthan ?? saved;
-    return library.map((entry) => {
-      if (entry.source !== "kind" || entry.kind !== "athan") return entry;
-      return { ...entry, settings: overlay(athan, entry.settings) };
-    });
-  }, [library, configs, draftAthan]);
-  const catalog = useMemo(() => mediaById(shownLibrary), [shownLibrary]);
-  const durationMs = programDurationMs(program, catalog);
-  const clips = useMemo(() => layout(program, catalog), [program, catalog]);
-  const { t, playing, seek, toggle, pause } = useClock(durationMs, program.cycle);
-  const current = itemAtTime(clips, t);
-  const selected =
-    clips.find((clip) => clip.item.id === selectedId) ?? current;
-  const stageClip =
-    (trim && clips.find((clip) => clip.item.id === trim.id)) || current;
-  const dirty = !sameProgram(program, baseline);
-  const canSave = dirty && program.items.length > 0;
-  const canUndo = past.length > 0;
-  const canRedo = future.length > 0;
-
-  const apply = (next: SignageProgram) => {
-    setProgram((currentProgram) => {
-      if (sameProgram(currentProgram, next)) return currentProgram;
-      setPast((stack) => [...stack, currentProgram].slice(-40));
-      setFuture([]);
-      return next;
-    });
-  };
+  useVisualViewportBottom();
 
   useEffect(() => {
     setHideSidebar(true);
@@ -136,453 +53,86 @@ export function ProgramEditor({
     const root = peRef.current;
     if (!root) return;
     root.addEventListener("contextmenu", suppressCoarseContextMenu, true);
-    return () => {
-      root.removeEventListener("contextmenu", suppressCoarseContextMenu, true);
-    };
+    return () => root.removeEventListener("contextmenu", suppressCoarseContextMenu, true);
   }, []);
 
   useEffect(() => {
-    void space()
-      .then(setOrbit)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    void space().then(setOrbit).catch(() => setOrbit(null));
   }, []);
 
-  useEffect(() => {
-    setLibrary(initialLibrary);
-  }, [initialLibrary]);
+  return createPortal(
+    <div className={`pe${wide ? " is-wide" : " is-narrow"}`} ref={peRef}>
+      <EditorProvider
+        initial={initial}
+        library={library}
+        orbit={orbit}
+        onSave={onSave}
+        onRefreshLibrary={onRefreshLibrary}
+      >
+        <Session wide={wide} container={peRef} onClose={onClose} />
+      </EditorProvider>
+    </div>,
+    document.body,
+  );
+}
 
-  useEffect(() => {
-    void fetchConfigs()
-      .then(setConfigs)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+/** Inside the provider, so the shells and the leave guard share one editor. */
+function Session({
+  wide,
+  container,
+  onClose,
+}: {
+  wide: boolean;
+  container: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const { editor } = useEditorSession();
+  const toast = useToast();
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const [source, setSource] = useState<SourcePage>(null);
 
-  useEffect(() => {
-    if (selectedId && program.items.some((item) => item.id === selectedId)) return;
-    setSelectedId(program.items[0]?.id ?? null);
-  }, [program.items, selectedId]);
-
-  useEffect(() => {
-    const id = pendingSeek.current;
-    if (!id) return;
-    const clip = clips.find((entry) => entry.item.id === id);
-    if (!clip) return;
-    pause();
-    seek(clip.startMs);
-    pendingSeek.current = null;
-  }, [clips]); // pause/seek are stable enough for a one-shot seek
-
-  const save = async (): Promise<boolean> => {
-    if (!canSave) return false;
-    setSaving(true);
-    setError(null);
-    try {
-      await onSave(program);
-      setBaseline(program);
-      haptic("save");
-      toast.show("Saved", "The World has this program.");
-      return true;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      haptic("error");
-      toast.show("Could not save", message);
-      return false;
-    } finally {
-      setSaving(false);
-    }
+  const actions: ClipActions = {
+    clipboard: editor.clipboard,
+    duplicate: editor.duplicate,
+    copy: editor.copy,
+    pasteAfter: editor.pasteAfter,
+    remove: editor.remove,
+    add: () => setSource("library"),
   };
 
   const back = () => {
-    if (dirty) setLeaveOpen(true);
+    if (editor.dirty) setLeaveOpen(true);
     else onClose();
   };
 
-  const add = (media: SignageMedia): string | null => {
-    pause();
-    const known = new Set(program.items.map((item) => item.id));
-    const next = addMedia(program, media, addAfterRef.current);
-    apply(next);
-    haptic("select");
-    const added = next.items.find((item) => !known.has(item.id));
-    setSelectedId(added?.id ?? null);
-    setAddOpen(false);
-    return added?.id ?? null;
-  };
-
-  const pasteAt = (afterId: string | null) => {
-    if (!clipboard) return;
-    pause();
-    const known = new Set(program.items.map((item) => item.id));
-    const next = pasteItem(program, clipboard, afterId);
-    apply(next);
-    const added = next.items.find((item) => !known.has(item.id));
-    setSelectedId(added?.id ?? null);
-  };
-
-  const openAdd = (open: boolean, after: string | null = selectedId) => {
-    if (open) {
-      addAfterRef.current = after;
-      void onRefreshLibrary().then(setLibrary);
-    }
-    setAddOpen(open);
-  };
-
-  const undo = () => {
-    if (past.length === 0) return;
-    const prev = past[past.length - 1];
-    setFuture((ahead) => [...ahead, program]);
-    setPast((stack) => stack.slice(0, -1));
-    setProgram(prev);
-  };
-
-  const redo = () => {
-    if (future.length === 0) return;
-    const next = future[future.length - 1];
-    setPast((stack) => [...stack, program]);
-    setFuture((ahead) => ahead.slice(0, -1));
-    setProgram(next);
-  };
-
-  const undoRef = useRef(undo);
-  const redoRef = useRef(redo);
-  undoRef.current = undo;
-  redoRef.current = redo;
+  useUndoShortcuts(editor.undo, editor.redo);
 
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      const meta = event.metaKey || event.ctrlKey;
-      if (!meta) return;
-      const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-        return;
-      }
-      if (event.key === "z" && !event.shiftKey) {
-        event.preventDefault();
-        undoRef.current();
-      } else if ((event.key === "z" && event.shiftKey) || event.key === "y") {
-        event.preventDefault();
-        redoRef.current();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    if (editor.error) toast.show("Could not save", editor.error);
+  }, [editor.error, toast]);
 
-  const addKind = async (kind: KindDefinition) => {
-    try {
-      const latest = await fetchConfigs();
-      setConfigs(latest);
-      const config = latest.find((entry) => entry.kind === kind.kind);
-      const media: SignageMedia = {
-        id: mintBodyId(),
-        name: kind.label,
-        source: "kind",
-        kind: kind.kind,
-        settings: kind.kind === "athan" ? {} : (config?.settings ?? {}),
-        duration_ms: 60_000,
-        width: null,
-        height: null,
-        catalog: null,
-      };
-      await saveMedia(media);
-      setLibrary((current) => [media, ...current]);
-      const itemId = add(media);
-      if (kind.kind === "athan") {
-        pendingSeek.current = itemId;
-        setAthanOpen(true);
-      }
-    } catch (err) {
-      toast.show(
-        "Could not add the app",
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  };
-
-  const actions: ClipActions = {
-    clipboard,
-    duplicate: (id) => {
-      pause();
-      const next = duplicateItem(program, id);
-      apply(next);
-      haptic("select");
-      const index = program.items.findIndex((item) => item.id === id);
-      setSelectedId(next.items[index + 1]?.id ?? id);
-    },
-    copy: (id) => {
-      const copied = copyItem(program, id);
-      if (copied) setClipboard(copied);
-    },
-    pasteAfter: pasteAt,
-    remove: (id) => {
-      pause();
-      haptic("delete");
-      apply(removeItem(program, id));
-    },
-    add: () => openAdd(true, selectedId),
-  };
-
-  return createPortal(
-    <div className={`pe${wide ? "" : " is-narrow"}`} ref={peRef}>
-      <header className="pe-bar">
-        <button type="button" className="ds-icon" onClick={back} aria-label="Back">
-          <ArrowLeft size={20} />
-        </button>
-        <button
-          type="button"
-          className="ds-icon"
-          disabled={!canUndo}
-          onClick={undo}
-          aria-label="Undo"
-          title="Undo"
-        >
-          <Undo2 size={18} />
-        </button>
-        <button
-          type="button"
-          className="ds-icon"
-          disabled={!canRedo}
-          onClick={redo}
-          aria-label="Redo"
-          title="Redo"
-        >
-          <Redo2 size={18} />
-        </button>
-        <input
-          className="pe-name"
-          value={program.name}
-          aria-label="Program name"
-          onChange={(event) => setProgram(rename(program, event.target.value))}
-        />
-        {dirty ? (
-          <button
-            type="button"
-            className="ds-btn ds-btn-ghost pe-discard"
-            disabled={saving}
-            onClick={() => apply(baseline)}
-          >
-            Discard
-          </button>
-        ) : null}
-        {canSave ? (
-          <button
-            type="button"
-            className="ds-btn ds-btn-solid"
-            disabled={saving}
-            onClick={() => void save()}
-          >
-            {saving ? "Saving" : "Save"}
-          </button>
-        ) : (
-          <span className="ds-hint">
-            {saving ? "Saving" : persisted && !dirty ? "Saved" : ""}
-          </span>
-        )}
-      </header>
-      {program.items.length === 0 ? (
-        <p className="ds-hint pe-hint">A program needs at least one item before it can be saved.</p>
-      ) : null}
-      {error ? <p className="ds-danger-text pe-error">{error}</p> : null}
-
-      <div className={`pe-workspace${athanOpen ? " has-panel" : ""}`}>
-        <Stage
-          clip={stageClip}
-          t={t}
-          playing={playing}
-          orbit={orbit}
-          trim={trim}
-          container={peRef}
+  return (
+    <>
+      {wide ? (
+        <DesktopShell
+          container={container}
+          source={source}
+          onSource={setSource}
           actions={actions}
+          onBack={back}
         />
+      ) : (
+        <MobileShell container={container} actions={actions} onBack={back} />
+      )}
 
-        <AthanSheet
-          embedded
-          open={athanOpen}
-          config={configs.find((entry) => entry.kind === "athan") ?? null}
-          onDraft={setDraftAthan}
-          onClose={() => setAthanOpen(false)}
-          onSaved={async () => {
-            const latest = await fetchConfigs();
-            setConfigs(latest);
-          }}
-          onRemoved={async () => {
-            const latest = await fetchConfigs();
-            setConfigs(latest);
-          }}
-          onError={(message) => toast.show("Save failed", message)}
-        />
-      </div>
-
-      <div className="pe-dock">
-        <div className={`pe-rail${wide ? "" : " is-narrow"}`}>
-          <div className="pe-rail-time">
-            {formatClock(t)}
-            <span> / {formatClock(durationMs)}</span>
-          </div>
-          <div className="pe-rail-play">
-            <button
-              type="button"
-              className="pe-skip"
-              disabled={durationMs <= 0}
-              onClick={() => {
-                pause();
-                seek(0);
-              }}
-              title="Skip to start"
-              aria-label="Skip to start"
-            >
-              <SkipBack size={18} fill="currentColor" />
-            </button>
-            <button
-              type="button"
-              className="pe-play"
-              disabled={durationMs <= 0}
-              onClick={toggle}
-              title={playing ? "Pause" : "Play"}
-              aria-label={playing ? "Pause" : "Play"}
-            >
-              {playing ? (
-                <Pause size={26} fill="currentColor" />
-              ) : (
-                <Play size={26} fill="currentColor" />
-              )}
-            </button>
-            <button
-              type="button"
-              className="pe-skip"
-              disabled={durationMs <= 0}
-              onClick={() => {
-                pause();
-                seek(durationMs);
-              }}
-              title="Skip to end"
-              aria-label="Skip to end"
-            >
-              <SkipForward size={18} fill="currentColor" />
-            </button>
-          </div>
-          <div className="pe-rail-clip">
-            {selected ? (
-              <>
-                <span className="pe-rail-name">
-                  {selected.media?.name ?? selected.item.media}
-                </span>
-                <DurationChip
-                  ms={selected.durationMs}
-                  onCommit={(ms) =>
-                    apply(setDuration(program, selected.item.id, ms))
-                  }
-                />
-                {selected.media?.source === "kind" &&
-                selected.media.kind === "athan" ? (
-                  <button
-                    type="button"
-                    className="pe-tool"
-                    title="Configure Athan"
-                    aria-label="Configure Athan"
-                    onClick={() => {
-                      pendingSeek.current = selected.item.id;
-                      pause();
-                      seek(selected.startMs);
-                      setAthanOpen(true);
-                    }}
-                  >
-                    <Settings2 size={18} />
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  className="pe-tool"
-                  title="Add after this clip"
-                  aria-label="Add after this clip"
-                  onClick={() => openAdd(true, selected.item.id)}
-                >
-                  <Plus size={18} />
-                </button>
-                <button
-                  type="button"
-                  className="pe-tool"
-                  title="Duplicate"
-                  aria-label="Duplicate"
-                  onClick={() => actions.duplicate(selected.item.id)}
-                >
-                  <Copy size={18} />
-                </button>
-                <button
-                  type="button"
-                  className="pe-remove"
-                  title="Remove from program"
-                  aria-label="Remove from program"
-                  onClick={() => actions.remove(selected.item.id)}
-                >
-                  <Trash2 size={18} />
-                </button>
-              </>
-            ) : null}
-          </div>
-        </div>
-
-        <Filmstrip
-        program={program}
-        library={catalog}
-        media={shownLibrary}
-        t={t}
-        selectedId={selectedId}
-        orbit={orbit}
-        addOpen={addOpen}
-        wide={wide}
-        container={peRef}
-        actions={actions}
-        onSelect={setSelectedId}
-        onSeek={(ms) => {
-          pause();
-          seek(ms);
-        }}
-        onMove={(from, to) => apply(moveItem(program, from, to))}
-        onTrim={(id, ms) => apply(setDuration(program, id, ms))}
-        onTrimLive={(preview) => {
-          if (preview) pause();
-          setTrim(preview);
-        }}
-        onAddOpenChange={(open) => openAdd(open, null)}
-        onAddMedia={add}
-        onUploaded={(uploaded) => {
-          setLibrary((current) => [...uploaded, ...current]);
-          void onRefreshLibrary().then(setLibrary);
-          if (uploaded.length > 0) {
-            toast.show(
-              "Uploaded",
-              uploaded.length === 1
-                ? uploaded[0].name
-                : `${uploaded.length} items are in the library.`,
-            );
-          }
-        }}
-        onAddKind={(kind) => void addKind(kind)}
-        onUploadError={(message) => toast.show("Upload refused", message)}
-      />
-      </div>
-
-      {!wide ? (
-        <LibrarySheet
-          open={addOpen}
-          onOpenChange={openAdd}
-          library={shownLibrary}
-          orbit={orbit}
-          onAdd={add}
-          onUploaded={(uploaded) => {
-            setLibrary((currentLibrary) => [...uploaded, ...currentLibrary]);
-            void onRefreshLibrary().then(setLibrary);
-          }}
-          onAddKind={(kind) => void addKind(kind)}
-          onUploadError={(message) => toast.show("Upload refused", message)}
-          container={peRef}
-        />
+      {editor.program.items.length === 0 ? (
+        <p className="ds-hint pe-hint">
+          A program needs at least one item before it can be saved.
+        </p>
       ) : null}
 
       <AlertDialog.Root open={leaveOpen} onOpenChange={setLeaveOpen}>
-        <AlertDialog.Portal container={peRef}>
+        <AlertDialog.Portal container={container}>
           <AlertDialog.Backdrop className="ds-backdrop" />
           <AlertDialog.Popup className="ds-dialog ds-leave">
             <AlertDialog.Title>Save this program?</AlertDialog.Title>
@@ -590,9 +140,7 @@ export function ProgramEditor({
               The World does not have these edits yet.
             </AlertDialog.Description>
             <menu>
-              <AlertDialog.Close className="ds-btn ds-btn-quiet">
-                Keep editing
-              </AlertDialog.Close>
+              <AlertDialog.Close className="ds-btn ds-btn-quiet">Keep editing</AlertDialog.Close>
               <button
                 type="button"
                 className="ds-btn ds-btn-ghost"
@@ -606,83 +154,45 @@ export function ProgramEditor({
               <button
                 type="button"
                 className="ds-btn ds-btn-solid"
-                disabled={!canSave || saving}
+                disabled={!editor.canSave || editor.saving}
                 onClick={() => {
-                  void save().then((ok) => {
+                  void editor.save().then((ok) => {
                     if (ok) onClose();
                     else setLeaveOpen(false);
                   });
                 }}
               >
-                {saving ? "Saving" : "Save"}
+                {editor.saving ? "Saving" : "Save"}
               </button>
             </menu>
           </AlertDialog.Popup>
         </AlertDialog.Portal>
       </AlertDialog.Root>
-    </div>,
-    document.body,
+    </>
   );
 }
 
-function DurationChip({
-  ms,
-  onCommit,
-}: {
-  ms: number;
-  onCommit: (nextMs: number) => void;
-}) {
-  const seconds = Math.max(1, Math.round(ms / 1000));
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(String(seconds));
-
+function useUndoShortcuts(undo: () => void, redo: () => void) {
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  undoRef.current = undo;
+  redoRef.current = redo;
   useEffect(() => {
-    if (!editing) setDraft(String(seconds));
-  }, [seconds, editing]);
-
-  const commit = () => {
-    const parsed = Number.parseInt(draft, 10);
-    if (Number.isFinite(parsed) && parsed > 0) onCommit(parsed * 1000);
-    else setDraft(String(seconds));
-    setEditing(false);
-  };
-
-  return (
-    <div className="pe-duration">
-      <Clock size={16} />
-      {editing ? (
-        <input
-          type="text"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          enterKeyHint="done"
-          value={draft}
-          autoFocus
-          aria-label="Duration in seconds"
-          onChange={(event) =>
-            setDraft(event.target.value.replace(/[^\d]/g, "").slice(0, 4))
-          }
-          onBlur={commit}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") commit();
-            if (event.key === "Escape") {
-              setDraft(String(seconds));
-              setEditing(false);
-            }
-          }}
-        />
-      ) : (
-        <button
-          type="button"
-          title="Duration"
-          aria-label={`Duration ${seconds} seconds`}
-          onClick={() => setEditing(true)}
-        >
-          {seconds}s
-        </button>
-      )}
-    </div>
-  );
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (event.key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undoRef.current();
+      } else if ((event.key === "z" && event.shiftKey) || event.key === "y") {
+        event.preventDefault();
+        redoRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 }
 
 function useVisualViewportBottom() {
@@ -706,10 +216,10 @@ function useVisualViewportBottom() {
 
 function useWide(): boolean {
   const [wide, setWide] = useState(
-    () => typeof window !== "undefined" && window.matchMedia("(min-width: 720px)").matches,
+    () => typeof window !== "undefined" && window.matchMedia("(min-width: 900px)").matches,
   );
   useEffect(() => {
-    const media = window.matchMedia("(min-width: 720px)");
+    const media = window.matchMedia("(min-width: 900px)");
     const onChange = () => setWide(media.matches);
     onChange();
     media.addEventListener("change", onChange);

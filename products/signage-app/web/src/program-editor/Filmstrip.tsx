@@ -3,9 +3,9 @@ import { AnimatePresence } from "framer-motion";
 import { ContextMenu } from "@base-ui/react/context-menu";
 import { useDrag, usePinch } from "@use-gesture/react";
 import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
-import type { KindDefinition } from "@/utils/apps/api";
 import { AddPopover } from "./AddPopover";
 import { Clip } from "./Clip";
+import { type KindPanel } from "./kinds/registry";
 import { haptic } from "./haptic";
 import { OverlayMenu, trackMenuItems, type ClipActions } from "./ItemMenu";
 import { useCoarsePointer } from "./pointer";
@@ -45,7 +45,7 @@ type Props = {
   onAddOpenChange: (open: boolean) => void;
   onAddMedia: (media: SignageMedia) => void;
   onUploaded: (media: SignageMedia[]) => void;
-  onAddKind: (kind: KindDefinition) => void;
+  onAddKind: (kind: KindPanel) => void;
   onUploadError?: (message: string) => void;
 };
 

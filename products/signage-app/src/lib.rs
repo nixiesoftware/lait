@@ -74,7 +74,7 @@ mod tests {
             surface.descriptor.runtime_implementation,
             implementation_id()
         );
-        assert_eq!(surface.descriptor.contract_version, 3);
+        assert_eq!(surface.descriptor.contract_version, 4);
         assert!(surface
             .descriptor
             .outputs

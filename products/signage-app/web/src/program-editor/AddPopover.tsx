@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { overlayTransition } from "@/ds";
 import type { SignageMedia } from "@/utils/lait/types";
-import { KINDS, type KindDefinition } from "@/utils/apps/api";
+import { KIND_PANELS, type KindPanel } from "./kinds/registry";
 import { uploadContentAll } from "@/utils/content/api";
 import { LibraryPicker } from "./LibraryPicker";
 
@@ -35,9 +35,8 @@ type FlowProps = {
   variant: "grid" | "list";
   onAdd: (media: SignageMedia) => void;
   onUploaded: (media: SignageMedia[]) => void;
-  onAddKind: (kind: KindDefinition) => void;
+  onAddKind: (kind: KindPanel) => void;
   onUploadError?: (message: string) => void;
-  onManageApps?: () => void;
 };
 
 export function AddFlow({
@@ -50,7 +49,6 @@ export function AddFlow({
   onUploaded,
   onAddKind,
   onUploadError,
-  onManageApps,
 }: FlowProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -122,7 +120,7 @@ export function AddFlow({
   if (page === "apps") {
     return (
       <div className="ds-sheet-body">
-        {KINDS.map((kind) => (
+        {KIND_PANELS.map((kind) => (
           <button
             type="button"
             key={kind.kind}
@@ -135,14 +133,6 @@ export function AddFlow({
             </span>
           </button>
         ))}
-        {onManageApps ? (
-          <button type="button" className="ds-row" onClick={onManageApps}>
-            <span className="ds-row-copy">
-              Manage apps
-              <span>Remove a connection for this Space.</span>
-            </span>
-          </button>
-        ) : null}
       </div>
     );
   }
@@ -166,7 +156,7 @@ type Props = {
   orbit: string | null;
   onAdd: (media: SignageMedia) => void;
   onUploaded: (media: SignageMedia[]) => void;
-  onAddKind: (kind: KindDefinition) => void;
+  onAddKind: (kind: KindPanel) => void;
   onUploadError?: (message: string) => void;
   container?: RefObject<HTMLElement | null>;
   asButton?: boolean;

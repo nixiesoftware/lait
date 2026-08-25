@@ -169,6 +169,12 @@ pub fn times_from_settings(
     let date = now.date();
     let offset_hours = f64::from(now.offset().seconds()) / 3600.0;
     let hours = compute(lat, lng, offset_hours, date, method, asr_factor);
+    // Above roughly 48°, fajr or isha can fail to occur for weeks: the sun
+    // never reaches the angle, `sun_angle` answers None, and the whole card
+    // used to blank with nothing saying why. Every serious implementation
+    // carries a rule for this; refusing to have one is not neutrality, it is
+    // a dark screen through a Scottish summer.
+    let hours = high_latitude(hours, &method, rule_of(settings));
     let fajr = hours
         .fajr
         .and_then(|value| prayer_row("Fajr", value, settings, "tune_fajr", "iqamah_fajr"))?;
@@ -372,6 +378,64 @@ fn phase_at(
         }
     }
     Some((next, upcoming.iqamah, Phase::Table, upcoming.at_unix_ms))
+}
+
+/// What to do when a twilight angle never arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HighLatitude {
+    /// Leave it absent. Honest, and what the renderer did before — but it
+    /// blanks the card, so it is not the default.
+    None,
+    /// Split the night into halves; fajr and isha sit at the boundary.
+    MiddleOfNight,
+    /// A seventh of the night after sunset, and before sunrise.
+    SeventhOfNight,
+    /// The twilight angle as a proportion of the night.
+    AngleBased,
+}
+
+fn rule_of(settings: &BTreeMap<String, String>) -> HighLatitude {
+    match settings
+        .get("high_lat_rule")
+        .map(String::as_str)
+        .unwrap_or("")
+        .trim()
+    {
+        "none" => HighLatitude::None,
+        "seventh" => HighLatitude::SeventhOfNight,
+        "angle" => HighLatitude::AngleBased,
+        _ => HighLatitude::MiddleOfNight,
+    }
+}
+
+/// Fill fajr and isha when the angle never happened.
+///
+/// The night is sunset to sunrise; each rule says how far into it the two
+/// prayers fall. A rule cannot be applied without both ends of the night, so
+/// a polar day leaves them absent — which is the one case where absent is the
+/// only true answer rather than a missing feature.
+fn high_latitude(mut hours: Hours, method: &Method, rule: HighLatitude) -> Hours {
+    if rule == HighLatitude::None {
+        return hours;
+    }
+    let (Some(sunrise), Some(sunset)) = (hours.sunrise, hours.maghrib) else {
+        return hours;
+    };
+    let night = fixhour(sunrise - sunset);
+    let portion = |angle: f64| match rule {
+        HighLatitude::MiddleOfNight => night / 2.0,
+        HighLatitude::SeventhOfNight => night / 7.0,
+        HighLatitude::AngleBased => night / 60.0 * angle,
+        HighLatitude::None => night,
+    };
+    if hours.fajr.is_none() {
+        hours.fajr = Some(fixhour(sunrise - portion(method.fajr)));
+    }
+    if hours.isha.is_none() {
+        let angle = method.isha_min.map_or(method.isha, |_| 18.0);
+        hours.isha = Some(fixhour(sunset + portion(angle)));
+    }
+    hours
 }
 
 fn parse_method(raw: &str) -> Method {

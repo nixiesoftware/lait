@@ -901,6 +901,16 @@ pub enum ScreenProjection {
         broadcasts: Vec<SignageBroadcast>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         audiences: Vec<SignageAudience>,
+        /// Every program anything addressing this screen could land on, and
+        /// the library those name. Bounded by reachability rather than by the
+        /// clock the World does not have — which is what keeps a display
+        /// prepare to the single round trip it is allowed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        programs: Vec<SignageProgram>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<SignageMedia>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        presets: Vec<SignagePreset>,
     },
     Reaches {
         screens: Vec<String>,
@@ -920,6 +930,7 @@ impl ScreenProjection {
                 channels,
                 broadcasts,
                 audiences,
+                ..
             } => {
                 let lookup: std::collections::BTreeMap<String, Match> = audiences
                     .iter()

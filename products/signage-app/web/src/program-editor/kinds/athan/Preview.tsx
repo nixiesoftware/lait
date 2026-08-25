@@ -1,19 +1,47 @@
-import { THEMES, athanTimes, formatClock } from "./athan";
+import type { Density } from "../types";
+import { THEMES, athanTimes, formatClock } from "./compute";
 
-export function AthanPreview({ settings }: { settings: Record<string, string> }) {
+/**
+ * One preview, three sizes. The stage, the inspector and the filmstrip
+ * thumbnail were each deriving this separately; a card that disagrees with
+ * itself across the editor is a card nobody can trust against the screen.
+ */
+export function AthanPreview({
+  settings,
+  density = "stage",
+}: {
+  settings: Record<string, string>;
+  density?: Density;
+}) {
   const day = athanTimes(settings);
   if (!day) {
     return (
-      <div className="pe-placeholder">
+      <div className={`pe-athan is-empty is-${density}`}>
         <strong>Athan</strong>
-        Pick a city to compute times.
+        <span>Pick a location to compute times.</span>
       </div>
     );
   }
   const theme = THEMES[day.theme];
+
+  if (density === "thumb") {
+    const next = day.prayers[day.next];
+    const clock = next ? (day.nextIsIqamah && next.iqamah ? next.iqamah : next.adhan) : null;
+    return (
+      <div
+        className="pe-athan is-thumb"
+        style={{ background: theme.bg, color: theme.accent }}
+      >
+        {next && clock
+          ? `${day.nextIsIqamah ? "Iqamah" : next.name} ${formatClock(clock, day.clock24h)}`
+          : "Athan"}
+      </div>
+    );
+  }
+
   return (
     <div
-      className="pe-athan"
+      className={`pe-athan is-${density}`}
       style={{ background: theme.bg, color: theme.accent }}
     >
       <header>

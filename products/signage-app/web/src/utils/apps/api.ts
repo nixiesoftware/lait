@@ -1,9 +1,9 @@
 /**
  * Integration configs. The World stores one `SignageConfig` per kind and
  * refuses a second; settings are an untyped string map on purpose — what a
- * kind's settings *mean* is this application's knowledge, kept in KINDS
- * below the way Medusa's backend/integrations registry kept it, until the
- * kind registry lands (SIGN-4).
+ * kind's settings *mean* is this application's knowledge, and it now lives in
+ * `program-editor/kinds`, where the same declaration renders the panel, the
+ * preview and the summary. This module is the transport and nothing else.
  */
 
 import { rpc } from '../api/client';
@@ -14,47 +14,6 @@ import type {
   ConfigsReply,
   SignageConfig,
 } from '../lait/types';
-
-export interface KindField {
-  name: string;
-  label: string;
-  kind: 'text' | 'number' | 'secret';
-  required: boolean;
-}
-
-export interface KindDefinition {
-  kind: string;
-  label: string;
-  description: string;
-  fields: KindField[];
-}
-
-/** The kinds this application can configure and render forms for. */
-export const KINDS: KindDefinition[] = [
-  {
-    kind: 'athan',
-    label: 'Athan',
-    description: 'Prayer times for a location, rendered as a schedule card.',
-    fields: [
-      { name: 'latitude', label: 'Latitude', kind: 'number', required: true },
-      { name: 'longitude', label: 'Longitude', kind: 'number', required: true },
-      { name: 'method', label: 'Calculation method', kind: 'text', required: false },
-      { name: 'timezone', label: 'Time zone', kind: 'text', required: false },
-    ],
-  },
-  {
-    kind: 'youtube',
-    label: 'YouTube',
-    description: 'A YouTube video by id.',
-    fields: [{ name: 'video_id', label: 'Video id', kind: 'text', required: true }],
-  },
-  {
-    kind: 'html_widget',
-    label: 'Web page',
-    description: 'Any web page by URL, shown full-screen.',
-    fields: [{ name: 'url', label: 'URL', kind: 'text', required: true }],
-  },
-];
 
 export async function fetchConfigs(): Promise<SignageConfig[]> {
   const reply = await rpc<ConfigsReply>({ cmd: 'config_list' });

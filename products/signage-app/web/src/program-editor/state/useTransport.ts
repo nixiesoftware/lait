@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProgramCycle } from "@/utils/lait/types";
 
-export function useClock(durationMs: number, cycle: ProgramCycle) {
+export function useTransport(durationMs: number, cycle: ProgramCycle) {
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);
   const playingRef = useRef(false);

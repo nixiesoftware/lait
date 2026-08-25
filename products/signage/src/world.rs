@@ -501,12 +501,49 @@ impl SignageWorld {
                 let channels = self.channels(ctx)?;
                 let broadcasts = self.broadcasts(ctx)?;
                 let audiences = self.audiences(ctx)?;
+                // Bounded by reachability, not by a clock: every program this
+                // screen could land on, whatever the hour, plus the library
+                // those name. Sending the whole library instead would make a
+                // prepare cost the Space rather than the screen.
+                let (programs, media) = match &screen {
+                    None => (Vec::new(), Vec::new()),
+                    Some(screen) => {
+                        let lookup: std::collections::BTreeMap<String, Match> = audiences
+                            .iter()
+                            .map(|entry| (entry.id.clone(), entry.rule.clone()))
+                            .collect();
+                        let wanted = reachable_programs(screen, &channels, &broadcasts, &lookup);
+                        let programs: Vec<SignageProgram> = self
+                            .programs(ctx)?
+                            .into_iter()
+                            .filter(|program| wanted.contains(&program.id))
+                            .collect();
+                        let named: BTreeSet<&str> = programs
+                            .iter()
+                            .flat_map(|program| {
+                                program.items.iter().map(|item| item.media.as_str())
+                            })
+                            .collect();
+                        let media = self
+                            .library(ctx)?
+                            .into_iter()
+                            .filter(|entry| named.contains(entry.id.as_str()))
+                            .collect();
+                        (programs, media)
+                    }
+                };
+                let presets = all(ctx, &self.id, &contract::preset_schema(), |preset| {
+                    SignagePreset::validate(preset).then_some((&preset.name, &preset.id))
+                })?;
                 Ok((
                     encode(&ScreenProjection::Plays {
                         screen,
                         channels,
                         broadcasts,
                         audiences,
+                        programs,
+                        media,
+                        presets,
                     })?,
                     demand,
                 ))
@@ -648,6 +685,12 @@ impl SignageWorld {
         }
     }
 
+    fn library(&self, ctx: &Context<'_>) -> Result<Vec<SignageMedia>, Rejection> {
+        all(ctx, &self.id, &contract::media_schema(), |entry| {
+            SignageMedia::validate(entry).then_some((&entry.name, &entry.id))
+        })
+    }
+
     fn channels(&self, ctx: &Context<'_>) -> Result<Vec<SignageChannel>, Rejection> {
         all(ctx, &self.id, &contract::channel_schema(), |channel| {
             SignageChannel::validate(channel).then_some((&channel.name, &channel.id))
@@ -708,6 +751,54 @@ fn named_media(
         }
     }
     Ok(library)
+}
+
+/// Every program this screen could land on, ignoring time.
+///
+/// The inverse of [`could_reach`], and bounded the same way: a channel it is
+/// tuned to contributes its base and every window, and a broadcast whose
+/// audience reaches it contributes whatever it plays.
+fn reachable_programs(
+    screen: &SignageScreen,
+    channels: &[SignageChannel],
+    broadcasts: &[SignageBroadcast],
+    audiences: &std::collections::BTreeMap<String, Match>,
+) -> BTreeSet<String> {
+    let mut wanted = BTreeSet::new();
+    let mut take = |channel: &SignageChannel, into: &mut BTreeSet<String>| {
+        if let Some(base) = &channel.base {
+            into.insert(base.clone());
+        }
+        for window in &channel.schedule {
+            into.insert(window.program.clone());
+        }
+    };
+    if let Some(id) = screen.tuned.as_deref() {
+        if let Some(channel) = channels.iter().find(|candidate| candidate.id == id) {
+            take(channel, &mut wanted);
+        }
+    }
+    let cx = MatchContext::default();
+    for broadcast in broadcasts {
+        let reaches = audiences
+            .get(&broadcast.audience)
+            .is_some_and(|rule| rule.reaches(screen, &cx, audiences));
+        if !reaches {
+            continue;
+        }
+        match &broadcast.action {
+            crate::fleet::Action::Play { program } => {
+                wanted.insert(program.clone());
+            }
+            crate::fleet::Action::Tune { channel: id } => {
+                if let Some(channel) = channels.iter().find(|candidate| &candidate.id == id) {
+                    take(channel, &mut wanted);
+                }
+            }
+            _ => {}
+        }
+    }
+    wanted
 }
 
 /// Which screens a program could reach, ignoring time.

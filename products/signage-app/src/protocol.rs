@@ -42,7 +42,7 @@ pub enum SignageRequest {
     },
     ScreenList,
     ScreenPut {
-        screen: contract::SignageScreen,
+        screen: signage::SignageScreen,
     },
     ScreenDelete {
         screen: String,
@@ -58,27 +58,58 @@ pub enum SignageRequest {
     ScreenPlays {
         screen: String,
     },
-    GroupGet {
-        group: String,
+    ChannelGet {
+        channel: String,
     },
-    GroupList,
-    GroupPut {
-        group: contract::SignageGroup,
+    ChannelList,
+    ChannelPut {
+        channel: signage::SignageChannel,
     },
-    GroupDelete {
-        group: String,
+    ChannelDelete {
+        channel: String,
     },
-    ConfigGet {
-        config: String,
+    AudienceGet {
+        audience: String,
+    },
+    AudienceList,
+    AudiencePut {
+        audience: signage::SignageAudience,
+    },
+    AudienceDelete {
+        audience: String,
+    },
+    /// Which screens an audience reaches. Asked before anything is sent.
+    AudienceReaches {
+        audience: String,
+    },
+    BroadcastGet {
+        broadcast: String,
+    },
+    BroadcastList,
+    BroadcastPut {
+        broadcast: signage::SignageBroadcast,
+    },
+    BroadcastDelete {
+        broadcast: String,
+    },
+    /// What a screen played, as the screen tells it.
+    AsRunGet {
+        screen: String,
+    },
+    AsRunRecord {
+        asrun: contract::SignageAsRun,
+    },
+    PresetGet {
+        preset: String,
     },
     /// A kind is configured exactly when a config exists for it, so listing is
     /// how a caller learns which are — there is no flag to read.
-    ConfigList,
-    ConfigPut {
-        config: contract::SignageConfig,
+    PresetList,
+    PresetPut {
+        preset: contract::SignagePreset,
     },
-    ConfigDelete {
-        config: String,
+    PresetDelete {
+        preset: String,
     },
 }
 
@@ -94,20 +125,31 @@ impl SignageRequest {
             | Self::ScreenList
             | Self::ScreenShowing { .. }
             | Self::ScreenPlays { .. }
-            | Self::GroupGet { .. }
-            | Self::GroupList
-            | Self::ConfigGet { .. }
-            | Self::ConfigList => Access::Query,
+            | Self::ChannelGet { .. }
+            | Self::ChannelList
+            | Self::AudienceGet { .. }
+            | Self::AudienceList
+            | Self::AudienceReaches { .. }
+            | Self::BroadcastGet { .. }
+            | Self::BroadcastList
+            | Self::AsRunGet { .. }
+            | Self::PresetGet { .. }
+            | Self::PresetList => Access::Query,
             Self::ProgramPut { .. }
             | Self::ProgramDelete { .. }
             | Self::MediaPut { .. }
             | Self::MediaDelete { .. }
             | Self::ScreenPut { .. }
             | Self::ScreenDelete { .. }
-            | Self::GroupPut { .. }
-            | Self::GroupDelete { .. }
-            | Self::ConfigPut { .. }
-            | Self::ConfigDelete { .. } => Access::Command,
+            | Self::ChannelPut { .. }
+            | Self::ChannelDelete { .. }
+            | Self::AudiencePut { .. }
+            | Self::AudienceDelete { .. }
+            | Self::BroadcastPut { .. }
+            | Self::BroadcastDelete { .. }
+            | Self::AsRunRecord { .. }
+            | Self::PresetPut { .. }
+            | Self::PresetDelete { .. } => Access::Command,
         }
     }
 
@@ -126,8 +168,10 @@ impl SignageRequest {
             Self::ProgramDelete { program } => ("program", program),
             Self::MediaDelete { media } => ("media", media),
             Self::ScreenDelete { screen } => ("screen", screen),
-            Self::GroupDelete { group } => ("group", group),
-            Self::ConfigDelete { config } => ("config", config),
+            Self::ChannelDelete { channel } => ("channel", channel),
+            Self::AudienceDelete { audience } => ("audience", audience),
+            Self::BroadcastDelete { broadcast } => ("broadcast", broadcast),
+            Self::PresetDelete { preset } => ("preset", preset),
             Self::ProgramGet { .. }
             | Self::ProgramList
             | Self::ProgramPut { .. }
@@ -140,12 +184,21 @@ impl SignageRequest {
             | Self::ScreenPut { .. }
             | Self::ScreenShowing { .. }
             | Self::ScreenPlays { .. }
-            | Self::GroupGet { .. }
-            | Self::GroupList
-            | Self::GroupPut { .. }
-            | Self::ConfigGet { .. }
-            | Self::ConfigList
-            | Self::ConfigPut { .. } => return None,
+            | Self::ChannelGet { .. }
+            | Self::ChannelList
+            | Self::ChannelPut { .. }
+            | Self::AudienceGet { .. }
+            | Self::AudienceList
+            | Self::AudienceReaches { .. }
+            | Self::AudiencePut { .. }
+            | Self::BroadcastGet { .. }
+            | Self::BroadcastList
+            | Self::BroadcastPut { .. }
+            | Self::AsRunGet { .. }
+            | Self::AsRunRecord { .. }
+            | Self::PresetGet { .. }
+            | Self::PresetList
+            | Self::PresetPut { .. } => return None,
         };
         Some(format!(
             "Delete signage {noun} {id}? This removes it for everyone in the Space."
@@ -164,14 +217,14 @@ pub enum SignageResponse {
     /// The program and the library entries its items name, together, because
     /// fetching the rows one by one is the round trip this surface removes.
     ///
-    /// `configs` is the Space-wide kind map, joined here so a display prepare
-    /// that is one World Query can overlay live Athan settings without a
-    /// second ClientInvocation. Absent on older answers; default empty.
+    /// `presets` is every kind presentation, joined here so a display prepare
+    /// that is one World Query can resolve an entry's preset without a second
+    /// ClientInvocation. Absent on older answers; default empty.
     Program {
         program: Option<signage::SignageProgram>,
         media: Vec<contract::SignageMedia>,
         #[serde(default)]
-        configs: Vec<contract::SignageConfig>,
+        presets: Vec<contract::SignagePreset>,
     },
     Programs {
         programs: Vec<signage::SignageProgram>,
@@ -198,10 +251,10 @@ pub enum SignageResponse {
         programs: Vec<String>,
     },
     Screen {
-        screen: Option<contract::SignageScreen>,
+        screen: Option<signage::SignageScreen>,
     },
     Screens {
-        screens: Vec<contract::SignageScreen>,
+        screens: Vec<signage::SignageScreen>,
     },
     Showing {
         screens: Vec<String>,
@@ -209,9 +262,19 @@ pub enum SignageResponse {
     /// The inputs to the ladder, never its answer — the caller brings the clock
     /// and calls [`contract::ScreenProjection::playback`].
     Plays {
-        screen: Option<contract::SignageScreen>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        group: Option<contract::SignageGroup>,
+        screen: Option<signage::SignageScreen>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        channels: Vec<signage::SignageChannel>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        broadcasts: Vec<signage::SignageBroadcast>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audiences: Vec<signage::SignageAudience>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        programs: Vec<signage::SignageProgram>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<contract::SignageMedia>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        presets: Vec<contract::SignagePreset>,
     },
     ScreenSaved {
         screen: String,
@@ -219,29 +282,63 @@ pub enum SignageResponse {
     ScreenDeleted {
         screen: String,
     },
-    Group {
-        group: Option<contract::SignageGroup>,
+    Channel {
+        channel: Option<signage::SignageChannel>,
     },
-    Groups {
-        groups: Vec<contract::SignageGroup>,
+    Channels {
+        channels: Vec<signage::SignageChannel>,
     },
-    GroupSaved {
-        group: String,
+    ChannelSaved {
+        channel: String,
     },
-    GroupDeleted {
-        group: String,
+    ChannelDeleted {
+        channel: String,
     },
-    Config {
-        config: Option<contract::SignageConfig>,
+    Audience {
+        audience: Option<signage::SignageAudience>,
     },
-    Configs {
-        configs: Vec<contract::SignageConfig>,
+    Audiences {
+        audiences: Vec<signage::SignageAudience>,
     },
-    ConfigSaved {
-        config: String,
+    AudienceSaved {
+        audience: String,
     },
-    ConfigDeleted {
-        config: String,
+    AudienceDeleted {
+        audience: String,
+    },
+    /// The blast radius, by screen id.
+    Reaches {
+        screens: Vec<String>,
+    },
+    Broadcast {
+        broadcast: Option<signage::SignageBroadcast>,
+    },
+    Broadcasts {
+        broadcasts: Vec<signage::SignageBroadcast>,
+    },
+    BroadcastSaved {
+        broadcast: String,
+    },
+    BroadcastDeleted {
+        broadcast: String,
+    },
+    AsRun {
+        asrun: Option<contract::SignageAsRun>,
+    },
+    AsRunRecorded {
+        screen: String,
+    },
+    Preset {
+        preset: Option<contract::SignagePreset>,
+    },
+    Presets {
+        presets: Vec<contract::SignagePreset>,
+    },
+    PresetSaved {
+        preset: String,
+    },
+    PresetDeleted {
+        preset: String,
     },
     Error {
         message: String,
@@ -311,8 +408,11 @@ trait Document {
 struct Program;
 struct Media;
 struct Screen;
-struct Group;
-struct Config;
+struct Channel;
+struct Audience;
+struct Broadcast;
+struct Preset;
+struct AsRun;
 
 impl Document for Program {
     type Query = signage::SignageQuery;
@@ -344,23 +444,53 @@ impl Document for Screen {
     }
 }
 
-impl Document for Group {
-    type Query = contract::GroupQuery;
-    type Intent = contract::GroupIntent;
-    type Projection = contract::GroupProjection;
-    const VERSION: u32 = contract::GROUP_SCHEMA_VERSION;
+impl Document for Channel {
+    type Query = contract::ChannelQuery;
+    type Intent = contract::ChannelIntent;
+    type Projection = contract::ChannelProjection;
+    const VERSION: u32 = contract::CHANNEL_SCHEMA_VERSION;
     fn schema() -> SchemaId {
-        contract::group_schema()
+        contract::channel_schema()
     }
 }
 
-impl Document for Config {
-    type Query = contract::ConfigQuery;
-    type Intent = contract::ConfigIntent;
-    type Projection = contract::ConfigProjection;
-    const VERSION: u32 = contract::CONFIG_SCHEMA_VERSION;
+impl Document for Audience {
+    type Query = contract::AudienceQuery;
+    type Intent = contract::AudienceIntent;
+    type Projection = contract::AudienceProjection;
+    const VERSION: u32 = contract::AUDIENCE_SCHEMA_VERSION;
     fn schema() -> SchemaId {
-        contract::config_schema()
+        contract::audience_schema()
+    }
+}
+
+impl Document for Broadcast {
+    type Query = contract::BroadcastQuery;
+    type Intent = contract::BroadcastIntent;
+    type Projection = contract::BroadcastProjection;
+    const VERSION: u32 = contract::BROADCAST_SCHEMA_VERSION;
+    fn schema() -> SchemaId {
+        contract::broadcast_schema()
+    }
+}
+
+impl Document for AsRun {
+    type Query = contract::AsRunQuery;
+    type Intent = contract::AsRunIntent;
+    type Projection = contract::AsRunProjection;
+    const VERSION: u32 = contract::ASRUN_SCHEMA_VERSION;
+    fn schema() -> SchemaId {
+        contract::asrun_schema()
+    }
+}
+
+impl Document for Preset {
+    type Query = contract::PresetQuery;
+    type Intent = contract::PresetIntent;
+    type Projection = contract::PresetProjection;
+    const VERSION: u32 = contract::PRESET_SCHEMA_VERSION;
+    fn schema() -> SchemaId {
+        contract::preset_schema()
     }
 }
 
@@ -479,69 +609,174 @@ impl SignageCallHandler {
                     Err(message) => SignageResponse::Error { message },
                 }
             }
-            SignageRequest::GroupGet { group } => {
-                Self::group_query(contract::GroupQuery::Group { group }, context)
+            SignageRequest::ChannelGet { channel } => {
+                Self::channel_query(contract::ChannelQuery::Channel { channel }, context)
             }
-            SignageRequest::GroupList => Self::group_query(contract::GroupQuery::Groups, context),
-            SignageRequest::GroupPut { group } => {
-                if !group.validate() {
+            SignageRequest::ChannelList => {
+                Self::channel_query(contract::ChannelQuery::Channels, context)
+            }
+            SignageRequest::ChannelPut { channel } => {
+                if !channel.validate() {
                     return SignageResponse::Error {
-                        message: "invalid signage group".into(),
+                        message: "invalid signage channel".into(),
                     };
                 }
-                let id = group.id.clone();
-                match Self::submit::<Group>(contract::GroupIntent::Put { group }, context) {
-                    Ok(()) => SignageResponse::GroupSaved { group: id },
+                let id = channel.id.clone();
+                match Self::submit::<Channel>(contract::ChannelIntent::Put { channel }, context) {
+                    Ok(()) => SignageResponse::ChannelSaved { channel: id },
                     Err(message) => SignageResponse::Error { message },
                 }
             }
-            SignageRequest::GroupDelete { group } => {
-                if BodyId::parse(&group).is_none() {
+            SignageRequest::ChannelDelete { channel } => {
+                if BodyId::parse(&channel).is_none() {
                     return SignageResponse::Error {
-                        message: "invalid signage group id".into(),
+                        message: "invalid signage channel id".into(),
                     };
                 }
-                match Self::submit::<Group>(
-                    contract::GroupIntent::Delete {
-                        group: group.clone(),
+                match Self::submit::<Channel>(
+                    contract::ChannelIntent::Delete {
+                        channel: channel.clone(),
                     },
                     context,
                 ) {
-                    Ok(()) => SignageResponse::GroupDeleted { group },
+                    Ok(()) => SignageResponse::ChannelDeleted { channel },
                     Err(message) => SignageResponse::Error { message },
                 }
             }
-            SignageRequest::ConfigGet { config } => {
-                Self::config_query(contract::ConfigQuery::Config { config }, context)
+            SignageRequest::AudienceGet { audience } => {
+                Self::audience_query(contract::AudienceQuery::Audience { audience }, context)
             }
-            SignageRequest::ConfigList => {
-                Self::config_query(contract::ConfigQuery::Configs, context)
+            SignageRequest::AudienceList => {
+                Self::audience_query(contract::AudienceQuery::Audiences, context)
             }
-            SignageRequest::ConfigPut { config } => {
-                if !config.validate() {
-                    return SignageResponse::Error {
-                        message: "invalid signage config".into(),
-                    };
-                }
-                let id = config.id.clone();
-                match Self::submit::<Config>(contract::ConfigIntent::Put { config }, context) {
-                    Ok(()) => SignageResponse::ConfigSaved { config: id },
+            SignageRequest::AudienceReaches { audience } => {
+                match Self::ask::<Screen>(contract::ScreenQuery::Reaches { audience }, context) {
+                    Ok(contract::ScreenProjection::Reaches { screens }) => {
+                        SignageResponse::Reaches { screens }
+                    }
+                    Ok(_) => SignageResponse::Error {
+                        message: "Reaches answered something else".into(),
+                    },
                     Err(message) => SignageResponse::Error { message },
                 }
             }
-            SignageRequest::ConfigDelete { config } => {
-                if BodyId::parse(&config).is_none() {
+            SignageRequest::AudiencePut { audience } => {
+                if !audience.validate() {
                     return SignageResponse::Error {
-                        message: "invalid signage config id".into(),
+                        message: "invalid signage audience".into(),
                     };
                 }
-                match Self::submit::<Config>(
-                    contract::ConfigIntent::Delete {
-                        config: config.clone(),
+                let id = audience.id.clone();
+                match Self::submit::<Audience>(contract::AudienceIntent::Put { audience }, context)
+                {
+                    Ok(()) => SignageResponse::AudienceSaved { audience: id },
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::AudienceDelete { audience } => {
+                if BodyId::parse(&audience).is_none() {
+                    return SignageResponse::Error {
+                        message: "invalid signage audience id".into(),
+                    };
+                }
+                match Self::submit::<Audience>(
+                    contract::AudienceIntent::Delete {
+                        audience: audience.clone(),
                     },
                     context,
                 ) {
-                    Ok(()) => SignageResponse::ConfigDeleted { config },
+                    Ok(()) => SignageResponse::AudienceDeleted { audience },
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::BroadcastGet { broadcast } => {
+                Self::broadcast_query(contract::BroadcastQuery::Broadcast { broadcast }, context)
+            }
+            SignageRequest::BroadcastList => {
+                Self::broadcast_query(contract::BroadcastQuery::Broadcasts, context)
+            }
+            SignageRequest::BroadcastPut { broadcast } => {
+                if !broadcast.validate() {
+                    return SignageResponse::Error {
+                        message: "invalid signage broadcast".into(),
+                    };
+                }
+                let id = broadcast.id.clone();
+                match Self::submit::<Broadcast>(
+                    contract::BroadcastIntent::Put { broadcast },
+                    context,
+                ) {
+                    Ok(()) => SignageResponse::BroadcastSaved { broadcast: id },
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::BroadcastDelete { broadcast } => {
+                if BodyId::parse(&broadcast).is_none() {
+                    return SignageResponse::Error {
+                        message: "invalid signage broadcast id".into(),
+                    };
+                }
+                match Self::submit::<Broadcast>(
+                    contract::BroadcastIntent::Delete {
+                        broadcast: broadcast.clone(),
+                    },
+                    context,
+                ) {
+                    Ok(()) => SignageResponse::BroadcastDeleted { broadcast },
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::AsRunGet { screen } => {
+                match Self::ask::<AsRun>(contract::AsRunQuery::AsRun { screen }, context) {
+                    Ok(contract::AsRunProjection::AsRun { asrun }) => {
+                        SignageResponse::AsRun { asrun }
+                    }
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::AsRunRecord { asrun } => {
+                if !asrun.validate() {
+                    return SignageResponse::Error {
+                        message: "invalid signage as-run record".into(),
+                    };
+                }
+                let screen = asrun.screen.clone();
+                match Self::submit::<AsRun>(contract::AsRunIntent::Record { asrun }, context) {
+                    Ok(()) => SignageResponse::AsRunRecorded { screen },
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::PresetGet { preset } => {
+                Self::preset_query(contract::PresetQuery::Preset { preset }, context)
+            }
+            SignageRequest::PresetList => {
+                Self::preset_query(contract::PresetQuery::Presets, context)
+            }
+            SignageRequest::PresetPut { preset } => {
+                if !preset.validate() {
+                    return SignageResponse::Error {
+                        message: "invalid signage preset".into(),
+                    };
+                }
+                let id = preset.id.clone();
+                match Self::submit::<Preset>(contract::PresetIntent::Put { preset }, context) {
+                    Ok(()) => SignageResponse::PresetSaved { preset: id },
+                    Err(message) => SignageResponse::Error { message },
+                }
+            }
+            SignageRequest::PresetDelete { preset } => {
+                if BodyId::parse(&preset).is_none() {
+                    return SignageResponse::Error {
+                        message: "invalid signage preset id".into(),
+                    };
+                }
+                match Self::submit::<Preset>(
+                    contract::PresetIntent::Delete {
+                        preset: preset.clone(),
+                    },
+                    context,
+                ) {
+                    Ok(()) => SignageResponse::PresetDeleted { preset },
                     Err(message) => SignageResponse::Error { message },
                 }
             }
@@ -554,7 +789,7 @@ impl SignageCallHandler {
                 SignageResponse::Program {
                     program,
                     media,
-                    configs: Self::configs_or_empty(context),
+                    presets: Self::presets_or_empty(context),
                 }
             }
             Ok(signage::SignageProjection::Programs { programs }) => {
@@ -584,36 +819,81 @@ impl SignageCallHandler {
             Ok(contract::ScreenProjection::Showing { screens }) => {
                 SignageResponse::Showing { screens }
             }
-            Ok(contract::ScreenProjection::Plays { screen, group }) => {
-                SignageResponse::Plays { screen, group }
+            Ok(contract::ScreenProjection::Reaches { screens }) => {
+                SignageResponse::Reaches { screens }
+            }
+            Ok(contract::ScreenProjection::Plays {
+                screen,
+                channels,
+                broadcasts,
+                audiences,
+                programs,
+                media,
+                presets,
+            }) => SignageResponse::Plays {
+                screen,
+                channels,
+                broadcasts,
+                audiences,
+                programs,
+                media,
+                presets,
+            },
+            Err(message) => SignageResponse::Error { message },
+        }
+    }
+
+    fn channel_query(query: contract::ChannelQuery, context: &Context<'_>) -> SignageResponse {
+        match Self::ask::<Channel>(query, context) {
+            Ok(contract::ChannelProjection::Channel { channel }) => {
+                SignageResponse::Channel { channel }
+            }
+            Ok(contract::ChannelProjection::Channels { channels }) => {
+                SignageResponse::Channels { channels }
             }
             Err(message) => SignageResponse::Error { message },
         }
     }
 
-    fn group_query(query: contract::GroupQuery, context: &Context<'_>) -> SignageResponse {
-        match Self::ask::<Group>(query, context) {
-            Ok(contract::GroupProjection::Group { group }) => SignageResponse::Group { group },
-            Ok(contract::GroupProjection::Groups { groups }) => SignageResponse::Groups { groups },
-            Err(message) => SignageResponse::Error { message },
-        }
-    }
-
-    fn config_query(query: contract::ConfigQuery, context: &Context<'_>) -> SignageResponse {
-        match Self::ask::<Config>(query, context) {
-            Ok(contract::ConfigProjection::Config { config }) => SignageResponse::Config { config },
-            Ok(contract::ConfigProjection::Configs { configs }) => {
-                SignageResponse::Configs { configs }
+    fn audience_query(query: contract::AudienceQuery, context: &Context<'_>) -> SignageResponse {
+        match Self::ask::<Audience>(query, context) {
+            Ok(contract::AudienceProjection::Audience { audience }) => {
+                SignageResponse::Audience { audience }
+            }
+            Ok(contract::AudienceProjection::Audiences { audiences }) => {
+                SignageResponse::Audiences { audiences }
             }
             Err(message) => SignageResponse::Error { message },
         }
     }
 
-    /// Live kind configs, or none. A failed config query must not fail the
-    /// program the screen is trying to draw.
-    fn configs_or_empty(context: &Context<'_>) -> Vec<contract::SignageConfig> {
-        match Self::ask::<Config>(contract::ConfigQuery::Configs, context) {
-            Ok(contract::ConfigProjection::Configs { configs }) => configs,
+    fn broadcast_query(query: contract::BroadcastQuery, context: &Context<'_>) -> SignageResponse {
+        match Self::ask::<Broadcast>(query, context) {
+            Ok(contract::BroadcastProjection::Broadcast { broadcast }) => {
+                SignageResponse::Broadcast { broadcast }
+            }
+            Ok(contract::BroadcastProjection::Broadcasts { broadcasts }) => {
+                SignageResponse::Broadcasts { broadcasts }
+            }
+            Err(message) => SignageResponse::Error { message },
+        }
+    }
+
+    fn preset_query(query: contract::PresetQuery, context: &Context<'_>) -> SignageResponse {
+        match Self::ask::<Preset>(query, context) {
+            Ok(contract::PresetProjection::Preset { preset }) => SignageResponse::Preset { preset },
+            Ok(contract::PresetProjection::Presets { presets }) => {
+                SignageResponse::Presets { presets }
+            }
+            Err(message) => SignageResponse::Error { message },
+        }
+    }
+
+    /// Every kind presentation, or none. A failed preset query must not fail
+    /// the program the screen is trying to draw.
+    fn presets_or_empty(context: &Context<'_>) -> Vec<contract::SignagePreset> {
+        match Self::ask::<Preset>(contract::PresetQuery::Presets, context) {
+            Ok(contract::PresetProjection::Presets { presets }) => presets,
             _ => Vec::new(),
         }
     }
@@ -760,40 +1040,96 @@ pub(crate) fn every_verb() -> Vec<(SignageRequest, Access)> {
             Access::Command,
         ),
         (
-            SignageRequest::GroupGet {
-                group: tests::group().id,
+            SignageRequest::ChannelGet {
+                channel: tests::channel().id,
             },
             Access::Query,
         ),
-        (SignageRequest::GroupList, Access::Query),
+        (SignageRequest::ChannelList, Access::Query),
         (
-            SignageRequest::GroupPut {
-                group: tests::group(),
+            SignageRequest::ChannelPut {
+                channel: tests::channel(),
             },
             Access::Command,
         ),
         (
-            SignageRequest::GroupDelete {
-                group: tests::group().id,
+            SignageRequest::ChannelDelete {
+                channel: tests::channel().id,
             },
             Access::Command,
         ),
         (
-            SignageRequest::ConfigGet {
-                config: tests::config().id,
+            SignageRequest::AudienceGet {
+                audience: tests::audience().id,
             },
             Access::Query,
         ),
-        (SignageRequest::ConfigList, Access::Query),
+        (SignageRequest::AudienceList, Access::Query),
         (
-            SignageRequest::ConfigPut {
-                config: tests::config(),
+            SignageRequest::AudienceReaches {
+                audience: tests::audience().id,
+            },
+            Access::Query,
+        ),
+        (
+            SignageRequest::AudiencePut {
+                audience: tests::audience(),
             },
             Access::Command,
         ),
         (
-            SignageRequest::ConfigDelete {
-                config: tests::config().id,
+            SignageRequest::AudienceDelete {
+                audience: tests::audience().id,
+            },
+            Access::Command,
+        ),
+        (
+            SignageRequest::BroadcastGet {
+                broadcast: tests::broadcast().id,
+            },
+            Access::Query,
+        ),
+        (SignageRequest::BroadcastList, Access::Query),
+        (
+            SignageRequest::BroadcastPut {
+                broadcast: tests::broadcast(),
+            },
+            Access::Command,
+        ),
+        (
+            SignageRequest::BroadcastDelete {
+                broadcast: tests::broadcast().id,
+            },
+            Access::Command,
+        ),
+        (
+            SignageRequest::AsRunGet {
+                screen: tests::screen().id,
+            },
+            Access::Query,
+        ),
+        (
+            SignageRequest::AsRunRecord {
+                asrun: tests::asrun(),
+            },
+            Access::Command,
+        ),
+        (
+            SignageRequest::PresetGet {
+                preset: tests::preset().id,
+            },
+            Access::Query,
+        ),
+        (SignageRequest::PresetList, Access::Query),
+        (
+            SignageRequest::PresetPut {
+                preset: tests::preset(),
+            },
+            Access::Command,
+        ),
+        (
+            SignageRequest::PresetDelete {
+                preset: tests::preset().id,
             },
             Access::Command,
         ),
@@ -839,27 +1175,63 @@ mod tests {
         }
     }
 
-    pub(super) fn screen() -> contract::SignageScreen {
-        contract::SignageScreen {
+    pub(super) fn screen() -> signage::SignageScreen {
+        signage::SignageScreen {
             id: id(3),
             name: "Front door".into(),
-            group: None,
-            intent: Default::default(),
+            place: None,
+            facts: Default::default(),
+            sync: None,
+            labels: vec!["role:lobby".into()],
+            tuned: None,
+        }
+    }
+
+    pub(super) fn channel() -> signage::SignageChannel {
+        signage::SignageChannel {
+            id: id(4),
+            name: "Lobby loop".into(),
+            base: Some(program().id),
             schedule: Vec::new(),
         }
     }
 
-    pub(super) fn group() -> contract::SignageGroup {
-        contract::SignageGroup {
-            id: id(4),
-            name: "Lobby screens".into(),
-            intent: Default::default(),
-            screens: vec![screen().id],
+    pub(super) fn audience() -> signage::SignageAudience {
+        signage::SignageAudience {
+            id: id(6),
+            name: "Every screen".into(),
+            rule: signage::Match::All,
         }
     }
 
-    pub(super) fn config() -> contract::SignageConfig {
-        contract::SignageConfig {
+    pub(super) fn broadcast() -> signage::SignageBroadcast {
+        signage::SignageBroadcast {
+            id: id(7),
+            name: "Evacuate".into(),
+            audience: audience().id,
+            action: signage::Action::Play {
+                program: program().id,
+            },
+            timing: signage::Timing::When {
+                of: signage::Match::All,
+                priority: 90,
+            },
+            supersedes: Vec::new(),
+            cancelled_at_unix_ms: None,
+        }
+    }
+
+    pub(super) fn asrun() -> contract::SignageAsRun {
+        contract::SignageAsRun {
+            id: id(8),
+            screen: screen().id,
+            entries: Vec::new(),
+            observations: Default::default(),
+        }
+    }
+
+    pub(super) fn preset() -> contract::SignagePreset {
+        contract::SignagePreset {
             id: id(5),
             kind: "weather".into(),
             name: "Weather".into(),
@@ -931,26 +1303,26 @@ mod tests {
         let answer = serde_json::to_value(SignageResponse::Program {
             program: Some(program()),
             media: vec![media()],
-            configs: vec![config()],
+            presets: vec![preset()],
         })
         .unwrap();
         assert_eq!(answer["kind"], "program");
         assert_eq!(answer["program"]["items"][0]["media"], media().id);
         assert_eq!(answer["media"][0]["id"], media().id);
-        assert_eq!(answer["configs"][0]["kind"], "weather");
+        assert_eq!(answer["presets"][0]["kind"], "weather");
     }
 
     #[test]
-    fn a_program_answer_without_configs_still_reads() {
+    fn a_program_answer_without_presets_still_reads() {
         let raw = serde_json::json!({
             "kind": "program",
             "program": program(),
             "media": [media()],
         });
-        let SignageResponse::Program { configs, .. } = serde_json::from_value(raw).unwrap() else {
+        let SignageResponse::Program { presets, .. } = serde_json::from_value(raw).unwrap() else {
             panic!("a program answer deserializes as a program");
         };
-        assert!(configs.is_empty());
+        assert!(presets.is_empty());
     }
 
     /// One schema pair per document, and no two alike.
@@ -966,16 +1338,22 @@ mod tests {
         assert_eq!(Media::VERSION, contract::MEDIA_SCHEMA_VERSION);
         assert_eq!(Screen::schema(), contract::screen_schema());
         assert_eq!(Screen::VERSION, contract::SCREEN_SCHEMA_VERSION);
-        assert_eq!(Group::schema(), contract::group_schema());
-        assert_eq!(Group::VERSION, contract::GROUP_SCHEMA_VERSION);
-        assert_eq!(Config::schema(), contract::config_schema());
-        assert_eq!(Config::VERSION, contract::CONFIG_SCHEMA_VERSION);
+        assert_eq!(Channel::schema(), contract::channel_schema());
+        assert_eq!(Channel::VERSION, contract::CHANNEL_SCHEMA_VERSION);
+        assert_eq!(Audience::schema(), contract::audience_schema());
+        assert_eq!(Audience::VERSION, contract::AUDIENCE_SCHEMA_VERSION);
+        assert_eq!(Broadcast::schema(), contract::broadcast_schema());
+        assert_eq!(Broadcast::VERSION, contract::BROADCAST_SCHEMA_VERSION);
+        assert_eq!(Preset::schema(), contract::preset_schema());
+        assert_eq!(Preset::VERSION, contract::PRESET_SCHEMA_VERSION);
+        assert_eq!(AsRun::schema(), contract::asrun_schema());
+        assert_eq!(AsRun::VERSION, contract::ASRUN_SCHEMA_VERSION);
         let distinct: std::collections::BTreeSet<_> = [
             Program::schema(),
             Media::schema(),
             Screen::schema(),
-            Group::schema(),
-            Config::schema(),
+            Channel::schema(),
+            Preset::schema(),
         ]
         .into_iter()
         .collect();
