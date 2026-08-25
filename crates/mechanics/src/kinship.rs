@@ -305,7 +305,7 @@ impl Claim {
             Self::Called(name) => name.as_bytes().to_vec(),
             Self::Sponsors(party) => party.wire().into_bytes(),
             Self::Portrait { picture, detail } => {
-                let mut out = Vec::with_capacity(64 + detail.len());
+                let mut out = Vec::with_capacity(64_usize.saturating_add(detail.len()));
                 match picture {
                     Some(hash) => framed(&mut out, &hash[..]),
                     None => framed(&mut out, &[]),

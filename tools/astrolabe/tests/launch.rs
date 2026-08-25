@@ -1020,9 +1020,7 @@ async fn the_daemon_serves_the_identity_profile_of_the_home_it_was_given() {
     };
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
-    let bundled_worlds = tempfile::tempdir().expect("bundled first-party World releases");
-    stage_bundled_worlds(bundled_worlds.path());
-    install_test_worlds(bundled_worlds.path(), identity.path());
+    install_independent_test_worlds(identity.path());
     let _daemon_stopped = DaemonStopped(identity.path().to_path_buf());
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
