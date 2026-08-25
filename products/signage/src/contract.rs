@@ -748,18 +748,30 @@ fn valid_content_id(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// What a screen says it actually played.
+/// What a screen played, as reported by the screen.
 ///
-/// Written by the panel, under the panel's own identity, and replicated like
-/// everything else. In broadcast this is the as-run log and it is the
-/// substrate billing rests on; in every signage CMS it is a telemetry table
-/// the server writes *about* a player. The difference matters: a record the
-/// controller authored attests only that the controller believes something,
-/// and proof-of-play that the proving party cannot sign is not proof.
+/// In broadcast this is the as-run log and it is the substrate billing rests
+/// on; in every signage CMS it is a telemetry table the server keeps *about* a
+/// player. This is closer to the first than the second — the record is a
+/// replicated Body rather than a private table, and the device authenticated
+/// itself before reporting — but the distinction is worth stating exactly,
+/// because it is easy to claim more than is true.
 ///
-/// It is also what stops a screen being purely a sink. A panel that can write
-/// is a peer, and the observations it reports here are the honest source of
-/// the context its own audiences are evaluated against.
+/// **A receiver cannot write this itself.** It reaches `/head/v1/*` and proves
+/// possession of its pairing key to the coordinator; it holds no Space actor
+/// and no signage grant, so it cannot submit a World intent. The coordinator
+/// records on its behalf, under the coordinator's actor, naming the device.
+/// So this attests *"the coordinator accepted a report from a device that
+/// proved it was this panel"* — one link weaker than a signature by the panel,
+/// and materially stronger than a server asserting what it thinks it sent.
+///
+/// Closing that last link means admitting display devices as Space members
+/// with a scoped grant on their own screen, which is a custody change, not a
+/// schema one. The shape here does not have to change when it happens.
+#[allow(
+    rustdoc::private_intra_doc_links,
+    reason = "the plane referenced is engine-side, not this crate's"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignageAsRun {
     /// The screen, and the body id: one document per panel, appended to.
