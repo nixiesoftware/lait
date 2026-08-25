@@ -7,12 +7,15 @@ use runtime::world::{
     Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection, Version, World,
 };
 
+use crate::addressing::{Context as MatchContext, Match, SignageAudience};
 use crate::contract::{
-    self, ConfigIntent, ConfigProjection, ConfigQuery, GroupIntent, GroupProjection, GroupQuery,
-    MediaIntent, MediaProjection, MediaQuery, ScreenIntent, ScreenProjection, ScreenQuery,
-    SignageConfig, SignageGroup, SignageIntent, SignageMedia, SignageProgram, SignageProjection,
-    SignageQuery, SignageScreen,
+    self, AsRunIntent, AsRunProjection, AsRunQuery, AudienceIntent, AudienceProjection,
+    AudienceQuery, BroadcastIntent, BroadcastProjection, BroadcastQuery, ChannelIntent,
+    ChannelProjection, ChannelQuery, MediaIntent, MediaProjection, MediaQuery, PresetIntent,
+    PresetProjection, PresetQuery, ScreenIntent, ScreenProjection, ScreenQuery, SignageAsRun,
+    SignageIntent, SignageMedia, SignagePreset, SignageProgram, SignageProjection, SignageQuery,
 };
+use crate::fleet::{SignageBroadcast, SignageChannel, SignageScreen};
 
 pub struct SignageWorld {
     id: WorldId,
@@ -27,8 +30,17 @@ impl SignageWorld {
                 atomic_json(contract::program_schema(), contract::PROGRAM_SCHEMA_VERSION),
                 atomic_json(contract::media_schema(), contract::MEDIA_SCHEMA_VERSION),
                 atomic_json(contract::screen_schema(), contract::SCREEN_SCHEMA_VERSION),
-                atomic_json(contract::group_schema(), contract::GROUP_SCHEMA_VERSION),
-                atomic_json(contract::config_schema(), contract::CONFIG_SCHEMA_VERSION),
+                atomic_json(contract::channel_schema(), contract::CHANNEL_SCHEMA_VERSION),
+                atomic_json(
+                    contract::audience_schema(),
+                    contract::AUDIENCE_SCHEMA_VERSION,
+                ),
+                atomic_json(
+                    contract::broadcast_schema(),
+                    contract::BROADCAST_SCHEMA_VERSION,
+                ),
+                atomic_json(contract::preset_schema(), contract::PRESET_SCHEMA_VERSION),
+                atomic_json(contract::asrun_schema(), contract::ASRUN_SCHEMA_VERSION),
             ],
         }
     }
@@ -38,9 +50,14 @@ impl SignageWorld {
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
             2,
-            *blake3::hash(b"lait.signage.policy-table.v4:media-screen-group-config-resources")
-                .as_bytes(),
-            *blake3::hash(b"lait.signage.schemas.v4:program:media:screen:group:config").as_bytes(),
+            *blake3::hash(
+                b"lait.signage.policy-table.v5:media-screen-channel-audience-broadcast-preset-asrun",
+            )
+            .as_bytes(),
+            *blake3::hash(
+                b"lait.signage.schemas.v5:program:media:screen:channel:audience:broadcast:preset:asrun",
+            )
+            .as_bytes(),
         )
     }
 }
@@ -66,8 +83,11 @@ enum Plane {
     Program,
     Media,
     Screen,
-    Group,
-    Config,
+    Channel,
+    Audience,
+    Broadcast,
+    Preset,
+    AsRun,
 }
 
 impl Plane {
@@ -76,8 +96,11 @@ impl Plane {
             contract::PROGRAM_SCHEMA => (Self::Program, contract::PROGRAM_SCHEMA_VERSION),
             contract::MEDIA_SCHEMA => (Self::Media, contract::MEDIA_SCHEMA_VERSION),
             contract::SCREEN_SCHEMA => (Self::Screen, contract::SCREEN_SCHEMA_VERSION),
-            contract::GROUP_SCHEMA => (Self::Group, contract::GROUP_SCHEMA_VERSION),
-            contract::CONFIG_SCHEMA => (Self::Config, contract::CONFIG_SCHEMA_VERSION),
+            contract::CHANNEL_SCHEMA => (Self::Channel, contract::CHANNEL_SCHEMA_VERSION),
+            contract::AUDIENCE_SCHEMA => (Self::Audience, contract::AUDIENCE_SCHEMA_VERSION),
+            contract::BROADCAST_SCHEMA => (Self::Broadcast, contract::BROADCAST_SCHEMA_VERSION),
+            contract::PRESET_SCHEMA => (Self::Preset, contract::PRESET_SCHEMA_VERSION),
+            contract::ASRUN_SCHEMA => (Self::AsRun, contract::ASRUN_SCHEMA_VERSION),
             _ => return Err(Rejection::UnsupportedSchema),
         };
         if version != current {
@@ -97,7 +120,7 @@ impl World for SignageWorld {
     fn descriptor(&self) -> Descriptor {
         Descriptor {
             id: self.id.clone(),
-            implementation_version: Version(4),
+            implementation_version: Version(5),
             schemas: self.schemas.clone(),
             limits: Limits::default(),
             scope_schemas: Vec::new(),
@@ -121,8 +144,11 @@ impl World for SignageWorld {
             Plane::Program => write_program(&intent.payload),
             Plane::Media => write_media(&intent.payload),
             Plane::Screen => write_screen(&intent.payload),
-            Plane::Group => write_group(&intent.payload),
-            Plane::Config => self.write_config(ctx, &intent.payload),
+            Plane::Channel => write_channel(&intent.payload),
+            Plane::Audience => self.write_audience(ctx, &intent.payload),
+            Plane::Broadcast => write_broadcast(&intent.payload),
+            Plane::Preset => write_preset(&intent.payload),
+            Plane::AsRun => write_asrun(&intent.payload),
         }
     }
 
@@ -131,8 +157,11 @@ impl World for SignageWorld {
             Plane::Program => self.read_programs(ctx, &query.payload)?,
             Plane::Media => self.read_media(ctx, &query.payload)?,
             Plane::Screen => self.read_screens(ctx, &query.payload)?,
-            Plane::Group => self.read_groups(ctx, &query.payload)?,
-            Plane::Config => self.read_configs(ctx, &query.payload)?,
+            Plane::Channel => self.read_channels(ctx, &query.payload)?,
+            Plane::Audience => self.read_audiences(ctx, &query.payload)?,
+            Plane::Broadcast => self.read_broadcasts(ctx, &query.payload)?,
+            Plane::Preset => self.read_presets(ctx, &query.payload)?,
+            Plane::AsRun => self.read_asrun(ctx, &query.payload)?,
         };
         Ok(Projection {
             schema: query.schema,
@@ -198,33 +227,90 @@ fn write_screen(payload: &[u8]) -> Result<Effect, Rejection> {
                 return Err(Rejection::InvalidRequest);
             }
             let key = screen.body_key().ok_or(Rejection::InvalidRequest)?;
-            let demand = contract::demand_manage_screen(&screen.id, screen.group.as_deref());
+            let demand = contract::demand_manage_screen(&screen.id);
             Ok(staged(key, replace(&screen)?, None, demand))
         }
         ScreenIntent::Delete { screen } => {
             let key = contract::body_key(&screen).ok_or(Rejection::InvalidRequest)?;
-            // No group arm: a submission stages without reading, so the group
-            // that would widen this demand is not in hand. Narrower, not wider.
-            let demand = contract::demand_manage_screen(&screen, None);
+            let demand = contract::demand_manage_screen(&screen);
             Ok(staged(key, Op::Tombstone, None, demand))
         }
     }
 }
 
-fn write_group(payload: &[u8]) -> Result<Effect, Rejection> {
-    match decode::<GroupIntent>(payload)? {
-        GroupIntent::Put { group } => {
-            if !group.validate() {
+fn write_channel(payload: &[u8]) -> Result<Effect, Rejection> {
+    match decode::<ChannelIntent>(payload)? {
+        ChannelIntent::Put { channel } => {
+            if !channel.validate() {
                 return Err(Rejection::InvalidRequest);
             }
-            let key = group.body_key().ok_or(Rejection::InvalidRequest)?;
-            let demand = contract::demand_manage_group(&group.id);
-            Ok(staged(key, replace(&group)?, None, demand))
+            let key = channel.body_key().ok_or(Rejection::InvalidRequest)?;
+            let demand = contract::demand_manage_channel(&channel.id);
+            Ok(staged(key, replace(&channel)?, None, demand))
         }
-        GroupIntent::Delete { group } => {
-            let key = contract::body_key(&group).ok_or(Rejection::InvalidRequest)?;
-            let demand = contract::demand_manage_group(&group);
+        ChannelIntent::Delete { channel } => {
+            let key = contract::body_key(&channel).ok_or(Rejection::InvalidRequest)?;
+            let demand = contract::demand_manage_channel(&channel);
             Ok(staged(key, Op::Tombstone, None, demand))
+        }
+    }
+}
+
+fn write_broadcast(payload: &[u8]) -> Result<Effect, Rejection> {
+    match decode::<BroadcastIntent>(payload)? {
+        BroadcastIntent::Put { broadcast } => {
+            if !broadcast.validate() {
+                return Err(Rejection::InvalidRequest);
+            }
+            let key = broadcast.body_key().ok_or(Rejection::InvalidRequest)?;
+            // On the transmission and on the audience it names: sending to a
+            // set of screens is authority over that set.
+            let demand = contract::demand_manage_broadcast(&broadcast.id, &broadcast.audience);
+            Ok(staged(key, replace(&broadcast)?, None, demand))
+        }
+        BroadcastIntent::Delete { broadcast } => {
+            let key = contract::body_key(&broadcast).ok_or(Rejection::InvalidRequest)?;
+            // A submission stages without reading, so the audience that would
+            // widen this demand is not in hand. Fleet-wide, never narrower.
+            let demand = contract::demand_manage();
+            Ok(staged(key, Op::Tombstone, None, demand))
+        }
+    }
+}
+
+fn write_preset(payload: &[u8]) -> Result<Effect, Rejection> {
+    match decode::<PresetIntent>(payload)? {
+        // No read-before-write, and no uniqueness scan. The old config plane
+        // refused a second document for a kind so that a lookup *by kind* had
+        // one answer; entries name their preset by id now, so a second one is
+        // an ordinary row rather than an ambiguity to refuse.
+        PresetIntent::Put { preset } => {
+            if !preset.validate() {
+                return Err(Rejection::InvalidRequest);
+            }
+            let key = preset.body_key().ok_or(Rejection::InvalidRequest)?;
+            let demand = contract::demand_manage_preset(&preset.id);
+            Ok(staged(key, replace(&preset)?, None, demand))
+        }
+        PresetIntent::Delete { preset } => {
+            let key = contract::body_key(&preset).ok_or(Rejection::InvalidRequest)?;
+            let demand = contract::demand_manage_preset(&preset);
+            Ok(staged(key, Op::Tombstone, None, demand))
+        }
+    }
+}
+
+fn write_asrun(payload: &[u8]) -> Result<Effect, Rejection> {
+    match decode::<AsRunIntent>(payload)? {
+        AsRunIntent::Record { asrun } => {
+            if !asrun.validate() {
+                return Err(Rejection::InvalidRequest);
+            }
+            let key = asrun.body_key().ok_or(Rejection::InvalidRequest)?;
+            // Demanded on the screen, so the only principal who can attest
+            // what a panel played is that panel.
+            let demand = contract::demand_record_asrun(&asrun.screen);
+            Ok(staged(key, replace(&asrun)?, None, demand))
         }
     }
 }
@@ -232,34 +318,58 @@ fn write_group(payload: &[u8]) -> Result<Effect, Rejection> {
 impl SignageWorld {
     /// The one write that reads first.
     ///
-    /// A library entry reaches its kind's configuration by kind, so two
-    /// documents claiming one kind would make "how is weather configured"
-    /// answerable two ways. Refusing the second is cheaper than resolving the
-    /// ambiguity at every read, and it is a refusal an author can act on:
-    /// there is already a document for this kind, edit that one.
-    fn write_config(&self, ctx: &mut Context<'_>, payload: &[u8]) -> Result<Effect, Rejection> {
-        match decode::<ConfigIntent>(payload)? {
-            ConfigIntent::Put { config } => {
-                if !config.validate() {
+    /// An audience may name another audience, and a cycle among them would
+    /// make evaluation depend on where it started. Bounded hops already stop
+    /// it from running forever; refusing the cycle at write is what keeps
+    /// "who does this reach" from having two answers. It is a refusal an
+    /// author can act on: this audience already reaches through that one.
+    fn write_audience(&self, ctx: &mut Context<'_>, payload: &[u8]) -> Result<Effect, Rejection> {
+        match decode::<AudienceIntent>(payload)? {
+            AudienceIntent::Put { audience } => {
+                if !audience.validate() {
                     return Err(Rejection::InvalidRequest);
                 }
-                let existing = all(ctx, &self.id, &contract::config_schema(), |config| {
-                    SignageConfig::validate(config).then_some((&config.name, &config.id))
-                })?;
-                if existing.iter().any(|other| config.conflicts_with(other)) {
+                let existing = self.audiences(ctx)?;
+                if reaches_itself(&audience, &existing) {
                     return Err(Rejection::InvalidRequest);
                 }
-                let key = config.body_key().ok_or(Rejection::InvalidRequest)?;
-                let demand = contract::demand_manage_config(&config.id);
-                Ok(staged(key, replace(&config)?, None, demand))
+                let key = audience.body_key().ok_or(Rejection::InvalidRequest)?;
+                let demand = contract::demand_manage_audience(&audience.id);
+                Ok(staged(key, replace(&audience)?, None, demand))
             }
-            ConfigIntent::Delete { config } => {
-                let key = contract::body_key(&config).ok_or(Rejection::InvalidRequest)?;
-                let demand = contract::demand_manage_config(&config);
+            AudienceIntent::Delete { audience } => {
+                let key = contract::body_key(&audience).ok_or(Rejection::InvalidRequest)?;
+                let demand = contract::demand_manage_audience(&audience);
                 Ok(staged(key, Op::Tombstone, None, demand))
             }
         }
     }
+}
+
+/// Whether this audience, once written, would reach itself by reference.
+fn reaches_itself(candidate: &SignageAudience, existing: &[SignageAudience]) -> bool {
+    let mut rules: std::collections::BTreeMap<&str, &Match> = existing
+        .iter()
+        .filter(|other| other.id != candidate.id)
+        .map(|other| (other.id.as_str(), &other.rule))
+        .collect();
+    rules.insert(candidate.id.as_str(), &candidate.rule);
+
+    let mut seen = BTreeSet::new();
+    let mut frontier = Vec::new();
+    candidate.rule.referenced_audiences(&mut frontier);
+    while let Some(next) = frontier.pop() {
+        if next == candidate.id {
+            return true;
+        }
+        if !seen.insert(next.clone()) {
+            continue;
+        }
+        if let Some(rule) = rules.get(next.as_str()) {
+            rule.referenced_audiences(&mut frontier);
+        }
+    }
+    false
 }
 
 /// One row written, and what that row declares about content.
@@ -379,25 +489,68 @@ impl SignageWorld {
                 })?,
                 contract::demand_read(),
             )),
-            // Two reads, never a scan: the screen names its group.
+            // One answer carrying every input resolution takes. It is a scan
+            // now, where it used to be two reads, because addressing stopped
+            // being a pointer the screen holds and became a predicate other
+            // documents make about it — you cannot know which broadcasts
+            // reach a screen without looking at the broadcasts.
             ScreenQuery::Plays { screen } => {
                 let demand = contract::demand_read_screen(&screen);
                 let key = contract::body_key(&screen).ok_or(Rejection::InvalidRequest)?;
                 let screen = one::<SignageScreen>(ctx, &key, SignageScreen::validate)?;
-                let group = match screen.as_ref().and_then(|screen| screen.group.as_ref()) {
-                    Some(id) => match contract::body_key(id) {
-                        Some(key) => one(ctx, &key, SignageGroup::validate)?,
-                        None => None,
-                    },
-                    None => None,
+                let channels = self.channels(ctx)?;
+                let broadcasts = self.broadcasts(ctx)?;
+                let audiences = self.audiences(ctx)?;
+                Ok((
+                    encode(&ScreenProjection::Plays {
+                        screen,
+                        channels,
+                        broadcasts,
+                        audiences,
+                    })?,
+                    demand,
+                ))
+            }
+            // The blast radius, before anybody presses send. Answered here
+            // rather than assembled by a caller so the count an operator is
+            // shown is produced by the same evaluator that will decide.
+            ScreenQuery::Reaches { audience } => {
+                let demand = contract::demand_read_audience(&audience);
+                let audiences = self.audiences(ctx)?;
+                let lookup: std::collections::BTreeMap<String, Match> = audiences
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.rule.clone()))
+                    .collect();
+                let screens = match audiences.iter().find(|entry| entry.id == audience) {
+                    None => Vec::new(),
+                    Some(entry) => {
+                        // The World holds no clock, so an `Observed` term is
+                        // matched against nothing here and reaches nobody. A
+                        // preview is a lower bound, and honestly so.
+                        let cx = MatchContext::default();
+                        self.screens(ctx)?
+                            .into_iter()
+                            .filter(|screen| entry.rule.reaches(screen, &cx, &lookup))
+                            .map(|screen| screen.id)
+                            .collect()
+                    }
                 };
-                Ok((encode(&ScreenProjection::Plays { screen, group })?, demand))
+                Ok((encode(&ScreenProjection::Reaches { screens })?, demand))
             }
             ScreenQuery::Showing { program } => {
+                let channels = self.channels(ctx)?;
+                let broadcasts = self.broadcasts(ctx)?;
+                let audiences: std::collections::BTreeMap<String, Match> = self
+                    .audiences(ctx)?
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.rule))
+                    .collect();
                 let screens = self
                     .screens(ctx)?
                     .into_iter()
-                    .filter(|screen| intends(screen, &program))
+                    .filter(|screen| {
+                        could_reach(screen, &program, &channels, &broadcasts, &audiences)
+                    })
                     .map(|screen| screen.id)
                     .collect();
                 Ok((
@@ -408,46 +561,115 @@ impl SignageWorld {
         }
     }
 
-    fn read_groups(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
-        match decode::<GroupQuery>(payload)? {
-            GroupQuery::Group { group } => {
-                let demand = contract::demand_read_group(&group);
-                let key = contract::body_key(&group).ok_or(Rejection::InvalidRequest)?;
-                let group = one(ctx, &key, SignageGroup::validate)?;
-                Ok((encode(&GroupProjection::Group { group })?, demand))
+    fn read_channels(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
+        match decode::<ChannelQuery>(payload)? {
+            ChannelQuery::Channel { channel } => {
+                let demand = contract::demand_read_channel(&channel);
+                let key = contract::body_key(&channel).ok_or(Rejection::InvalidRequest)?;
+                let channel = one(ctx, &key, SignageChannel::validate)?;
+                Ok((encode(&ChannelProjection::Channel { channel })?, demand))
             }
-            GroupQuery::Groups => {
-                let groups = all(ctx, &self.id, &contract::group_schema(), |group| {
-                    SignageGroup::validate(group).then_some((&group.name, &group.id))
+            ChannelQuery::Channels => Ok((
+                encode(&ChannelProjection::Channels {
+                    channels: self.channels(ctx)?,
+                })?,
+                contract::demand_read(),
+            )),
+        }
+    }
+
+    fn read_audiences(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
+        match decode::<AudienceQuery>(payload)? {
+            AudienceQuery::Audience { audience } => {
+                let demand = contract::demand_read_audience(&audience);
+                let key = contract::body_key(&audience).ok_or(Rejection::InvalidRequest)?;
+                let audience = one(ctx, &key, SignageAudience::validate)?;
+                Ok((encode(&AudienceProjection::Audience { audience })?, demand))
+            }
+            AudienceQuery::Audiences => Ok((
+                encode(&AudienceProjection::Audiences {
+                    audiences: self.audiences(ctx)?,
+                })?,
+                contract::demand_read(),
+            )),
+        }
+    }
+
+    fn read_broadcasts(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
+        match decode::<BroadcastQuery>(payload)? {
+            BroadcastQuery::Broadcast { broadcast } => {
+                let demand = contract::demand_read_broadcast(&broadcast);
+                let key = contract::body_key(&broadcast).ok_or(Rejection::InvalidRequest)?;
+                let broadcast = one(ctx, &key, SignageBroadcast::validate)?;
+                Ok((
+                    encode(&BroadcastProjection::Broadcast { broadcast })?,
+                    demand,
+                ))
+            }
+            BroadcastQuery::Broadcasts => Ok((
+                encode(&BroadcastProjection::Broadcasts {
+                    broadcasts: self.broadcasts(ctx)?,
+                })?,
+                contract::demand_read(),
+            )),
+        }
+    }
+
+    fn read_presets(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
+        match decode::<PresetQuery>(payload)? {
+            PresetQuery::Preset { preset } => {
+                let demand = contract::demand_read_preset(&preset);
+                let key = contract::body_key(&preset).ok_or(Rejection::InvalidRequest)?;
+                let preset = one(ctx, &key, SignagePreset::validate)?;
+                Ok((encode(&PresetProjection::Preset { preset })?, demand))
+            }
+            PresetQuery::Presets => {
+                let presets = all(ctx, &self.id, &contract::preset_schema(), |preset| {
+                    SignagePreset::validate(preset).then_some((&preset.name, &preset.id))
                 })?;
                 Ok((
-                    encode(&GroupProjection::Groups { groups })?,
+                    encode(&PresetProjection::Presets { presets })?,
                     contract::demand_read(),
                 ))
             }
         }
     }
 
-    fn read_configs(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
-        match decode::<ConfigQuery>(payload)? {
-            ConfigQuery::Config { config } => {
-                let demand = contract::demand_read_config(&config);
-                let key = contract::body_key(&config).ok_or(Rejection::InvalidRequest)?;
-                let config = one(ctx, &key, SignageConfig::validate)?;
-                Ok((encode(&ConfigProjection::Config { config })?, demand))
-            }
-            // Which kinds are configured is this list and nothing else, so it
-            // stays cheap enough to ask before drawing a picker.
-            ConfigQuery::Configs => {
-                let configs = all(ctx, &self.id, &contract::config_schema(), |config| {
-                    SignageConfig::validate(config).then_some((&config.name, &config.id))
-                })?;
-                Ok((
-                    encode(&ConfigProjection::Configs { configs })?,
-                    contract::demand_read(),
-                ))
+    fn read_asrun(&self, ctx: &Context<'_>, payload: &[u8]) -> Result<Answer, Rejection> {
+        match decode::<AsRunQuery>(payload)? {
+            AsRunQuery::AsRun { screen } => {
+                let demand = contract::demand_read_screen(&screen);
+                let asrun = self
+                    .all_asrun(ctx)?
+                    .into_iter()
+                    .find(|record| record.screen == screen);
+                Ok((encode(&AsRunProjection::AsRun { asrun })?, demand))
             }
         }
+    }
+
+    fn channels(&self, ctx: &Context<'_>) -> Result<Vec<SignageChannel>, Rejection> {
+        all(ctx, &self.id, &contract::channel_schema(), |channel| {
+            SignageChannel::validate(channel).then_some((&channel.name, &channel.id))
+        })
+    }
+
+    fn audiences(&self, ctx: &Context<'_>) -> Result<Vec<SignageAudience>, Rejection> {
+        all(ctx, &self.id, &contract::audience_schema(), |audience| {
+            SignageAudience::validate(audience).then_some((&audience.name, &audience.id))
+        })
+    }
+
+    fn broadcasts(&self, ctx: &Context<'_>) -> Result<Vec<SignageBroadcast>, Rejection> {
+        all(ctx, &self.id, &contract::broadcast_schema(), |broadcast| {
+            SignageBroadcast::validate(broadcast).then_some((&broadcast.name, &broadcast.id))
+        })
+    }
+
+    fn all_asrun(&self, ctx: &Context<'_>) -> Result<Vec<SignageAsRun>, Rejection> {
+        all(ctx, &self.id, &contract::asrun_schema(), |record| {
+            SignageAsRun::validate(record).then_some((&record.screen, &record.id))
+        })
     }
 
     fn programs(&self, ctx: &Context<'_>) -> Result<Vec<SignageProgram>, Rejection> {
@@ -488,22 +710,56 @@ fn named_media(
     Ok(library)
 }
 
-/// Whether a screen's slot names `program` at all.
+/// Which screens a program could reach, ignoring time.
 ///
-/// A World callback gets no clock, so `intended_at` cannot be asked here and a
-/// lapsed override still answers: this index says which screens *name* a
-/// program, which is the question a rename or a delete needs answered.
-fn intends(screen: &SignageScreen, program: &str) -> bool {
-    screen
-        .intent
-        .base
-        .as_ref()
-        .is_some_and(|base| base.member == program)
-        || screen
-            .intent
-            .over
-            .as_ref()
-            .is_some_and(|over| over.choice.member == program)
+/// A World callback gets no clock, so this answers *reachability* rather than
+/// what is on the glass now: a channel that carries the program anywhere in
+/// its schedule counts, and so does a broadcast that plays it, whatever its
+/// window says. That is the question a rename or a delete needs answered —
+/// "who would notice if this went away" — and answering it with a clock would
+/// make a program look unused because nobody happened to be showing it.
+fn could_reach(
+    screen: &SignageScreen,
+    program: &str,
+    channels: &[SignageChannel],
+    broadcasts: &[SignageBroadcast],
+    audiences: &std::collections::BTreeMap<String, Match>,
+) -> bool {
+    let tuned_to_it = screen.tuned.as_deref().is_some_and(|id| {
+        channels.iter().any(|channel| {
+            channel.id == id
+                && (channel.base.as_deref() == Some(program)
+                    || channel
+                        .schedule
+                        .iter()
+                        .any(|window| window.program == program))
+        })
+    });
+    if tuned_to_it {
+        return true;
+    }
+    // Reachability, so `Observed` terms are matched against nothing and a
+    // reactive broadcast is reported only when the rest of its audience
+    // already reaches this screen.
+    let cx = MatchContext::default();
+    broadcasts.iter().any(|broadcast| {
+        let plays_it = match &broadcast.action {
+            crate::fleet::Action::Play { program: played } => played == program,
+            crate::fleet::Action::Tune { channel: id } => channels.iter().any(|channel| {
+                &channel.id == id
+                    && (channel.base.as_deref() == Some(program)
+                        || channel
+                            .schedule
+                            .iter()
+                            .any(|window| window.program == program))
+            }),
+            _ => false,
+        };
+        plays_it
+            && audiences
+                .get(&broadcast.audience)
+                .is_some_and(|rule| rule.reaches(screen, &cx, audiences))
+    })
 }
 
 /// One row, decoded and re-checked against its own contract. A row that no
@@ -554,7 +810,9 @@ fn encode<T: serde::Serialize>(projection: &T) -> Result<Vec<u8>, Rejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addressing::Compare;
     use crate::contract::{MediaSource, ProgramCycle, SignageItem};
+    use crate::fleet::{Action, Resolved, Showing, Timing};
     use mechanics::authorization::AuthorizationDemand;
     use replica::body::BodyId;
     use std::collections::BTreeMap;
@@ -624,20 +882,19 @@ mod tests {
         );
     }
 
+    /// A screen's own grant, or the fleet's. There is no third arm now: a
+    /// group used to widen this demand, and which set somebody had filed a
+    /// panel under stopped being part of who may write to it.
     #[test]
-    fn a_screen_put_is_satisfied_by_the_screen_its_group_or_the_fleet() {
-        let screen = screen("a", Some(group_id()), Some(program_id()));
+    fn a_screen_put_is_satisfied_by_the_screen_or_the_fleet() {
+        let screen = screen("a", None, Some(program_id()));
         let effect = submit(&screen_intent(ScreenIntent::Put {
             screen: screen.clone(),
         }))
         .unwrap();
         assert_eq!(
             granted_on(&effect.demand),
-            BTreeSet::from([
-                vec!["screen".to_owned(), screen.id],
-                vec!["group".to_owned(), group_id()],
-                Vec::new(),
-            ])
+            BTreeSet::from([vec!["screen".to_owned(), screen.id], Vec::new()])
         );
     }
 
@@ -655,94 +912,209 @@ mod tests {
         );
     }
 
-    /// The ladder's inputs arrive together, and resolve at the caller's clock.
-    ///
-    /// One round trip, and the group comes back with the screen that named it
-    /// — pairing them at the caller is how a screen gets resolved against a
-    /// group it does not belong to.
+    /// The whole ladder, in one place: a broadcast outranks the channel a
+    /// screen is tuned to, and a cancelled one stops outranking anything.
     #[test]
-    fn plays_returns_the_screen_with_the_group_it_inherits_from() {
-        let inherited = body_id("inherited", 4);
-        let group = SignageGroup {
-            id: body_id("lobbies", 5),
-            name: "Lobbies".into(),
-            intent: register::Slot {
-                base: Some(register::Choice {
-                    member: inherited.clone(),
-                    chosen_unix_ms: 1,
-                    chooser: "someone".into(),
-                }),
-                over: None,
-            },
-            screens: Vec::new(),
-        };
-        let attached = screen("a", Some(group.id.clone()), None);
-        let reader = Reader::default().screen(&attached).group(&group);
+    fn a_broadcast_outranks_the_channel_and_a_cancellation_gives_it_back() {
+        let menus = channel("menus", Some(program_id()));
+        let evacuate = body_id("prg", 21);
+        let everyone = audience("all", Match::All);
+        let screen = tuned_screen("lobby", Some(menus.id.clone()), &["role:menu"]);
 
-        let answer: ScreenProjection = ask(
+        let lookup: BTreeMap<String, Match> = [(everyone.id.clone(), everyone.rule.clone())].into();
+        let cx = MatchContext::at(1_700_000_000_000);
+
+        let quiet = crate::fleet::resolve(&screen, &[menus.clone()], &[], &cx, &lookup);
+        assert_eq!(
+            quiet.showing,
+            Showing::Program {
+                program: program_id()
+            },
+            "with nothing broadcast, the tuned channel answers"
+        );
+
+        let mut alert = broadcast(
+            "evac",
+            &everyone.id,
+            Action::Play {
+                program: evacuate.clone(),
+            },
+        );
+        let loud = crate::fleet::resolve(
+            &screen,
+            &[menus.clone()],
+            std::slice::from_ref(&alert),
+            &cx,
+            &lookup,
+        );
+        assert_eq!(
+            loud.showing,
+            Showing::Program { program: evacuate },
+            "a broadcast interrupts the channel"
+        );
+        let Some(Resolved::Broadcast { name, .. }) = loud.source else {
+            panic!("the answer names the broadcast that won");
+        };
+        assert_eq!(name, "evac", "why it is showing that, in words");
+
+        alert.cancelled_at_unix_ms = Some(cx.now_unix_ms - 1);
+        let restored = crate::fleet::resolve(
+            &screen,
+            &[menus],
+            std::slice::from_ref(&alert),
+            &cx,
+            &lookup,
+        );
+        assert_eq!(
+            restored.showing,
+            Showing::Program {
+                program: program_id()
+            },
+            "an all-clear travels faster than an expiry"
+        );
+    }
+
+    /// Blank and unaddressed are different facts. Folding them together is the
+    /// defect this codebase names everywhere else.
+    #[test]
+    fn a_blanked_screen_is_not_an_unaddressed_one() {
+        let dark = audience(
+            "dark",
+            Match::Label {
+                label: "role:office".into(),
+            },
+        );
+        let lookup: BTreeMap<String, Match> = [(dark.id.clone(), dark.rule.clone())].into();
+        let cx = MatchContext::at(1_700_000_000_000);
+        let office = tuned_screen("office", None, &["role:office"]);
+        let blanked = crate::fleet::resolve(
+            &office,
+            &[],
+            &[broadcast("lights", &dark.id, Action::Blank)],
+            &cx,
+            &lookup,
+        );
+        assert_eq!(blanked.showing, Showing::Blank);
+        assert!(blanked.source.is_some(), "somebody chose this darkness");
+
+        let nobody = tuned_screen("spare", None, &[]);
+        let unaddressed = crate::fleet::resolve(&nobody, &[], &[], &cx, &lookup);
+        assert_eq!(unaddressed.showing, Showing::Unaddressed);
+        assert!(unaddressed.source.is_none(), "nothing chose this darkness");
+    }
+
+    /// Two mosques under one operator, on different reckonings, addressed by
+    /// what is true of them rather than by which set somebody filed them under.
+    #[test]
+    fn an_audience_reaches_by_fact_without_anybody_maintaining_a_label() {
+        let makkah = audience(
+            "makkah",
+            Match::Fact {
+                kind: "athan".into(),
+                key: "method".into(),
+                value: "makkah".into(),
+            },
+        );
+        let lookup: BTreeMap<String, Match> = [(makkah.id.clone(), makkah.rule.clone())].into();
+        let cx = MatchContext::at(1_700_000_000_000);
+
+        let mut one = tuned_screen("one", None, &[]);
+        one.facts = [(
+            "athan".to_string(),
+            BTreeMap::from([("method".to_string(), "makkah".to_string())]),
+        )]
+        .into();
+        let mut two = tuned_screen("two", None, &[]);
+        two.facts = [(
+            "athan".to_string(),
+            BTreeMap::from([("method".to_string(), "isna".to_string())]),
+        )]
+        .into();
+
+        assert!(makkah.rule.reaches(&one, &cx, &lookup));
+        assert!(!makkah.rule.reaches(&two, &cx, &lookup));
+    }
+
+    /// An observation the screen never reported fails the comparison. Absent
+    /// is not zero, and a reactive broadcast must not fire on silence.
+    #[test]
+    fn an_unreported_observation_reaches_nobody() {
+        let busy = Match::Observed {
+            key: "queue".into(),
+            compare: Compare::Above,
+            value: "5".into(),
+        };
+        let screen = tuned_screen("till", None, &[]);
+        assert!(!busy.reaches(&screen, &MatchContext::at(0), &()));
+        assert!(busy.reaches(
+            &screen,
+            &MatchContext::observing(0, [("queue".to_string(), "9".to_string())].into()),
+            &()
+        ));
+        assert!(
+            !busy.reaches(
+                &screen,
+                &MatchContext::observing(0, [("queue".to_string(), "busy".to_string())].into()),
+                &()
+            ),
+            "unparseable is absent, never zero"
+        );
+    }
+
+    /// An audience that reaches itself would make "who does this reach"
+    /// depend on where evaluation started.
+    #[test]
+    fn an_audience_that_reaches_itself_is_refused() {
+        let first = body_id("aud", 41);
+        let second = body_id("aud", 42);
+        let existing = SignageAudience {
+            id: second.clone(),
+            name: "second".into(),
+            rule: Match::Audience {
+                audience: first.clone(),
+            },
+        };
+        let candidate = SignageAudience {
+            id: first.clone(),
+            name: "first".into(),
+            rule: Match::Audience {
+                audience: second.clone(),
+            },
+        };
+        let reader = Reader::default().audience(&existing);
+        let refused = submit_against(
             &reader,
-            contract::screen_schema(),
-            contract::SCREEN_SCHEMA_VERSION,
-            &ScreenQuery::Plays {
-                screen: attached.id.clone(),
-            },
+            &audience_intent(AudienceIntent::Put {
+                audience: candidate.clone(),
+            }),
         );
-        let ScreenProjection::Plays {
-            screen: got,
-            group: from,
-        } = &answer
-        else {
-            panic!("Plays answers Plays");
+        assert!(matches!(refused, Err(Rejection::InvalidRequest)));
+
+        let straight = SignageAudience {
+            id: first,
+            name: "first".into(),
+            rule: Match::All,
         };
-        assert_eq!(got.as_ref().map(|row| &row.id), Some(&attached.id));
-        assert_eq!(from.as_ref().map(|row| &row.id), Some(&group.id));
-
-        let playback = answer.playback(1_000).expect("the screen exists").unwrap();
-        assert_eq!(playback.program.as_ref(), Some(&inherited));
-        assert_eq!(playback.source, Some(contract::PlaybackSource::Group));
-
-        // A screen in no group answers with none, and resolves to nothing
-        // rather than failing.
-        let alone = screen("b", None, None);
-        let answer: ScreenProjection = ask(
-            &Reader::default().screen(&alone),
-            contract::screen_schema(),
-            contract::SCREEN_SCHEMA_VERSION,
-            &ScreenQuery::Plays {
-                screen: alone.id.clone(),
-            },
-        );
-        assert!(matches!(
-            &answer,
-            ScreenProjection::Plays { group: None, .. }
-        ));
-        assert_eq!(answer.playback(1_000).unwrap().unwrap().program, None);
-
-        // A screen that is not there is absent, never a corrupt read.
-        let answer: ScreenProjection = ask(
-            &Reader::default(),
-            contract::screen_schema(),
-            contract::SCREEN_SCHEMA_VERSION,
-            &ScreenQuery::Plays {
-                screen: body_id("missing", 9),
-            },
-        );
-        assert!(matches!(
-            answer,
-            ScreenProjection::Plays { screen: None, .. }
-        ));
-        assert!(answer.playback(1_000).is_none());
+        assert!(submit_against(
+            &reader,
+            &audience_intent(AudienceIntent::Put { audience: straight })
+        )
+        .is_ok());
     }
 
     #[test]
-    fn showing_finds_the_screens_that_intend_that_program() {
-        let mine = screen("a", None, Some(program_id()));
-        let theirs = screen("b", None, Some(BodyId::from_bytes([9; 16]).render()));
-        let idle = screen("c", None, None);
+    fn showing_finds_the_screens_tuned_to_a_channel_carrying_it() {
+        let menus = channel("menus", Some(program_id()));
+        let other = channel("other", Some(BodyId::from_bytes([9; 16]).render()));
+        let mine = tuned_screen("a", Some(menus.id.clone()), &[]);
+        let theirs = tuned_screen("b", Some(other.id.clone()), &[]);
+        let idle = tuned_screen("c", None, &[]);
         let reader = Reader::default()
             .screen(&mine)
             .screen(&theirs)
-            .screen(&idle);
+            .screen(&idle)
+            .channel(&menus)
+            .channel(&other);
 
         let ScreenProjection::Showing { screens } = ask(
             &reader,
@@ -757,20 +1129,25 @@ mod tests {
         assert_eq!(screens, vec![mine.id]);
     }
 
-    /// An override names a program the base does not, and the index must see
-    /// it: a program under a live override is still in use.
+    /// A program reached only by a broadcast is still in use, and the index
+    /// must see it: "who would notice if this went away" is the question a
+    /// delete needs answered, and a program nobody is tuned to can still be
+    /// the one an emergency plays.
     #[test]
-    fn showing_sees_a_program_named_only_by_an_override() {
-        let mut overridden = screen("a", None, Some(BodyId::from_bytes([9; 16]).render()));
-        overridden.intent.over = Some(register::Override {
-            choice: register::Choice {
-                member: program_id(),
-                chosen_unix_ms: 1_000,
-                chooser: "someone".into(),
+    fn showing_sees_a_program_reached_only_by_a_broadcast() {
+        let everyone = audience("all", Match::All);
+        let alert = broadcast(
+            "evac",
+            &everyone.id,
+            Action::Play {
+                program: program_id(),
             },
-            until_unix_ms: 2_000,
-        });
-        let reader = Reader::default().screen(&overridden);
+        );
+        let unattached = tuned_screen("a", None, &[]);
+        let reader = Reader::default()
+            .screen(&unattached)
+            .audience(&everyone)
+            .broadcast(&alert);
 
         let ScreenProjection::Showing { screens } = ask(
             &reader,
@@ -782,7 +1159,7 @@ mod tests {
         ) else {
             panic!("Showing answers Showing");
         };
-        assert_eq!(screens, vec![overridden.id]);
+        assert_eq!(screens, vec![unattached.id]);
     }
 
     #[test]
@@ -846,61 +1223,39 @@ mod tests {
     /// The second document is refused rather than merged: merging would make
     /// the answer depend on which arrived first, which is exactly the ambiguity
     /// the lookup cannot carry.
+    /// The refusal this port exists to remove. Two presets for one kind used
+    /// to be a contract violation, which is what made a second venue in one
+    /// Space impossible to express.
     #[test]
-    fn a_second_configuration_of_one_kind_is_refused_and_editing_the_first_is_not() {
-        let existing = config("weather");
-        let reader = Reader::default().config(&existing);
-
-        let mut second = config("weather");
-        second.id = body_id("weather-again", 9);
-        assert!(matches!(
-            submit_against(
-                &reader,
-                &config_intent(ConfigIntent::Put { config: second })
-            ),
-            Err(Rejection::InvalidRequest)
-        ));
-
-        let mut edited = existing.clone();
-        edited
-            .settings
-            .insert("units".to_owned(), "imperial".to_owned());
+    fn a_second_preset_for_one_kind_is_ordinary() {
+        let house = preset("house", "athan");
+        let ramadan = preset("ramadan", "athan");
+        let reader = Reader::default().preset(&house);
         assert!(
             submit_against(
                 &reader,
-                &config_intent(ConfigIntent::Put { config: edited })
-            )
-            .is_ok(),
-            "the same document may be rewritten"
-        );
-
-        assert!(
-            submit_against(
-                &reader,
-                &config_intent(ConfigIntent::Put {
-                    config: config("athan")
+                &preset_intent(PresetIntent::Put {
+                    preset: ramadan.clone()
                 })
             )
             .is_ok(),
-            "a different kind is not a conflict"
+            "a kind may be presented more than one way"
         );
+        assert_ne!(house.id, ramadan.id);
     }
 
-    /// Two entries of one kind differ by their own settings.
-    ///
-    /// Medusa kept these on the content row and could hold two YouTube videos.
-    /// An earlier shape here named a shared config document instead, which made
-    /// every entry of a kind the same entry.
     #[test]
     fn two_entries_of_one_kind_carry_their_own_settings() {
         let mut first = card("a");
         first.source = MediaSource::Kind {
             kind: "youtube".into(),
+            preset: None,
             settings: BTreeMap::from([("video_id".to_owned(), "aaaaaaaaaaa".to_owned())]),
         };
         let mut second = card("b");
         second.source = MediaSource::Kind {
             kind: "youtube".into(),
+            preset: None,
             settings: BTreeMap::from([("video_id".to_owned(), "bbbbbbbbbbb".to_owned())]),
         };
         assert!(first.validate() && second.validate());
@@ -920,27 +1275,23 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_is_configured_when_its_document_is_in_the_list() {
-        let reader = Reader::default().config(&config("weather"));
-        let ConfigProjection::Configs { configs } = ask(
+    fn presets_come_back_in_the_list() {
+        let house = preset("house", "athan");
+        let reader = Reader::default().preset(&house);
+        let PresetProjection::Presets { presets } = ask(
             &reader,
-            contract::config_schema(),
-            contract::CONFIG_SCHEMA_VERSION,
-            &ConfigQuery::Configs,
+            contract::preset_schema(),
+            contract::PRESET_SCHEMA_VERSION,
+            &PresetQuery::Presets,
         ) else {
-            panic!("Configs answers Configs");
+            panic!("Presets answers Presets");
         };
-        assert_eq!(
-            configs
-                .iter()
-                .map(|row| row.kind.as_str())
-                .collect::<Vec<_>>(),
-            ["weather"]
-        );
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets.first().map(|row| row.kind.as_str()), Some("athan"));
     }
 
     #[test]
-    fn deleting_any_of_the_five_tombstones_its_row() {
+    fn deleting_any_document_tombstones_its_row() {
         let deletions = [
             (
                 program_intent(SignageIntent::Delete {
@@ -959,14 +1310,28 @@ mod tests {
                 screen_id("a"),
             ),
             (
-                group_intent(GroupIntent::Delete { group: group_id() }),
-                group_id(),
+                channel_intent(ChannelIntent::Delete {
+                    channel: channel("menus", None).id,
+                }),
+                channel("menus", None).id,
             ),
             (
-                config_intent(ConfigIntent::Delete {
-                    config: config("weather").id,
+                audience_intent(AudienceIntent::Delete {
+                    audience: audience("all", Match::All).id,
                 }),
-                config("weather").id,
+                audience("all", Match::All).id,
+            ),
+            (
+                broadcast_intent(BroadcastIntent::Delete {
+                    broadcast: broadcast("evac", &audience("all", Match::All).id, Action::Blank).id,
+                }),
+                broadcast("evac", &audience("all", Match::All).id, Action::Blank).id,
+            ),
+            (
+                preset_intent(PresetIntent::Delete {
+                    preset: preset("house", "athan").id,
+                }),
+                preset("house", "athan").id,
             ),
         ];
         for (intent, id) in deletions {
@@ -1060,6 +1425,61 @@ mod tests {
         BodyId::from_bytes([4; 16]).render()
     }
 
+    fn channel(tag: &str, base: Option<String>) -> SignageChannel {
+        SignageChannel {
+            id: body_id(tag, 60),
+            name: tag.into(),
+            base,
+            schedule: Vec::new(),
+        }
+    }
+
+    fn audience(tag: &str, rule: Match) -> SignageAudience {
+        SignageAudience {
+            id: body_id(tag, 61),
+            name: tag.into(),
+            rule,
+        }
+    }
+
+    /// A broadcast that is always open, so a test says what it is testing:
+    /// resolution order, not window arithmetic.
+    fn broadcast(tag: &str, audience: &str, action: Action) -> SignageBroadcast {
+        SignageBroadcast {
+            id: body_id(tag, 62),
+            name: tag.into(),
+            audience: audience.to_string(),
+            action,
+            timing: Timing::When {
+                of: Match::All,
+                priority: 10,
+            },
+            supersedes: Vec::new(),
+            cancelled_at_unix_ms: None,
+        }
+    }
+
+    fn preset(tag: &str, kind: &str) -> SignagePreset {
+        SignagePreset {
+            id: body_id(tag, 63),
+            kind: kind.into(),
+            name: tag.into(),
+            settings: BTreeMap::new(),
+        }
+    }
+
+    fn tuned_screen(tag: &str, tuned: Option<String>, labels: &[&str]) -> SignageScreen {
+        SignageScreen {
+            id: screen_id(tag),
+            name: tag.into(),
+            place: None,
+            facts: BTreeMap::new(),
+            sync: None,
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            tuned,
+        }
+    }
+
     fn group_id() -> String {
         BodyId::from_bytes([5; 16]).render()
     }
@@ -1103,30 +1523,11 @@ mod tests {
         )
     }
 
-    fn config(kind: &str) -> SignageConfig {
-        SignageConfig {
-            id: body_id(kind, 7),
-            kind: kind.into(),
-            name: format!("{kind} settings"),
-            settings: BTreeMap::from([("units".to_owned(), "metric".to_owned())]),
-        }
-    }
-
-    fn screen(tag: &str, group: Option<String>, program: Option<String>) -> SignageScreen {
-        SignageScreen {
-            id: screen_id(tag),
-            name: format!("screen {tag}"),
-            group,
-            intent: register::Slot {
-                base: program.map(|member| register::Choice {
-                    member,
-                    chosen_unix_ms: 1,
-                    chooser: "someone".into(),
-                }),
-                over: None,
-            },
-            schedule: Vec::new(),
-        }
+    /// A screen tuned to a channel. The second argument used to be a group
+    /// and a program in one; a panel now names only what it is tuned to, and
+    /// what plays there is the channel's business.
+    fn screen(tag: &str, _unused: Option<String>, tuned: Option<String>) -> SignageScreen {
+        tuned_screen(tag, tuned, &[])
     }
 
     fn program(items: &[(&str, &str)]) -> SignageProgram {
@@ -1172,18 +1573,34 @@ mod tests {
         )
     }
 
-    fn group_intent(intent: GroupIntent) -> Intent {
+    fn channel_intent(intent: ChannelIntent) -> Intent {
         wire(
-            contract::group_schema(),
-            contract::GROUP_SCHEMA_VERSION,
+            contract::channel_schema(),
+            contract::CHANNEL_SCHEMA_VERSION,
             &intent,
         )
     }
 
-    fn config_intent(intent: ConfigIntent) -> Intent {
+    fn audience_intent(intent: AudienceIntent) -> Intent {
         wire(
-            contract::config_schema(),
-            contract::CONFIG_SCHEMA_VERSION,
+            contract::audience_schema(),
+            contract::AUDIENCE_SCHEMA_VERSION,
+            &intent,
+        )
+    }
+
+    fn broadcast_intent(intent: BroadcastIntent) -> Intent {
+        wire(
+            contract::broadcast_schema(),
+            contract::BROADCAST_SCHEMA_VERSION,
+            &intent,
+        )
+    }
+
+    fn preset_intent(intent: PresetIntent) -> Intent {
+        wire(
+            contract::preset_schema(),
+            contract::PRESET_SCHEMA_VERSION,
             &intent,
         )
     }
@@ -1280,12 +1697,20 @@ mod tests {
             self.put(contract::SCREEN_SCHEMA, &row.id, row)
         }
 
-        fn config(self, row: &SignageConfig) -> Self {
-            self.put(contract::CONFIG_SCHEMA, &row.id, row)
+        fn channel(self, row: &SignageChannel) -> Self {
+            self.put(contract::CHANNEL_SCHEMA, &row.id, row)
         }
 
-        fn group(self, row: &SignageGroup) -> Self {
-            self.put(contract::GROUP_SCHEMA, &row.id, row)
+        fn audience(self, row: &SignageAudience) -> Self {
+            self.put(contract::AUDIENCE_SCHEMA, &row.id, row)
+        }
+
+        fn broadcast(self, row: &SignageBroadcast) -> Self {
+            self.put(contract::BROADCAST_SCHEMA, &row.id, row)
+        }
+
+        fn preset(self, row: &SignagePreset) -> Self {
+            self.put(contract::PRESET_SCHEMA, &row.id, row)
         }
 
         fn put<T: serde::Serialize>(mut self, schema: &str, id: &str, row: &T) -> Self {

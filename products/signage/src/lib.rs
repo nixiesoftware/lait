@@ -23,14 +23,24 @@
 /// Immutable release version carried by this product package.
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod addressing;
 pub mod contract;
+pub mod fleet;
 mod world;
 
+pub use addressing::{
+    AudienceLookup, Compare, Context, Match, Observations, Place, PlaceMatch, SignageAudience,
+};
 pub use contract::{
-    ConfigIntent, ConfigProjection, ConfigQuery, GroupIntent, GroupProjection, GroupQuery,
-    MediaIntent, MediaProjection, MediaQuery, MediaSource, Playback, PlaybackSource, ProgramCycle,
-    ProgramWindow, ScreenIntent, ScreenProjection, ScreenQuery, Settings, SignageConfig,
-    SignageGroup, SignageIntent, SignageItem, SignageMedia, SignageProgram, SignageProjection,
-    SignageQuery, SignageScreen, SignageWindow, PRODUCT_WORLD,
+    AsRunEntry, AsRunIntent, AsRunProjection, AsRunQuery, AudienceIntent, AudienceProjection,
+    AudienceQuery, BroadcastIntent, BroadcastProjection, BroadcastQuery, ChannelIntent,
+    ChannelProjection, ChannelQuery, MediaIntent, MediaProjection, MediaQuery, MediaSource,
+    PresetIntent, PresetProjection, PresetQuery, ProgramCycle, ScreenIntent, ScreenProjection,
+    ScreenQuery, Settings, SignageAsRun, SignageIntent, SignageItem, SignageMedia, SignagePreset,
+    SignageProgram, SignageProjection, SignageQuery, SignageWindow, PRODUCT_WORLD,
+};
+pub use fleet::{
+    Action, ChannelWindow, Playback, Resolved, Showing, SignageBroadcast, SignageChannel,
+    SignageScreen, Timing,
 };
 pub use world::SignageWorld;
