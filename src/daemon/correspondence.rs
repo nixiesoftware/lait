@@ -39,30 +39,29 @@ use crate::control::{Request, Response};
 /// the carrier gives one function down and one this service is even more
 /// exposed to: a directory that answers "not available" because it was
 /// misconfigured is indistinguishable, at the surface, from a person who does
-/// not exist. An absent directory refuses in words instead.
+/// not exist. An absent directory refuses in words instead — and absence is
+/// now a *choice*: the endpoint resolves through `Settings::directory_url`
+/// (env override, then the config key, then the cloud built-in release
+/// builds carry), so the packaged product connects and an operator opts out
+/// by emptying it.
 #[must_use]
-pub fn configured_directory() -> Option<Box<dyn Directory + Send>> {
-    let base = std::env::var("LAIT_DIRECTORY_URL").ok()?;
-    let base = base.trim();
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return None;
-    }
-    Some(Box::new(lait_directory::Remote::at(base)))
+pub fn configured_directory(identity: &std::path::Path) -> Option<Box<dyn Directory + Send>> {
+    let base = crate::config::Settings::load(Some(identity)).directory_url()?;
+    Some(Box::new(lait_directory::Remote::at(&base)))
 }
 
 /// The carrier this deployment is pointed at, if any.
 ///
-/// `LAIT_POST_URL` names a hosted Post. Nothing is assumed absent it: a default
-/// would point every install at a host, and an unreachable host read as an empty
-/// mailbox is the defect this plane is most careful about.
+/// The Post this identity carries over, resolved through
+/// `Settings::post_url` — env override, config key, then the cloud built-in
+/// release builds carry. An unreachable host read as an empty mailbox is
+/// still the defect this plane is most careful about; the default moving to
+/// the cloud changes who chooses the host, not what an unreachable one is
+/// allowed to look like.
 #[must_use]
-pub fn configured_carrier() -> Option<Box<dyn Contractor>> {
-    let base = std::env::var("LAIT_POST_URL").ok()?;
-    let base = base.trim();
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return None;
-    }
-    Some(Box::new(correspondence::post::PostContractor::new(base)))
+pub fn configured_carrier(identity: &std::path::Path) -> Option<Box<dyn Contractor>> {
+    let base = crate::config::Settings::load(Some(identity)).post_url()?;
+    Some(Box::new(correspondence::post::PostContractor::new(&base)))
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -91,6 +90,7 @@ pub fn is_correspondence_request(request: &Request) -> bool {
         request,
         Request::ReachShare
             | Request::ReachLearn { .. }
+            | Request::ReachResolve { .. }
             | Request::ReachView
             | Request::CorrespondSend { .. }
             | Request::CorrespondCollect
@@ -105,6 +105,12 @@ pub struct CorrespondenceService {
     /// not an empty mailbox — every operation refuses in words, because the two
     /// are different facts and only one is worth acting on.
     plane: Mutex<Option<Plane>>,
+    /// The identity's book, hooked once at wiring. The one seam between the
+    /// two services, and it carries gestures, not state: learning a
+    /// correspondent installs their card, sharing reach presents My Card.
+    /// Absent (tests, a book that failed to open), both halves simply do not
+    /// happen — reach itself never depends on the book.
+    book: std::sync::OnceLock<std::sync::Arc<crate::daemon::address_book::AddressBookService>>,
 }
 
 /// What a configured plane holds: the identity's reach, and something to carry
@@ -128,7 +134,13 @@ impl CorrespondenceService {
         Self {
             identity: identity.to_path_buf(),
             plane: Mutex::new(None),
+            book: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Hook the identity's book, once, at wiring time.
+    pub fn hook_book(&self, book: std::sync::Arc<crate::daemon::address_book::AddressBookService>) {
+        let _ = self.book.set(book);
     }
 
     /// Where this identity's durable correspondence state lives.
@@ -143,7 +155,7 @@ impl CorrespondenceService {
     /// a person hands out names them on every start. Durable reach state is
     /// read here and written back by anything that changes it.
     pub fn carry_over(&self, contractor: Box<dyn Contractor>, now: u64) -> Result<(), String> {
-        self.carry_over_with(contractor, configured_directory(), now)
+        self.carry_over_with(contractor, configured_directory(&self.identity), now)
     }
 
     /// The same, with the directory named rather than read from the
@@ -179,6 +191,44 @@ impl CorrespondenceService {
         addressbook::ReachStore::at(&self.identity)
             .save(&plane.reach.state())
             .map_err(|error| error.to_string())
+    }
+
+    /// The book half of learning somebody. The consent was the learn itself —
+    /// pasting an announcement or resolving an address *is* accepting the
+    /// introduction — so their declared name and devices land as a card with
+    /// `Declared` evidence, no second question. No name legible to this
+    /// reader means nothing installs: a bare device set is not a person worth
+    /// a row, and reach never depends on the book either way. Failures are
+    /// noted, not raised — the learn already succeeded and stays succeeded.
+    fn adopt_into_book(&self, plane: &Plane, profile: &mechanics::kinship::ProfileId) {
+        let Some(book) = self.book.get() else {
+            return;
+        };
+        // Never your own profile. Learning your own announcement (testing it,
+        // or a correspondent echoing it back) resolves your own name and
+        // devices, and would mint a phantom self-card — a duplicate that also
+        // becomes a send target.
+        if profile == plane.reach.profile() {
+            return;
+        }
+        let reader = plane.reach.standing();
+        let Some(name) = plane.reach.declared_name(profile, &reader) else {
+            return;
+        };
+        let Some(devices) = plane.reach.resolve(profile) else {
+            return;
+        };
+        let handles: Vec<addressbook::Handle> = devices
+            .into_iter()
+            .map(addressbook::Handle::Device)
+            .collect();
+        match book.install_introduced(profile, &name, &handles) {
+            Ok(true) => tracing::info!(name, "an introduced correspondent joined the book"),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "the introduced correspondent could not join the book");
+            }
+        }
     }
 
     /// This identity's reach and everything said on it, as every answer
@@ -296,7 +346,20 @@ impl CorrespondenceService {
 
             Request::ReachShare => {
                 let reader = plane.reach.standing();
-                let announcement = match plane.reach.announce(Audience::Public, &reader) {
+                // Sharing reach is the gesture that presents: a person who
+                // claimed My Card and now publishes where they answer means
+                // to be recognized there. No card claimed, nothing presented
+                // — authoring is never publishing on its own.
+                let portrait = self.book.get().and_then(|book| book.my_portrait());
+                let announced = match &portrait {
+                    Some(portrait) => {
+                        plane
+                            .reach
+                            .announce_presenting(Audience::Public, &reader, portrait)
+                    }
+                    None => plane.reach.announce(Audience::Public, &reader),
+                };
+                let announcement = match announced {
                     Ok(announcement) => announcement,
                     Err(error) => return Response::err(format!("{error}")),
                 };
@@ -363,10 +426,13 @@ impl CorrespondenceService {
                     }
                 }
                 match plane.reach.learn(announcement, &reader) {
-                    Ok(_) => match self.keep(plane) {
-                        Ok(()) => self.reach_view(plane),
-                        Err(error) => Response::err(error),
-                    },
+                    Ok(profile) => {
+                        self.adopt_into_book(plane, &profile);
+                        match self.keep(plane) {
+                            Ok(()) => self.reach_view(plane),
+                            Err(error) => Response::err(error),
+                        }
+                    }
                     Err(error) => Response::err(format!("{error}")),
                 }
             }
@@ -377,10 +443,13 @@ impl CorrespondenceService {
                 };
                 let reader = plane.reach.standing();
                 match plane.reach.learn(parsed, &reader) {
-                    Ok(_) => match self.keep(plane) {
-                        Ok(()) => self.reach_view(plane),
-                        Err(error) => Response::err(error),
-                    },
+                    Ok(profile) => {
+                        self.adopt_into_book(plane, &profile);
+                        match self.keep(plane) {
+                            Ok(()) => self.reach_view(plane),
+                            Err(error) => Response::err(error),
+                        }
+                    }
                     Err(error) => Response::err(format!("{error}")),
                 }
             }
@@ -477,6 +546,12 @@ mod tests {
         assert!(is_correspondence_request(&Request::CorrespondCollect));
         assert!(is_correspondence_request(&Request::ReachLearn {
             announcement: "x".into()
+        }));
+        // Omitting a routed request here strands it on "no daemon-scoped
+        // handler" — ReachResolve shipped unreachable exactly this way.
+        assert!(is_correspondence_request(&Request::ReachResolve {
+            address: "tin-harbor-quiet-4417".into(),
+            accept_change: false,
         }));
         assert!(is_correspondence_request(&Request::CorrespondSend {
             to: "prf_x".into(),
@@ -903,6 +978,133 @@ mod tests {
         assert!(
             matches!(&answer, Response::Error { message, .. } if message.contains("carrier")),
             "{answer:?}"
+        );
+    }
+
+    /// The seamless chain, asserted whole: Ada claims My Card, shares her
+    /// reach — the gesture that presents — and Grace learns the announcement
+    /// — the gesture that accepts the introduction. Ada lands in Grace's book
+    /// under Ada's own declared name, Declared evidence, no second question.
+    /// And the boundary holds twice over: learning again rewrites nothing,
+    /// and an identity with no claimed card presents nothing.
+    #[tokio::test]
+    async fn learning_a_presented_announcement_installs_the_card() {
+        let root = std::env::temp_dir().join(format!("corr-portrait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (ada_home, grace_home) = (root.join("ada"), root.join("grace"));
+        for home in [&ada_home, &grace_home] {
+            std::fs::create_dir_all(home).unwrap();
+            crate::config::load_or_create_identity(home).expect("identity");
+        }
+
+        // Ada authors My Card. Authoring publishes nothing on its own.
+        {
+            let store = addressbook::Store::at(&ada_home);
+            let mut engine = addressbook::BookEngine::new();
+            let author = addressbook::Author {
+                device: mechanics::actor::device_from_seed(&[5u8; 32]),
+                at: 1,
+            };
+            let id = addressbook::CardId::mint(&mechanics::ids::SystemUlidSource);
+            engine
+                .apply(
+                    &author,
+                    addressbook::Action::Create {
+                        id: id.clone(),
+                        name: "Ada Lovelace".into(),
+                    },
+                )
+                .expect("create");
+            engine
+                .apply(&author, addressbook::Action::ClaimSelf { id })
+                .expect("claim");
+            store.replace(&engine).expect("save");
+        }
+
+        let shared = correspondence::SharedMem::new();
+        let ada = CorrespondenceService::open(&ada_home);
+        let grace = CorrespondenceService::open(&grace_home);
+        ada.hook_book(std::sync::Arc::new(
+            crate::daemon::address_book::AddressBookService::open(&ada_home).expect("ada book"),
+        ));
+        grace.hook_book(std::sync::Arc::new(
+            crate::daemon::address_book::AddressBookService::open(&grace_home).expect("grace book"),
+        ));
+        let now = now_secs();
+        ada.carry_over(Box::new(shared.clone()), now).expect("ada");
+        grace
+            .carry_over(Box::new(shared.clone()), now)
+            .expect("grace");
+
+        let ada_card = reach(&ada.handle(Request::ReachShare).await)
+            .announcement
+            .clone()
+            .expect("ada publishes");
+        grace
+            .handle(Request::ReachLearn {
+                announcement: ada_card.clone(),
+            })
+            .await;
+
+        let book = addressbook::Store::at(&grace_home)
+            .open()
+            .expect("read")
+            .expect("a book exists now")
+            .book()
+            .expect("project");
+        let installed: Vec<_> = book
+            .cards
+            .values()
+            .filter(|card| card.name.value == "Ada Lovelace")
+            .collect();
+        assert_eq!(
+            installed.len(),
+            1,
+            "Ada joined Grace's book by her own name"
+        );
+        assert!(
+            installed[0]
+                .handles
+                .iter()
+                .all(|link| link.evidence == addressbook::Evidence::Declared),
+            "worth what a self-claim is worth"
+        );
+
+        // Learning again rewrites nothing: the handle is known, so the book
+        // is left alone.
+        grace
+            .handle(Request::ReachLearn {
+                announcement: ada_card,
+            })
+            .await;
+        let again = addressbook::Store::at(&grace_home)
+            .open()
+            .expect("read")
+            .expect("book")
+            .book()
+            .expect("project");
+        assert_eq!(again.cards.len(), book.cards.len(), "no duplicate row");
+
+        // Grace claimed no card, so Ada learned no name: the presenting half
+        // is the claimed card, not the identity's existence.
+        let grace_card = reach(&grace.handle(Request::ReachShare).await)
+            .announcement
+            .clone()
+            .expect("grace publishes");
+        ada.handle(Request::ReachLearn {
+            announcement: grace_card,
+        })
+        .await;
+        let ada_book = addressbook::Store::at(&ada_home)
+            .open()
+            .expect("read")
+            .expect("book")
+            .book()
+            .expect("project");
+        assert_eq!(
+            ada_book.cards.len(),
+            1,
+            "only My Card — an unpresented identity installs nothing"
         );
     }
 }

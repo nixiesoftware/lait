@@ -10,7 +10,8 @@ use crate::bounds::{
 };
 use crate::ids::{
     decode_hex_32, encode_hex, AuthenticationTag, Challenge, CoordinatorFingerprint,
-    DisplayDeviceId, DisplayPairingId, PollKey, ProofKey, ReceiverNonce, RendezvousId,
+    CoordinatorProfile, DisplayDeviceId, DisplayPairingId, PollKey, ProofKey, ReceiverNonce,
+    RendezvousId,
 };
 use crate::receiver::ReceiverCapabilities;
 use crate::wire::Transcript;
@@ -27,6 +28,18 @@ pub enum CoordinatorTrust {
     },
     WebPkiOrigin {
         origin: String,
+    },
+    /// Anchored on the coordinator's *identity* rather than on any placement.
+    ///
+    /// The origin is a resolved route — where the identity answers right now,
+    /// typically through a Web-PKI fronting router — and may change without
+    /// the receiver re-pairing. The profile is what the receiver holds the
+    /// coordinator to: the instance must report it, and the confirmation
+    /// phrase derives from it, so the six words a person compares prove *who*
+    /// and not *where*.
+    Profile {
+        origin: String,
+        profile: CoordinatorProfile,
     },
 }
 
@@ -51,6 +64,10 @@ pub struct CoordinatorInstance {
     pub protocol_major: u32,
     pub instance: String,
     pub label: String,
+    /// The identity this placement answers for. Every placement of one
+    /// identity reports the same profile; `instance` is what distinguishes
+    /// them.
+    pub profile: CoordinatorProfile,
     pub trust: CoordinatorTrust,
 }
 
@@ -72,6 +89,8 @@ pub struct PairingStartResponse {
     pub expires_in_ms: u32,
     pub confirmation_phrase: Vec<String>,
     pub coordinator_fingerprint: CoordinatorFingerprint,
+    /// The identity the phrase derives from — what enrollment anchors on.
+    pub coordinator_profile: CoordinatorProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +184,18 @@ pub fn validate_bootstrap(bootstrap: &ReceiverBootstrap) -> Result<(), Refusal> 
             }
             origin
         }
+        // Identity-anchored: the origin is a resolved route over the platform
+        // Web PKI, so pinned material would claim an authority the anchor
+        // deliberately does not rest on. The profile's own shape is enforced
+        // by its type; there is nothing further to check until the instance
+        // reports one, which `DisplayReceiverClient` compares at first
+        // contact.
+        CoordinatorTrust::Profile { origin, .. } => {
+            if bootstrap.certificate_pem.is_some() {
+                return Err(Refusal::InvalidShape("profile-anchored certificate PEM"));
+            }
+            origin
+        }
     };
     if !valid_https_origin(origin) {
         return Err(Refusal::InvalidShape("coordinator HTTPS origin"));
@@ -223,6 +254,15 @@ pub fn validate_instance(instance: &CoordinatorInstance) -> Result<(), Refusal> 
     let origin = match &instance.trust {
         CoordinatorTrust::PinnedCertificate { origin, .. }
         | CoordinatorTrust::WebPkiOrigin { origin } => origin,
+        CoordinatorTrust::Profile { origin, profile } => {
+            // The instance's own profile and its trust anchor cannot disagree
+            // about who this is — a placement reporting one identity while
+            // anchored on another is two coordinators wearing one route.
+            if profile != &instance.profile {
+                return Err(Refusal::Integrity("coordinator profile anchor"));
+            }
+            origin
+        }
     };
     if !valid_https_origin(origin) {
         return Err(Refusal::InvalidShape("coordinator HTTPS origin"));
@@ -286,13 +326,17 @@ const CONFIRMATION_WORDS: [&str; 32] = [
 ];
 
 pub fn confirmation_phrase(
-    fingerprint: &CoordinatorFingerprint,
+    profile: &CoordinatorProfile,
     pairing: &DisplayPairingId,
     receiver_nonce: &ReceiverNonce,
 ) -> Result<Vec<String>, Refusal> {
-    let mut transcript = Transcript::new(b"astrolabe-display/confirmation-phrase/v1")?;
+    // v2: the phrase commits the *identity*, not a placement's certificate.
+    // The words a person compares must stay the same when the coordinator
+    // moves machines or rotates a certificate — a placement is not what is
+    // being enrolled against.
+    let mut transcript = Transcript::new(b"astrolabe-display/confirmation-phrase/v2")?;
     transcript.u32(PROTOCOL_MAJOR)?;
-    transcript.text(fingerprint.as_str())?;
+    transcript.text(profile.as_str())?;
     transcript.text(pairing.as_str())?;
     transcript.text(receiver_nonce.as_str())?;
     let digest = Sha256::digest(transcript.finish());

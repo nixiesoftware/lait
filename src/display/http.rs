@@ -956,9 +956,19 @@ async fn serve_live_socket(
     stream: super::coordinator::AuthorizedLiveStream,
     mut snapshot: super::LiveMediaSnapshot,
 ) {
+    // A planned presentation is walked, not subscribed: its broadcast never
+    // fires, and a receiver waiting on it would wait forever. The fork is
+    // decided here, once, and told to the receiver in the hello — `complete`
+    // is what lets it end the stream instead of treating the close as an
+    // interruption to recover from.
+    let planned = state
+        .coordinator
+        .live_hub()
+        .planned_for_mse(&stream.orbit, &stream.resource);
     let hello = serde_json::json!({
         "kind": "astrolabe_live",
         "version": 1,
+        "complete": planned.is_some(),
         "tracks": snapshot.tracks,
     });
     let Ok(hello) = serde_json::to_string(&hello) else {
@@ -975,6 +985,74 @@ async fn serve_live_socket(
     for packet in snapshot.packets {
         if send_live_packet(&mut socket, packet).await.is_err() {
             return;
+        }
+    }
+    if planned.is_some() {
+        // The film, one planned segment per iteration: read, package, push.
+        // Authorization is re-checked each segment — revocation lands at the
+        // next boundary, exactly as it does for live. `None` is the end; a
+        // clean close after it is what the receiver was told to expect.
+        // Paced to the film's own clock after a short lead: the receiver's
+        // session is the live machinery — bounded queues, eviction behind the
+        // playhead — and a push faster than playback would overrun the bounds
+        // it holds against exactly this. Three segments of lead absorb
+        // per-segment read jitter without meaningfully growing the buffer.
+        let timescales: std::collections::BTreeMap<String, u64> = snapshot
+            .tracks
+            .iter()
+            .map(|track| (track.rendition.clone(), u64::from(track.timescale.max(1))))
+            .collect();
+        let mut sequence: u64 = 0;
+        let mut lead: u32 = 3;
+        loop {
+            if !state
+                .coordinator
+                .live_stream_still_authorized(&stream, now())
+            {
+                return;
+            }
+            match state
+                .coordinator
+                .mse_planned_segment(&stream, sequence, now())
+                .await
+            {
+                Ok(Some(packets)) => {
+                    let mut pace_ms: u64 = 0;
+                    for packet in packets {
+                        if let LiveMediaPacket::Fragment {
+                            rendition,
+                            duration,
+                            ..
+                        } = &packet
+                        {
+                            let timescale = timescales.get(rendition).copied().unwrap_or(1);
+                            pace_ms = pace_ms.max(
+                                duration
+                                    .saturating_mul(1000)
+                                    .checked_div(timescale)
+                                    .unwrap_or(0),
+                            );
+                        }
+                        if send_live_packet(&mut socket, packet).await.is_err() {
+                            return;
+                        }
+                    }
+                    sequence = sequence.saturating_add(1);
+                    if lead > 0 {
+                        lead = lead.saturating_sub(1);
+                    } else if pace_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(pace_ms)).await;
+                    }
+                }
+                Ok(None) => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, sequence, "planned MSE segment failed");
+                    return;
+                }
+            }
         }
     }
     let mut authorization_check = tokio::time::interval(Duration::from_secs(1));

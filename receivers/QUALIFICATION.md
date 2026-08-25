@@ -94,4 +94,6 @@ an emulator, compiler, static test, or successful store upload alone.
   TestFlight physical-device pass.
 
 Release only after every applicable row has an attached result and all
-security/integrity failures are zero-tolerance passes.
+security/integrity failures are zero-tolerance passes. A run is recorded in
+[`qualification/`](qualification/) — one committed file per run, copied from
+its template; an uncommitted result is not attached.

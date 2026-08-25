@@ -18,7 +18,10 @@ pub use http::serve_display_on;
 /// is the HTTPS surface itself, which has one caller.
 pub(crate) use http::{bind_display, is_port_taken};
 mod live;
+pub mod overlay;
 mod pairing;
+mod pin;
+mod publish;
 mod runtime;
 mod store;
 mod tls;
@@ -39,6 +42,7 @@ pub use mediabox::{
 pub use pairing::{
     AuthorizationRefusal, AuthorizedDevice, DisplayPairingService, PendingPairingView,
 };
+pub use publish::publish_route;
 pub use runtime::DisplayRuntime;
 pub use store::{
     AssignmentRecord, AssignmentSync, CoordinatorPolicy, CoordinatorSecrets, CoordinatorStore,

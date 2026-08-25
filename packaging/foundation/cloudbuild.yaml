@@ -1,0 +1,39 @@
+# Cloud Build: build the Post seam image and push it to the Foundation's
+# Artifact Registry. No local Docker in the authoring environment, so the
+# server images are built in the cloud and pinned by digest into the
+# NixieSoftware/foundation Terraform.
+#
+#   gcloud builds submit \
+#     --project the-foundation-498604 \
+#     --config packaging/foundation/cloudbuild.yaml \
+#     --substitutions=_IMAGE=us-central1-docker.pkg.dev/the-foundation-498604/foundation/lait-post,_TAG=<git-sha>
+#
+# The pushed digest is what infra/envs/prod's image_post consumes.
+
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/the-foundation-498604/foundation/lait-post
+  _TAG: latest
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - packaging/foundation/Dockerfile.post
+      - -t
+      - ${_IMAGE}:${_TAG}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+
+images:
+  - ${_IMAGE}:${_TAG}
+  - ${_IMAGE}:latest
+
+options:
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 50
+
+# A cold release build of the workspace's Post subgraph is well under this,
+# but a warmed cache is not available across submissions, so give it room.
+timeout: 2400s

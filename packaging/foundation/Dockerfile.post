@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# The Post seam image the Foundation platform runs: post + directory +
+# registry, one binary, three mounts, stateless over Firestore. Built by this
+# repository (the wire contracts live here), deployed by NixieSoftware/foundation
+# which owns where and how it runs. Cloud Build builds it — there is no local
+# Docker in the authoring environment — so the context is whatever
+# `.gcloudignore`/`.dockerignore` admit.
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Pinned to the crate MSRV. The crypto stack is pure Rust (RustCrypto/dalek,
+# rustls+ring); the only C need is a linker and ring's perl/cc, from
+# build-essential.
+FROM rust:1.91-slim-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config perl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The whole workspace, then one binary out of it. No stub cache-warm: the
+# single-crate trick does not survive a workspace, and Cloud Build has no
+# layer cache across submissions anyway.
+COPY . .
+RUN cargo build --release --locked -p lait-post
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+# Slim runtime; ca-certificates lets ureq reach Firestore's REST API and the
+# metadata server over TLS. Unprivileged, and the deposit root is pre-created
+# and owned so `FsStore::open`'s create_dir_all never needs write on /var/lib.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 lait \
+    && mkdir -p /var/lib/lait-post \
+    && chown lait:lait /var/lib/lait-post
+
+COPY --from=build /src/target/release/lait-post /usr/local/bin/lait-post
+
+# An image is a distribution like any other: whoever receives it gets the
+# terms and the account of what it is built from.
+COPY LICENSE /usr/share/doc/lait/LICENSE
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/lait/THIRD-PARTY-NOTICES.md
+
+USER lait
+EXPOSE 8080
+
+# No args baked in: the platform passes --http/--root/--directory-project, and
+# injects REGISTRY_CHRONICLE_SEED from Secret Manager. Running with none prints
+# the usage and exits, which is the honest failure for a misconfigured deploy.
+ENTRYPOINT ["lait-post"]

@@ -93,13 +93,19 @@ pub fn agent(trust: &CoordinatorTrust) -> Result<ureq::Agent> {
                 .with_no_client_auth();
             Ok(builder.tls_config(Arc::new(config)).build())
         }
-        CoordinatorTrust::WebPkiOrigin { .. } => Ok(builder.build()),
+        // Identity-anchored trust reaches its resolved route over the platform
+        // Web PKI: the anchor is the profile the pairing offer must report,
+        // not any certificate this client could pin.
+        CoordinatorTrust::WebPkiOrigin { .. } | CoordinatorTrust::Profile { .. } => {
+            Ok(builder.build())
+        }
     }
 }
 
 pub fn origin(trust: &CoordinatorTrust) -> &str {
     match trust {
         CoordinatorTrust::PinnedCertificate { origin, .. }
-        | CoordinatorTrust::WebPkiOrigin { origin } => origin,
+        | CoordinatorTrust::WebPkiOrigin { origin }
+        | CoordinatorTrust::Profile { origin, .. } => origin,
     }
 }

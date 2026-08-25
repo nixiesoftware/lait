@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use display_protocol::ids::{
-    Challenge, CoordinatorFingerprint, DisplayDeviceId, DisplayPairingId, PollKey, ProofKey,
-    ReceiverNonce,
+    Challenge, CoordinatorFingerprint, CoordinatorProfile, DisplayDeviceId, DisplayPairingId,
+    PollKey, ProofKey, ReceiverNonce,
 };
 use display_protocol::pairing::CoordinatorTrust;
 use mechanics::secretfs::{self, Create, Wrap};
@@ -20,6 +20,7 @@ pub enum CredentialState {
         receiver_nonce: ReceiverNonce,
         poll_key: PollKey,
         fingerprint: CoordinatorFingerprint,
+        profile: CoordinatorProfile,
         phrase: Vec<String>,
         user_confirmed: bool,
     },

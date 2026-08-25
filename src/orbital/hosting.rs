@@ -391,7 +391,11 @@ fn prepare_station_open(
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
-    let network = comms::policy::Network::from_env()?;
+    // Resolved through the settings chain rather than env alone: named
+    // relays mean lait's own rendezvous, and the release default names the
+    // Foundation relay — the fleet stops riding a third party's mesh by
+    // default. `LAIT_NETWORK` keeps its explicit override semantics.
+    let network = crate::config::Settings::load(Some(home)).network()?;
     Ok(PreparedStationOpen {
         space,
         mechanics,

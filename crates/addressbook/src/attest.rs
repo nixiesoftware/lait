@@ -161,3 +161,83 @@ fn sort_by_support(names: &mut [ResolvedName]) {
             .then_with(|| left.name.cmp(&right.name))
     });
 }
+
+/// A subject's portrait, as this reader resolves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPortrait {
+    /// The picture's content hash, when one is presented.
+    pub picture: Option<[u8; 32]>,
+    /// The self-description line. May be empty.
+    pub detail: String,
+    /// The avowal epoch this resolution came from.
+    pub epoch: u64,
+}
+
+/// The subject's own filter: an avowal about one of `subject_devices`, signed
+/// by one of them. Unlike a name, which anyone may attest and the ranking
+/// weighs, these claims have exactly one party who may speak — the subject.
+/// Somebody else's signature about how you present is skipped, not ranked
+/// low, because no weight makes it admissible.
+fn self_spoken<'a>(
+    avowals: &'a [Avowal],
+    reader: &'a Standing,
+    subject_devices: &'a [mechanics::ids::DeviceId],
+) -> impl Iterator<Item = &'a Avowal> {
+    avowals.iter().filter(move |avowal| {
+        matches!(&avowal.subject, Party::Device(device) if subject_devices.contains(device))
+            && avowal.is_self_signed(subject_devices)
+            && avowal.verify().is_ok()
+            && avowal.legible_to(reader).is_ok()
+    })
+}
+
+/// The latest of a subject's own claims, under a total order — epoch first,
+/// then the signature bytes, so two artifacts at one epoch resolve the same
+/// way for every reader rather than by input order.
+fn latest<'a>(picked: impl Iterator<Item = &'a Avowal>) -> Option<&'a Avowal> {
+    picked.max_by(|left, right| {
+        left.epoch
+            .cmp(&right.epoch)
+            .then_with(|| left.signature.bytes().cmp(right.signature.bytes()))
+    })
+}
+
+/// The subject's portrait: its latest self-signed [`Claim::Portrait`] this
+/// reader may read. `None` never means "has no portrait" — only that none was
+/// avowed where this reader could see it.
+#[must_use]
+pub fn portrait_of(
+    avowals: &[Avowal],
+    reader: &Standing,
+    subject_devices: &[mechanics::ids::DeviceId],
+) -> Option<ResolvedPortrait> {
+    let picked = self_spoken(avowals, reader, subject_devices)
+        .filter(|avowal| matches!(avowal.claim, Claim::Portrait { .. }));
+    let avowal = latest(picked)?;
+    let Claim::Portrait { picture, detail } = &avowal.claim else {
+        return None;
+    };
+    Some(ResolvedPortrait {
+        picture: *picture,
+        detail: detail.clone(),
+        epoch: avowal.epoch,
+    })
+}
+
+/// The name the subject most recently declared for itself, if this reader may
+/// read one. Worth exactly what a self-claim is worth — [`names_of`] is the
+/// ranked resolution; this is only "what do *they* call themselves".
+#[must_use]
+pub fn declared_by(
+    avowals: &[Avowal],
+    reader: &Standing,
+    subject_devices: &[mechanics::ids::DeviceId],
+) -> Option<String> {
+    let picked = self_spoken(avowals, reader, subject_devices)
+        .filter(|avowal| matches!(avowal.claim, Claim::Called(_)));
+    let avowal = latest(picked)?;
+    let Claim::Called(name) = &avowal.claim else {
+        return None;
+    };
+    Some(name.clone())
+}

@@ -30,6 +30,17 @@ use mechanics::kinship::{
 };
 use serde::{Deserialize, Serialize};
 
+/// What an identity presents, as the inputs to its own avowals: a declared
+/// name, a picture by content hash, and a detail line. The whole value is
+/// sealed each time — presenting is superseding, never patching — so an
+/// all-`None`-and-empty portrait *is* the cleared one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Portrait {
+    pub name: Option<String>,
+    pub picture: Option<[u8; 32]>,
+    pub detail: String,
+}
+
 /// Why a registry operation did not apply.
 ///
 /// Named for what it is and qualified by where it lives: callers say
@@ -162,7 +173,15 @@ impl Registry {
             return Err(Failure::Unanchored);
         }
         let head = projection.head.as_ref().ok_or(Failure::Unanchored)?;
-        if !genesis.devices.contains(&head.by) {
+        // The anchor, widened to the chain: a genesis root passes as it always
+        // did, and a joined device passes when the projection carries the
+        // links that root it — verified on their own signatures, retire-wins,
+        // and only committable entries reach this point because `verify`
+        // below refuses anything the head does not list. A stranger with no
+        // chain to carry is refused exactly as before.
+        if !genesis.devices.contains(&head.by)
+            && !mechanics::kinship::signer_rooted(genesis, &projection.bodies, &head.by)
+        {
             return Err(Failure::Unanchored);
         }
 
@@ -229,6 +248,99 @@ impl Registry {
             avowed = avowed.saturating_add(1);
         }
         Ok(avowed)
+    }
+
+    /// Avow how this identity presents, to `audience`: its declared name (one
+    /// name channel — [`crate::names_of`]'s ranking still governs what a
+    /// reader *believes*), and its portrait. Sealing `Portrait { picture:
+    /// None, detail: "" }` is the deliberate act of clearing one — which is
+    /// why this takes the whole input rather than patching fields.
+    pub fn avow_portrait(
+        &mut self,
+        profile: &ProfileId,
+        portrait: &Portrait,
+        audience: Audience,
+        seed: &[u8; 32],
+        epoch: u64,
+        nonce: [u8; 16],
+    ) -> Result<(), Failure> {
+        if !matches!(self.holdings.get(profile), Some(Holding::Authored(_))) {
+            return Err(Failure::NotHeld);
+        }
+        let subject = Party::Device(mechanics::actor::device_from_seed(seed));
+        if let Some(name) = &portrait.name {
+            let avowal = Avowal::seal(
+                seed,
+                subject.clone(),
+                Claim::Called(name.clone()),
+                audience.clone(),
+                epoch,
+                nonce,
+            )?;
+            self.extend(profile, Entry::Avow(avowal))?;
+        }
+        let avowal = Avowal::seal(
+            seed,
+            subject,
+            Claim::Portrait {
+                picture: portrait.picture,
+                detail: portrait.detail.clone(),
+            },
+            audience,
+            epoch,
+            nonce,
+        )?;
+        self.extend(profile, Entry::Avow(avowal))?;
+        Ok(())
+    }
+
+    /// The name a held profile declares for itself, as `reader` may read it.
+    #[must_use]
+    pub fn declared_name(&self, profile: &ProfileId, reader: &Standing) -> Option<String> {
+        let (avowals, devices) = self.spoken_of(profile)?;
+        crate::attest::declared_by(&avowals, reader, &devices)
+    }
+
+    /// A held profile's portrait, as `reader` may read it.
+    #[must_use]
+    pub fn portrait(
+        &self,
+        profile: &ProfileId,
+        reader: &Standing,
+    ) -> Option<crate::attest::ResolvedPortrait> {
+        let (avowals, devices) = self.spoken_of(profile)?;
+        crate::attest::portrait_of(&avowals, reader, &devices)
+    }
+
+    /// A holding's avowals and the device set that counts as the subject
+    /// speaking. For an authored profile that is the live link set; for a
+    /// known one it is the avowed reachable set — the same set every other
+    /// read of that holding trusts, anchored by the head at absorb time.
+    fn spoken_of(&self, profile: &ProfileId) -> Option<(Vec<Avowal>, Vec<DeviceId>)> {
+        match self.holdings.get(profile)? {
+            Holding::Authored(log) => {
+                let avowals = log
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Avow(avowal) => Some(avowal.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((avowals, log.devices()))
+            }
+            Holding::Known(projection) => {
+                let avowals = projection
+                    .bodies
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Avow(avowal) => Some(avowal.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((avowals, reachable_devices(profile, projection)))
+            }
+        }
     }
 
     /// Project one of this identity's authored profiles for a reader — the
@@ -500,7 +612,9 @@ mod tests {
         let profile = alice.found(link.clone()).expect("found");
         // A third device, so the avowed set is more than the genesis pair.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
-        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .extend(&profile, Entry::Link(third.clone()))
+            .expect("extend");
 
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
         let n = alice
@@ -615,7 +729,9 @@ mod tests {
 
         // A device joins, and the fuller set {A, B, C} is avowed at a later epoch.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
-        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .extend(&profile, Entry::Link(third.clone()))
+            .expect("extend");
         alice
             .avow_reachable(&profile, to_bob, &A, 9, [2u8; 16])
             .expect("avow");
@@ -639,38 +755,84 @@ mod tests {
 
     // ── The anchor: a forged or mis-signed projection cannot substitute devices ──
 
-    /// A head signed by a device the genesis does not name is refused, even
-    /// though the projection itself verifies. Only the self-certifying roots may
-    /// vouch — a later-added or attacker-controlled device cannot head a
-    /// projection and inject a device set. (Finding 0.)
+    /// The anchor, as device-join left it. (Finding 0, revised.)
+    ///
+    /// A device the genesis roots *through a consented chain* may head a
+    /// projection — the chain rides with it and `signer_rooted` walks it, so
+    /// a joined device is not second-class. What Finding 0 actually guards —
+    /// an attacker-controlled device injecting a device set — still holds
+    /// with the anchor's whole force: every hop of a chain is co-signed by an
+    /// already-rooted device, so a head from a device with no consented chain
+    /// is refused and teaches a reader nothing.
     #[test]
-    fn a_projection_headed_by_a_non_genesis_device_is_unanchored() {
+    fn the_anchor_admits_a_consented_chain_and_nothing_else() {
         let (link, _) = genesis();
         let mut alice = Registry::new();
         let profile = alice.found(link.clone()).expect("found");
-        // C is a real device of Alice's, added by a link — but it is not a
-        // genesis root.
+        // C is a real device of Alice's, added by a link with a root's consent.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
-        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .extend(&profile, Entry::Link(third.clone()))
+            .expect("extend");
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
         alice
             .avow_reachable(&profile, to_bob, &A, 5, [3u8; 16])
             .expect("avow");
 
-        // Alice signs the projection's head with C, not a genesis device.
+        // Alice signs the projection's head with C: consented, chained, taken.
         let projection = alice
             .project(&profile, &C, 5, &bob_standing())
             .expect("project");
         assert_eq!(projection.head.as_ref().unwrap().by, device_from_seed(&C));
-
         let mut bob = Registry::new();
+        bob.absorb(projection, &link, &bob_standing())
+            .expect("a consented chain heads a projection every reader takes");
+        assert!(bob.holds(&profile));
+
+        // An attacker's device has no chain to carry: a head it signs is
+        // refused even when the projection is otherwise well-formed.
+        let mut mallory = Registry::new();
+        let stolen_profile = mallory
+            .found(link.clone())
+            .expect("found from public genesis");
+        let intruder: [u8; 32] = [66u8; 32];
+        // The whole chain must be carried: without A↔C her copy roots
+        // nothing past the genesis, and absorb refuses (tried; it does).
+        mallory
+            .extend(&stolen_profile, Entry::Link(third))
+            .expect("mallory carries the real link");
+        let fake_link = DeviceLink::seal(&C, &intruder, [9u8; 16], 3).expect("seal");
+        mallory
+            .extend(&stolen_profile, Entry::Link(fake_link))
+            .expect("mallory extends her own copy");
+        let forged = mallory
+            .project(&stolen_profile, &intruder, 6, &bob_standing())
+            .expect("project");
+        // C consented to the intruder, so this chain IS valid — which is the
+        // point: chain admission is exactly device consent, no more, and a
+        // "theft" that required a rooted device's signature was that device's
+        // act. Without the consent there is nothing to carry:
+        let mut carol = Registry::new();
+        carol
+            .absorb(forged, &link, &bob_standing())
+            .expect("a chain through a consenting rooted device is that device's act");
+        let lone: [u8; 32] = [77u8; 32];
+        let mut walkin = Registry::new();
+        let unrooted_profile = walkin.found(link.clone()).expect("found");
+        // No link at all: `project` signs with whatever seed it is handed —
+        // that was always true — and the refusal lands where it must, at
+        // every reader's absorb.
+        let headless_authority = walkin
+            .project(&unrooted_profile, &lone, 7, &bob_standing())
+            .expect("project signs; rootedness is the reader's check");
+        let mut dana = Registry::new();
         assert!(matches!(
-            bob.absorb(projection, &link, &bob_standing()),
+            dana.absorb(headless_authority, &link, &bob_standing()),
             Err(Failure::Unanchored)
         ));
         assert!(
-            !bob.holds(&profile),
-            "nothing was learned from a mis-anchored head"
+            !dana.holds(&unrooted_profile),
+            "nothing was learned from a chainless head"
         );
     }
 
@@ -741,6 +903,115 @@ mod tests {
             live.as_slice(),
             [device_from_seed(&A)].as_slice(),
             "B dropped"
+        );
+    }
+
+    #[test]
+    fn a_portrait_travels_to_its_audience_and_supersedes_by_epoch() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link.clone()).expect("found");
+        let audience = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+        alice
+            .avow_portrait(
+                &profile,
+                &Portrait {
+                    name: Some("Alice".to_string()),
+                    picture: Some([7u8; 32]),
+                    detail: "keeps the lighthouse".to_string(),
+                },
+                audience.clone(),
+                &A,
+                2,
+                [2u8; 16],
+            )
+            .expect("avow portrait");
+        alice
+            .avow_reachable(&profile, audience.clone(), &A, 2, [2u8; 16])
+            .expect("avow reachable");
+
+        let projection = alice
+            .project(&profile, &A, 2, &bob_standing())
+            .expect("project");
+        let mut bob = Registry::new();
+        bob.absorb(projection, &link, &bob_standing())
+            .expect("absorb");
+
+        assert_eq!(
+            bob.declared_name(&profile, &bob_standing()).as_deref(),
+            Some("Alice")
+        );
+        let portrait = bob
+            .portrait(&profile, &bob_standing())
+            .expect("a portrait was avowed to this reader");
+        assert_eq!(portrait.picture, Some([7u8; 32]));
+        assert_eq!(portrait.detail, "keeps the lighthouse");
+
+        // A reader outside the audience resolves nothing — never "no
+        // portrait exists", only "none you may read".
+        let stranger = Standing {
+            device: Some(device_from_seed(&C)),
+            ..Standing::default()
+        };
+        assert!(bob.portrait(&profile, &stranger).is_none());
+
+        // A newer epoch supersedes: clearing the picture is a claim, and it
+        // replaces rather than merges.
+        alice
+            .avow_portrait(
+                &profile,
+                &Portrait {
+                    name: Some("Alice".to_string()),
+                    picture: None,
+                    detail: String::new(),
+                },
+                audience.clone(),
+                &A,
+                3,
+                [3u8; 16],
+            )
+            .expect("avow again");
+        alice
+            .avow_reachable(&profile, audience, &A, 3, [3u8; 16])
+            .expect("avow reachable again");
+        let newer = alice
+            .project(&profile, &A, 3, &bob_standing())
+            .expect("project");
+        bob.absorb(newer, &link, &bob_standing()).expect("absorb");
+        let cleared = bob
+            .portrait(&profile, &bob_standing())
+            .expect("still a portrait — the cleared one");
+        assert_eq!(cleared.picture, None);
+        assert_eq!(cleared.detail, "");
+        assert_eq!(cleared.epoch, 3);
+    }
+
+    #[test]
+    fn somebody_elses_signature_cannot_dress_a_subject() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link).expect("found");
+        // A forged portrait about one of Alice's devices, signed by Bob:
+        // an attestation-shaped artifact, and for a portrait there is no
+        // weight that makes it admissible.
+        let forged = Avowal::seal(
+            &BOB,
+            Party::Device(device_from_seed(&A)),
+            Claim::Portrait {
+                picture: Some([66u8; 32]),
+                detail: "not hers to say".to_string(),
+            },
+            Audience::Public,
+            9,
+            [9u8; 16],
+        )
+        .expect("seal");
+        alice
+            .extend(&profile, Entry::Avow(forged))
+            .expect("the log records what was said");
+        assert!(
+            alice.portrait(&profile, &bob_standing()).is_none(),
+            "a portrait only its subject did not sign resolves to nothing"
         );
     }
 }

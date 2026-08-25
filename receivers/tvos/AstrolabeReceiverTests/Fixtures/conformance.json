@@ -1,15 +1,15 @@
 {
   "confirmation_phrase": {
-    "fingerprint": "6666666666666666666666666666666666666666666666666666666666666666",
     "pairing": "77777777777777777777777777777777",
+    "profile": "prf_66666666666666666666666666",
     "receiver_nonce": "8888888888888888888888888888888888888888888888888888888888888888",
     "words": [
-      "spruce",
-      "violet",
       "quartz",
-      "coral",
-      "juniper",
-      "willow"
+      "delta",
+      "comet",
+      "lantern",
+      "comet",
+      "lantern"
     ]
   },
   "fixture_only_keys": {

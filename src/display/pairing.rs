@@ -140,7 +140,7 @@ impl DisplayPairingService {
         }
         validate_capabilities(&request.capabilities).context("validate receiver capabilities")?;
         let pairing = random_pairing_id()?;
-        let phrase = confirmation_phrase(&self.fingerprint, &pairing, &request.receiver_nonce)
+        let phrase = confirmation_phrase(&self.instance.profile, &pairing, &request.receiver_nonce)
             .context("derive display confirmation phrase")?;
         let expires_at_unix_ms = now_unix_ms
             .checked_add(u64::from(MAX_PAIRING_LIFETIME_MS))
@@ -157,6 +157,7 @@ impl DisplayPairingService {
             },
         );
         Ok(PairingStartResponse {
+            coordinator_profile: self.instance.profile.clone(),
             protocol_major: display_protocol::PROTOCOL_MAJOR,
             pairing,
             expires_in_ms: MAX_PAIRING_LIFETIME_MS,
@@ -593,6 +594,11 @@ mod tests {
                 protocol_major: display_protocol::PROTOCOL_MAJOR,
                 instance: "11".repeat(16),
                 label: "Home Astrolabe".into(),
+                profile: display_protocol::ids::CoordinatorProfile::parse(format!(
+                    "prf_{}",
+                    "6".repeat(26)
+                ))
+                .unwrap(),
                 trust: CoordinatorTrust::PinnedCertificate {
                     origin: "https://astrolabe.local:7443".into(),
                     sha256: fingerprint.clone(),

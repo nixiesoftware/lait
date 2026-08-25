@@ -978,6 +978,11 @@ pub struct Daemon {
     endpoint: Arc<Endpoint>,
     display: Arc<crate::display::DisplayRuntime>,
     relaunch_requested: Arc<AtomicBool>,
+    /// The identity's own seed, held for the overlay endpoint the serve path
+    /// stands up. The display custodian already carries it, so this is a
+    /// second reference to material this process necessarily holds, not a new
+    /// exposure.
+    device_seed: [u8; 32],
 }
 
 impl Daemon {
@@ -986,18 +991,22 @@ impl Daemon {
         clients: world_interface::WorldClientRegistry,
         home: &Path,
         device_seed: &[u8; 32],
+        profile: mechanics::kinship::ProfileId,
     ) -> Result<Self> {
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
             clients,
             device_seed,
+            profile,
+            crate::config::Settings::load(Some(home)).display_port(),
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
             display,
             router,
             relaunch_requested: Arc::new(AtomicBool::new(false)),
+            device_seed: *device_seed,
         })
     }
 
@@ -1060,6 +1069,93 @@ impl Daemon {
                 return Err(error).context("serve daemon display HTTPS");
             }
         };
+        // The same router the TCP path serves, reachable over the overlay:
+        // addressed by endpoint id, no port, no inbound hole. A failure here
+        // is a degradation — the LAN listener is already up — never a reason
+        // for the daemon not to exist.
+        let overlay_task = match crate::config::Settings::load(Some(home)).network() {
+            Ok(network) => {
+                let seed = self.device_seed;
+                let state = crate::display::DisplayHttpState {
+                    coordinator: self.display.coordinator.clone(),
+                    pairing: self.display.pairing.clone(),
+                };
+                let overlay_stop = self.endpoint.subscribe_stop();
+                let publication = crate::config::Settings::load(Some(home)).route_publication();
+                let identity_home = home
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| home.to_path_buf());
+                Some(tokio::spawn(async move {
+                    let transport = match comms::DefaultTransport::new(
+                        &seed,
+                        &network,
+                        comms::Protocols {
+                            framed: &[],
+                            session: &[crate::display::overlay::DISPLAY_ALPN],
+                        },
+                    )
+                    .await
+                    {
+                        Ok(transport) => std::sync::Arc::new(transport),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "display overlay endpoint could not bind;                                  serving the LAN listener only"
+                            );
+                            return;
+                        }
+                    };
+                    // Say where this identity answers, when it has a label and
+                    // a registry to say it to. Publication is evidence signed
+                    // by this device; a refusal is logged and serving goes on,
+                    // because a coordinator that cannot announce is degraded,
+                    // not absent — LAN receivers never needed the registry.
+                    if let Some((label, registry)) = publication {
+                        let endpoint = comms::Transport::my_id(transport.as_ref())
+                            .as_str()
+                            .to_string();
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            crate::display::publish_route(
+                                &identity_home,
+                                &label,
+                                &registry,
+                                &endpoint,
+                            )
+                        })
+                        .await;
+                        match outcome {
+                            Ok(Ok(receipt)) => {
+                                tracing::info!(
+                                    label = %receipt.resolved.label.as_str(),
+                                    chronicled = receipt.entry.is_some(),
+                                    "route published"
+                                );
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "route publication refused; serving anyway");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "route publication task failed");
+                            }
+                        }
+                    }
+                    if let Err(error) = crate::display::overlay::serve_display_overlay(
+                        transport,
+                        crate::display::display_http_router(state),
+                        overlay_stop,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "display overlay service stopped");
+                    }
+                }))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no overlay network policy; serving the LAN listener only");
+                None
+            }
+        };
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
@@ -1088,6 +1184,13 @@ impl Daemon {
                 }
             }
         };
+        // The overlay stops on the same watch every sibling uses; joining is
+        // what keeps its endpoint from outliving the daemon that owns it.
+        if let Some(overlay) = overlay_task {
+            if let Err(error) = overlay.await {
+                tracing::error!(%error, "display overlay task ended abnormally");
+            }
+        }
         Self::join_staging(staging).await;
         Self::join_world_upgrades(world_upgrades).await;
         outcome
@@ -1547,9 +1650,10 @@ impl Runner {
         router: Arc<Router>,
         clients: world_interface::WorldClientRegistry,
         device_seed: [u8; 32],
+        profile: mechanics::kinship::ProfileId,
     ) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let daemon = Arc::new(Daemon::new(router, clients, &home, &device_seed)?);
+        let daemon = Arc::new(Daemon::new(router, clients, &home, &device_seed, profile)?);
         Ok(Self {
             home,
             daemon,
@@ -1601,6 +1705,9 @@ pub async fn run_lait_daemon(
     // address book's author path is load-only by design).
     std::fs::create_dir_all(&identity)?;
     let device_seed = crate::config::load_or_create_identity(&identity)?;
+    // The identity's address, derived once beside its seed for the same
+    // reason the seed is: a value threaded down, never re-read to disagree.
+    let profile = crate::config::identity_profile(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
@@ -1609,7 +1716,7 @@ pub async fn run_lait_daemon(
         Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = Runner::start(home, router, clients, device_seed)?;
+    let runner = Runner::start(home, router, clients, device_seed, profile)?;
     let relaunch_requested = runner.relaunch_requested();
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
@@ -1987,7 +2094,16 @@ pub(crate) fn runner_with_factory(
         )),
         crate::world::client_packages().clone(),
         [0x5a; 32],
+        test_profile(),
     )
+}
+
+/// A fixed, valid profile for lifecycle tests — the derivation the daemon
+/// itself uses, over throwaway seeds.
+#[cfg(test)]
+pub(crate) fn test_profile() -> mechanics::kinship::ProfileId {
+    correspondence::plane::ReachPlane::profile_for(&[[0x5a; 32], [0x5b; 32]])
+        .expect("derive test profile")
 }
 
 #[cfg(test)]

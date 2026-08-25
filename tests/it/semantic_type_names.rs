@@ -662,6 +662,16 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "actor",
                 "assignment",
                 "authorization",
+                // An append-only log that can prove its own memory: signed
+                // heads, inclusion paths, consistency paths, and the reader's
+                // monotonic ratchet over them. Public because it is the
+                // artifact grammar *both* sides of that check share — the
+                // registrar in `directory` mints heads and proofs, the daemon
+                // in `display` pins one and asks every later head to prove it
+                // extends the pin. A second copy of the shape is exactly how a
+                // mirror gets to serve two readers two worlds, which is the
+                // defect this module exists to make impossible.
+                "chronicle",
                 // Whose key is about to be spent on the way out. Public because
                 // the crate that carries correspondence has to take the witness
                 // as an argument — that is the whole enforcement mechanism, and a

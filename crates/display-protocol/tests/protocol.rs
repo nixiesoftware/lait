@@ -4,8 +4,8 @@ use display_protocol::auth::{
 };
 use display_protocol::bounds::{MAX_ASSET_BYTES, MAX_STAGED_BYTES};
 use display_protocol::ids::{
-    AuthenticationTag, Challenge, CoordinatorFingerprint, DisplayAssignmentId, DisplayDeviceId,
-    DisplayPairingId, DisplayProgramId, ProgramRevision, ProofKey, ReceiverNonce,
+    AuthenticationTag, Challenge, CoordinatorFingerprint, CoordinatorProfile, DisplayAssignmentId,
+    DisplayDeviceId, DisplayPairingId, DisplayProgramId, ProgramRevision, ProofKey, ReceiverNonce,
 };
 use display_protocol::pairing::{
     authenticate_pairing_complete, confirmation_phrase, validate_bootstrap,
@@ -451,17 +451,25 @@ fn pairing_completion_proof_changes_with_the_enrolled_device() {
 }
 
 #[test]
-fn confirmation_phrase_commits_fingerprint_pairing_and_receiver_nonce() {
-    let fingerprint = CoordinatorFingerprint::parse(repeated('6', 64)).unwrap();
+fn confirmation_phrase_commits_profile_pairing_and_receiver_nonce() {
+    let profile = CoordinatorProfile::parse(format!("prf_{}", repeated('6', 26))).unwrap();
     let pairing = DisplayPairingId::parse(repeated('7', 32)).unwrap();
     let nonce = ReceiverNonce::parse(repeated('8', 64)).unwrap();
-    let first = confirmation_phrase(&fingerprint, &pairing, &nonce).unwrap();
+    let first = confirmation_phrase(&profile, &pairing, &nonce).unwrap();
     assert_eq!(first.len(), 6);
 
     let other = ReceiverNonce::parse(repeated('9', 64)).unwrap();
     assert_ne!(
         first,
-        confirmation_phrase(&fingerprint, &pairing, &other).unwrap()
+        confirmation_phrase(&profile, &pairing, &other).unwrap()
+    );
+
+    // A different identity is different words: the phrase is what a person
+    // compares, and it must move with *who*, not with any placement fact.
+    let stranger = CoordinatorProfile::parse(format!("prf_{}", repeated('9', 26))).unwrap();
+    assert_ne!(
+        first,
+        confirmation_phrase(&stranger, &pairing, &nonce).unwrap()
     );
 
     use sha2::Digest as _;
@@ -498,6 +506,8 @@ fn confirmation_words_outside_the_frozen_dictionary_are_refused() {
         expires_in_ms: 60_000,
         confirmation_phrase: vec!["invented".to_owned(); 6],
         coordinator_fingerprint: CoordinatorFingerprint::parse(repeated('6', 64)).unwrap(),
+        coordinator_profile: CoordinatorProfile::parse(format!("prf_{}", repeated('6', 26)))
+            .unwrap(),
     };
     assert_eq!(
         validate_pairing_start_response(&response),
@@ -577,8 +587,7 @@ fn language_neutral_fixture_matches_rust_transcripts_and_json() {
 
     let phrase = fixture.get("confirmation_phrase").unwrap();
     let words = confirmation_phrase(
-        &CoordinatorFingerprint::parse(phrase.get("fingerprint").unwrap().as_str().unwrap())
-            .unwrap(),
+        &CoordinatorProfile::parse(phrase.get("profile").unwrap().as_str().unwrap()).unwrap(),
         &DisplayPairingId::parse(phrase.get("pairing").unwrap().as_str().unwrap()).unwrap(),
         &ReceiverNonce::parse(phrase.get("receiver_nonce").unwrap().as_str().unwrap()).unwrap(),
     )
