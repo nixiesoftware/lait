@@ -9,8 +9,13 @@ import path from 'path';
  *
  * Like every World web client, this bundle is not compiled into the host. A
  * head serves it only from the selected immutable Signage release, and it
- * ships on the World's own update channel. `npm run build` emits `dist/`;
- * staging that into a release directory is the dev loop.
+ * ships on the World's own update channel. `npm run build` emits straight
+ * into `products/signage-app/assets/web`, which is **committed** and copied
+ * into the release by `.github/scripts/stage-worlds.sh` beside the runner and
+ * the signed declaration — the same arrangement `viewer/` has with Issues.
+ *
+ * The tradeoff is honest: build output in git, kept fresh by `npm run build`
+ * and guarded by CI diffing a rebuild.
  *
  * Dev runs two origins — vite on :3000, the engine on its own port — which
  * is exactly what `serve::auth` refuses. The proxy adapts (Host, Origin,
@@ -31,6 +36,21 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+    },
+  },
+  build: {
+    outDir: '../assets/web',
+    emptyOutDir: true,
+    // No hashed filenames: the bundle is committed, so stable names keep the
+    // diff legible and stop every rebuild from churning the tree with new
+    // files. The World release is versioned as a whole, so cache-busting names
+    // add nothing.
+    rollupOptions: {
+      output: {
+        entryFileNames: 'app.js',
+        chunkFileNames: '[name].js',
+        assetFileNames: '[name][extname]',
+      },
     },
   },
   server: {

@@ -7,5 +7,7 @@
   "tagline": "Author durable programs for managed displays",
   "implementation_version": 4,
   "accent": 10182117,
-  "launch": []
+  "launch": [
+    { "id": "app", "present": "primary", "target": { "type": "web", "path": "/" } }
+  ]
 }
