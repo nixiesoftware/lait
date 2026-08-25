@@ -21,7 +21,7 @@
 // without privileges.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -80,53 +80,12 @@ try {
 console.log(`staged ${targetName} at ${target}`);
 
 // The native package carries the reviewed first-party catalog, not World code.
-// Catalog membership is why a row exists; choosing Install resolves the
-// World's independently signed channel and downloads its native payload.
+// It is a host release input in its own right: staging must never inspect a
+// product manifest, artwork tree, runner, or build output. Catalog membership
+// is why a row exists; choosing Install resolves the World's independently
+// signed channel and downloads its native payload.
+const catalogSource = resolve(here, "..", "catalog");
 const worldCatalog = resolve(here, "..", "src-tauri", "world-catalog");
-// Collect generated output from the retired bootstrap layout so an old local
-// build cannot be mistaken for a resource owned by this one.
-rmSync(resolve(here, "..", "src-tauri", "bundled-worlds"), { recursive: true, force: true });
 rmSync(worldCatalog, { recursive: true, force: true });
-
-function packageVersion(relativeManifest) {
-  const manifest = readFileSync(join(repo, relativeManifest), "utf8");
-  const match = manifest.match(/^version\s*=\s*"([^"]+)"/m);
-  if (match === null) throw new Error(`${relativeManifest} has no package version`);
-  return match[1];
-}
-
-function stageCatalogEntry({ id, version, template, art }) {
-  const root = join(worldCatalog, id);
-  mkdirSync(root, { recursive: true });
-  for (const [from, to] of art ?? []) {
-    const destination = join(root, to);
-    mkdirSync(dirname(destination), { recursive: true });
-    copyFileSync(join(repo, from), destination);
-  }
-  const releaseDeclaration = readFileSync(join(repo, template), "utf8")
-    .replaceAll("${VERSION}", version)
-    .replaceAll("${EXE}", process.platform === "win32" ? ".exe" : "");
-  const declaration = JSON.parse(releaseDeclaration);
-  // Runner paths, compatibility claims and payload inventory belong to the
-  // signed World release. The host catalog says only what can be installed
-  // and how the client should present it before installation.
-  delete declaration.runners;
-  delete declaration.requires;
-  writeFileSync(join(root, "world.json"), `${JSON.stringify(declaration, null, 2)}\n`);
-}
-
-stageCatalogEntry({
-  id: "com.lait.issues",
-  version: packageVersion("products/issues/Cargo.toml"),
-  template: "products/issues-runner/world.json.template",
-  art: [
-    ["products/issues-app/assets/mark.png", "art/mark.png"],
-    ["products/issues-app/assets/hero.png", "art/hero.png"],
-  ],
-});
-stageCatalogEntry({
-  id: "com.lait.signage",
-  version: packageVersion("products/signage/Cargo.toml"),
-  template: "products/signage-runner/world.json.template",
-});
+cpSync(catalogSource, worldCatalog, { recursive: true, errorOnExist: true });
 console.log(`staged first-party World catalog at ${worldCatalog}`);

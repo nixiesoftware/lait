@@ -444,15 +444,31 @@ impl IssuesWorld {
         )
     }
 
-    pub fn migrator_implementation_descriptor() -> runtime::world::Implementation {
-        let world = Self::migrator();
-        runtime::world::Implementation::from_registration(
-            &world.descriptor(),
-            3,
-            *blake3::hash(b"lait.issues.policy-table.v3-migrator").as_bytes(),
-            *blake3::hash(b"lait.issues.v3-to-v4-migrator").as_bytes(),
-        )
-    }
+    /// The reviewed coordinate the migrator presents: the exact historical v3
+    /// implementation — the one coordinate a live pre-v4 Space actually
+    /// activated, whose digest every transaction in its store already attests.
+    ///
+    /// This is a pinned historical fact, not a projection of current source.
+    /// The id was minted by `Implementation::from_registration` over the v3
+    /// descriptor before the query/publication rebuild (#122) renumbered
+    /// `MutationModel`'s canonical encoding (`Collaborative` moved from byte 1
+    /// to byte 2 when `ImmutableAtomic` was inserted), so no current code path
+    /// can re-derive it — and re-deriving it was the defect: a migrator
+    /// minting a fresh coordinate is an implementation no Space has ever
+    /// activated, and the lifecycle's read-continuity gate correctly refuses
+    /// to migrate from an identity that is not installed. An implementation id
+    /// names what a Space activated; the constant changes only if that history
+    /// does, which is never.
+    pub const MIGRATOR_IMPLEMENTATION_ID: [u8; 32] = [
+        0xe4, 0x05, 0xd9, 0xb5, 0x2b, 0xa7, 0xa3, 0xac, 0xa4, 0xa1, 0xdb, 0x28, 0xf8, 0x02, 0xc4,
+        0x56, 0x68, 0x90, 0x33, 0x8e, 0xa2, 0x41, 0x2f, 0xa0, 0xa7, 0x0e, 0x83, 0x2e, 0x80, 0xd0,
+        0x4b, 0x56,
+    ];
+
+    /// The implementation version of [`Self::MIGRATOR_IMPLEMENTATION_ID`],
+    /// which the migrator package's descriptor must also declare — the
+    /// (id, version) pair is what a Space's authority compares.
+    pub const MIGRATOR_IMPLEMENTATION_VERSION: u32 = 3;
 }
 
 fn legacy_and_v4_schemas() -> Vec<Schema> {
@@ -570,10 +586,27 @@ mod package_descriptor_tests {
 
     #[test]
     fn migrator_has_a_distinct_identity_and_the_historical_decoders() {
+        // The identity is the historical one: the exact id the live pre-v4
+        // Space activated, pinned as hex because the canonical encoding that
+        // minted it no longer exists in this tree. A drifted constant here
+        // strands every Space that activated the real coordinate.
+        assert_eq!(
+            data_encoding::HEXLOWER.encode(&IssuesWorld::MIGRATOR_IMPLEMENTATION_ID),
+            "e405d9b52ba7a3aca4a1db28f802c4566890338ea2412fa0a70e832e80d04b56"
+        );
+        assert_eq!(IssuesWorld::MIGRATOR_IMPLEMENTATION_VERSION, 3);
         let preferred = IssuesWorld::implementation_descriptor();
-        let migrator = IssuesWorld::migrator_implementation_descriptor();
-        assert_ne!(preferred.id().unwrap(), migrator.id().unwrap());
+        assert_ne!(
+            preferred.id().unwrap(),
+            IssuesWorld::MIGRATOR_IMPLEMENTATION_ID
+        );
+        // The (id, version) pair is what authority compares, so the served
+        // descriptor must declare the same version the pinned id carries.
         let descriptor = IssuesWorld::migrator().descriptor();
+        assert_eq!(
+            descriptor.implementation_version.0,
+            IssuesWorld::MIGRATOR_IMPLEMENTATION_VERSION
+        );
         assert!(descriptor
             .schemas
             .iter()
@@ -5552,12 +5585,15 @@ fn migration_spec_revisions(
         } else {
             revision.body.plan
         };
-        validate_plan(
-            ctx,
-            &CatalogState::default(),
-            &revision.body.project,
-            plan.as_ref(),
-        )?;
+        // A migrated revision is history, not a new authoring: its plan roots
+        // are what they were, including Issues since deleted or abandoned.
+        // Only the plan's structure is checked here; the live rule that every
+        // root must name an existing Issue in the same project belongs to
+        // authoring, and reads already surface a dangling root as a Packet
+        // conflict rather than an error.
+        if let Some(plan) = plan.as_ref() {
+            plan.validate().map_err(|_| Rejection::StateCorrupt)?;
+        }
         let body = crate::spec::Body {
             spec: revision.body.spec,
             project: revision.body.project,
@@ -8051,7 +8087,10 @@ impl World for IssuesWorld {
     fn descriptor(&self) -> runtime::world::Descriptor {
         runtime::world::Descriptor {
             id: self.id.clone(),
-            implementation_version: runtime::world::Version(4),
+            implementation_version: runtime::world::Version(match self.package {
+                IssuesPackage::Preferred => 4,
+                IssuesPackage::Migrator => Self::MIGRATOR_IMPLEMENTATION_VERSION,
+            }),
             schemas: self.schemas.clone(),
             limits: runtime::world::Limits {
                 max_payload_bytes: contract::MAX_PAYLOAD_BYTES,

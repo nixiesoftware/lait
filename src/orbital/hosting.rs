@@ -7,7 +7,7 @@
 //! Application hosting for one active Station.
 //!
 //! It composes [`SpaceAuthority`] (authority/keys/membership over signed
-//! material), a [`Runtime`] hosting the build's registered Worlds, and a
+//! material), a [`Runtime`] hosting the selected runners' registered Worlds, and a
 //! [`Station`] with the comms Contact plane. [`WorldRouter`] owns one
 //! host per installed World. The process adapter serves Space-owned
 //! `control::Request`/`Response` IPC and product-neutral [`Call`] envelopes,
@@ -158,7 +158,7 @@ fn lifecycle_read_continuity_refusal(
         return None;
     }
     Some(if active_installed {
-        "this build cannot yet preserve the exact active World read publication throughout migration; keeping the prior implementation active"
+        "the selected runner cannot yet preserve the exact active World read publication throughout migration; keeping the prior implementation active"
             .into()
     } else {
         format!(
@@ -183,7 +183,7 @@ struct WorldUpgradeSourceRecord {
     frontier: replica::frontier::ReplicaFrontier,
 }
 
-/// Where this build stands against the Space, for one World.
+/// Where the selected runner stands against the Space, for one World.
 ///
 /// `active` is `None` only before any activation has been incorporated — a
 /// joiner whose backfill has not reached the founder's activation yet. That is
@@ -191,14 +191,14 @@ struct WorldUpgradeSourceRecord {
 /// resolves itself and the other needs somebody to act.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImplementationDrift {
-    /// What this build declares.
+    /// What the selected runner declares.
     pub ours: mechanics::membership::ActiveImplementation,
     /// What the Space has in force.
     pub active: Option<mechanics::membership::ActiveImplementation>,
 }
 
 impl ImplementationDrift {
-    /// Whether this build and the Space agree.
+    /// Whether the selected runner and the Space agree.
     pub fn matched(&self) -> bool {
         self.active.is_some_and(|active| active.id == self.ours.id)
     }
@@ -2730,7 +2730,7 @@ impl StationHost {
                     );
                 };
                 format!(
-                    "{world}: this build is v{} ({}), the space runs v{} ({}) — {}",
+                    "{world}: the selected runner is v{} ({}), the space runs v{} ({}) — {}",
                     drift.ours.version,
                     data_encoding::HEXLOWER.encode(&drift.ours.id[..8]),
                     active.version,
@@ -2740,13 +2740,13 @@ impl StationHost {
                             "this node takes the space forward on its next restart",
                         (std::cmp::Ordering::Greater, false) =>
                             "this node is ahead but cannot activate — ask an admin to \
-                             update, or to run world_upgrade on a node running this build",
+                             update, or to run world_upgrade on a node with this runner selected",
                         (std::cmp::Ordering::Equal, _) =>
                             "same version, different descriptor — neither can order the \
                              other, so one of them has to bump its version",
                         (std::cmp::Ordering::Less, true) =>
                             "update this node, or run world_upgrade here to move the \
-                             space back to this build deliberately",
+                             space back to this selected runner deliberately",
                         (std::cmp::Ordering::Less, false) => "update this node",
                     }
                 )
@@ -3422,8 +3422,8 @@ impl StationHost {
         }
     }
 
-    /// Bring the Space's active World implementations up to this build's, where
-    /// this build is strictly newer and this node may say so.
+    /// Bring the Space's active World implementations up to the selected
+    /// runners, where a runner is strictly newer and this node may say so.
     ///
     /// Runs once at open, before anything docks. Reports through
     /// [`implementation_drift`] either way, which is what the `implementation`
@@ -3449,7 +3449,7 @@ impl StationHost {
                 ),
                 Some(active) if active.id == ours.id => {}
                 Some(active) if !admin => tracing::warn!(
-                    "this build's {world} implementation (v{}, {}) is not the Space's active \
+                    "the selected {world} runner's implementation (v{}, {}) is not the Space's active \
                      one (v{}, {}) — writes attest the active implementation. This node is not \
                      an admin, so it cannot activate its own; ask one to run world_upgrade.",
                     ours.version,
@@ -3477,7 +3477,7 @@ impl StationHost {
                             short(&ours.id),
                         ),
                         Err(error) => tracing::warn!(
-                            "could not activate this build's {world} implementation \
+                            "could not activate the selected {world} runner's implementation \
                              (v{}, {}): {error}",
                             ours.version,
                             short(&ours.id),
@@ -3492,7 +3492,7 @@ impl StationHost {
                             short(&active.id),
                         ),
                         Ok(WorldUpgradeAssessment::Unsupported { reason }) => tracing::warn!(
-                            "{world} cannot be upgraded by this build: {reason}; keeping v{} ({}) active",
+                            "{world} cannot be upgraded by the selected runner: {reason}; keeping v{} ({}) active",
                             active.version,
                             short(&active.id),
                         ),
@@ -3505,11 +3505,11 @@ impl StationHost {
                 }
                 // Behind, or level-but-different. Level-but-different is the
                 // interesting one: same declared version, different descriptor,
-                // which means two builds disagree about what v{n} *is*. Neither
+                // which means two runner releases disagree about what v{n} *is*. Neither
                 // may take the Space, because there is no order between them —
                 // somebody has to bump a version.
                 Some(active) => tracing::warn!(
-                    "this build's {world} implementation (v{}, {}) is {} the Space's active one \
+                    "the selected {world} runner's implementation (v{}, {}) is {} the Space's active one \
                      (v{}, {}) — writes attest the active implementation. Update this node, or \
                      run world_upgrade here to make the Space match it deliberately.",
                     ours.version,

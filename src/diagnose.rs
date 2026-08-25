@@ -135,10 +135,10 @@ pub struct DiagnoseInput<'a> {
     /// Why the scheduler is not dialing, when nothing is dialable — already
     /// worded by the daemon, which holds the registry this is read from.
     pub peer_blocked_by: Option<&'a str>,
-    /// Worlds where this build's implementation is not the Space's active one,
-    /// already rendered — the daemon knows the ids and versions, and this layer
-    /// only has to decide whether the drift blocks. Empty is the ordinary case
-    /// and the ordinary case must stay silent, or the gate becomes furniture.
+    /// Worlds where the selected runner's implementation is not the Space's
+    /// active one, already rendered — the daemon knows the ids and versions,
+    /// and this layer only has to decide whether the drift blocks. Empty is the
+    /// ordinary case and must stay silent, or the gate becomes furniture.
     pub implementation_drift: &'a [String],
 }
 
@@ -290,7 +290,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
         )
     };
 
-    // 5b. implementation — this build against the Space's active World.
+    // 5b. implementation — the selected runner against the Space's active World.
     //
     //     After `synced`, because a joiner mid-backfill has not seen the
     //     founder's activation yet and would otherwise be told its build is
@@ -307,7 +307,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
             "implementation",
             "implementation",
             GateState::Pass,
-            "this build matches the space",
+            "the selected runner matches the space",
         )
     } else {
         DiagnosisGate::new(
@@ -557,7 +557,7 @@ mod tests {
         // own. Blocking here would tell somebody they are locked out of a board
         // that is on their screen.
         let mut i = input();
-        let drift = ["com.lait.issues: this build is v3, the space runs v2".to_string()];
+        let drift = ["com.lait.issues: selected runner is v3, the space runs v2".to_string()];
         i.implementation_drift = &drift;
         let v = diagnose(i);
         assert_eq!(gate(&v, "implementation").state, GateState::Warn);
@@ -711,7 +711,7 @@ mod tests {
         //
         // `implementation` sits after `synced` for a reason of the same kind. A
         // joiner mid-backfill has not incorporated the founder's activation
-        // yet, so asking "does this build match?" before "has anything arrived?"
+        // yet, so asking "does the selected runner match?" before "has anything arrived?"
         // would report a mismatch against a Space this node has not finished
         // reading. Answer the arrival question first.
         assert_eq!(

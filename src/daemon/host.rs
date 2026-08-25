@@ -1229,7 +1229,7 @@ impl Daemon {
     /// step, so progress never monopolizes the host reactor or a Station.
     fn spawn_world_upgrades(&self) -> tokio::task::JoinHandle<()> {
         let router = self.router.clone();
-        let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+        let worlds = crate::serve::head::installations_root(router.catalog().identity());
         let stop = self.endpoint.subscribe_stop();
         let relaunch = GenerationRelaunch {
             requested: self.relaunch_requested.clone(),
@@ -1345,7 +1345,7 @@ async fn advance_world_upgrade_job(
 ) -> Result<WorldUpgradeAdvance> {
     use crate::update::consent::Phase;
 
-    // `current.json` can move while this daemon is running, but every Runtime
+    // `selected.json` can move while this daemon is running, but every Runtime
     // Catalog and client adapter in this process is pinned to the release it
     // launched. Only a fresh daemon may interpret the new descriptor. The
     // durable phase is written before the old generation drains; the new
@@ -1489,6 +1489,45 @@ async fn advance_world_upgrade_job(
         router
             .run_blocking(move || crate::update::consent::save(&worlds_for_save, &staged))
             .await?;
+    }
+
+    if crate::orbits::bootstrap::needs_representation_rebuild(&router, &orbit)? {
+        job.phase = Phase::Migrating;
+        job.message = Some(format!(
+            "Space {orbit} is crossing the signed representation boundary"
+        ));
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        let staged = job.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &staged))
+            .await?;
+        match crate::orbits::bootstrap::rebuild(&router, &orbit).await {
+            Ok(rebuilt) => {
+                tracing::info!(
+                    world = %world,
+                    orbit = %orbit,
+                    generation = %rebuilt.generation,
+                    bodies = rebuilt.bodies,
+                    receipts = rebuilt.receipts,
+                    "authenticated prior Space facts into a current generation"
+                );
+                return Ok(WorldUpgradeAdvance::Progressed);
+            }
+            Err(error) => {
+                tracing::warn!(world = %world, orbit = %orbit, %error, "Space representation rebuild refused");
+                job.phase = Phase::Refused;
+                job.message = Some(format!(
+                    "Space {orbit} cannot cross this compatibility floor: {error}. The prior store remains unchanged"
+                ));
+                job.updated_at = mechanics::wallclock::now_secs();
+                let worlds_for_save = worlds;
+                router
+                    .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+                    .await?;
+                return Ok(WorldUpgradeAdvance::Progressed);
+            }
+        }
     }
 
     let step = match router

@@ -126,6 +126,35 @@ fn the_installer_places_both_binaries_in_one_directory() {
     );
 }
 
+/// A canonical install replaces every owned release tree before writing any
+/// new release bytes. The bounded launcher helper performs the transaction;
+/// NSIS must abort on refusal and seal the receipt only after the new tree.
+#[test]
+fn canonical_install_replaces_release_trees_and_never_overlays_them() {
+    let script = directives();
+    let prepare = script
+        .find("--prepare-canonical-install")
+        .expect("the installer never invokes the bounded replacement helper");
+    let release_out = script
+        .find(r#"SetOutPath "$INSTDIR\current""#)
+        .expect("the release out path");
+    let receipt = script
+        .find(r#"FileOpen $0 "$INSTDIR\canonical-layout-v1" w"#)
+        .expect("the installer does not seal the canonical layout receipt");
+    assert!(prepare < release_out && release_out < receipt);
+    assert!(script.contains("No new release tree was installed."));
+    assert!(
+        script.contains(r#"Delete "$INSTDIR\canonical-layout-v1""#),
+        "uninstall leaves the canonical receipt behind and therefore cannot remove its root"
+    );
+    assert!(
+        !script[..release_out]
+            .lines()
+            .any(|line| line.trim().starts_with(r#"RMDir /r "$INSTDIR\current"#)),
+        "NSIS still recursively edits the live tree instead of using the transaction"
+    );
+}
+
 /// Nothing outside the install may point into a release directory.
 ///
 /// The most expensive mistake in this space, by evidence: Squirrel's
@@ -507,7 +536,7 @@ fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
     );
     assert!(
         !script.contains("WORLD_ROOT") && !script.contains("$runner"),
-        "the macOS host package still enumerates bundled World executables"
+        "the macOS host package still enumerates World product executables"
     );
     assert!(
         script.contains(r#"codesign --verify --deep --strict --verbose=1 "$STAGED""#),
@@ -674,6 +703,10 @@ fn the_linux_package_carries_the_pair_and_notices() {
         "the Linux package does not place the release under current/"
     );
     assert!(
+        script.contains(r#"printf '%s\n' "$VERSION" > "$STAGED/canonical-layout-v1""#),
+        "the Linux package does not seal the canonical install layout"
+    );
+    assert!(
         script.contains(r#"cp "$REPO/THIRD-PARTY-NOTICES.md""#),
         "the Linux package ships binaries without their notices"
     );
@@ -822,8 +855,8 @@ fn the_bundle_is_configured_to_produce_the_layout_the_pair_rule_needs() {
 }
 
 /// The staging script may carry first-party metadata and artwork, but never a
-/// runner or web payload. Installation obtains those bytes from the World's
-/// own signed channel.
+/// product dependency, runner, or web payload. Installation obtains those
+/// bytes from the World's own signed channel.
 #[test]
 fn the_native_client_stages_a_catalog_without_world_payloads() {
     let script =
@@ -831,15 +864,57 @@ fn the_native_client_stages_a_catalog_without_world_payloads() {
             .expect("read the native staging script");
     assert!(
         script.contains("src-tauri\", \"world-catalog")
-            && script.contains("writeFileSync(join(root, \"world.json\")"),
-        "the staging script does not build the first-party catalog"
+            && script.contains("const catalogSource = resolve(here, \"..\", \"catalog\")")
+            && script.contains("cpSync(catalogSource, worldCatalog"),
+        "the staging script does not stage the independent first-party catalog"
     );
     assert!(
-        !script.contains("lait-world-issues-runner")
+        !script.contains("products/")
+            && !script.contains("products\\")
+            && !script.contains("lait-world-issues-runner")
             && !script.contains("lait-world-signage-runner")
             && !script.contains("issues-app/dist"),
-        "the native staging script still builds or copies a World payload"
+        "the native staging script still depends on or copies a World product"
     );
+}
+
+/// Catalog declarations are host release inputs, not projections of whatever
+/// World products happen to share this checkout. Keep the checked-in source
+/// self-contained and presentation-only so the release builder can consume it
+/// without compiling, inspecting, or locating a World product.
+#[test]
+fn the_first_party_catalog_is_a_self_contained_host_input() {
+    let root = repo_root().join("apps/astrolabe-web/catalog");
+    let entries = std::fs::read_dir(&root).expect("read the first-party catalog");
+    let mut worlds = 0_usize;
+
+    for entry in entries {
+        let entry = entry.expect("read a catalog entry");
+        assert!(entry.file_type().expect("catalog entry type").is_dir());
+        let declared = std::fs::read(entry.path().join("world.json"))
+            .expect("every catalog entry carries world.json");
+        let manifest = world_interface::manifest::WorldManifest::parse(&declared)
+            .expect("catalog world.json is a valid declaration");
+        assert_eq!(
+            entry.file_name().to_string_lossy(),
+            manifest.id,
+            "catalog directory and declared World disagree"
+        );
+        assert!(
+            manifest.runners.is_empty() && manifest.requires.is_empty(),
+            "host catalog declarations may not carry executable or compatibility claims"
+        );
+        for (kind, relative) in [("mark", manifest.mark), ("hero", manifest.hero)] {
+            let Some(relative) = relative else { continue };
+            let bytes = std::fs::read(entry.path().join(&relative))
+                .unwrap_or_else(|error| panic!("read catalog {kind} {relative}: {error}"));
+            world_interface::manifest::artwork_bounds(kind, &bytes)
+                .unwrap_or_else(|error| panic!("invalid catalog {kind} {relative}: {error}"));
+        }
+        worlds += 1;
+    }
+
+    assert!(worlds > 0, "the first-party catalog is empty");
 }
 
 // --- The terms --------------------------------------------------------------
@@ -968,9 +1043,8 @@ fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
         "the host update tree still carries executable World releases"
     );
     assert!(
-        tree.contains(r#"[ ! -e "$STAGE/$RESOURCES/worlds" ]"#)
-            && tree.contains(r#"*/world.json|*/art/*.png"#),
-        "the update-tree gate does not refuse legacy or unexpected World payloads"
+        tree.contains(r#"*/world.json|*/art/*.png"#),
+        "the update-tree gate admits files beyond signed catalog declarations and artwork"
     );
 
     // The Linux stable-root package is relocatable, while Tauri's conventional

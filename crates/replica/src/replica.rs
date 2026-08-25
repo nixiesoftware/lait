@@ -255,6 +255,17 @@ fn integrity_cause(
     }
 }
 
+fn annotate_integrity(
+    failure: Failure,
+    operation: &'static str,
+    reason: impl std::fmt::Debug,
+) -> Failure {
+    match failure {
+        Failure::Integrity(defect) => integrity_cause(defect, operation, reason),
+        other => other,
+    }
+}
+
 /// The outcome of committing a request through the persistent-idempotency
 /// scope: either a fresh commit or a replay of the original receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2247,7 +2258,13 @@ impl BodyDirectory {
             }));
             index
         };
-        debug_assert!(self.lookup.insert(key, index).is_none());
+        // The insertion must happen in every profile; only the emptiness CLAIM
+        // is debug-only. With the insert inside the assertion, release builds
+        // stored the slot and never indexed it — a Body invisible to lookup
+        // and iteration alike, surfacing as a bare Integrity(Encoding) on the
+        // first write into a rebuilt store, in release binaries only.
+        let previous = self.lookup.insert(key, index);
+        debug_assert!(previous.is_none());
         None
     }
 

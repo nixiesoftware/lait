@@ -1,13 +1,11 @@
 import SwiftUI
 
-/// The library. One row per Space from the node's registry; Worlds open
-/// inline behind a disclosure. Listing is passive — nothing here probes,
-/// mounts, or connects because you looked at it. Entering and inviting are
-/// the two acts, and both are explicit.
+/// One row per Space from the node's registry. Listing is passive — nothing
+/// here probes, mounts, or connects because you looked at it. Entering,
+/// inviting, and syncing are explicit acts.
 struct SpacesView: View {
     let view: IosView
     let onRefresh: () -> Void
-    let onOpen: (SpaceRow, SpaceWorldRow) -> Void
 
     @State private var entering = false
     @State private var inviteLink: PresentedLink?
@@ -21,7 +19,7 @@ struct SpacesView: View {
                     emptyState
                 } else {
                     ForEach(view.spaces, id: \.spaceId) { space in
-                        SpaceSection(space: space, onOpen: onOpen, onInvite: invite, onSync: sync)
+                        SpaceSection(space: space, onInvite: invite, onSync: sync)
                     }
                 }
             }
@@ -103,52 +101,30 @@ struct SpacesView: View {
 
 private struct SpaceSection: View {
     let space: SpaceRow
-    let onOpen: (SpaceRow, SpaceWorldRow) -> Void
     let onInvite: (SpaceRow) -> Void
     let onSync: (SpaceRow) -> Void
-    @State private var expanded = true
 
     var body: some View {
         Section {
-            DisclosureGroup(isExpanded: $expanded) {
-                ForEach(space.worlds, id: \.mount) { world in
-                    Button {
-                        onOpen(space, world)
-                    } label: {
-                        HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(Color(accent: world.resident ? world.accent : nil))
-                                .frame(width: 4, height: 28)
-                            Text(world.name).foregroundStyle(.primary)
-                            Spacer()
-                            if !world.resident {
-                                Text("not resident").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .disabled(!world.resident)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(space.name).font(.body.weight(.semibold))
+                StateChip(status: space.status)
+            }
+            .contextMenu {
+                Button {
+                    onInvite(space)
+                } label: {
+                    Label("Invite…", systemImage: "person.badge.plus")
                 }
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(space.name).font(.body.weight(.semibold))
-                    StateChip(status: space.status)
+                Button {
+                    onSync(space)
+                } label: {
+                    Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .contextMenu {
-                    Button {
-                        onInvite(space)
-                    } label: {
-                        Label("Invite…", systemImage: "person.badge.plus")
-                    }
-                    Button {
-                        onSync(space)
-                    } label: {
-                        Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    if let orbit = space.orbitId {
-                        Text("orb: \(orbit.prefix(14))…")
-                    }
-                    Text("id: \(space.spaceId)")
+                if let orbit = space.orbitId {
+                    Text("orb: \(orbit.prefix(14))…")
                 }
+                Text("id: \(space.spaceId)")
             }
         }
     }

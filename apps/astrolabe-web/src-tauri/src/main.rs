@@ -67,10 +67,6 @@ enum WebUpdate {
     Attention {
         why: String,
     },
-    Forced {
-        version: String,
-        holding: Vec<String>,
-    },
 }
 
 /// The staged image this client spawns from, and whether the source was
@@ -955,9 +951,6 @@ impl From<ClientView> for WebClientView {
                     WebUpdate::Waiting { version, holding }
                 }
                 api::UpdateRow::Attention { why } => WebUpdate::Attention { why },
-                api::UpdateRow::Forced { version, holding } => {
-                    WebUpdate::Forced { version, holding }
-                }
             }),
         }
     }

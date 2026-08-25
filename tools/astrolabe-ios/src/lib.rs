@@ -10,9 +10,9 @@
 //!
 //! The view below is the interface design's shape rendered honestly at this
 //! platform's capability. iOS cannot spawn or dynamically install native World
-//! executables, so the signed app carries reviewed first-party adapters while
-//! desktop reads independently selected releases. The link state says *why*
-//! content is absent.
+//! executables. It therefore carries no World implementation: until a
+//! platform-safe independent delivery contract exists, World content is a
+//! typed absence rather than native product code linked into the host.
 //! Chats and the Inbox render from nothing at all yet: correspondence rides
 //! the mailbox primitive (a payload sealed once, unlocked per device), and
 //! until that contract is issued their surfaces say so rather than carrying
@@ -21,7 +21,6 @@
 uniffi::setup_scaffolding!();
 
 mod node;
-mod worlds;
 pub use node::*;
 
 use lait::orbits;
@@ -33,14 +32,9 @@ pub struct IosView {
     pub core_version: String,
     /// This phone's standing in the identity's linked-device set.
     pub link: LinkState,
-    /// Reviewed first-party Worlds carried by this signed iOS application.
-    pub bundled_worlds: Vec<BundledWorld>,
     /// One row per joined Space, from the Orbit registry — advisory
     /// navigation state, never truth.
     pub spaces: Vec<SpaceRow>,
-    /// The in-process head, when the node has started. A World cannot open
-    /// without it, and its absence renders as "starting", not as an error.
-    pub head: Option<HeadReady>,
 }
 
 /// The typed absence rule applies to the link itself: "cannot yet" and "has
@@ -56,21 +50,6 @@ pub enum LinkState {
     Linked { device_name: String, did: String },
 }
 
-/// A reviewed first-party World this signed iOS application carries.
-#[derive(uniffi::Record)]
-pub struct BundledWorld {
-    /// The published namespace key — machine input, never renamed.
-    pub mount: String,
-    /// What the World calls itself.
-    pub name: String,
-    /// One line under the name, when the World declared one.
-    pub tagline: Option<String>,
-    /// Packed 0xRRGGBB accent seed, when declared.
-    pub accent: Option<u32>,
-    /// Whether `Open` has anywhere to land. False is a real answer.
-    pub openable: bool,
-}
-
 /// One Space, one row, however many providers advertise it.
 #[derive(uniffi::Record)]
 pub struct SpaceRow {
@@ -78,11 +57,9 @@ pub struct SpaceRow {
     pub name: String,
     /// The store path — the handle invite-minting keys on.
     pub path: String,
-    /// The head's address for this Space (`orb_…`), when the store is
-    /// present: `/spaces/{orbit_id}` in the served shell.
+    /// The orbital address for this Space (`orb_…`), when the store is present.
     pub orbit_id: Option<String>,
     pub status: SpaceStatus,
-    pub worlds: Vec<SpaceWorldRow>,
 }
 
 /// The state vocabulary from the interface design — measured facts and typed
@@ -104,44 +81,10 @@ pub enum SpaceStatus {
     StoreMissing,
 }
 
-/// A World within a Space's disclosure.
-#[derive(uniffi::Record)]
-pub struct SpaceWorldRow {
-    pub mount: String,
-    pub name: String,
-    pub accent: Option<u32>,
-    /// False renders as the typed "not resident" absence.
-    pub resident: bool,
-}
-
 /// The one read. Whole view out; no partial asks.
 #[uniffi::export]
 pub fn client_view() -> IosView {
-    let registry = worlds::client_packages().unwrap_or_default();
-    let bundled_worlds: Vec<BundledWorld> = registry
-        .packages()
-        .map(|package| {
-            let display = package.display();
-            BundledWorld {
-                mount: package.mount().to_owned(),
-                name: display.name().to_owned(),
-                tagline: display.tagline().map(str::to_owned),
-                accent: display.accent(),
-                openable: display.entry_path().is_some(),
-            }
-        })
-        .collect();
-
-    // The head's *current* announcement: a paused head reads as absent, and
-    // the tab surface renders that as its own state. Never a startup-frozen
-    // copy — after a foreground restart the old one is a dead port.
-    let head = node::node()
-        .and_then(|node| node.head_ready())
-        .map(|ready| HeadReady {
-            url: ready.url.clone(),
-            token: ready.token.clone(),
-            port: ready.port,
-        });
+    let node_ready = node::node().is_some();
 
     // The registry is navigation state, never truth: names are advisory
     // snapshots, and a corrupt file degrades to "no known spaces".
@@ -163,7 +106,7 @@ pub fn client_view() -> IosView {
                     Some("member" | "admin") => SpaceStatus::ServingLocally,
                     Some(_) => SpaceStatus::AdmissionPending,
                     None if pending => SpaceStatus::AdmissionPending,
-                    None if head.is_some() => SpaceStatus::ServingLocally,
+                    None if node_ready => SpaceStatus::ServingLocally,
                     None => SpaceStatus::NotRunning,
                 }
             };
@@ -175,16 +118,6 @@ pub fn client_view() -> IosView {
                 ),
                 _ => None,
             };
-            let worlds = bundled_worlds
-                .iter()
-                .filter(|world| world.openable)
-                .map(|world| SpaceWorldRow {
-                    mount: world.mount.clone(),
-                    name: world.name.clone(),
-                    accent: world.accent,
-                    resident: present,
-                })
-                .collect();
             SpaceRow {
                 space_id: entry.space.clone(),
                 name: if entry.name.is_empty() {
@@ -195,7 +128,6 @@ pub fn client_view() -> IosView {
                 path: entry.path,
                 orbit_id,
                 status,
-                worlds,
             }
         })
         .collect();
@@ -203,8 +135,6 @@ pub fn client_view() -> IosView {
     IosView {
         core_version: lait::VERSION.to_owned(),
         link: LinkState::Unavailable,
-        bundled_worlds,
         spaces,
-        head,
     }
 }

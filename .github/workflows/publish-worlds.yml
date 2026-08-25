@@ -1,4 +1,11 @@
-name: Publish first-party Worlds
+name: World Candidate
+
+# Build one complete, native, commit-addressed World candidate. The candidate
+# is the immutable byte set the hostile-install and real-data audits exercise.
+# This workflow moves no channel and holds no signing key: publication is a
+# separate, local act — `ci/publish-world.sh --from-run` consumes the audited
+# run's artifact, and the feed signing seed never leaves the maintainer
+# machine performing it.
 
 on:
   push:
@@ -22,17 +29,9 @@ on:
       - Cargo.toml
       - Cargo.lock
   workflow_dispatch:
-    inputs:
-      stable:
-        description: Promote the existing tested releases to stable without rebuilding
-        required: true
-        default: false
-        type: boolean
 
-# Channel pointers are the only mutable objects. Never let two commits race to
-# decide which complete release is current.
 concurrency:
-  group: first-party-world-channels
+  group: world-candidate-${{ github.sha }}
   cancel-in-progress: false
 
 permissions: {}
@@ -45,7 +44,6 @@ env:
 jobs:
   gate:
     name: decide which immutable releases are new
-    if: ${{ github.event_name == 'push' || inputs.stable == false }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -53,6 +51,11 @@ jobs:
       issues-needed: ${{ steps.releases.outputs.issues-needed }}
       signage-needed: ${{ steps.releases.outputs.signage-needed }}
       any-needed: ${{ steps.releases.outputs.any-needed }}
+      issues-version: ${{ steps.releases.outputs.issues-version }}
+      signage-version: ${{ steps.releases.outputs.signage-version }}
+      sha: ${{ steps.releases.outputs.sha }}
+      short-sha: ${{ steps.releases.outputs.short-sha }}
+      artifact: ${{ steps.releases.outputs.artifact }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -87,6 +90,8 @@ jobs:
           issues_version="$(version_of products/issues/Cargo.toml)"
           signage_version="$(version_of products/signage/Cargo.toml)"
           [ -n "$issues_version" ] && [ -n "$signage_version" ]
+          sha="$(git rev-parse HEAD)"
+          short_sha="${sha:0:12}"
           issues_needed="$(needs_release com.lait.issues "$issues_version")"
           signage_needed="$(needs_release com.lait.signage "$signage_version")"
           any_needed=false
@@ -96,6 +101,11 @@ jobs:
           echo "issues-needed=$issues_needed" >> "$GITHUB_OUTPUT"
           echo "signage-needed=$signage_needed" >> "$GITHUB_OUTPUT"
           echo "any-needed=$any_needed" >> "$GITHUB_OUTPUT"
+          echo "issues-version=$issues_version" >> "$GITHUB_OUTPUT"
+          echo "signage-version=$signage_version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short-sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "artifact=world-candidate-$short_sha" >> "$GITHUB_OUTPUT"
 
   build:
     name: build World runners (${{ matrix.target }})
@@ -104,6 +114,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -132,58 +144,42 @@ jobs:
           set -euo pipefail
           bash .github/scripts/stage-worlds.sh "${{ matrix.target }}" stage
           tar czf "world-bundles-${{ matrix.target }}.tar.gz" -C stage worlds
+          sha256sum "world-bundles-${{ matrix.target }}.tar.gz" \
+            > "world-bundles-${{ matrix.target }}.tar.gz.sha256"
+      - name: Attest the native World candidate
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: world-bundles-${{ matrix.target }}.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: world-bundles-${{ matrix.target }}
-          path: world-bundles-${{ matrix.target }}.tar.gz
+          path: |
+            world-bundles-${{ matrix.target }}.tar.gz
+            world-bundles-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
-  publish:
-    name: seal and publish World channels
+  candidate:
+    name: assemble the commit-addressed World candidate
     needs: [gate, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: world-bundles-*
-          path: dist
+          path: candidate
           merge-multiple: true
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
-        with:
-          toolchain: stable
-      - name: Build the feed sealer
-        run: cargo build --release --locked -p lait-feed
-      - name: Authenticate to the distribution bucket
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_WORLD_PUBLISHER_SERVICE_ACCOUNT }}
-      - name: Install gcloud
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-        with:
-          version: '>= 416.0.0'
-      - name: Publish new immutable releases to test
+      - name: Verify every native byte set against its checksum and provenance
         shell: bash
         env:
-          WORLD_FEED_SIGNING_SEED: ${{ secrets.WORLD_FEED_SIGNING_SEED }}
-          ISSUES_NEEDED: ${{ needs.gate.outputs.issues-needed }}
-          SIGNAGE_NEEDED: ${{ needs.gate.outputs.signage-needed }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
         run: |
           set -euo pipefail
-          [ -n "$WORLD_FEED_SIGNING_SEED" ] || {
-            echo "WORLD_FEED_SIGNING_SEED is not configured" >&2
-            exit 1
-          }
-          seed="$RUNNER_TEMP/world-feed-signing.seed"
-          printf '%s\n' "$WORLD_FEED_SIGNING_SEED" > "$seed"
-          chmod 600 "$seed"
-
+          cd candidate
           targets=(
             x86_64-unknown-linux-gnu
             aarch64-unknown-linux-gnu
@@ -192,76 +188,58 @@ jobs:
             x86_64-pc-windows-msvc
           )
           for target in "${targets[@]}"; do
-            mkdir -p "dist/$target"
-            tar xzf "dist/world-bundles-$target.tar.gz" -C "dist/$target"
+            [ -f "world-bundles-$target.tar.gz" ] \
+              || { echo "::error::missing world-bundles-$target.tar.gz"; exit 1; }
+            sha256sum -c "world-bundles-$target.tar.gz.sha256"
+            gh attestation verify "world-bundles-$target.tar.gz" \
+              --repo "$GITHUB_REPOSITORY" --source-digest "$SOURCE_SHA" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-worlds.yml" \
+              > /dev/null
           done
-
-          publish_world() {
-            local world="$1" manifest="$2" version args=()
-            version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
-            [ -n "$version" ] || { echo "$manifest has no version" >&2; exit 1; }
-            for target in "${targets[@]}"; do
-              args+=(--bundle "$target=$PWD/dist/$target/worlds/$world/$version")
-            done
-            FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
-              --world "$world" --version "$version" "${args[@]}" \
-              --channel test --seed "$seed"
-          }
-
-          if [ "$ISSUES_NEEDED" = true ]; then
-            publish_world com.lait.issues products/issues/Cargo.toml
-          fi
-          if [ "$SIGNAGE_NEEDED" = true ]; then
-            publish_world com.lait.signage products/signage/Cargo.toml
-          fi
-
-  promote:
-    name: promote the exact tested World releases
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.stable }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
-        with:
-          toolchain: stable
-      - name: Build the feed sealer
-        run: cargo build --release --locked -p lait-feed
-      - name: Authenticate to the distribution bucket
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_WORLD_PUBLISHER_SERVICE_ACCOUNT }}
-      - name: Install gcloud
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-        with:
-          version: '>= 416.0.0'
-      - name: Move stable pointers to the existing tested manifests
+      - name: Record the immutable candidate coordinate
         shell: bash
         env:
-          WORLD_FEED_SIGNING_SEED: ${{ secrets.WORLD_FEED_SIGNING_SEED }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+          ISSUES_VERSION: ${{ needs.gate.outputs.issues-version }}
+          SIGNAGE_VERSION: ${{ needs.gate.outputs.signage-version }}
         run: |
           set -euo pipefail
-          [ -n "$WORLD_FEED_SIGNING_SEED" ] || {
-            echo "WORLD_FEED_SIGNING_SEED is not configured" >&2
-            exit 1
-          }
-          seed="$RUNNER_TEMP/world-feed-signing.seed"
-          printf '%s\n' "$WORLD_FEED_SIGNING_SEED" > "$seed"
-          chmod 600 "$seed"
-
-          promote_world() {
-            local world="$1" manifest="$2" version
-            version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
-            [ -n "$version" ] || { echo "$manifest has no version" >&2; exit 1; }
-            FEED_TOOL="$PWD/target/release/lait-feed" bash ci/publish-world.sh \
-              --world "$world" --version "$version" --channel stable \
-              --promote --seed "$seed"
-          }
-
-          promote_world com.lait.issues products/issues/Cargo.toml
-          promote_world com.lait.signage products/signage/Cargo.toml
+          printf 'source_sha=%s\nissues_version=%s\nsignage_version=%s\n' \
+            "$SOURCE_SHA" "$ISSUES_VERSION" "$SIGNAGE_VERSION" \
+            > candidate/world-candidate-provenance.env
+          (cd candidate && sha256sum world-candidate-provenance.env \
+            > world-candidate-provenance.env.sha256)
+      - name: Attest the candidate coordinate
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: candidate/world-candidate-provenance.env
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ needs.gate.outputs.artifact }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record the audit and publication coordinates
+        env:
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_SHA: ${{ needs.gate.outputs.sha }}
+          ARTIFACT: ${{ needs.gate.outputs.artifact }}
+          ISSUES_NEEDED: ${{ needs.gate.outputs.issues-needed }}
+          SIGNAGE_NEEDED: ${{ needs.gate.outputs.signage-needed }}
+          ISSUES_VERSION: ${{ needs.gate.outputs.issues-version }}
+          SIGNAGE_VERSION: ${{ needs.gate.outputs.signage-version }}
+        run: |
+          {
+            echo "### Commit-addressed World candidate"
+            echo "Audit artifact \`$ARTIFACT\` from commit \`$SOURCE_SHA\` before any channel moves."
+            echo '```sh'
+            if [ "$ISSUES_NEEDED" = true ]; then
+              echo "ci/publish-world.sh --world com.lait.issues --version $ISSUES_VERSION --from-run $RUN_ID --artifact-name $ARTIFACT --channel test --seed ~/.lait-feed-signing.seed"
+              echo "ci/publish-world.sh --world com.lait.issues --version $ISSUES_VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed"
+            fi
+            if [ "$SIGNAGE_NEEDED" = true ]; then
+              echo "ci/publish-world.sh --world com.lait.signage --version $SIGNAGE_VERSION --from-run $RUN_ID --artifact-name $ARTIFACT --channel test --seed ~/.lait-feed-signing.seed"
+              echo "ci/publish-world.sh --world com.lait.signage --version $SIGNAGE_VERSION --channel stable --promote --seed ~/.lait-feed-signing.seed"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

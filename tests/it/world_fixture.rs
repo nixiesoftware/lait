@@ -27,9 +27,7 @@ pub fn packages() -> lait::orbital::WorldPackages {
             ));
 
     let migrator_world = issues::IssuesWorld::migrator();
-    let migrator_id = issues::IssuesWorld::migrator_implementation_descriptor()
-        .id()
-        .expect("canonical Issues migrator descriptor");
+    let migrator_id = issues::IssuesWorld::MIGRATOR_IMPLEMENTATION_ID;
     let migrator = lait::orbital::WorldPackage::new(Arc::new(migrator_world), migrator_id)
         .with_control(Arc::new(issues_app::IssuesCallHandler))
         .with_exec(runtime::exec::Package::new().with_spec(issues::contract::verify_spec()))

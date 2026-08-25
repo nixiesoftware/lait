@@ -1057,7 +1057,7 @@ impl Worker {
                 let identity = client.identity_dir().ok_or_else(|| {
                     ClientError::internal("the World installation has no identity directory")
                 })?;
-                let worlds = lait::serve::head::worlds_root(&identity);
+                let worlds = lait::serve::head::installations_root(&identity);
                 let world_id = entry.world;
                 let mount = world.clone();
                 let updates = self.updates.clone();

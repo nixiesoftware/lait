@@ -17,7 +17,7 @@
     )
 )]
 
-//! Application package for the bundled Issues World.
+//! Application package for the independently distributed Issues World.
 //!
 //! [`issues`] remains the pure semantic World. This package owns the external
 //! application protocol and the client interfaces a host mounts. It deliberately

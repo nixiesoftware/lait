@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
+use runtime::world::AuthorityView;
 
 use super::{discover_space, orbital_store_root, SpaceAuthority, SpaceStore};
 
@@ -170,13 +171,70 @@ pub fn rebuild_prior(home: &Path, device_seed: &[u8; 32]) -> Result<Rebuild> {
         signer: &identity,
         authority_frontier: authority.current_frontier(),
     };
-    let replica = replica::generation::build_prior(
-        &orbit,
-        build.path(runtime::generation::Component::Replica),
-        &context,
-        authority,
-    )
-    .map_err(|error| anyhow!("build Replica generation: {error}"))?;
+    let replica_target = build.path(runtime::generation::Component::Replica);
+    let needs_semantic_migration =
+        replica::generation::PriorReplicaSource::open(&orbit, authority.clone())
+            .is_ok_and(|source| source.body_count() != 0);
+    let replica = if needs_semantic_migration {
+        let actor = authority
+            .my_actor()
+            .ok_or_else(|| anyhow!("this device has no actor standing for semantic migration"))?;
+        let device = identity.device().clone();
+        replica::generation::migrate_prior(
+            &orbit,
+            &replica_target,
+            &context,
+            authority.clone(),
+            authority.as_ref(),
+            &actor,
+            &device,
+            |world| {
+                mechanics::authorization::AuthorizationDemand::require(
+                    mechanics::authorization::PolicyCapability::new(world.as_str(), "space.admin"),
+                    mechanics::authorization::Resource::root(world.as_str()),
+                )
+                .encode_canonical()
+                .map_err(|_| {
+                    replica::transaction::commit::Failure::Integrity(
+                        replica::transaction::commit::Defect::Encoding,
+                    )
+                })
+            },
+            |world, core| {
+                let implementation = authority
+                    .active_implementation(world, &context.authority_frontier)
+                    .map_err(|_| {
+                        mechanics::authorization::Refusal::Denied(
+                            mechanics::authorization::DenialReason::Internal(
+                                "active implementation could not be resolved for migration",
+                            ),
+                        )
+                    })?
+                    .ok_or(mechanics::authorization::Refusal::Denied(
+                        mechanics::authorization::DenialReason::Internal(
+                            "the prior World's implementation is not active",
+                        ),
+                    ))?;
+                authority.authorize_mutation(
+                    &space,
+                    world,
+                    &actor,
+                    &device,
+                    &context.authority_frontier,
+                    core.parent_manifest_root,
+                    implementation,
+                    core.intent_digest,
+                    &core.demand,
+                    core.operations_digest,
+                    core.digest(),
+                )
+            },
+        )
+        .map_err(|error| anyhow!("migrate prior Replica facts: {error}"))?
+    } else {
+        replica::generation::build_prior(&orbit, &replica_target, &context, authority.clone())
+            .map_err(|error| anyhow!("build Replica generation: {error}"))?
+    };
 
     let evidence = combined_evidence(mechanics.evidence(), replica.evidence());
     let verification = build
@@ -214,4 +272,19 @@ fn combined_evidence(mechanics: [u8; 32], replica: [u8; 32]) -> [u8; 32] {
     hash.update(&mechanics);
     hash.update(&replica);
     *hash.finalize().as_bytes()
+}
+
+#[cfg(test)]
+mod real_data_diagnostic {
+    #[test]
+    #[ignore = "requires LAIT_REAL_REBUILD_HOME pointing at a disposable copied Space home"]
+    fn copied_prior_space_reports_the_exact_rebuild_failure() {
+        let home = std::env::var_os("LAIT_REAL_REBUILD_HOME")
+            .map(std::path::PathBuf::from)
+            .expect("LAIT_REAL_REBUILD_HOME");
+        let seed = crate::config::load_or_create_identity(&home).expect("identity seed");
+        let rebuilt = super::rebuild_prior(&home, &seed);
+        eprintln!("REAL_REBUILD_RESULT={rebuilt:?}");
+        rebuilt.expect("copied real Space rebuild");
+    }
 }

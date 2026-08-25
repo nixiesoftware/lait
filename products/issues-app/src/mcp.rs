@@ -1606,7 +1606,7 @@ fn verify(input: Value) -> Result<ClientInvocation, Failure> {
     world(IssuesRequest::Verify {
         reff: a.reff,
         source: a.source.into_string(),
-        // Empty means omitted: the router fills the bundled Build and records
+        // Empty means omitted: the router fills the package-selected Build and records
         // package_filled. Filling here would look like a caller-named Build.
         build: a.build.map(Hex32Bytes::into_string).unwrap_or_default(),
     })

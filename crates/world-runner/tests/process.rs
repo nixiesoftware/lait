@@ -4,11 +4,12 @@ use world_runner::{Instance, Operation, Release, Reply, Stopped};
 
 fn fixture_binary() -> PathBuf {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("target")
-        .join("debug")
-        .join(format!("world-fixture{suffix}"))
+    let test_binary = std::env::current_exe().expect("running process test binary");
+    let profile_dir = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .expect("Cargo test binary under <target>/<profile>/deps");
+    profile_dir.join(format!("world-fixture{suffix}"))
 }
 
 fn staged_release(version: &str, digest: [u8; 32]) -> (tempfile::TempDir, Release) {

@@ -20,9 +20,6 @@ on:
     paths:
       - .github/workflows/build-binaries.yml
       - .github/scripts/archive-*.sh
-      - .github/scripts/stage-worlds.sh
-      - products/issues-runner/world.json.template
-      - products/signage-runner/world.json.template
       - .github/workflows/release.yml
 
 concurrency:
@@ -66,8 +63,10 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: rel-${{ matrix.target }}
-      - name: Build host and first-party World runners
-        run: cargo build --release --locked --target ${{ matrix.target }} -p lait -p lait-issues-runner -p lait-signage-runner
+      # A host release has no build edge to World implementations. Worlds are
+      # built and published only by publish-worlds.yml on their own versions.
+      - name: Build host
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait
       - name: Archive (nested tar.gz + sha256)
         shell: bash
         env:
@@ -114,8 +113,9 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: rel-${{ matrix.target }}
-      - name: Build host and first-party World runners
-        run: cargo build --release --locked --target ${{ matrix.target }} -p lait -p lait-issues-runner -p lait-signage-runner
+      # A host release has no build edge to World implementations.
+      - name: Build host
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lait
       # SIGNING SLOT (next increment): codesign --options runtime the binary here,
       # then notarize + staple a .pkg, before the archive step. Secret-gated.
       - name: Archive (nested tar.gz + sha256)
@@ -159,8 +159,9 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: rel-x86_64-pc-windows-msvc
-      - name: Build host and first-party World runners
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p lait -p lait-issues-runner -p lait-signage-runner
+      # A host release has no build edge to World implementations.
+      - name: Build host
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p lait
       # SIGNING SLOT (next increment): Azure-sign target\...\lait.exe here, before
       # the zip step. Secret-gated.
       - name: Archive (flat zip + sha256)

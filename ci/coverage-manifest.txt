@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2636
-pr-platform    2146
-nightly        2665
+pr             2651
+pr-platform    2161
+nightly        2680
 mutants        106
 
 [gates]
@@ -95,6 +95,7 @@ astrolabe api::tests::the_book_crosses_as_authored_cards_not_as_reachability
 astrolabe api::tests::the_glance_is_the_book_joined_to_one_world
 astrolabe api::tests::the_library_crosses_as_the_declaration_keyed_by_mount
 astrolabe browser::tests::only_a_web_address_is_ever_handed_to_the_shell
+astrolabe client::config_tests::a_legacy_installed_tree_requires_the_canonical_installer
 astrolabe client::config_tests::the_correspondence_fixture_is_off_by_default
 astrolabe client::correspondence::tests::ada_folds_two_devices_into_one_conversation
 astrolabe client::correspondence::tests::blocking_a_person_stops_their_messages_landing
@@ -130,9 +131,8 @@ astrolabe client::storage::tests::an_unknown_transfer_total_is_not_zero_and_not_
 astrolabe client::storage::tests::an_unmeasured_footprint_is_absent_rather_than_zero
 astrolabe client::update::tests::a_clock_behind_the_staging_time_is_quiet_rather_than_urgent
 astrolabe client::update::tests::a_machine_that_has_never_checked_says_nothing_rather_than_up_to_date
-astrolabe client::update::tests::a_relaunch_that_did_not_apply_escalates_instead_of_asking_again
 astrolabe client::update::tests::a_verification_failure_and_a_replayed_pointer_both_ask_for_attention
-astrolabe client::update::tests::below_the_floor_the_restart_is_taken_rather_than_asked_for
+astrolabe client::update::tests::below_the_floor_requires_a_canonical_reinstall
 astrolabe client::update::tests::declared_work_in_flight_holds_the_request_and_names_what_is_holding_it
 astrolabe client::update::tests::only_the_installed_shape_has_a_managing_stub
 astrolabe client::update::tests::staging_is_silent_and_so_is_a_channel_that_could_not_be_asked
@@ -201,12 +201,12 @@ astrolabe-display-reference shell::tests::changed_pixels_re_present_and_a_blank_
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_synchronized_snapshot_keeps_advancing_while_assets_are_staged
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::an_unsynchronized_snapshot_begins_when_it_is_activated
-astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
-astrolabe-ios worlds::tests::signed_adapter_carries_exactly_the_reviewed_first_party_defaults
+astrolabe-ios node::tests::the_product_free_embedded_node_starts_without_a_world_head
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
 astrolabe-stub tests::a_live_tree_that_cannot_start_falls_back_to_the_previous_tree
 astrolabe-stub tests::a_manifest_that_does_not_carry_its_own_entry_is_refused
 astrolabe-stub tests::a_missing_live_tree_with_no_stage_restores_the_previous_tree
+astrolabe-stub tests::a_receipt_symlink_cannot_admit_a_legacy_installation
 astrolabe-stub tests::a_same_length_tamper_is_caught_by_the_digest_rather_than_the_size
 astrolabe-stub tests::a_stage_being_written_right_now_is_left_alone
 astrolabe-stub tests::a_stage_manifest_without_its_tree_is_cleared_rather_than_refused_forever
@@ -215,7 +215,13 @@ astrolabe-stub tests::a_tampered_stage_is_refused_by_name_and_the_live_tree_is_u
 astrolabe-stub tests::a_verified_stage_is_applied_and_the_previous_tree_is_kept
 astrolabe-stub tests::an_extra_file_in_the_staged_tree_is_a_verification_failure
 astrolabe-stub tests::an_interrupted_swap_is_finished_at_the_next_launch
+astrolabe-stub tests::canonical_install_refuses_a_live_installation_without_changing_it
+astrolabe-stub tests::canonical_install_refuses_an_active_stager_without_changing_it
+astrolabe-stub tests::canonical_install_removes_all_owned_trees_and_preserves_unknown_root_content
+astrolabe-stub tests::canonical_install_rolls_back_every_detached_tree_when_replacement_is_refused
+astrolabe-stub tests::canonical_install_unlinks_a_hostile_tree_symlink_without_following_it
 astrolabe-stub tests::nothing_staged_is_the_ordinary_launch_and_touches_nothing
+astrolabe-stub tests::only_a_regular_nonempty_canonical_receipt_admits_launch
 astrolabe-stub tests::stale_scratch_is_swept_when_the_installation_is_claimed
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::launch a_relaunch_request_reaches_the_apply_window_under_one_stub
@@ -223,6 +229,7 @@ astrolabe::launch a_request_with_nothing_staged_relaunches_once_and_is_consumed
 astrolabe::launch a_secondary_stub_cannot_consume_the_primary_relaunch_request
 astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
 astrolabe::launch the_daemon_serves_the_identity_profile_of_the_home_it_was_given
+astrolabe::packaging canonical_install_replaces_release_trees_and_never_overlays_them
 astrolabe::packaging every_platform_stages_the_terms_where_the_update_tree_will_find_them
 astrolabe::packaging every_shell_artifact_points_at_the_stub_and_never_into_a_release
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
@@ -235,6 +242,7 @@ astrolabe::packaging the_dmg_ships_the_notices_inside_the_bundle
 astrolabe::packaging the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep
 astrolabe::packaging the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed
 astrolabe::packaging the_dmg_staples_assesses_and_keeps_identity_out_of_the_project
+astrolabe::packaging the_first_party_catalog_is_a_self_contained_host_input
 astrolabe::packaging the_installer_asks_for_no_elevation
 astrolabe::packaging the_installer_carries_nothing_from_the_retired_stacks
 astrolabe::packaging the_installer_carries_the_c_runtime
@@ -256,6 +264,7 @@ comms iroh::tests::framing_golden_bytes
 comms iroh::tests::id_topic_conversions
 comms mem::tests::connect_fails_after_peer_shutdown
 comms mem::tests::finish_delivers_end_of_stream_after_drain
+comms mem::tests::shutdown_announces_departure_and_closes_every_dial_path
 comms mem::tests::two_mem_peers_gossip_and_dial
 comms mem::tests::wait_closed_parks_until_dialer_drops
 comms network_simulation_tests::a_different_seed_is_a_different_run
@@ -667,6 +676,7 @@ lait mcp::scope_tests::an_unknown_world_pin_is_refused_rather_than_served_empty
 lait mcp::scope_tests::the_issues_mount_is_a_legal_explicit_pin
 lait mcp::scope_tests::the_live_router_composes_shell_and_namespaced_world_tools
 lait mcp::scope_tests::world_upgrade_names_the_pinned_world
+lait orbital::generation::real_data_diagnostic::copied_prior_space_reports_the_exact_rebuild_failure
 lait orbital::hosting::nudge_delivery::a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names
 lait orbital::hosting::nudge_delivery::actor_matching_is_equality_and_not_a_prefix
 lait orbital::hosting::nudge_delivery::an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error
@@ -885,13 +895,13 @@ lait update::world::tests::a_signed_bundle_that_runs_here_is_staged_under_its_ow
 lait update::world::tests::a_tampered_bundle_fails_the_digest_and_stages_nothing
 lait update::world::tests::a_world_channel_sits_beside_the_products_and_under_the_same_rules
 lait update::world::tests::a_world_this_build_declares_is_a_world_this_build_accepts
+lait update::world::tests::an_explicit_directory_still_crosses_the_signed_install_boundary
 lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
 lait update::world::tests::an_unmet_bundle_records_the_refusal_and_keeps_naming_what_serves
 lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bounds
 lait update::world::tests::old_releases_are_never_replaced_and_can_be_selected_without_a_download
 lait update::world::tests::only_a_known_newer_bundle_this_build_can_run_is_behind
 lait update::world::tests::republishing_an_old_version_never_overwrites_its_release
-lait update::world::tests::retirement_moves_only_the_legacy_directory_digest_and_preserves_its_bytes
 lait update::world::tests::the_standing_is_recorded_beside_the_served_tree_and_never_within_it
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
@@ -1013,7 +1023,7 @@ lait-issues record_store::migration_tests::final_head_projection_is_causal_when_
 lait-issues record_store::migration_tests::migration_status_reads_only_the_bounded_marker_and_audit_body
 lait-issues record_store::migration_tests::one_window_cannot_exceed_the_operation_or_byte_envelope
 lait-issues record_store::migration_tests::same_semantic_immutable_id_with_different_bytes_is_a_conflict
-lait-issues record_store::migration_tests::terminal_activation_remains_closed_while_migrator_reads_are_partial
+lait-issues record_store::migration_tests::terminal_activation_is_open_once_the_frozen_source_view_is_retained
 lait-issues records::tests::alias_coordinates_do_not_drift_when_ordinals_collide
 lait-issues records::tests::board_placement_is_one_canonical_value
 lait-issues records::tests::body_coordinates_are_domain_separated
@@ -1422,7 +1432,7 @@ lait::it orbital_two_node::two_station_hosts_join_admit_and_converge_over_the_so
 lait::it product_features::a_follower_hears_about_an_issue_they_are_not_assigned
 lait::it product_features::milestones_cycles_initiatives_teams_triage_delete_and_attachments
 lait::it product_independence::allowlist_is_empty_when_the_shell_stops_depending_on_products
-lait::it product_independence::ios_has_exactly_one_reviewed_product_composition_root
+lait::it product_independence::ios_has_no_product_composition_root
 lait::it product_independence::no_unallowlisted_product_references
 lait::it product_independence::the_rule_has_teeth
 lait::it product_schema::positive_examples_roundtrip_and_canonical_bytes_are_stable
@@ -1927,8 +1937,13 @@ replica replica::body_directory_tests::source_fingerprint_is_slot_independent_an
 replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_current_store
 replica replica::generation::tests::indexed_prior_source_pages_verified_signed_evidence_without_rewriting_it
 replica replica::generation::tests::interpreted_prior_body_never_collapses_a_missing_epoch_into_opaque
-replica replica::generation::tests::prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order
+replica replica::generation::tests::nonempty_prior_facts_cross_only_as_fresh_current_transactions
+replica replica::generation::tests::prior_advertised_heads_authenticate_the_stored_set_independent_of_order
+replica replica::generation::tests::prior_atomic_snapshot_selects_only_the_committed_winner
+replica replica::generation::tests::prior_collaborative_frontier_accepts_the_historical_duplicate_fold_only_at_its_height
+replica replica::generation::tests::prior_collaborative_snapshot_merges_every_committed_head
 replica replica::generation::tests::prior_transaction_and_material_tampering_are_typed_integrity_failures
+replica replica::generation::tests::semantic_evidence_is_merge_order_independent_and_binds_causal_history
 replica replica::generation_format_tests::an_unreadable_version_names_itself_and_what_this_build_reads
 replica replica::generation_format_tests::the_previous_generation_opens_and_keeps_its_generation_root
 replica replica::generation_format_tests::version_two_store_meta_is_a_lossless_input_to_generation_journaling
@@ -2469,6 +2484,7 @@ runtime neighbors::tests::a_known_frontier_does_not_queue_and_duplicates_coalesc
 runtime neighbors::tests::a_v1_registry_file_migrates_in_place
 runtime neighbors::tests::an_established_peer_that_declares_news_re_arms_a_dial_back
 runtime neighbors::tests::backoff_grows_persists_and_route_expiry_suppresses_dialing
+runtime neighbors::tests::contact_results_cannot_overwrite_newer_liveness_observations
 runtime neighbors::tests::corrupt_and_foreign_registries_are_typed_errors_never_deleted
 runtime neighbors::tests::frontier_equality_is_the_full_pair_not_root_alone
 runtime neighbors::tests::high_water_is_forward_only_and_persists_across_restart

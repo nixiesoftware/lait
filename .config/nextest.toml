@@ -43,6 +43,18 @@ retries = 0
 # budget.
 slow-timeout = { period = "30s", terminate-after = 3 }
 
+# The per-push convergence sweep executes 24 deterministic 150-step schedules
+# through the complete runtime simulation. It is CPU-bound and has no external
+# peer to wait on. Measured in isolation on the 56-core Linux dev box after the
+# independent-World cutover: 96.7 s, so the generic 90 s ceiling terminates a
+# healthy run even before the rest of the workspace competes for CPU. Keep the
+# exception on the one sweep (the replay and refusal cases remain under the
+# default) and retain a finite three-period ceiling for a genuine simulation
+# wedge. Nightly's 512-seed sweep has its larger override below.
+[[profile.default.overrides]]
+filter = '(binary_id(runtime) & test(internal_tests::convergence_simulation::the_fleet_converges_across_many_schedules))'
+slow-timeout = { period = "120s", terminate-after = 3 }
+
 # Only the suites that put real traffic on a real relay belong in the network
 # cap. Listing them by name rather than taking all of `kind(test)` matters: most
 # integration binaries here are CPU-bound (argument parsing, DTO parity,
@@ -168,6 +180,17 @@ threads-required = "num-test-threads"
 # reserve the runner while the measured process boundary is active.
 [[profile.default.overrides]]
 filter = '(binary_id(lait::it) & test(launcher_safety::))'
+threads-required = "num-test-threads"
+
+# This runtime case proves that reads remain available while a deliberately
+# blocked extractor owns the mutation lane. Its 250 ms assertions measure lock
+# behavior, and the worker must first be scheduled to reach that gate. In the
+# 2,610-test PR aggregate on the 56-core dev box the worker was starved past its
+# 15 s admission sentinel; the exact test passed in 0.21 s when isolated. Give
+# this scheduling-sensitive measurement the runner rather than weakening its
+# product deadlines or misreporting test-pool contention as a lock regression.
+[[profile.default.overrides]]
+filter = '(binary_id(runtime) & test(dispatch_tests::historical_find_uses_the_exact_installed_implementation_after_activation_moves))'
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]

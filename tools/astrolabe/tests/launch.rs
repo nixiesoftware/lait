@@ -49,6 +49,37 @@ fn reference_receiver() -> Option<PathBuf> {
     built_binary("astrolabe-display-reference")
 }
 
+/// Install the Worlds this process seam exercises from an explicit signed
+/// channel. The helper is product-blind; the test names the two declarations
+/// it intends to drive, and the production installer verifies and records
+/// their immutable releases before the client starts its daemon.
+fn install_independent_test_worlds(identity: &Path) {
+    let channels = std::env::var_os("WORLD_FIXTURE_CHANNELS")
+        .map(PathBuf::from)
+        .expect("WORLD_FIXTURE_CHANNELS must name the signed process-test channels");
+    let installer = std::env::var_os("WORLD_FIXTURE_INSTALLER")
+        .map(PathBuf::from)
+        .expect("WORLD_FIXTURE_INSTALLER must name the product-blind installer");
+    let output = Command::new(&installer)
+        .arg("--channels")
+        .arg(&channels)
+        .arg("--identity")
+        .arg(identity)
+        .arg("--world")
+        .arg("com.lait.issues")
+        .arg("--world")
+        .arg("com.lait.signage")
+        .output()
+        .unwrap_or_else(|error| panic!("start {}: {error}", installer.display()));
+    assert!(
+        output.status.success(),
+        "signed World installation failed ({}):\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn built_binary(name: &str) -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
     let profile = current.parent()?.parent()?;
@@ -59,130 +90,6 @@ fn built_binary(name: &str) -> Option<PathBuf> {
     };
     let candidate = profile.join(name);
     candidate.is_file().then_some(candidate)
-}
-
-/// Assemble the same immutable first-party seed releases the Tauri bundle
-/// carries. The launch seam must exercise the product-blind sidecar with real
-/// selected runners; linking a test package into the host would conceal a
-/// missing resource or installer handoff.
-fn stage_bundled_worlds(root: &Path) {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let exe = if cfg!(windows) { ".exe" } else { "" };
-    for (id, package, template, runner) in [
-        (
-            "com.lait.issues",
-            "products/issues/Cargo.toml",
-            "products/issues-runner/world.json.template",
-            "lait-world-issues",
-        ),
-        (
-            "com.lait.signage",
-            "products/signage/Cargo.toml",
-            "products/signage-runner/world.json.template",
-            "lait-world-signage",
-        ),
-    ] {
-        let version = package_version(&repo.join(package));
-        let release = root.join(id).join(&version);
-        std::fs::create_dir_all(release.join("bin")).expect("create seed World release");
-        let binary = built_binary(runner).unwrap_or_else(|| {
-            panic!(
-                "no {runner} binary beside the test binary; build the workspace bins before the launch suite"
-            )
-        });
-        std::fs::copy(binary, release.join("bin").join(format!("{runner}{exe}")))
-            .expect("copy seed World runner");
-        let declaration = std::fs::read_to_string(repo.join(template))
-            .expect("read seed World declaration")
-            .replace("${VERSION}", &version)
-            .replace("${EXE}", exe);
-        std::fs::write(release.join("world.json"), declaration)
-            .expect("write seed World declaration");
-
-        if id == "com.lait.issues" {
-            copy_tree(&repo.join("products/issues-app/assets/web"), &release);
-            let art = release.join("art");
-            std::fs::create_dir_all(&art).expect("create Issues artwork directory");
-            std::fs::copy(
-                repo.join("products/issues-app/assets/mark.png"),
-                art.join("mark.png"),
-            )
-            .expect("copy Issues mark");
-            std::fs::copy(
-                repo.join("products/issues-app/assets/hero.png"),
-                art.join("hero.png"),
-            )
-            .expect("copy Issues hero");
-        }
-    }
-}
-
-/// Put the real test runners into the identity with an archive-domain digest.
-/// The helper above assembles a release tree; `seed_bundled` records its tree
-/// digest, so rewrite that test-only record to model an independently fetched
-/// artifact and keep the legacy-retirement migration from correctly moving it.
-fn install_test_worlds(source: &Path, identity: &Path) {
-    let worlds = lait::serve::head::worlds_root(identity);
-    lait::update::world::seed_bundled(source, &worlds).expect("install test World releases");
-    for world in ["com.lait.issues", "com.lait.signage"] {
-        let selected = lait::update::world::staged(&worlds, world).expect("selected test World");
-        let digest = blake3::hash(
-            format!("independent-test-artifact:{world}:{}", selected.version).as_bytes(),
-        )
-        .to_hex()
-        .to_string();
-        for record in [
-            worlds.join(world).join("current.json"),
-            worlds
-                .join(world)
-                .join("records")
-                .join(format!("{}.json", selected.version)),
-        ] {
-            let mut value: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(&record).expect("read test World release record"),
-            )
-            .expect("decode test World release record");
-            value["digest"] = serde_json::Value::String(digest.clone());
-            std::fs::write(
-                record,
-                serde_json::to_vec_pretty(&value).expect("encode test World release record"),
-            )
-            .expect("write test World release record");
-        }
-    }
-}
-
-fn package_version(manifest: &Path) -> String {
-    std::fs::read_to_string(manifest)
-        .expect("read product manifest")
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("version")?
-                .trim_start()
-                .strip_prefix('=')?
-                .trim()
-                .strip_prefix('"')?
-                .strip_suffix('"')
-                .map(str::to_owned)
-        })
-        .expect("product manifest package version")
-}
-
-fn copy_tree(source: &Path, target: &Path) {
-    std::fs::create_dir_all(target).expect("create seed World asset directory");
-    for entry in std::fs::read_dir(source).expect("read seed World asset directory") {
-        let entry = entry.expect("read seed World asset entry");
-        let destination = target.join(entry.file_name());
-        if entry
-            .file_type()
-            .expect("read seed World asset type")
-            .is_dir()
-        {
-            copy_tree(&entry.path(), &destination);
-        } else {
-            std::fs::copy(entry.path(), destination).expect("copy seed World asset");
-        }
-    }
 }
 
 struct OwnedReceiver(Child);
@@ -1190,9 +1097,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
-    let bundled_worlds = tempfile::tempdir().expect("bundled first-party World releases");
-    stage_bundled_worlds(bundled_worlds.path());
-    install_test_worlds(bundled_worlds.path(), identity.path());
+    install_independent_test_worlds(identity.path());
     // Declared before the client, so it drops after it: the daemon is asked to
     // stop once nothing is still speaking to it, and before the temporary homes
     // it is holding open are removed.
@@ -1205,6 +1110,25 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         .expect("a client that starts its identity daemon");
 
     let selection = lait::config::Selection::for_identity(identity.path());
+    // `HostRestart` acknowledges before the daemon has released its process
+    // lock. Exercise the actual client handoff before any World operation: a
+    // replacement spawned on acknowledgement loses the lock race, exits, and
+    // leaves this entire launch chain with no daemon after the old one drains.
+    let daemon = lait::daemon::Client::for_selection(&selection)
+        .expect("address the original identity daemon");
+    let before = lait::config::daemon_pid(daemon.home()).expect("original daemon records its pid");
+    client
+        .roll_identity_daemon()
+        .await
+        .expect("restart waits for release and stands up the replacement");
+    let daemon = lait::daemon::Client::for_selection(&selection)
+        .expect("address the replacement identity daemon");
+    assert!(
+        matches!(daemon.probe().await, lait::control::Probe::Healthy { .. }),
+        "replacement daemon is not healthy"
+    );
+    let after = lait::config::daemon_pid(daemon.home()).expect("replacement records its pid");
+    assert_ne!(before, after, "restart kept the original daemon process");
     let daemon = lait::daemon::Client::for_selection(&selection).expect("the identity daemon");
     assert!(
         matches!(daemon.probe().await, lait::control::Probe::Healthy { .. }),
@@ -1226,7 +1150,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         displays.surfaces.iter().any(|surface| {
             surface.world == "com.lait.signage" && surface.surface == "signage.program"
         }),
-        "the process serving Astrolabe omitted the bundled Signage display surface"
+        "the independently installed Signage runner omitted its display surface"
     );
     let first_pid = lait::config::daemon_pid(daemon.home()).expect("the started daemon's pid");
 
@@ -1993,6 +1917,17 @@ fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
+/// Lay down the stable launcher boundary as a canonical installer does.
+fn install_stub(root: &Path, stub: &Path) {
+    std::fs::copy(stub, root.join(installed_stub_name()))
+        .expect("the stub lands in the install root");
+    std::fs::write(
+        root.join(astrolabe_stub::CANONICAL_LAYOUT),
+        format!("{}\n", env!("CARGO_PKG_VERSION")),
+    )
+    .expect("the canonical install receipt");
+}
+
 /// Run the stub as a real process against `root`, with the probe announcing
 /// into `root`, and wait for it to exit.
 ///
@@ -2043,8 +1978,7 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
     // lays it down — the build name `astrolabe-stub` exists in no
     // installation, and `lait::update::watch::install_root_of` keys on the
     // installed name to decide whether staging happens at all.
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
 
     // The live tree, version 0.0.1 — the install as the person has it.
     let current = root.join("current");
@@ -2197,8 +2131,7 @@ fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
 
     let current = root.join("current");
     std::fs::create_dir(&current).expect("the live tree");
@@ -2210,10 +2143,7 @@ fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
     let mut stub_process = Command::new(root.join(installed_stub_name()))
         .env("CHAIN_PROBE_ANNOUNCE", root)
         .env("CHAIN_PROBE_RUNS", &runs)
-        .env(
-            "CHAIN_PROBE_ENV_NAME",
-            astrolabe::client::update::RELAUNCHED_ENV,
-        )
+        .env("CHAIN_PROBE_ENV_NAME", astrolabe_stub::RELAUNCHED_ENV)
         .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
         .env("CHAIN_PROBE_RELAUNCH_GATE", &gate)
         .env(
@@ -2286,8 +2216,7 @@ fn a_secondary_stub_cannot_consume_the_primary_relaunch_request() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
     let current = root.join("current");
     std::fs::create_dir(&current).expect("the live tree");
     std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
@@ -2344,8 +2273,7 @@ fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
 
     let scratch = tempfile::tempdir().expect("an install root");
     let root = scratch.path();
-    std::fs::copy(&stub, root.join(installed_stub_name()))
-        .expect("the stub lands in the install root");
+    install_stub(root, &stub);
 
     let current = root.join("current");
     std::fs::create_dir(&current).expect("the live tree");
@@ -2355,10 +2283,7 @@ fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
     let runs = root.join("runs.log");
     let status = Command::new(root.join(installed_stub_name()))
         .env("CHAIN_PROBE_RUNS", &runs)
-        .env(
-            "CHAIN_PROBE_ENV_NAME",
-            astrolabe::client::update::RELAUNCHED_ENV,
-        )
+        .env("CHAIN_PROBE_ENV_NAME", astrolabe_stub::RELAUNCHED_ENV)
         .env("CHAIN_PROBE_RELAUNCH_ONCE", root.join("relaunch.asked"))
         .env(
             "CHAIN_PROBE_REQUEST",

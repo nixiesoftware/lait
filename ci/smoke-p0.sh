@@ -48,45 +48,24 @@ fi
 [ -x "$LAIT_BIN" ] || { echo "::error::no built lait binary at target/debug"; exit 1; }
 LAIT_BIN="$(cd "$(dirname "$LAIT_BIN")" && pwd)/$(basename "$LAIT_BIN")"
 
-# A clean CI checkout has no installed Worlds, by design. Assemble process-test
-# fixtures beside the binaries, then explicitly place them in this smoke's
-# disposable identity. Production does not discover executable Worlds beside
-# the host; this harness opts into the same immutable-release shape an
-# independently downloaded World occupies.
-bash ci/stage-test-worlds.sh "$(dirname "$LAIT_BIN")"
-
-install_process_worlds() {
-  local fixtures="$(dirname "$LAIT_BIN")/worlds"
-  local worlds="$LAIT_CONFIG_ROOT/worlds"
-  local source id release version target digest record
-  [ -d "$fixtures" ] || { echo "::error::no staged World fixtures at $fixtures"; exit 1; }
-  mkdir -p "$worlds"
-
-  for source in "$fixtures"/*; do
-    [ -d "$source" ] || continue
-    id="$(basename "$source")"
-    for release in "$source"/*; do
-      [ -d "$release" ] || continue
-      version="$(basename "$release")"
-      target="$worlds/$id/releases/$version"
-      mkdir -p "$(dirname "$target")" "$worlds/$id/records"
-      cp -R "$release" "$target"
-
-      # This is a test-only archive-domain digest, deliberately distinct from
-      # seed_bundled's legacy directory digest so startup does not quarantine
-      # the fixture as payload from an old native client.
-      case "$id" in
-        com.lait.issues) digest="1111111111111111111111111111111111111111111111111111111111111111" ;;
-        com.lait.signage) digest="2222222222222222222222222222222222222222222222222222222222222222" ;;
-        *) echo "::error::unexpected process World fixture $id"; exit 1 ;;
-      esac
-      record="{\"world\":\"$id\",\"version\":\"$version\",\"digest\":\"$digest\",\"files\":1}"
-      printf '%s\n' "$record" > "$worlds/$id/records/$version.json"
-      printf '%s\n' "$record" > "$worlds/$id/current.json"
-    done
-  done
+# A clean checkout has no installed Worlds, by design. The smoke accepts only
+# explicit signed channel output and drives the generic installer tool; there
+# is no fallback to neighboring build products or hand-authored records.
+: "${WORLD_FIXTURE_CHANNELS:?signed independent World fixture channels are required}"
+: "${WORLD_FIXTURE_INSTALLER:?an explicit world-channel-installer is required}"
+[ -d "$WORLD_FIXTURE_CHANNELS" ] || {
+  echo "::error::signed World fixture channels are absent: $WORLD_FIXTURE_CHANNELS"
+  exit 1
 }
-install_process_worlds
+[ -x "$WORLD_FIXTURE_INSTALLER" ] || {
+  echo "::error::World fixture installer is not executable: $WORLD_FIXTURE_INSTALLER"
+  exit 1
+}
+"$WORLD_FIXTURE_INSTALLER" \
+  --channels "$WORLD_FIXTURE_CHANNELS" \
+  --identity "$LAIT_CONFIG_ROOT" \
+  --world com.lait.issues \
+  --world com.lait.signage
 
 has() { case "$1" in *"$2"*) : ;; *) echo "::error::expected '$2' in:"; echo "$1"; exit 1 ;; esac; }
 

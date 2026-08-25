@@ -53,8 +53,9 @@ request must not be able to fall through into root control decoding.
 `{id}` is a **local Orbit id**, not a Space id: two local stores on one machine
 may participate in the same Space, so the Space id would not choose between
 them. `GET /api/spaces` is what turns a freshly founded store into the id every
-Space route takes. `{world}` is the package's mount name — `issues` for the
-bundled tracker — the same string that prefixes its MCP tool names.
+Space route takes. `{world}` is the selected package's mount name — `issues`
+for the independently installed tracker — the same string that prefixes its
+MCP tool names.
 
 Three more routes complete the surface:
 

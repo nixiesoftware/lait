@@ -872,9 +872,9 @@ pub enum Request {
     AssignmentRevoke {
         grant_id: String,
     },
-    /// Activate this build's reviewed implementation for one hosted World
+    /// Activate the selected runner's reviewed implementation for one World
     /// (admin-authored ACL action; idempotent when already active).
-    /// The activation is what receipts pin — a build whose descriptor differs
+    /// The activation is what receipts pin — a runner whose descriptor differs
     /// from the active one should run this before writing.
     WorldActivate {
         world: String,
@@ -1225,7 +1225,7 @@ pub enum Request {
         /// The project directory for a project-scoped config.
         dir: String,
         /// Mount of the World this binding pins (`issues`, `signage`, …).
-        /// `None` lets `lait mcp` take the sole World this build hosts.
+        /// `None` lets `lait mcp` take the sole World this identity has selected.
         #[serde(default)]
         world: Option<String>,
     },
@@ -1262,8 +1262,8 @@ pub enum Request {
     /// that could send it could kill the server answering it. This one is only
     /// ever the daemon *under* a head, and that head survives to re-spawn it.
     HostRestart,
-    /// Orientation: this identity, the Worlds this build hosts, and the local
-    /// Orbits and named identities that exist.
+    /// Orientation: this identity, its selected World installations, and the
+    /// local Orbits and named identities that exist.
     HostContext,
     /// Version handshake (see [`CONTROL_PROTOCOL_VERSION`]). The first thing a
     /// client sends, and the only request whose reply must stay decodable
@@ -2615,7 +2615,7 @@ pub enum HostReply {
         /// opinion. A browser has no working directory to default to, so
         /// without this every founding form starts with an empty path box.
         spaces_root: String,
-        /// World ids this build hosts.
+        /// World ids with selected installations in this identity.
         worlds: Vec<String>,
         /// Named identities registered on this machine.
         identities: Vec<String>,

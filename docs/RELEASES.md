@@ -22,7 +22,9 @@ not a location any installed client resolves.
 
 Release objects are immutable and long-cached. `channels/test` and
 `channels/stable` are the only mutable host objects and are served with
-`no-cache`.
+`no-cache`. Stable promotion fetches and verifies the exact manifest exercised
+on `test`, then moves only the stable pointer; it never rebuilds or re-uploads
+the release.
 
 ## Platform authenticity
 

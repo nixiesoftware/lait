@@ -1060,11 +1060,11 @@ const SIGNAL_QUEUE: usize = 32;
 pub struct Context {
     /// Where what this peer says becomes readable to anyone else.
     pub handle: Option<std::sync::Arc<LiveHandle>>,
-    /// What this connection may say on the signal lane. `None` means this build
+    /// What this connection may say on the signal lane. `None` means this runner
     /// is not serving the lane here, and a signal flow is refused rather than
     /// ignored.
     pub signals: Option<crate::signal::SignalPolicy>,
-    /// The Worlds this build hosts, for checking a `World` scope against
+    /// The Worlds this runner registered, for checking a `World` scope against
     /// what its World actually declared.
     ///
     /// `None` means no check, which is the shape a MemNet harness with no Space

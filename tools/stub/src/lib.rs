@@ -100,7 +100,13 @@ const SWEEPABLE: &[&str] = &[
     "previous.trash-",
     "staged.tmp-",
     "staged.manifest.json.tmp-",
+    "canonical-install.trash-",
 ];
+
+/// Receipt written only after a canonical installer has replaced every owned
+/// release tree. A client crossed below the compatibility floor by the old
+/// sparse updater has no receipt and must refuse with reinstall instructions.
+pub const CANONICAL_LAYOUT: &str = "canonical-layout-v1";
 
 /// What `staged/` must contain, byte for byte. Written by the stager
 /// (`lait::update::tree`), proven again here before any rename.
@@ -251,6 +257,165 @@ pub fn claim(root: &Path) -> std::io::Result<Option<Claim>> {
     }
     sweep(root);
     Ok(Some(Claim { file }))
+}
+
+/// Detach and remove every release tree owned by a canonical installer.
+///
+/// The caller supplies the exact install root. Only `current`, `previous`, and
+/// `staged` are ever renamed. Renaming first makes the cut atomic from the
+/// launcher's perspective: if any tree cannot be detached, every earlier
+/// rename is rolled back before an error is returned. Detached symlinks and
+/// junctions are removed as links, never traversed into user-owned targets.
+pub fn prepare_canonical_install(root: &Path) -> Result<(), String> {
+    prepare_canonical_install_with(root, |source, destination| fs::rename(source, destination))
+}
+
+fn prepare_canonical_install_with(
+    root: &Path,
+    mut detach: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    if !root.is_absolute() || root.parent().is_none() || root.file_name().is_none() {
+        return Err("the canonical install root is not a bounded absolute directory".into());
+    }
+    fs::create_dir_all(root)
+        .map_err(|error| format!("the canonical install root could not be opened: {error}"))?;
+
+    let instance = lock_file(&root.join(INSTANCE_LOCK))
+        .map_err(|error| format!("the installation lock could not be opened: {error}"))?;
+    instance.try_lock_exclusive().map_err(|_| {
+        "Astrolabe is running; close every client window before reinstalling".to_string()
+    })?;
+    let staging = lock_file(&root.join(STAGING_LOCK))
+        .map_err(|error| format!("the staging lock could not be opened: {error}"))?;
+    staging.try_lock_exclusive().map_err(|_| {
+        "an update is being staged; close Astrolabe and run the installer again".to_string()
+    })?;
+
+    remove_canonical_trash(root)?;
+    let mut detached: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for name in [CURRENT_DIR, PREVIOUS_DIR, STAGED_DIR] {
+        let source = root.join(name);
+        match fs::symlink_metadata(&source) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                rollback_detached(&detached)?;
+                return Err(format!(
+                    "the existing {name} tree could not be inspected: {error}"
+                ));
+            }
+            Ok(_) => {}
+        }
+        let destination = root.join(scratch_name("canonical-install.trash-"));
+        if let Err(error) = detach(&source, &destination) {
+            rollback_detached(&detached)?;
+            return Err(format!(
+                "the existing {name} tree could not be detached; the installation was left unchanged: {error}"
+            ));
+        }
+        detached.push((source, destination));
+    }
+
+    for (_, path) in &detached {
+        remove_detached(path).map_err(|error| {
+            format!(
+                "an old release tree was detached but could not be removed; no new tree was installed: {error}"
+            )
+        })?;
+    }
+    for file in [STAGE_MANIFEST, RELAUNCH_REQUEST, CANONICAL_LAYOUT] {
+        match fs::remove_file(root.join(file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "obsolete installer state {file} could not be removed: {error}"
+                ));
+            }
+        }
+    }
+    let _ = fs2::FileExt::unlock(&staging);
+    let _ = fs2::FileExt::unlock(&instance);
+    Ok(())
+}
+
+/// Refuse a launcher tree that did not come through the canonical replacement
+/// boundary. The receipt must be a regular, non-empty file; a directory or a
+/// link cannot stand in for the installer's completed write.
+pub fn require_canonical_layout(root: &Path) -> Result<(), String> {
+    let receipt = root.join(CANONICAL_LAYOUT);
+    let metadata = fs::symlink_metadata(&receipt).map_err(|_| {
+        "this installation predates the independent-World boundary; run the canonical Astrolabe installer"
+            .to_string()
+    })?;
+    if !metadata.file_type().is_file()
+        || fs::read_to_string(&receipt)
+            .ok()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(
+            "the canonical installation receipt is invalid; run the canonical Astrolabe installer"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn rollback_detached(detached: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    for (source, destination) in detached.iter().rev() {
+        fs::rename(destination, source).map_err(|error| {
+            format!(
+                "canonical replacement was refused and the prior {} tree could not be restored: {error}",
+                source.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn remove_canonical_trash(root: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(root)
+        .map_err(|error| format!("the install root could not be inspected: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("an install entry could not be read: {error}"))?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("canonical-install.trash-")
+        {
+            remove_detached(&entry.path()).map_err(|error| {
+                format!("a prior canonical replacement remains incomplete: {error}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_detached(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let attributes = metadata.file_attributes();
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                fs::remove_dir(path)
+            } else {
+                fs::remove_file(path)
+            };
+        }
+    }
+    #[cfg(not(windows))]
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(path);
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
 }
 
 /// Prove `staged/` is exactly what the manifest describes.
@@ -623,6 +788,218 @@ mod tests {
         fs::create_dir(root.path().join(CURRENT_DIR)).expect("a live tree");
         fs::write(root.path().join(CURRENT_DIR).join(entry_name()), b"live").expect("a live entry");
         root
+    }
+
+    #[test]
+    fn canonical_install_removes_all_owned_trees_and_preserves_unknown_root_content() {
+        let root = root_with_current();
+        fs::create_dir_all(root.path().join(CURRENT_DIR).join("worlds/legacy"))
+            .expect("a legacy live payload");
+        fs::write(
+            root.path()
+                .join(CURRENT_DIR)
+                .join("worlds/legacy/world.exe"),
+            b"old live product",
+        )
+        .expect("an old live product");
+        fs::create_dir_all(root.path().join(PREVIOUS_DIR).join("worlds/legacy"))
+            .expect("a hostile rollback tree");
+        fs::write(
+            root.path()
+                .join(PREVIOUS_DIR)
+                .join("worlds/legacy/world.exe"),
+            b"old rollback product",
+        )
+        .expect("an old rollback product");
+        fs::create_dir_all(root.path().join(STAGED_DIR).join("worlds/legacy"))
+            .expect("a hostile staged tree");
+        fs::write(
+            root.path().join(STAGED_DIR).join("worlds/legacy/world.exe"),
+            b"old staged product",
+        )
+        .expect("an old staged product");
+        fs::write(root.path().join(STAGE_MANIFEST), b"stale").expect("stale stage state");
+        fs::write(root.path().join(RELAUNCH_REQUEST), b"stale").expect("stale relaunch state");
+        fs::write(root.path().join(CANONICAL_LAYOUT), b"forged-old-layout")
+            .expect("an untrusted old receipt");
+        fs::create_dir_all(root.path().join("canonical-install.trash-abandoned/worlds"))
+            .expect("abandoned installer trash");
+        fs::write(root.path().join("unknown-root-file"), b"preserve")
+            .expect("unknown root content");
+
+        let identity = tempfile::tempdir().expect("user identity outside the install root");
+        fs::create_dir_all(identity.path().join("spaces/project/issues"))
+            .expect("user-authored issue data");
+        fs::write(
+            identity.path().join("spaces/project/issues/record"),
+            b"preserve me",
+        )
+        .expect("an issue record");
+        fs::create_dir_all(identity.path().join("worlds/com.lait.issues"))
+            .expect("a retired installation namespace");
+        fs::write(
+            identity.path().join("worlds/com.lait.issues/selection"),
+            b"inert",
+        )
+        .expect("an inert old selection");
+
+        prepare_canonical_install(root.path()).expect("canonical replacement");
+
+        for tree in [CURRENT_DIR, PREVIOUS_DIR, STAGED_DIR] {
+            assert!(
+                !root.path().join(tree).exists(),
+                "{tree} survived replacement"
+            );
+        }
+        assert!(!root.path().join(STAGE_MANIFEST).exists());
+        assert!(!root.path().join(RELAUNCH_REQUEST).exists());
+        assert!(!root.path().join(CANONICAL_LAYOUT).exists());
+        assert!(
+            fs::read_dir(root.path())
+                .expect("inspect the replaced root")
+                .flatten()
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("canonical-install.trash-")),
+            "canonical installer trash survived replacement"
+        );
+        assert_eq!(
+            fs::read(root.path().join("unknown-root-file")).expect("preserved root content"),
+            b"preserve"
+        );
+        assert_eq!(
+            fs::read(identity.path().join("spaces/project/issues/record"))
+                .expect("user-authored issue data survived"),
+            b"preserve me"
+        );
+        assert_eq!(
+            fs::read(identity.path().join("worlds/com.lait.issues/selection"))
+                .expect("the installer did not inspect identity state"),
+            b"inert"
+        );
+    }
+
+    #[test]
+    fn canonical_install_rolls_back_every_detached_tree_when_replacement_is_refused() {
+        let root = root_with_current();
+        fs::create_dir_all(root.path().join(PREVIOUS_DIR)).expect("a rollback tree");
+        fs::write(root.path().join(PREVIOUS_DIR).join("old"), b"previous").expect("previous bytes");
+        fs::create_dir_all(root.path().join(STAGED_DIR)).expect("a staged tree");
+        fs::write(root.path().join(STAGED_DIR).join("partial"), b"staged").expect("staged bytes");
+
+        let reason = prepare_canonical_install_with(root.path(), |source, destination| {
+            if source.file_name().and_then(|name| name.to_str()) == Some(PREVIOUS_DIR) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected hostile layout refusal",
+                ));
+            }
+            fs::rename(source, destination)
+        })
+        .expect_err("a tree that cannot detach must refuse replacement");
+
+        assert!(reason.contains("left unchanged"), "{reason}");
+        assert_eq!(
+            fs::read(root.path().join(CURRENT_DIR).join(entry_name()))
+                .expect("current was restored"),
+            b"live"
+        );
+        assert_eq!(
+            fs::read(root.path().join(PREVIOUS_DIR).join("old")).expect("previous was never moved"),
+            b"previous"
+        );
+        assert_eq!(
+            fs::read(root.path().join(STAGED_DIR).join("partial")).expect("staged was never moved"),
+            b"staged"
+        );
+        assert!(
+            fs::read_dir(root.path())
+                .expect("inspect the refused root")
+                .flatten()
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("canonical-install.trash-")),
+            "a refused replacement left a detached tree behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_install_unlinks_a_hostile_tree_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("an install root");
+        let outside = tempfile::tempdir().expect("user-owned content");
+        fs::write(outside.path().join("keep"), b"mine").expect("outside content");
+        symlink(outside.path(), root.path().join(CURRENT_DIR)).expect("hostile current link");
+
+        prepare_canonical_install(root.path()).expect("bounded replacement");
+
+        assert!(!root.path().join(CURRENT_DIR).exists());
+        assert_eq!(
+            fs::read(outside.path().join("keep")).expect("outside content survived"),
+            b"mine"
+        );
+    }
+
+    #[test]
+    fn canonical_install_refuses_a_live_installation_without_changing_it() {
+        let root = root_with_current();
+        let claim = claimed(root.path());
+
+        let reason = prepare_canonical_install(root.path()).expect_err("a live client must refuse");
+
+        assert!(reason.contains("Astrolabe is running"), "{reason}");
+        assert!(root.path().join(CURRENT_DIR).is_dir());
+        drop(claim);
+    }
+
+    #[test]
+    fn canonical_install_refuses_an_active_stager_without_changing_it() {
+        let root = root_with_current();
+        let staging = lock_file(&root.path().join(STAGING_LOCK)).expect("a staging lock");
+        staging
+            .try_lock_exclusive()
+            .expect("the test owns the staging window");
+
+        let reason =
+            prepare_canonical_install(root.path()).expect_err("an active stage must refuse");
+
+        assert!(reason.contains("update is being staged"), "{reason}");
+        assert_eq!(
+            fs::read(root.path().join(CURRENT_DIR).join(entry_name()))
+                .expect("the live tree was untouched"),
+            b"live"
+        );
+    }
+
+    #[test]
+    fn only_a_regular_nonempty_canonical_receipt_admits_launch() {
+        let root = tempfile::tempdir().expect("an install root");
+        assert!(require_canonical_layout(root.path()).is_err());
+        fs::create_dir(root.path().join(CANONICAL_LAYOUT)).expect("a hostile receipt directory");
+        assert!(require_canonical_layout(root.path()).is_err());
+        fs::remove_dir(root.path().join(CANONICAL_LAYOUT)).expect("remove hostile receipt");
+        fs::write(root.path().join(CANONICAL_LAYOUT), b"\n").expect("an empty receipt");
+        assert!(require_canonical_layout(root.path()).is_err());
+        fs::write(root.path().join(CANONICAL_LAYOUT), b"0.9.5\n").expect("a sealed receipt");
+        assert!(require_canonical_layout(root.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_receipt_symlink_cannot_admit_a_legacy_installation() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("an install root");
+        let outside = tempfile::NamedTempFile::new().expect("an outside receipt");
+        fs::write(outside.path(), b"0.9.5\n").expect("a tempting receipt target");
+        symlink(outside.path(), root.path().join(CANONICAL_LAYOUT))
+            .expect("a hostile receipt link");
+
+        assert!(require_canonical_layout(root.path()).is_err());
     }
 
     fn stage(root: &Path, version: &str, files: &[(&str, &[u8])]) {

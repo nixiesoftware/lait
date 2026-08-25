@@ -311,12 +311,14 @@ async fn drive(ctx: DriverContext) {
                         let _ = reply.send(Err(Failure::Capacity));
                         continue;
                     }
+                    let attempt_revision =
+                        ctx.registry.lock_recovering().attempt_revision(&station);
                     in_flight.borrow_mut().insert(station.clone());
                     let ctx2 = ctx.clone();
                     let in_flight2 = in_flight.clone();
                     tokio::task::spawn_local(async move {
                         let result = contact_neighbor(&ctx2, &station).await;
-                        record_result(&ctx2, &station, &result);
+                        record_result(&ctx2, &station, attempt_revision, &result);
                         in_flight2.borrow_mut().remove(&station);
                         let _ = reply.send(result);
                     });
@@ -383,9 +385,17 @@ async fn drive(ctx: DriverContext) {
         // Scheduler: dial eligible Neighbors, fair order, bounded fan-out.
         let eligible = {
             let registry = ctx.registry.lock_recovering();
-            registry.eligible(now_ms())
+            registry
+                .eligible(now_ms())
+                .into_iter()
+                .filter_map(|station| {
+                    registry
+                        .attempt_revision(&station)
+                        .map(|revision| (station, revision))
+                })
+                .collect::<Vec<_>>()
         };
-        for station in eligible {
+        for (station, attempt_revision) in eligible {
             if ctx.cancel.is_cancelled() {
                 break;
             }
@@ -400,7 +410,7 @@ async fn drive(ctx: DriverContext) {
             let in_flight2 = in_flight.clone();
             tokio::task::spawn_local(async move {
                 let result = contact_neighbor(&ctx2, &station).await;
-                record_result(&ctx2, &station, &result);
+                record_result(&ctx2, &station, Some(attempt_revision), &result);
                 in_flight2.borrow_mut().remove(&station);
             });
         }
@@ -532,14 +542,22 @@ fn ingest_beacon(ctx: &DriverContext, emit: &EmitState, bytes: &[u8]) {
     }
 }
 
-fn record_result(ctx: &DriverContext, station: &Key, result: &Result<ContactOutcome, Failure>) {
+fn record_result(
+    ctx: &DriverContext,
+    station: &Key,
+    attempt_revision: Option<u64>,
+    result: &Result<ContactOutcome, Failure>,
+) {
+    let Some(attempt_revision) = attempt_revision else {
+        return;
+    };
     let mut registry = ctx.registry.lock_recovering();
     match result {
         Ok(_) => {
-            let _ = registry.record_success(station, now_ms());
+            let _ = registry.record_success_if_current(station, attempt_revision, now_ms());
         }
         Err(_) => {
-            let _ = registry.record_failure(station, now_ms());
+            let _ = registry.record_failure_if_current(station, attempt_revision, now_ms());
         }
     }
 }

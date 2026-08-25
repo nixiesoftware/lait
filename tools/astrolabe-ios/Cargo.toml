@@ -28,10 +28,6 @@ crate-type = ["rlib"]
 lait = { path = "../.." }
 runtime = { path = "../../crates/runtime" }
 world-interface = { path = "../../crates/world-interface" }
-issues = { package = "lait-issues", path = "../../products/issues" }
-issues-app = { package = "lait-issues-app", path = "../../products/issues-app" }
-signage = { package = "lait-signage", path = "../../products/signage" }
-signage-app = { package = "lait-signage-app", path = "../../products/signage-app" }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

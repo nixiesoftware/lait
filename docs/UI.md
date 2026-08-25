@@ -88,7 +88,7 @@ standing, and it never applies to a read.
 `lait mcp` exposes the daemon request surface as MCP tools for agents. MCP uses
 the same request and response types as the web head and remains pinned to the
 Orbit selected at launch and to one World (`$LAIT_WORLD`, or the sole World
-this build hosts). The World designs that tool list; the adapter does not
+this identity has selected). The World designs that tool list; the adapter does not
 generate it from the wire protocol. Astrolabe writes the portable binding
 (`lait` off PATH, `LAIT_AGENT`, `LAIT_WORLD`) from the selected Library row
 and never parents that process. A parity test guards the shell half; World

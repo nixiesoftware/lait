@@ -3,10 +3,7 @@ fn main() -> anyhow::Result<()> {
         std::env::var("LAIT_WORLD_VERSION").unwrap_or_else(|_| issues::RELEASE_VERSION.to_string());
     let migrator = std::env::args().any(|argument| argument == "--migrator");
     if migrator {
-        let implementation = issues::IssuesWorld::migrator_implementation_descriptor();
-        let reviewed = implementation
-            .id()
-            .map_err(|error| anyhow::anyhow!("invalid Issues migrator descriptor: {error}"))?;
+        let reviewed = issues::IssuesWorld::MIGRATOR_IMPLEMENTATION_ID;
         world_runner::serve(
             issues::PRODUCT_WORLD,
             version,

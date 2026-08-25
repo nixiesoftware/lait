@@ -17,9 +17,9 @@ pub struct HostContext {
     pub identity_home: String,
     /// Where to offer to put a new store when the person has no opinion.
     pub spaces_root: String,
-    /// World ids this *build* hosts. Not which are active in an Orbit — that is
-    /// SUB-2, and conflating them is how a Library ends up listing Worlds an
-    /// Orbit never activated.
+    /// World ids this identity has selected. Not which are active in an Orbit
+    /// — that is SUB-2, and conflating them is how a Library ends up listing
+    /// Worlds an Orbit never activated.
     pub worlds: Vec<String>,
     pub identities: Vec<String>,
     pub orbits: Vec<OrbitEntry>,
@@ -43,8 +43,8 @@ pub struct OrbitEntry {
 }
 
 impl Client {
-    /// Orientation: what this build is, which identities exist, which Orbits
-    /// this identity has.
+    /// Orientation: what host release is running, which identities exist,
+    /// which Worlds are selected, and which Orbits this identity has.
     pub async fn host_context(&self) -> ClientResult<HostContext> {
         let daemon = self.daemon()?;
         let reply = daemon

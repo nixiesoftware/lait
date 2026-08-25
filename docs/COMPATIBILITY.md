@@ -47,9 +47,9 @@ This server does not implement Streamable HTTP, OAuth, resources, prompts,
 sampling, roots, logging, or the Tasks extension. Geometry is compiled
 Blueprint output for the viewer and is not an MCP tool.
 
-`$LAIT_WORLD` pins the session to one World mount. Unset, a build that
-hosts a single World (today: `issues`) takes that pin. Unset with more
-than one hosted World is a refusal that names the mounts. An unknown
+`$LAIT_WORLD` pins the session to one World mount. Unset, an identity with a
+single selected World takes that pin. Unset with more than one selected World
+is a refusal that names the mounts. An unknown
 mount is a refusal, not an empty tool list. Existing bindings that omit
 the variable stay valid while Issues is the sole package. A binding
 that names a World writes `LAIT_WORLD` next to `LAIT_AGENT`; it still
@@ -239,11 +239,19 @@ object maps with authenticated Body, generation, receipt, and ownership roots.
 A bounded prior reader recognizes the immediately preceding Journal/Replica
 representation only as a read-only migration source. It never rewrites an old
 whole-Body signed descriptor into a causal descriptor: those declarations have
-different signed meanings. After launcher update consent, the launcher-owned
-migration job streams the prior committed facts into a fresh generation through
-authorized current transactions, verifies semantic Body and receipt evidence,
-and only then activates it. Unknown or older formats fail closed, and the normal
-current reader carries no predecessor branch.
+different signed meanings. After launcher update consent, the daemon-owned
+update job first vacates the Orbit and streams the prior committed facts into a
+fresh generation through authorized current transactions. The local actor must
+still have `space.admin` standing at the current authority frontier; otherwise
+the job refuses and names the untouched prior source. It authenticates and
+counts every prior receipt as source evidence, but the new compatibility floor
+deliberately does not install those incompatible idempotency records. Each
+deterministic migration batch gets a fresh current receipt. The job verifies
+exact Body values, bindings, content references, source-receipt evidence, and a
+reopened current store before it atomically activates the generation and
+resumes the World lifecycle. Unknown or older formats fail closed, a partial
+target is never hosted, and the normal current reader carries no predecessor
+branch.
 
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no

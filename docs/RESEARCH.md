@@ -279,9 +279,12 @@ would invalidate the original author's signature and authorization receipt.
 The old store is therefore a bounded, validated, read-only migration source.
 After update consent, the launcher-owned migration capability streams those
 facts into a fresh generation through ordinary current transaction validation,
-then verifies semantic Body and receipt evidence before the generation can be
-activated. The half-built target is never hosted or synchronized, and the
-normal current store carries no legacy-head variant.
+then verifies semantic Body evidence and the full authenticated prior receipt
+count before the generation can be activated. Prior receipts are retired
+evidence at the compatibility floor rather than being reissued under false
+historical coordinates; deterministic batches receive fresh current receipts.
+The half-built target is never hosted or synchronized, and the normal current
+store carries no legacy-head variant.
 
 Acceptance gates:
 

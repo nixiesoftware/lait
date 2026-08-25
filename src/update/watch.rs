@@ -63,19 +63,18 @@ pub enum Standing {
         /// The newer version the channel names.
         version: String,
     },
+    /// This build is below the channel's compatibility floor. Crossing is not
+    /// staged: the canonical installer must replace the owned release trees.
+    ReinstallRequired {
+        /// The release the channel names.
+        version: String,
+        /// The oldest client the release permits.
+        floor: String,
+    },
     /// A verified tree is on disk waiting for a launch to accept it.
     Staged {
         /// The version that will be live after the next launch.
         version: String,
-        /// This build is below the release's published compatibility floor.
-        ///
-        /// The one case that restarts on its own: a build below the floor must
-        /// move, so the restart is taken after declared work drains rather
-        /// than asked for. Absent on a store written before this was recorded,
-        /// which reads as "not below the floor" — the side that asks rather
-        /// than the side that acts.
-        #[serde(default)]
-        below_floor: bool,
         /// When it was staged, unix seconds.
         ///
         /// Recorded because the only question a person is ever asked on this
@@ -279,6 +278,17 @@ where
         };
     }
 
+    if let Some(floor) = resolved
+        .floor
+        .as_ref()
+        .filter(|floor| *floor <= &resolved.version && current < *floor)
+    {
+        return Standing::ReinstallRequired {
+            version: resolved.version.to_string(),
+            floor: floor.to_string(),
+        };
+    }
+
     // A tree already staged at this version is the answer; re-downloading it
     // every period would be bytes spent to learn nothing.
     if let Some(staged) = tree::staged_version(root) {
@@ -296,7 +306,6 @@ where
             return Standing::Staged {
                 version: staged,
                 at,
-                below_floor: below_floor(&resolved, current),
             };
         }
     }
@@ -305,7 +314,6 @@ where
         Ok(staged) => Standing::Staged {
             version: staged.version,
             at: now(),
-            below_floor: below_floor(&resolved, current),
         },
         Err(error) => {
             // The release exists and this machine could not take it. That is
@@ -319,19 +327,8 @@ where
     }
 }
 
-/// Whether this build is below the release's published compatibility floor.
-///
-/// A floor above the release naming it cannot ship and is ignored when
-/// observed anyway, so an unsatisfiable one never forces a restart.
-fn below_floor(resolved: &feed::Resolved, current: &semver::Version) -> bool {
-    resolved
-        .floor
-        .as_ref()
-        .is_some_and(|floor| floor <= &resolved.version && current < floor)
-}
-
-/// Check every World this build hosts, and stage any head published for this
-/// runtime.
+/// Check every selected World installation, and stage any head published for
+/// this runtime.
 ///
 /// Separate from the client check and never able to fail it: a World's
 /// publisher and the product's are different parties on different cadences,
@@ -340,7 +337,7 @@ fn below_floor(resolved: &feed::Resolved, current: &semver::Version) -> bool {
 /// prompted — a staged head becomes live at the next head that starts, which
 /// is the same "applied at a boundary" rule the client tree follows.
 fn check_worlds(identity: &Path, channel: feed::Channel) {
-    let worlds = crate::serve::head::worlds_root(identity);
+    let worlds = crate::serve::head::installations_root(identity);
     let installed = crate::world::installed::declarations(&worlds).unwrap_or_default();
     for declaration in installed {
         let world = declaration.manifest.id;
@@ -607,7 +604,6 @@ mod tests {
         let staged = Standing::Staged {
             version: "0.9.0".into(),
             at: 1_700_000_000,
-            below_floor: false,
         };
         record(identity.path(), &staged);
         assert_eq!(standing(identity.path()), Some(staged));
@@ -679,7 +675,6 @@ mod tests {
             Some(Standing::Staged {
                 version: "0.9.0".into(),
                 at: long_ago,
-                below_floor: false,
             }),
         );
         assert_eq!(
@@ -687,7 +682,6 @@ mod tests {
             Standing::Staged {
                 version: "0.9.0".into(),
                 at: long_ago,
-                below_floor: false,
             },
             "re-observing the same staged release reset its clock"
         );

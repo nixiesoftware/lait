@@ -79,10 +79,12 @@ committed source facts -> Build -> immutable Generation -> Verify -> Activate
 
 `Build` writes both the Mechanics and Replica components under an isolated
 generation directory. Mechanics verifies the signed effect set and frontier;
-Replica verifies the Body and receipt catalogs and reopens the result through
-the current transaction, protected-material, index, receipt, and Manifest
-validators. Their evidence digests commit to logical facts, not checkpoint or
-index layout. `Activate` then compare-and-swaps one canonical
+Replica verifies the Body catalog and the authenticated prior receipt evidence,
+then reopens the result through the current transaction, protected-material,
+index, fresh migration-receipt, and Manifest validators. Prior idempotency
+receipts are evidence only at this compatibility floor; they are not installed
+under a new transaction format. Their evidence digests commit to logical facts,
+not checkpoint or index layout. `Activate` then compare-and-swaps one canonical
 `active-generation` pointer. The switch therefore selects both components or
 neither; a process can never observe new authority material with an old Replica
 materialization.

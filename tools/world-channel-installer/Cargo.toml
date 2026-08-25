@@ -1,0 +1,19 @@
+[package]
+name = "world-channel-installer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[[bin]]
+name = "world-channel-installer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+data-encoding = "2.6"
+lait = { path = "../.." }
+
+[lints]
+workspace = true

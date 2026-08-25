@@ -281,7 +281,7 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
 }
 
 /**
- * The artwork a World compiled in, read once per mount. The initial render
+ * The artwork a World declares, read once per mount. The initial render
  * draws the accent fallback and the art arrives a frame later — the same
  * fallback a World that ships no art keeps for good.
  */
@@ -517,25 +517,7 @@ function OperationalBar({ view, onSummonWindow, dispatch }: { view: ClientView; 
  * either into silence is exactly the quiet an attack buys.
  */
 function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
-  // The floor is the one case that moves on its own: once declared work has
-  // drained there is nothing to ask, so the restart is taken. Until then it
-  // says what it is waiting for rather than going quiet.
-  useEffect(() => {
-    if (update?.kind === "forced" && update.holding.length === 0) {
-      void restartForUpdate(update.version);
-    }
-  }, [update]);
-
   if (update === null) return null;
-  if (update.kind === "forced") {
-    return <span className="tip" title={`${update.version} is required; this build is below the published floor`}>
-      <span className="update-forced" role="status">
-        <span className="spinner tiny" />
-        {update.holding.length === 0
-          ? "Restarting to update…"
-          : `Update required — finishing ${update.holding.length === 1 ? "1 task" : `${update.holding.length} tasks`}`}
-      </span></span>;
-  }
   if (update.kind === "attention") {
     return <span className="tip" title={update.why}>
       <span className="update-attention" role="status">⚠ Update needs attention</span></span>;

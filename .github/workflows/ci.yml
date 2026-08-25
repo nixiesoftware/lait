@@ -168,9 +168,9 @@ jobs:
 
       # `tauri-build` validates both `bundle.externalBin` and every resource
       # directory even for `cargo check`. Use the production staging command so
-      # this gate proves the host sees the daemon and the independently carried
-      # immutable World releases that the actual application bundle contains.
-      - name: Stage the lait sidecar and carried Worlds the bundler requires
+      # this gate proves the host sees the daemon and reviewed catalog while the
+      # production stage keeps executable World payloads out of the bundle.
+      - name: Stage the lait sidecar and reviewed World catalog
         run: npm run stage-bundle
         working-directory: apps/astrolabe-web
 
@@ -302,12 +302,29 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
-      # Cargo produces runner executables but not the installable fixture tree.
-      # Process tests explicitly install this tree into throwaway identities;
-      # production never discovers executable Worlds beside the host.
-      - name: Stage first-party Worlds for process tests
+      # Publish real signed World archives into an explicit local channel.
+      # Process tests install them through the updater boundary; no runner is
+      # discovered beside the host and no installation record is synthesized.
+      - name: Publish independent World channels for process tests
         shell: bash
-        run: bash ci/stage-test-worlds.sh
+        run: |
+          set -euo pipefail
+          feed="$PWD/target/debug/lait-feed"
+          [ -x "$feed" ] || feed="$PWD/target/debug/lait-feed.exe"
+          channels="$RUNNER_TEMP/world-fixture-channels"
+          mkdir -p "$channels"
+          bash ci/prepare-independent-world-fixtures.sh \
+            "$channels" "$PWD/target/debug" "$feed"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          # Git Bash spells Windows paths as /c/..., but these values are
+          # consumed by native Rust processes after this shell exits.
+          if command -v cygpath >/dev/null 2>&1; then
+            channels="$(cygpath -w "$channels")"
+            installer="$(cygpath -w "$installer")"
+          fi
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       # The `pr` profile in .config/nextest.toml is the tier definition: the
       # whole suite minus the four heavy gates and the real-network suites,
@@ -440,11 +457,28 @@ jobs:
       # of /bin/sleep is not a valid subject, so there is no fallback the test
       # could quietly take instead.
       - name: Build the binaries the seam tests spawn
-        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
+        run: cargo build --locked --all-features -p lait -p astrolabe-stub -p lait-feed -p world-channel-installer -p lait-issues-runner -p lait-signage-runner -p astrolabe-display-reference --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper --bin lait-feed --bin world-channel-installer --bin lait-world-issues --bin lait-world-signage --bin astrolabe-display-reference
 
-      - name: Stage first-party Worlds for process tests
+      - name: Publish independent World channels for process tests
         shell: bash
-        run: bash ci/stage-test-worlds.sh
+        run: |
+          set -euo pipefail
+          feed="$PWD/target/debug/lait-feed"
+          [ -x "$feed" ] || feed="$PWD/target/debug/lait-feed.exe"
+          channels="$RUNNER_TEMP/world-fixture-channels"
+          mkdir -p "$channels"
+          bash ci/prepare-independent-world-fixtures.sh \
+            "$channels" "$PWD/target/debug" "$feed"
+          installer="$PWD/target/debug/world-channel-installer"
+          [ -x "$installer" ] || installer="$PWD/target/debug/world-channel-installer.exe"
+          # Git Bash spells Windows paths as /c/..., but these values are
+          # consumed by native Rust processes after this shell exits.
+          if command -v cygpath >/dev/null 2>&1; then
+            channels="$(cygpath -w "$channels")"
+            installer="$(cygpath -w "$installer")"
+          fi
+          echo "WORLD_FIXTURE_CHANNELS=$channels" >> "$GITHUB_ENV"
+          echo "WORLD_FIXTURE_INSTALLER=$installer" >> "$GITHUB_ENV"
 
       - name: Test (OS seam — unit tests, every crate)
         run: cargo nextest run --workspace --locked --all-features --profile pr-platform --lib
@@ -739,8 +773,63 @@ jobs:
           done
           grep -q -- '--from-run' ci/publish-feed.sh \
             || { echo "::error::feed publisher cannot consume our release run"; exit 1; }
+          grep -q -- '--artifact-name' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot consume an audited SHA candidate"; exit 1; }
+          grep -q -- 'candidate-provenance.env' .github/workflows/release.yml \
+            || { echo "::error::candidate does not attest its exact source coordinate"; exit 1; }
+          if grep -Eq '^[[:space:]]+push:' .github/workflows/release.yml; then
+            echo "::error::a semantic tag must not trigger a second release build"
+            exit 1
+          fi
+          grep -q -- '--promote' ci/publish-feed.sh \
+            || { echo "::error::feed publisher cannot promote exact tested bytes"; exit 1; }
+          grep -q -- '--if-generation-match=0' ci/publish-feed.sh \
+            || { echo "::error::feed publisher can overwrite an immutable release"; exit 1; }
           if grep -q -- '--from-release' ci/publish-feed.sh; then
             echo "::error::feed publisher still depends on GitHub Release assets"
+            exit 1
+          fi
+          host_distribution=(
+            .github/workflows/build-binaries.yml
+            .github/workflows/dev-release.yml
+            .github/scripts/archive-unix.sh
+            .github/scripts/archive-windows.sh
+            packaging/build-astrolabe.sh
+            apps/astrolabe-web/scripts/stage-sidecar.mjs
+            apps/astrolabe-web/src-tauri/Cargo.toml
+            apps/astrolabe-web/src-tauri/tauri.conf.json
+          )
+          for path in "${host_distribution[@]}"; do
+            if grep -Eq 'products/(issues|signage)|lait-(issues|signage)-runner|stage-worlds\.sh|[ /]worlds([ /]|$)' "$path"; then
+              echo "::error::$path still depends on, builds, or carries a World in a host release"
+              exit 1
+            fi
+          done
+          # The World half of the same contract: candidate construction in CI,
+          # publication as a local, seed-holding act that verifies the exact
+          # audited bytes before any channel moves.
+          bash -n ci/publish-world.sh
+          bash -n .github/scripts/stage-worlds.sh
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            grep -q "$target" .github/workflows/publish-worlds.yml \
+              || { echo "::error::$target missing from World candidate builder"; exit 1; }
+          done
+          grep -q -- '--from-run' ci/publish-world.sh \
+            || { echo "::error::World publisher cannot consume an audited candidate run"; exit 1; }
+          grep -q -- '--artifact-name' ci/publish-world.sh \
+            || { echo "::error::World publisher cannot name the audited SHA candidate"; exit 1; }
+          grep -q -- '--signer-workflow' ci/publish-world.sh \
+            || { echo "::error::World publisher does not pin the candidate workflow identity"; exit 1; }
+          grep -q -- 'world-candidate-provenance.env' .github/workflows/publish-worlds.yml \
+            || { echo "::error::World candidate does not record its exact source coordinate"; exit 1; }
+          grep -q -- '--promote' ci/publish-world.sh \
+            || { echo "::error::World publisher cannot promote exact tested bytes"; exit 1; }
+          grep -q -- '--if-generation-match=0' ci/publish-world.sh \
+            || { echo "::error::World publisher can overwrite an immutable release"; exit 1; }
+          if grep -Eq 'WORLD_FEED_SIGNING_SEED|gcloud|google-github-actions' \
+            .github/workflows/publish-worlds.yml; then
+            echo "::error::the World candidate workflow can sign or move a channel; publication must stay a local act"
             exit 1
           fi
 

@@ -88,6 +88,7 @@ struct Inner {
 #[derive(Clone)]
 enum TopicMsg {
     Join(PeerId),
+    Leave(PeerId),
     Data(PeerId, Vec<u8>),
 }
 
@@ -312,6 +313,7 @@ impl MemNet {
             net: self.clone(),
             incoming: TokioMutex::new(rx),
             incoming_sessions: TokioMutex::new(session_rx),
+            subscriptions: StdMutex::new(Vec::new()),
         }
     }
 
@@ -342,6 +344,11 @@ pub struct MemTransport {
     net: MemNet,
     incoming: TokioMutex<mpsc::UnboundedReceiver<Incoming>>,
     incoming_sessions: TokioMutex<mpsc::UnboundedReceiver<IncomingConnection>>,
+    /// Topics this scoped transport joined, retained so shutdown can publish
+    /// the same `NeighborDown` event a real overlay produces. The signed
+    /// dormancy frame is intentionally lossy and cannot be the sole way a
+    /// perfect-network harness learns that a peer left.
+    subscriptions: StdMutex<Vec<Topic>>,
 }
 
 /// A framed duplex stream backed by a pair of channels.
@@ -777,6 +784,12 @@ impl GossipReceiver for MemGossipReceiver {
                     }
                     return Some(GossipEvent::NeighborUp(p));
                 }
+                Ok(TopicMsg::Leave(p)) if p != self.me => {
+                    if !self.net.gossip_reaches(&p, &self.me) {
+                        continue;
+                    }
+                    return Some(GossipEvent::NeighborDown(p));
+                }
                 Ok(_) => continue, // our own frames
                 Err(broadcast::error::RecvError::Lagged(_)) => continue, // lossy by contract
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -910,6 +923,15 @@ impl Transport for MemTransport {
     ) -> Result<(Box<dyn GossipSender>, Box<dyn GossipReceiver>)> {
         let bus = self.net.topic_bus(topic);
         let rx = bus.subscribe();
+        {
+            let mut subscriptions = self
+                .subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !subscriptions.contains(&topic) {
+                subscriptions.push(topic);
+            }
+        }
         // Announce ourselves so already-subscribed peers see a NeighborUp.
         let _ = bus.send(TopicMsg::Join(self.id.clone()));
         Ok((
@@ -926,12 +948,28 @@ impl Transport for MemTransport {
     }
 
     async fn shutdown(&self) {
-        self.net
-            .0
+        let topics = self
+            .subscriptions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .peers
-            .remove(&self.id);
+            .clone();
+        let buses = {
+            let mut inner = self
+                .net
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner.peers.remove(&self.id);
+            inner.sessions.remove(&self.id);
+            inner.lanes.retain(|(peer, _), _| peer != &self.id);
+            topics
+                .iter()
+                .filter_map(|topic| inner.topics.get(topic).cloned())
+                .collect::<Vec<_>>()
+        };
+        for bus in buses {
+            let _ = bus.send(TopicMsg::Leave(self.id.clone()));
+        }
     }
 }
 
@@ -999,6 +1037,32 @@ mod tests {
         s.send(b"ping").await.unwrap();
         assert_eq!(s.recv().await.unwrap().as_deref(), Some(&b"pong"[..]));
         b_accept.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_announces_departure_and_closes_every_dial_path() {
+        let net = MemNet::new();
+        let a = net.peer(id(1));
+        let b = net.peer(id(2));
+        let topic = Topic([8u8; 32]);
+
+        let (_b_send, mut b_recv) = b.subscribe(topic, &[]).await.unwrap();
+        let (_a_send, _a_recv) = a.subscribe(topic, &[]).await.unwrap();
+        assert!(matches!(
+            b_recv.next().await,
+            Some(GossipEvent::NeighborUp(peer)) if peer == id(1)
+        ));
+
+        a.shutdown().await;
+        let departure = tokio::time::timeout(Duration::from_secs(1), b_recv.next())
+            .await
+            .expect("shutdown publishes the departure");
+        assert!(matches!(
+            departure,
+            Some(GossipEvent::NeighborDown(peer)) if peer == id(1)
+        ));
+        assert!(b.connect(id(1), TEST_ALPN).await.is_err());
+        assert!(b.connect_session(id(1), TEST_ALPN).await.is_err());
     }
 
     /// `finish` delivers a real end-of-stream: the peer drains the queued

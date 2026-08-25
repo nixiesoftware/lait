@@ -275,6 +275,20 @@ pub async fn rebuild(
     rebuilt
 }
 
+/// Whether a locally admitted Orbit still selects the implicit prior
+/// representation. This is a read-only classifier: unknown prior bytes are not
+/// called compatible here; [`rebuild`] will either authenticate the one
+/// supported source generation and replace it atomically, or refuse it.
+pub fn needs_representation_rebuild(router: &Router, selector: &str) -> Result<bool> {
+    let store = orbits::select(selector)?;
+    let resolved = admit(router, &store).map_err(|error| anyhow!("{selector}: {error}"))?;
+    let active = runtime::generation::Active::read(
+        crate::orbital::orbital_store_root(&resolved.home).join(resolved.address.space.as_str()),
+    )
+    .map_err(|error| anyhow!("read active generation for {selector}: {error}"))?;
+    Ok(active.generation().is_none())
+}
+
 /// The local Orbit a host request named, admitted for this daemon to act on.
 ///
 /// Two questions, and both belong on this side. Is the path a store this daemon
@@ -680,10 +694,10 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             };
             if router.reviewed_world_implementation(&world_id).is_none() {
                 return Some(Response::not_found(format!(
-                    "World '{world}' is not installed in this build"
+                    "World '{world}' is not installed for this identity"
                 )));
             }
-            let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+            let worlds = crate::serve::head::installations_root(router.catalog().identity());
             let world_for_job = world.clone();
             match router
                 .run_blocking(move || {
@@ -711,10 +725,10 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             };
             if router.reviewed_world_implementation(&world_id).is_none() {
                 return Some(Response::not_found(format!(
-                    "World '{world}' is not installed in this build"
+                    "World '{world}' is not installed for this identity"
                 )));
             }
-            let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+            let worlds = crate::serve::head::installations_root(router.catalog().identity());
             let world_for_job = world.clone();
             match router
                 .run_blocking(move || crate::update::consent::load(&worlds, &world_for_job))
