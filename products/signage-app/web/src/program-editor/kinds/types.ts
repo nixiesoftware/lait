@@ -1,8 +1,8 @@
 /**
  * What a kind *is*, declared once.
  *
- * A kind (`athan`, and whatever follows it) is configured by a Space-wide
- * `SignageConfig`, drawn on the stage by a preview, and summarised in a row.
+ * A kind (`athan`, and whatever follows it) is presented by a `SignagePreset`,
+ * drawn on the stage by a preview, and summarised in a row.
  * Before this file those three facts lived in three places — `KINDS` in
  * `utils/apps/api.ts` described fields nobody rendered, `AthanSheet` hand-built
  * a form that ignored them, and `Thumb`/`Stage` each re-derived the preview.
@@ -15,7 +15,7 @@
 
 import type { ComponentType } from "react";
 import type { LucideIcon } from "lucide-react";
-import type { SignageConfig } from "@/utils/lait/types";
+import type { SignagePreset } from "@/utils/lait/types";
 
 /** A kind's settings, exactly as the World stores them. */
 export type Settings = Record<string, string>;
@@ -86,11 +86,14 @@ export type Group = {
 export type FieldError = { key: string; message: string };
 
 /**
- * Where an edit lands. `space` is the one that needs saying out loud: the
- * config is shared, so editing it from one clip changes every clip of that
- * kind on every screen.
+ * Where an edit lands.
+ *
+ * `preset` is shared by every clip pointing at it — which is what a style is
+ * for, and needs no warning. What used to need one, and no longer exists, was
+ * a single per-Space configuration that carried the venue's own facts: those
+ * live on the screen now and are edited where the screen is.
  */
-export type Scope = "clip" | "space" | "program";
+export type Scope = "clip" | "preset" | "program";
 
 export type KindPanel = {
   kind: string;
@@ -101,15 +104,15 @@ export type KindPanel = {
   tone: string;
   scope: Scope;
   groups: Group[];
-  /** Sensible values for a config that does not exist yet. */
+  /** Sensible values for a preset that does not exist yet. */
   defaults: Settings;
   /** How long a freshly added clip of this kind runs. */
   defaultDurationMs: number;
-  seed(config: SignageConfig | null): Draft;
+  seed(preset: SignagePreset | null): Draft;
   /** Merged over what is already stored — never a wholesale replacement. */
   pack(draft: Draft, existing: Settings): Settings;
   validate(draft: Draft): FieldError[];
-  summarize(config: SignageConfig | null): string;
+  summarize(preset: SignagePreset | null): string;
   Preview: ComponentType<{ settings: Settings; density?: Density }>;
 };
 
@@ -117,8 +120,8 @@ export type KindPanel = {
 export type Density = "stage" | "panel" | "thumb";
 
 /** Seed helper: defaults under whatever the Space already stored. */
-export function seedFrom(panel: KindPanel, config: SignageConfig | null): Draft {
-  return { ...panel.defaults, ...(config?.settings ?? {}) };
+export function seedFrom(panel: KindPanel, preset: SignagePreset | null): Draft {
+  return { ...panel.defaults, ...(preset?.settings ?? {}) };
 }
 
 /**

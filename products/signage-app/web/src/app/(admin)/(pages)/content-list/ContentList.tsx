@@ -220,7 +220,7 @@ export const ContentListPage: React.FC = () => {
 
   const displayItems = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let rows = items.filter((item) => {
+    const rows = items.filter((item) => {
       if (q && !item.name.toLowerCase().includes(q)) return false;
       if (filter !== "all" && sourceCategory(item) !== filter) return false;
       return true;

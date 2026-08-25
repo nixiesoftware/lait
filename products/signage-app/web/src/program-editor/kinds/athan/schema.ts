@@ -8,7 +8,7 @@
  */
 
 import { Moon } from "lucide-react";
-import type { SignageConfig } from "@/utils/lait/types";
+import type { SignagePreset } from "@/utils/lait/types";
 import {
   mergeSettings,
   seedFrom,
@@ -223,15 +223,15 @@ function validate(draft: Draft): FieldError[] {
   return errors;
 }
 
-function summarize(config: SignageConfig | null): string {
-  if (!config) return "Prayer times for a location, rendered as a schedule card.";
-  const zone = config.settings.timezone;
-  const lat = config.settings.latitude;
-  const lng = config.settings.longitude;
+function summarize(preset: SignagePreset | null): string {
+  if (!preset) return "Prayer times for a location, rendered as a schedule card.";
+  const zone = preset.settings.timezone;
+  const lat = preset.settings.latitude;
+  const lng = preset.settings.longitude;
   if (zone && lat && lng) {
     return `${zone} · ${Number(lat).toFixed(2)}°, ${Number(lng).toFixed(2)}°`;
   }
-  return zone || config.name;
+  return zone || preset.name;
 }
 
 export const athanPanel: KindPanel = {
@@ -240,7 +240,7 @@ export const athanPanel: KindPanel = {
   description: "Prayer times for a location, rendered as a schedule card.",
   Icon: Moon,
   tone: "athan",
-  scope: "space",
+  scope: "preset",
   groups: GROUPS,
   defaults: DEFAULTS,
   defaultDurationMs: 60_000,

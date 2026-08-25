@@ -20,19 +20,19 @@ import { saveMedia } from "@/utils/content/api";
 import { mintBodyId } from "@/utils/lait/ids";
 import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
 import type { KindPanel } from "../kinds/types";
-import { useKindConfigs, type KindConfigs } from "./useKindConfigs";
+import { useKindPresets, type KindPresets } from "./useKindPresets";
 import { useProgramEditor, type Editor } from "./useProgramEditor";
 
 export type PanelTarget =
   | { sort: "none" }
-  /** A kind config, opened from the clip that uses it. */
+  /** A kind's presentation, opened from the clip that uses it. */
   | { sort: "kind"; panel: KindPanel; itemId: string | null }
   /** Nothing selected, or the program itself. */
   | { sort: "program" };
 
 type Session = {
   editor: Editor;
-  kinds: KindConfigs;
+  kinds: KindPresets;
   orbit: string | null;
   panel: PanelTarget;
   openKindPanel: (panel: KindPanel, itemId: string | null) => void;
@@ -70,7 +70,7 @@ export function EditorProvider({
   children: ReactNode;
 }) {
   const toast = useToast();
-  const kinds = useKindConfigs();
+  const kinds = useKindPresets();
   const editor = useProgramEditor({
     initial,
     library,
@@ -106,14 +106,21 @@ export function EditorProvider({
   const addKind = useCallback(
     async (kindPanel: KindPanel) => {
       try {
-        await kinds.refresh();
+        const existing = await kinds.refresh();
+        // Reuse the kind's first preset rather than minting one per clip:
+        // presets are meant to be shared, and a clip that quietly owned its
+        // own would rebuild the per-entry snapshot this port removed.
+        const reuse = existing.find((entry) => entry.kind === kindPanel.kind);
+        const preset =
+          reuse ?? (await kinds.create(kindPanel.kind, kindPanel.label, kindPanel.defaults));
         const media: SignageMedia = {
           id: mintBodyId(),
           name: kindPanel.label,
           source: "kind",
           kind: kindPanel.kind,
-          // The row is a pointer. Its settings stay empty because the Space
-          // config is the fact, and a snapshot here would fossilise it.
+          preset: preset.id,
+          // The entry's own settings stay empty. What varies per venue is not
+          // here at all — it lives on the screen and arrives at render time.
           settings: {},
           duration_ms: kindPanel.defaultDurationMs,
           width: null,

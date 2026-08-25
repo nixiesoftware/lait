@@ -1,683 +1,377 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+/**
+ * One panel: what is true of it, what somebody calls it, and what it is
+ * showing right now — with the reason.
+ *
+ * The page is divided the way the model is. **Place** and **Facts** are true of
+ * the screen and are the only things here that can make a card correct or
+ * wrong. **Labels** are the operator's vocabulary and mean nothing to the
+ * substrate. **Tuning** is what it falls back to when nothing is being
+ * broadcast at it. Nothing on this page assigns a program to a panel, because
+ * that wire is what made addressing a fleet expensive.
+ */
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Monitor, Plus, Trash2 } from "lucide-react";
-import { Confirm, Inspector, Page, haptic, useToast } from "@/ds";
-import {
-  fetchScreen,
-  saveScreen,
-  deleteScreen,
-  assignProgramToScreen,
-  removeProgramFromScreen,
-  setScreenGroup,
-} from "@/utils/screens/api";
-import { fetchPrograms } from "@/utils/broadcasts/api";
-import { fetchGroups } from "@/utils/networks/api";
-import {
-  addScheduleWindow,
-  updateScheduleWindow,
-  deleteScheduleWindow,
-  setScreenOverride,
-  clearScreenOverride,
-} from "@/utils/schedules/api";
+import { ArrowLeft, Trash2, X } from "lucide-react";
+import { Confirm, Page, haptic, useToast } from "@/ds";
+import { deleteScreen, fetchScreenPlays, saveScreen } from "@/utils/screens/api";
+import { explain } from "@/utils/lait/resolve";
+import { KIND_PANELS } from "@/program-editor/kinds/registry";
 import type {
-  ProgramWindow,
-  Recurrence,
-  ScheduleWindow,
-  SignageGroup,
+  Playback,
+  SignageChannel,
   SignageProgram,
   SignageScreen,
 } from "@/utils/lait/types";
 
-interface ScreenDetailProps {
-  screenId: string;
-}
-
-const RECURRENCES: Recurrence[] = ["none", "daily", "weekly", "monthly"];
-
-const RECURRENCE_LABEL: Record<Recurrence, string> = {
-  none: "Once",
-  daily: "Daily",
-  weekly: "Weekly",
-  monthly: "Monthly",
-};
-
-function toCivil(value: string): string {
-  return value.length === 16 ? `${value}:00` : value;
-}
-
-function fromCivil(value: string): string {
-  return value.slice(0, 16);
-}
-
-function formatDuration(ms: number): string {
-  return ms % 60000 === 0 ? `${ms / 60000} min` : `${ms / 1000} s`;
-}
-
-function formatWindowWhen(row: ProgramWindow): string {
-  const start = row.start_local.replace("T", " ").slice(0, 16);
-  return `${RECURRENCE_LABEL[row.recurrence]} · ${start} · ${formatDuration(row.duration_ms)}`;
-}
-
-export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
+export default function ScreenDetail({ screenId }: { screenId: string }) {
   const navigate = useNavigate();
   const toast = useToast();
-
   const [screen, setScreen] = useState<SignageScreen | null>(null);
+  const [channels, setChannels] = useState<SignageChannel[]>([]);
   const [programs, setPrograms] = useState<SignageProgram[]>([]);
-  const [groups, setGroups] = useState<SignageGroup[]>([]);
+  const [playback, setPlayback] = useState<Playback | null>(null);
   const [loading, setLoading] = useState(true);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [label, setLabel] = useState("");
 
-  const [name, setName] = useState("");
-  const [selectedProgramId, setSelectedProgramId] = useState<string>("");
-
-  const [overrideProgramId, setOverrideProgramId] = useState<string>("");
-  const [overrideUntil, setOverrideUntil] = useState("");
-  const [settingOverride, setSettingOverride] = useState(false);
-
-  const [showWindowForm, setShowWindowForm] = useState(false);
-  const [editingWindowId, setEditingWindowId] = useState<string | null>(null);
-  const [wfProgram, setWfProgram] = useState("");
-  const [wfStart, setWfStart] = useState("");
-  const [wfDurationMin, setWfDurationMin] = useState("60");
-  const [wfRecurrence, setWfRecurrence] = useState<Recurrence>("none");
-  const [wfTimezone, setWfTimezone] = useState(
-    Intl.DateTimeFormat().resolvedOptions().timeZone,
-  );
-  const [wfPriority, setWfPriority] = useState("0");
-  const [wfEnabled, setWfEnabled] = useState(true);
-  const [windowFormError, setWindowFormError] = useState("");
-  const [savingWindow, setSavingWindow] = useState(false);
-
-  const programNames = useMemo(
-    () => new Map(programs.map((p) => [p.id, p.name])),
-    [programs],
-  );
-
-  const refreshScreen = useCallback(async () => {
+  const reload = useCallback(async () => {
     try {
-      const data = await fetchScreen(screenId);
-      setScreen(data);
-      if (data) {
-        setName(data.name);
-        setSelectedProgramId(data.intent.base?.member ?? "");
-      }
-      return data;
+      setError(null);
+      const { inputs, playback } = await fetchScreenPlays(screenId);
+      setScreen(inputs.screen);
+      setChannels(inputs.channels);
+      setPrograms(inputs.programs);
+      setPlayback(playback);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch screen");
-      return null;
+      setError(err instanceof Error ? err.message : "Could not load this screen");
+    } finally {
+      setLoading(false);
     }
   }, [screenId]);
 
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      await Promise.all([
-        refreshScreen(),
-        fetchPrograms().then(setPrograms).catch(() => undefined),
-        fetchGroups().then(setGroups).catch(() => undefined),
-      ]);
-      setLoading(false);
-    };
-    void loadData();
-  }, [refreshScreen]);
+    void reload();
+  }, [reload]);
 
-  const activeOverride =
-    screen?.intent.over && screen.intent.over.until_unix_ms > Date.now()
-      ? screen.intent.over
-      : null;
-  const group = screen?.group
-    ? groups.find((g) => g.id === screen.group) ?? null
-    : null;
-
-  const saveName = async () => {
-    if (!screen) return;
-    const next = name.trim();
-    if (!next || next === screen.name) return;
-    setError("");
-    try {
-      await saveScreen({ ...screen, name: next });
-      haptic("save");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to rename screen");
-      haptic("error");
-    }
-  };
-
-  const handleGroupChange = async (groupId: string) => {
-    setError("");
-    try {
-      await setScreenGroup(screenId, groupId || null);
-      haptic("save");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to move screen");
-      haptic("error");
-    }
-  };
-
-  const handleProgramChange = async (programId: string) => {
-    setSelectedProgramId(programId);
-    setError("");
-    try {
-      if (programId) await assignProgramToScreen(screenId, programId);
-      else await removeProgramFromScreen(screenId);
-      haptic("save");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to assign program");
-      haptic("error");
-    }
-  };
-
-  const handleSetOverride = async () => {
-    if (!overrideProgramId || !overrideUntil) {
-      setError("Pick a program and an end time for the override");
-      return;
-    }
-    setSettingOverride(true);
-    setError("");
-    try {
-      await setScreenOverride(
-        screenId,
-        overrideProgramId,
-        new Date(overrideUntil).getTime(),
-      );
-      setOverrideProgramId("");
-      setOverrideUntil("");
-      haptic("save");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to set override");
-      haptic("error");
-    } finally {
-      setSettingOverride(false);
-    }
-  };
-
-  const handleClearOverride = async () => {
-    setError("");
-    try {
-      await clearScreenOverride(screenId);
-      haptic("save");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear override");
-      haptic("error");
-    }
-  };
-
-  const resetWindowForm = () => {
-    setWfProgram("");
-    setWfStart("");
-    setWfDurationMin("60");
-    setWfRecurrence("none");
-    setWfTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
-    setWfPriority("0");
-    setWfEnabled(true);
-    setWindowFormError("");
-  };
-
-  const closeWindowForm = () => {
-    setShowWindowForm(false);
-    setEditingWindowId(null);
-    resetWindowForm();
-  };
-
-  const handleEditWindow = (row: ProgramWindow) => {
-    setEditingWindowId(row.id);
-    setWfProgram(row.program);
-    setWfStart(fromCivil(row.start_local));
-    setWfDurationMin(String(row.duration_ms / 60000));
-    setWfRecurrence(row.recurrence);
-    setWfTimezone(row.timezone);
-    setWfPriority(String(row.priority));
-    setWfEnabled(row.enabled);
-    setWindowFormError("");
-    setShowWindowForm(true);
-  };
-
-  const handleSaveWindow = async () => {
-    setWindowFormError("");
-    if (!wfProgram || !wfStart || !wfTimezone.trim()) {
-      setWindowFormError("Program, start, and timezone are required");
-      return;
-    }
-    const durationMin = Number(wfDurationMin);
-    if (!Number.isFinite(durationMin) || durationMin <= 0) {
-      setWindowFormError("Duration must be a positive number of minutes");
-      return;
-    }
-    const priority = Number(wfPriority);
-    if (!Number.isInteger(priority)) {
-      setWindowFormError("Priority must be an integer");
-      return;
-    }
-
-    const existing = editingWindowId
-      ? screen?.schedule.find((row) => row.id === editingWindowId)
-      : undefined;
-    const window: ScheduleWindow = {
-      start_local: toCivil(wfStart),
-      duration_ms: Math.round(durationMin * 60000),
-      recurrence: wfRecurrence,
-      until_unix_ms: existing?.until_unix_ms ?? null,
-      priority,
-      enabled: wfEnabled,
-      timezone: wfTimezone.trim(),
-    };
-
-    setSavingWindow(true);
-    try {
-      if (editingWindowId) {
-        await updateScheduleWindow(screenId, {
-          id: editingWindowId,
-          program: wfProgram,
-          ...window,
-        });
-      } else {
-        await addScheduleWindow(screenId, wfProgram, window);
+  const commit = useCallback(
+    async (next: SignageScreen) => {
+      setScreen(next);
+      try {
+        await saveScreen(next);
+        haptic("save");
+        await reload();
+      } catch (err) {
+        toast.show("Could not save", err instanceof Error ? err.message : String(err));
+        await reload();
       }
-      closeWindowForm();
-      haptic("save");
-      await refreshScreen();
-    } catch (err) {
-      setWindowFormError(err instanceof Error ? err.message : "Failed to save window");
-      haptic("error");
-    } finally {
-      setSavingWindow(false);
-    }
-  };
+    },
+    [reload, toast],
+  );
 
-  const handleDeleteWindow = async (windowId: string) => {
-    try {
-      await deleteScheduleWindow(screenId, windowId);
-      haptic("delete");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete window");
-      haptic("error");
-    }
-  };
+  const showingName = useMemo(() => {
+    if (playback?.showing.showing !== "program") return undefined;
+    const id = playback.showing.program;
+    return programs.find((program) => program.id === id)?.name;
+  }, [playback, programs]);
 
-  const handleDelete = async () => {
-    setDeleting(true);
-    setError("");
-    try {
-      await deleteScreen(screenId);
-      haptic("delete");
-      navigate({ to: "/screen-list" });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete screen");
-      haptic("error");
-      setDeleting(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <Page>
-        <p className="ds-hint">Loading screen…</p>
-      </Page>
-    );
-  }
-
+  if (loading) return <Page>Loading…</Page>;
   if (!screen) {
     return (
       <Page>
-        <p className="ds-danger-text">Screen not found</p>
+        <p className="ds-danger-text">{error ?? "That screen is not here."}</p>
       </Page>
     );
   }
 
-  const directProgramName = screen.intent.base
-    ? programNames.get(screen.intent.base.member) ?? "Unknown program"
-    : null;
-  const groupProgramName = group?.intent.base
-    ? programNames.get(group.intent.base.member) ?? "Unknown program"
-    : null;
-  const overrideProgramName = activeOverride
-    ? programNames.get(activeOverride.choice.member) ?? "Unknown program"
-    : null;
-
-  const playingName = overrideProgramName ?? directProgramName ?? groupProgramName;
-  const playingKicker = activeOverride
-    ? `Override until ${new Date(activeOverride.until_unix_ms).toLocaleString()}`
-    : directProgramName
-      ? "This screen’s own choice"
-      : group
-        ? `Following ${group.name}`
-        : "Nothing assigned";
+  const place = screen.place;
 
   return (
     <Page>
-      <header className="ds-page-head">
-        <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-          <button
-            type="button"
-            className="ds-icon"
-            aria-label="Back"
-            onClick={() => navigate({ to: "/screen-list" })}
-          >
-            <ArrowLeft size={20} />
-          </button>
-          <h1 className="ds-page-title">{screen.name}</h1>
-        </div>
+      <header className="ds-detail-bar">
         <button
           type="button"
           className="ds-icon"
-          aria-label="Delete screen"
-          onClick={() => setDeleteOpen(true)}
+          aria-label="Back"
+          onClick={() => void navigate({ to: "/screen-list" })}
         >
-          <Trash2 size={18} />
+          <ArrowLeft size={20} />
+        </button>
+        <input
+          className="ds-detail-title"
+          value={screen.name}
+          aria-label="Screen name"
+          onChange={(event) => setScreen({ ...screen, name: event.target.value })}
+          onBlur={() => void commit(screen)}
+        />
+        <button
+          type="button"
+          className="ds-btn ds-btn-quiet is-danger"
+          onClick={() => setRemoving(true)}
+        >
+          <Trash2 size={15} />
+          Remove
         </button>
       </header>
 
-      {error && <p className="ds-danger-text">{error}</p>}
+      {error ? <p className="ds-danger-text">{error}</p> : null}
 
-      <div className="ds-hero">
-        <span className="ds-bezel">
-          {playingName ? (
-            <span className="ds-bezel-copy">
-              <em>{activeOverride ? "Override" : "Playing"}</em>
-              <strong>{playingName}</strong>
-            </span>
-          ) : (
-            <Monitor size={22} strokeWidth={1.6} />
-          )}
-        </span>
-        <div className="ds-hero-copy">
-          <h2>{playingName ?? "Idle"}</h2>
-          <p>{playingKicker}</p>
-        </div>
-      </div>
-
-      <section className="ds-set">
-        <div className="ds-set-head">
-          <div>
-            <h2>Screen</h2>
-            <p>Name, network, and the standing program.</p>
-          </div>
-        </div>
-        <label className="ds-set-row">
-          <span>Name</span>
-          <input
-            className="ds-input"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            onBlur={() => void saveName()}
-          />
-        </label>
-        <label className="ds-set-row">
-          <span>Network</span>
-          <select
-            className="ds-input"
-            value={screen.group ?? ""}
-            onChange={(event) => void handleGroupChange(event.target.value)}
-          >
-            <option value="">No network</option>
-            {groups.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="ds-set-row">
-          <span>Program</span>
-          <select
-            className="ds-input"
-            value={selectedProgramId}
-            onChange={(event) => void handleProgramChange(event.target.value)}
-          >
-            <option value="">None (follow network)</option>
-            {programs.map((program) => (
-              <option key={program.id} value={program.id}>
-                {program.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      </section>
-
-      <section className="ds-set">
-        <div className="ds-set-head">
-          <div>
-            <h2>
-              Override{" "}
-              {activeOverride && <span className="ds-badge is-warn">Active</span>}
-            </h2>
-            <p>Takes the screen until a stated moment, then the standing choice returns.</p>
-          </div>
-        </div>
-        {activeOverride ? (
-          <div className="ds-event">
-            <div>
-              <strong>{overrideProgramName}</strong>
-              <em>Until {new Date(activeOverride.until_unix_ms).toLocaleString()}</em>
-            </div>
-            <button
-              type="button"
-              className="ds-btn ds-btn-ghost"
-              onClick={() => void handleClearOverride()}
-            >
-              Clear
-            </button>
-          </div>
-        ) : (
-          <>
-            <label className="ds-set-row">
-              <span>Program</span>
-              <select
-                className="ds-input"
-                value={overrideProgramId}
-                onChange={(event) => setOverrideProgramId(event.target.value)}
-              >
-                <option value="">Select…</option>
-                {programs.map((program) => (
-                  <option key={program.id} value={program.id}>
-                    {program.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="ds-set-row">
-              <span>Until</span>
-              <div className="ds-page-actions">
-                <input
-                  className="ds-input"
-                  type="datetime-local"
-                  value={overrideUntil}
-                  onChange={(event) => setOverrideUntil(event.target.value)}
-                />
-                <button
-                  type="button"
-                  className="ds-btn ds-btn-solid"
-                  disabled={settingOverride || !overrideProgramId || !overrideUntil}
-                  onClick={() => void handleSetOverride()}
-                >
-                  {settingOverride ? "Setting…" : "Set"}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </section>
-
-      <section className="ds-set">
-        <div className="ds-set-head">
-          <div>
-            <h2>Schedule</h2>
-            <p>Windows that take the screen at a time. Resolution stays with the engine.</p>
-          </div>
-          <button
-            type="button"
-            className="ds-btn ds-btn-ghost"
-            onClick={() => {
-              setEditingWindowId(null);
-              resetWindowForm();
-              setShowWindowForm(true);
-            }}
-          >
-            <Plus size={16} />
-            Add
-          </button>
-        </div>
-        {screen.schedule.length > 0 ? (
-          screen.schedule.map((row) => (
-            <div
-              key={row.id}
-              className={`ds-event${row.enabled ? "" : " is-off"}`}
-            >
-              <div>
-                <strong>{programNames.get(row.program) ?? "Unknown program"}</strong>
-                <em>{formatWindowWhen(row)}</em>
-              </div>
-              <div className="ds-page-actions">
-                <button
-                  type="button"
-                  className="ds-btn ds-btn-quiet"
-                  onClick={() => handleEditWindow(row)}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="ds-icon"
-                  aria-label="Delete window"
-                  onClick={() => void handleDeleteWindow(row.id)}
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
-            </div>
-          ))
-        ) : (
-          <p className="ds-hint" style={{ padding: "4px 16px 16px" }}>
-            No scheduled windows.
+      {/* What it is doing, and why. The sentence an operator needs when a
+          panel is showing the wrong thing — or nothing. */}
+      <section className="ds-panel">
+        <h3>Right now</h3>
+        <p className="ds-showing">{playback ? explain(playback, showingName) : "Unknown"}</p>
+        {playback?.showing.showing === "unaddressed" && !screen.tuned ? (
+          <p className="ds-hint">
+            Nothing reaches this screen. Tune it to a channel below, or address a
+            broadcast at it.
           </p>
-        )}
+        ) : null}
       </section>
 
-      <Inspector
-        open={showWindowForm}
-        onOpenChange={(open) => {
-          if (!open) closeWindowForm();
-        }}
-        className="ds-app-setup"
-        title={editingWindowId ? "Edit window" : "Add window"}
-        actions={
-          <>
-            <button
-              type="button"
-              className="ds-btn ds-btn-quiet"
-              onClick={closeWindowForm}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="ds-btn ds-btn-solid"
-              disabled={savingWindow}
-              onClick={() => void handleSaveWindow()}
-            >
-              {savingWindow ? "Saving…" : editingWindowId ? "Update" : "Create"}
-            </button>
-          </>
-        }
-      >
+      <section className="ds-panel">
+        <h3>Tuned to</h3>
+        <select
+          className="ds-input"
+          value={screen.tuned ?? ""}
+          onChange={(event) =>
+            void commit({ ...screen, tuned: event.target.value || null })
+          }
+        >
+          <option value="">Nothing</option>
+          {channels.map((channel) => (
+            <option key={channel.id} value={channel.id}>
+              {channel.name}
+            </option>
+          ))}
+        </select>
+        <p className="ds-hint">
+          What it shows when no broadcast is addressed at it.
+        </p>
+      </section>
+
+      {/* Facts. The only fields here that can make a card correct or wrong. */}
+      <section className="ds-panel">
+        <h3>Place</h3>
+        <p className="ds-hint">
+          Where the panel physically is. Kinds that compute from a location —
+          prayer times, weather, a local clock — read this and nothing else.
+        </p>
+        <div className="ds-place-grid">
+          <label className="ds-field">
+            <span>Latitude</span>
+            <input
+              className="ds-input"
+              inputMode="decimal"
+              placeholder="51.5074"
+              value={place?.latitude ?? ""}
+              onChange={(event) =>
+                setScreen({
+                  ...screen,
+                  place: {
+                    latitude: Number(event.target.value),
+                    longitude: place?.longitude ?? 0,
+                    timezone: place?.timezone ?? "",
+                    region: place?.region ?? null,
+                  },
+                })
+              }
+              onBlur={() => void commit(screen)}
+            />
+          </label>
+          <label className="ds-field">
+            <span>Longitude</span>
+            <input
+              className="ds-input"
+              inputMode="decimal"
+              placeholder="-0.1278"
+              value={place?.longitude ?? ""}
+              onChange={(event) =>
+                setScreen({
+                  ...screen,
+                  place: {
+                    latitude: place?.latitude ?? 0,
+                    longitude: Number(event.target.value),
+                    timezone: place?.timezone ?? "",
+                    region: place?.region ?? null,
+                  },
+                })
+              }
+              onBlur={() => void commit(screen)}
+            />
+          </label>
+        </div>
         <label className="ds-field">
-          <span>Program</span>
-          <select
-            className="ds-input"
-            value={wfProgram}
-            onChange={(event) => setWfProgram(event.target.value)}
-          >
-            <option value="">Select…</option>
-            {programs.map((program) => (
-              <option key={program.id} value={program.id}>
-                {program.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="ds-field">
-          <span>Start (local)</span>
+          <span>Time zone</span>
           <input
             className="ds-input"
-            type="datetime-local"
-            value={wfStart}
-            onChange={(event) => setWfStart(event.target.value)}
+            list="ds-zones"
+            placeholder="Europe/London"
+            value={place?.timezone ?? ""}
+            onChange={(event) =>
+              setScreen({
+                ...screen,
+                place: {
+                  latitude: place?.latitude ?? 0,
+                  longitude: place?.longitude ?? 0,
+                  timezone: event.target.value,
+                  region: place?.region ?? null,
+                },
+              })
+            }
+            onBlur={() => void commit(screen)}
           />
         </label>
+        <ZoneOptions />
         <label className="ds-field">
-          <span>Duration (minutes)</span>
+          <span>Region</span>
           <input
             className="ds-input"
-            type="number"
-            min={1}
-            value={wfDurationMin}
-            onChange={(event) => setWfDurationMin(event.target.value)}
+            placeholder="MI"
+            value={place?.region ?? ""}
+            onChange={(event) =>
+              setScreen({
+                ...screen,
+                place: {
+                  latitude: place?.latitude ?? 0,
+                  longitude: place?.longitude ?? 0,
+                  timezone: place?.timezone ?? "",
+                  region: event.target.value || null,
+                },
+              })
+            }
+            onBlur={() => void commit(screen)}
           />
+          <small className="ds-hint">
+            So an audience can say &ldquo;every screen in Michigan&rdquo; without
+            anybody maintaining a label that drifts from the coordinates above.
+          </small>
         </label>
-        <label className="ds-field">
-          <span>Recurrence</span>
-          <select
-            className="ds-input"
-            value={wfRecurrence}
-            onChange={(event) => setWfRecurrence(event.target.value as Recurrence)}
-          >
-            {RECURRENCES.map((r) => (
-              <option key={r} value={r}>
-                {RECURRENCE_LABEL[r]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="ds-field">
-          <span>Timezone (IANA)</span>
-          <input
-            className="ds-input"
-            value={wfTimezone}
-            placeholder="America/Chicago"
-            onChange={(event) => setWfTimezone(event.target.value)}
-          />
-        </label>
-        <label className="ds-field">
-          <span>Priority</span>
-          <input
-            className="ds-input"
-            type="number"
-            value={wfPriority}
-            onChange={(event) => setWfPriority(event.target.value)}
-          />
-        </label>
-        <label
-          className="ds-field"
-          style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+      </section>
+
+      {KIND_PANELS.map((panel) => (
+        <section className="ds-panel" key={panel.kind}>
+          <h3>{panel.label} at this venue</h3>
+          <p className="ds-hint">
+            What this congregation practises, as distinct from how the card
+            looks. Two venues under one operator can differ here and share a
+            preset.
+          </p>
+          {panel.groups
+            .flatMap((group) => group.fields)
+            .filter((field) => field.control !== "place")
+            .map((field, index) => {
+              const key = "key" in field ? field.key : `${panel.kind}-${index}`;
+              if (!("key" in field)) return null;
+              const held = screen.facts?.[panel.kind]?.[field.key] ?? "";
+              return (
+                <label className="ds-field" key={key}>
+                  <span>{field.label}</span>
+                  <input
+                    className="ds-input"
+                    placeholder="from the preset"
+                    value={held}
+                    onChange={(event) => {
+                      const kindFacts = {
+                        ...(screen.facts?.[panel.kind] ?? {}),
+                      };
+                      if (event.target.value) kindFacts[field.key] = event.target.value;
+                      else delete kindFacts[field.key];
+                      setScreen({
+                        ...screen,
+                        facts: { ...(screen.facts ?? {}), [panel.kind]: kindFacts },
+                      });
+                    }}
+                    onBlur={() => void commit(screen)}
+                  />
+                </label>
+              );
+            })}
+        </section>
+      ))}
+
+      {/* Abstraction. Overlapping and arbitrary on purpose. */}
+      <section className="ds-panel">
+        <h3>Labels</h3>
+        <p className="ds-hint">
+          Yours. Overlapping and arbitrary — a screen can be
+          <code> biz:acme</code>, <code>role:menu</code> and <code>rented</code> at
+          once, and audiences address whichever slice matters today.
+        </p>
+        <div className="ds-label-row">
+          {(screen.labels ?? []).map((held) => (
+            <span className="ds-label" key={held}>
+              {held}
+              <button
+                type="button"
+                aria-label={`Remove ${held}`}
+                onClick={() =>
+                  void commit({
+                    ...screen,
+                    labels: (screen.labels ?? []).filter((other) => other !== held),
+                  })
+                }
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+        <form
+          className="ds-label-add"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const next = label.trim();
+            if (!next) return;
+            void commit({
+              ...screen,
+              labels: [...new Set([...(screen.labels ?? []), next])].sort(),
+            });
+            setLabel("");
+          }}
         >
           <input
-            type="checkbox"
-            checked={wfEnabled}
-            onChange={(event) => setWfEnabled(event.target.checked)}
+            className="ds-input"
+            value={label}
+            placeholder="role:menu"
+            onChange={(event) => setLabel(event.target.value)}
           />
-          <span>Enabled</span>
-        </label>
-        {windowFormError && <p className="ds-danger-text">{windowFormError}</p>}
-      </Inspector>
+          <button type="submit" className="ds-btn ds-btn-quiet">
+            Add label
+          </button>
+        </form>
+      </section>
 
       <Confirm
-        open={deleteOpen}
-        onOpenChange={setDeleteOpen}
-        title={`Delete “${screen.name}”?`}
-        description="This cannot be undone."
-        confirmLabel={deleting ? "Deleting…" : "Delete"}
+        open={removing}
+        onOpenChange={setRemoving}
+        title={`Remove ${screen.name}?`}
+        description="The panel stops being addressable. Pairing and grants are Astrolabe's and are not touched here."
+        confirmLabel="Remove"
         danger
-        onConfirm={handleDelete}
+        onConfirm={() => {
+          void deleteScreen(screen.id)
+            .then(() => navigate({ to: "/screen-list" }))
+            .catch((err: unknown) =>
+              toast.show("Could not remove", err instanceof Error ? err.message : String(err)),
+            );
+        }}
       />
     </Page>
   );
-};
+}
+
+/** Whatever this browser can enumerate, offered as completions. */
+function ZoneOptions() {
+  const zones =
+    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  if (zones.length === 0) return null;
+  return (
+    <datalist id="ds-zones">
+      {zones.map((zone) => (
+        <option key={zone} value={zone} />
+      ))}
+    </datalist>
+  );
+}

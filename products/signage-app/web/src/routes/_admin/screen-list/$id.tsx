@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { ScreenDetail } from '@/app/(admin)/(pages)/screen-list/[id]/ScreenDetail';
+import ScreenDetail from '@/app/(admin)/(pages)/screen-list/[id]/ScreenDetail';
 
 function ScreenDetailPage() {
   const { id } = Route.useParams();

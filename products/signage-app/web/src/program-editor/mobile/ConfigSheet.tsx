@@ -16,9 +16,15 @@ import type { KindPanel } from "../kinds/types";
 import { useEditorSession } from "../state/EditorContext";
 import { useKindDraft } from "../state/useKindDraft";
 
-export function KindSheet({ panel }: { panel: KindPanel }) {
+export function KindSheet({
+  panel,
+  presetId,
+}: {
+  panel: KindPanel;
+  presetId: string | null;
+}) {
   const { closePanel, usageOf } = useEditorSession();
-  const draft = useKindDraft(panel);
+  const draft = useKindDraft(panel, presetId);
   const [tab, setTab] = useState(panel.groups[0]?.id ?? "");
   const [removeOpen, setRemoveOpen] = useState(false);
   const group = panel.groups.find((entry) => entry.id === tab) ?? panel.groups[0];
@@ -34,9 +40,9 @@ export function KindSheet({ panel }: { panel: KindPanel }) {
         </button>
       </header>
 
-      {panel.scope === "space" ? (
+      {panel.scope === "preset" ? (
         <p className="pe-scope is-compact">
-          Shared — every {panel.label} clip on every screen in this Space.
+          Preset — shared by every clip pointing at it.
           {used > 0 ? ` ${used === 1 ? "1 clip" : `${used} clips`} here.` : ""}
         </p>
       ) : null}
@@ -91,7 +97,7 @@ export function KindSheet({ panel }: { panel: KindPanel }) {
             });
           }}
         >
-          {draft.saving ? "Saving…" : "Save for every screen"}
+          {draft.saving ? "Saving…" : draft.configured ? "Save preset" : "Create preset"}
         </button>
       </footer>
 
@@ -101,8 +107,8 @@ export function KindSheet({ panel }: { panel: KindPanel }) {
         title={`Remove ${panel.label}?`}
         description={
           used > 0
-            ? `${used === 1 ? "1 clip" : `${used} clips`} here draw ${panel.label}. They go blank on every screen until it is configured again.`
-            : `${panel.label} clips go blank on every screen until it is configured again.`
+            ? `${used === 1 ? "1 clip" : `${used} clips`} here point at it. They fall back to whatever each screen supplies.`
+            : "No clip here points at it."
         }
         confirmLabel="Remove"
         danger

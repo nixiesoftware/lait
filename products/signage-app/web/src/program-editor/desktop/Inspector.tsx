@@ -38,7 +38,14 @@ export function Inspector() {
   return (
     <aside className="pe-inspector">
       <ClipSection />
-      {kindPanel ? <KindSection panel={kindPanel} /> : null}
+      {kindPanel ? (
+        <KindSection
+          panel={kindPanel}
+          presetId={
+            selected.media?.source === "kind" ? (selected.media.preset ?? null) : null
+          }
+        />
+      ) : null}
       <ProgramSection collapsed />
     </aside>
   );
@@ -126,9 +133,15 @@ function ClipSection() {
   );
 }
 
-function KindSection({ panel }: { panel: KindPanel }) {
+function KindSection({
+  panel,
+  presetId,
+}: {
+  panel: KindPanel;
+  presetId: string | null;
+}) {
   const { usageOf, closePanel } = useEditorSession();
-  const draft = useKindDraft(panel);
+  const draft = useKindDraft(panel, presetId);
   const [removeOpen, setRemoveOpen] = useState(false);
   const used = usageOf(panel.kind);
 
@@ -141,11 +154,11 @@ function KindSection({ panel }: { panel: KindPanel }) {
         </span>
       }
     >
-      {panel.scope === "space" ? (
+      {panel.scope === "preset" ? (
         <p className="pe-scope">
-          <strong>Shared</strong>
-          Every {panel.label} clip in this Space reads these settings —{" "}
-          {used === 1 ? "1 clip" : `${used} clips`} in this program.
+          <strong>Preset</strong>
+          {used === 1 ? "1 clip" : `${used} clips`} here point at this preset.
+          Where each one plays supplies the rest.
         </p>
       ) : null}
 
@@ -189,7 +202,7 @@ function KindSection({ panel }: { panel: KindPanel }) {
           disabled={draft.saving || !draft.dirty}
           onClick={() => void draft.commit()}
         >
-          {draft.saving ? "Saving…" : draft.configured ? "Save for every screen" : "Configure"}
+          {draft.saving ? "Saving…" : draft.configured ? "Save preset" : "Create preset"}
         </button>
       </div>
 
@@ -199,8 +212,8 @@ function KindSection({ panel }: { panel: KindPanel }) {
         title={`Remove ${panel.label}?`}
         description={
           used > 0
-            ? `${used === 1 ? "1 clip" : `${used} clips`} in this program draw ${panel.label}. They will go blank on every screen until it is configured again.`
-            : `${panel.label} clips will go blank on every screen until it is configured again.`
+            ? `${used === 1 ? "1 clip" : `${used} clips`} in this program point at it. They fall back to whatever each screen supplies.`
+            : "No clip in this program points at it."
         }
         confirmLabel="Remove"
         danger

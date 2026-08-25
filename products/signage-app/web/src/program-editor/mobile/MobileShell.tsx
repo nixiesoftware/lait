@@ -126,7 +126,16 @@ export function MobileShell({
           onDuration={() => setDurationOpen(true)}
         />
 
-        {panel.sort === "kind" ? <KindSheet panel={panel.panel} /> : null}
+        {panel.sort === "kind" ? (
+          <KindSheet
+            panel={panel.panel}
+            presetId={
+              editor.selected?.media?.source === "kind"
+                ? (editor.selected.media.preset ?? null)
+                : null
+            }
+          />
+        ) : null}
         {panel.sort === "program" ? <ProgramSheet /> : null}
       </div>
 

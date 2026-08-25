@@ -18,9 +18,9 @@ function sameSettings(left: Settings, right: Settings): boolean {
   return keys.every((key) => left[key] === right[key]);
 }
 
-export function useKindDraft(panel: KindPanel) {
+export function useKindDraft(panel: KindPanel, presetId: string | null) {
   const { kinds } = useEditorSession();
-  const config = kinds.configFor(panel.kind);
+  const config = kinds.byId(presetId);
   const configId = config?.id ?? null;
 
   const [draft, setDraft] = useState<Settings>(() => panel.seed(config));
@@ -48,8 +48,9 @@ export function useKindDraft(panel: KindPanel) {
 
   const { setDraft: setSessionDraft } = kinds;
   useEffect(() => {
-    setSessionDraft({ kind: panel.kind, settings: packed });
-  }, [setSessionDraft, panel.kind, packed]);
+    if (!configId) return;
+    setSessionDraft({ preset: configId, settings: packed });
+  }, [setSessionDraft, configId, packed]);
 
   const errors = useMemo(() => panel.validate(draft), [panel, draft]);
   const errorFor = useCallback(
@@ -73,7 +74,11 @@ export function useKindDraft(panel: KindPanel) {
     setSaving(true);
     setFailure(null);
     try {
-      await kinds.save(panel.kind, name.trim() || panel.label, packed);
+      if (!config) {
+        await kinds.create(panel.kind, name.trim() || panel.label, packed);
+      } else {
+        await kinds.save({ ...config, name: name.trim() || panel.label, settings: packed });
+      }
       return true;
     } catch (err) {
       setFailure(err instanceof Error ? err.message : String(err));
@@ -81,7 +86,7 @@ export function useKindDraft(panel: KindPanel) {
     } finally {
       setSaving(false);
     }
-  }, [errors, kinds, name, packed, panel.kind, panel.label]);
+  }, [config, errors, kinds, name, packed, panel.kind, panel.label]);
 
   const remove = useCallback(async (): Promise<boolean> => {
     if (!config) return false;
