@@ -6188,10 +6188,10 @@ impl Session {
     ///
     /// Every declaration for the id is consulted, exactly as the readable
     /// check below does: a World may declare several versions of one schema
-    /// (the Issues migrator declares its historical and current bindings side
-    /// by side, canonically sorted), and which entry happens to come first is
-    /// declaration order, not policy. `readable_predecessors` deliberately do
-    /// not make a version writable.
+    /// side by side (a migrator that writes its current binding while reading
+    /// a historical one), canonically sorted, so which entry happens to come
+    /// first is declaration order, not policy. `readable_predecessors`
+    /// deliberately do not make a version writable.
     fn ensure_writable_schema(&self, schema: &SchemaId, version: u32) -> Result<(), Rejection> {
         let mut saw_schema = false;
         for s in &self.schemas {
