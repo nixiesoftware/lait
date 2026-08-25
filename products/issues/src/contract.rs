@@ -1073,11 +1073,16 @@ pub struct V4MigrationWindow {
     pub phase: String,
     /// Exact frozen Body opened by the commit callback. Absent only for the
     /// terminal sentinel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Never `skip_serializing_if`: this window rides postcard inside the
+    /// host's lifecycle record, and a skipped field shifts every byte after
+    /// it. The one body-less window — the terminal sentinel — is exactly the
+    /// one that then failed to decode, at the finish line of a real migration.
+    #[serde(default)]
     pub body: Option<BodyKey>,
     /// Phase-local continuation within that Body. It is an ordinal or a
     /// canonical map/set key, never source payload.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub subitem: String,
     /// Domain-separated digest of the selected Body/window coordinate and its
     /// frozen source bytes. Commit recomputes it before staging any effect.
