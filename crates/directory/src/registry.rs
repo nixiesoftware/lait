@@ -45,7 +45,7 @@
 //! - A **label resolution** ([`Registrar::resolve`]) carries the current head
 //!   but **not** yet an inclusion path binding the resolved route to it: a
 //!   resolver would need the publication's bytes to recompute the leaf, and
-//!   the shipped read path (the `reach` bridge) holds no pin to check one
+//!   the shipped read path (the `reach` router) holds no pin to check one
 //!   against — route-level substitution is caught downstream at pairing, where
 //!   the confirmation phrase commits the destination *profile*. Binding a
 //!   resolved route to the chronicle is future work for a pinning resolver,
