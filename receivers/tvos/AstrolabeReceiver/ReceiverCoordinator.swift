@@ -160,13 +160,15 @@ final class ReceiverCoordinator: ObservableObject {
             "rendezvous": (bootstrap?.rendezvous as Any?) ?? NSNull(),
             "capabilities": capabilities(),
         ])
-        try StrictJSON.fields(response, exactly: ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"], name: "pairing")
+        try StrictJSON.fields(response, exactly: ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint", "coordinator_profile"], name: "pairing")
         guard let pairing = response["pairing"] as? String,
               let fingerprint = response["coordinator_fingerprint"] as? String,
+              let profile = response["coordinator_profile"] as? String,
               let phrase = response["confirmation_phrase"] as? [String],
               let lifetime = StrictJSON.int(response["expires_in_ms"]), (1...600_000).contains(lifetime),
               DisplayProtocolV1.isHex(pairing, count: 32), DisplayProtocolV1.isHex(fingerprint, count: 64),
-              phrase == (try DisplayProtocolV1.confirmationPhrase(fingerprint: fingerprint, pairing: pairing, nonce: nonce))
+              DisplayProtocolV1.isProfileId(profile),
+              phrase == (try DisplayProtocolV1.confirmationPhrase(profile: profile, pairing: pairing, nonce: nonce))
         else { throw DisplayProtocolV1.refusal("pairing_integrity", "confirmation phrase") }
         if let pinned = bootstrap?.trust.fingerprint, fingerprint != pinned {
             throw DisplayProtocolV1.refusal("pairing_integrity", "certificate bootstrap")

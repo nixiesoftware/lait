@@ -38,7 +38,9 @@ mod store;
 mod types;
 
 pub use announce::{Announcement, ANNOUNCEMENT_VERSION};
-pub use attest::{names_of, parties_called, ResolvedName};
+pub use attest::{
+    declared_by, names_of, parties_called, portrait_of, ResolvedName, ResolvedPortrait,
+};
 pub use bounds::{
     MAX_ADDRESSBOOK_HISTORY_BYTES, MAX_BOOK_BYTES, MAX_BUNDLE_BYTES, MAX_CARDS,
     MAX_CARDS_PER_BUNDLE, MAX_HANDLES_PER_CARD, MAX_NAME_BYTES, MAX_NOTE_BYTES,
@@ -51,7 +53,7 @@ pub use error::Error;
 pub use ids::{CardId, PathHash};
 pub use mapping::BODY_KEY;
 pub use reach_store::{ReachState, ReachStore};
-pub use registry::Registry;
+pub use registry::{Portrait, Registry};
 pub use store::Store;
 pub use types::{
     Author, Book, Card, Coverage, DerivedObservation, Evidence, Field, GroupLink, Handle,

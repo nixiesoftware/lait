@@ -171,6 +171,32 @@ impl ReachPlane {
         Self::restore(seeds, None, now)
     }
 
+    /// The profile these seeds name, without founding a plane.
+    ///
+    /// The one derivation, shared with [`ReachPlane::restore`]: same seeds,
+    /// same fixed genesis, same id on every call. It exists so a component
+    /// that needs only the identity's address — the display coordinator
+    /// anchoring receivers on it — does not stand up a whole reach plane, and
+    /// cannot drift from the plane's own derivation by re-implementing it.
+    pub fn profile_for(seeds: &[[u8; 32]]) -> Result<mechanics::kinship::ProfileId, Failure> {
+        let log = mechanics::kinship::KinshipLog::found(Self::genesis_for(seeds)?)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        Ok(log.profile().clone())
+    }
+
+    /// The fixed genesis these seeds name — the artifact [`profile_for`]'s id
+    /// is the hash of, exposed for the caller that must *carry* it: a route
+    /// publication anchors on the genesis, not on its digest.
+    ///
+    /// [`profile_for`]: ReachPlane::profile_for
+    pub fn genesis_for(seeds: &[[u8; 32]]) -> Result<DeviceLink, Failure> {
+        let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
+            return Err(Failure::TooFewDevices);
+        };
+        DeviceLink::seal(first, second, GENESIS_NONCE, GENESIS_EPOCH)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))
+    }
+
     /// Found the plane, reusing durable state when there is any.
     ///
     /// The genesis is recomputed from the seeds either way — it is deterministic,
@@ -340,6 +366,27 @@ impl ReachPlane {
         audience: Audience,
         reader: &Standing,
     ) -> Result<Announcement, Failure> {
+        self.publish(audience, reader, None)
+    }
+
+    /// [`Self::announce`], presenting: the portrait's avowals are sealed at
+    /// the same bumped epoch, so who-this-is rides the identical rail as
+    /// which-devices-are-it and supersedes the same way.
+    pub fn announce_presenting(
+        &mut self,
+        audience: Audience,
+        reader: &Standing,
+        portrait: &addressbook::Portrait,
+    ) -> Result<Announcement, Failure> {
+        self.publish(audience, reader, Some(portrait))
+    }
+
+    fn publish(
+        &mut self,
+        audience: Audience,
+        reader: &Standing,
+        portrait: Option<&addressbook::Portrait>,
+    ) -> Result<Announcement, Failure> {
         self.epoch = self.epoch.saturating_add(1);
         // Derived from the epoch rather than sampled, so a republication is
         // reproducible from durable state alone. It carries 8 bits and repeats
@@ -349,6 +396,16 @@ impl ReachPlane {
         // secret and must never become one; a real source belongs here the
         // moment anything depends on it being unguessable.
         let nonce = [u8::try_from(self.epoch & 0xff).unwrap_or(0); 16];
+        if let Some(portrait) = portrait {
+            self.registry.avow_portrait(
+                &self.profile,
+                portrait,
+                audience.clone(),
+                &self.canonical_seed(),
+                self.epoch,
+                nonce,
+            )?;
+        }
         self.registry.avow_reachable(
             &self.profile,
             audience,
@@ -422,8 +479,31 @@ impl ReachPlane {
         self.registry.resolve(profile)
     }
 
+    /// The name a held profile declares for itself, as `reader` may read it.
+    #[must_use]
+    pub fn declared_name(&self, profile: &ProfileId, reader: &Standing) -> Option<String> {
+        self.registry.declared_name(profile, reader)
+    }
+
+    /// A held profile's portrait, as `reader` may read it.
+    #[must_use]
+    pub fn portrait(
+        &self,
+        profile: &ProfileId,
+        reader: &Standing,
+    ) -> Option<addressbook::ResolvedPortrait> {
+        self.registry.portrait(profile, reader)
+    }
+
     /// Every profile this identity holds, its own included.
     #[must_use]
+    /// The registry beneath, read-only — for a caller projecting with a seed
+    /// this plane does not hold, which is exactly an adopted placement's case.
+    #[must_use]
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     pub fn registry_profiles(&self) -> Vec<ProfileId> {
         self.registry.profiles().cloned().collect()
     }
@@ -451,6 +531,29 @@ impl ReachPlane {
     #[must_use]
     pub fn canonical_device(&self) -> DeviceId {
         device_from_seed(&self.canonical_seed())
+    }
+
+    /// Adopt a device this identity does not hold the seed for — a placement
+    /// on another machine, or the printed recovery device — by appending its
+    /// consented link.
+    ///
+    /// The link is the sponsorship artifact: both sides signed the same
+    /// preimage where their seeds live (`DeviceLink::half` + `assemble`), and
+    /// one of them must already be rooted here, or the append is an unrelated
+    /// pair wearing this profile's log. The adopted device can then *sign
+    /// heads every reader takes* — `project` carries its chain and `absorb`
+    /// walks it — but it cannot compose from this plane, which holds no seed
+    /// for it and says so rather than pretending.
+    pub fn adopt_device(&mut self, link: mechanics::kinship::DeviceLink) -> Result<(), Failure> {
+        link.verify()
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        let rooted = self.registry.resolve(&self.profile).unwrap_or_default();
+        if !link.devices.iter().any(|device| rooted.contains(device)) {
+            return Err(Failure::NotReachable);
+        }
+        self.registry
+            .extend(&self.profile, mechanics::kinship::Entry::Link(link))?;
+        Ok(())
     }
 
     /// Hand the canonical role to another of this identity's devices.
@@ -829,6 +932,16 @@ impl PostReach {
         self.plane.announce(audience, reader)
     }
 
+    /// [`Self::announce`], carrying the identity's portrait on the same rail.
+    pub fn announce_presenting(
+        &mut self,
+        audience: Audience,
+        reader: &Standing,
+        portrait: &addressbook::Portrait,
+    ) -> Result<Announcement, Failure> {
+        self.plane.announce_presenting(audience, reader, portrait)
+    }
+
     /// Take in a correspondent's announcement, anchored to its genesis.
     pub fn learn(
         &mut self,
@@ -1011,22 +1124,156 @@ mod tests {
     const BOB_B: [u8; 32] = [41u8; 32];
     const NOW: u64 = 1_800_000_000;
 
-    /// **A device outside the genesis pair cannot publish**, and this is the
-    /// constraint device-join has to design around.
-    ///
-    /// `Registry::project` signs the head with whichever seed it is handed, and
-    /// `absorb` refuses any head whose signer is not one of the two devices in
-    /// the genesis link (`Failure::Unanchored`) — deliberately, since that
-    /// anchor is what stops a stranger substituting a device set. So `canonical`
-    /// today conflates two authorities that are not the same: *composing and
-    /// sealing a letter*, which any live device may do, and *signing a head a
-    /// correspondent will accept*, which only a genesis root may do.
-    ///
-    /// Pinned rather than fixed: splitting the two is the next piece of work,
-    /// and it is worth this being a failing expectation somebody reads rather
-    /// than a surprise somebody hits.
+    /// The standalone derivation and the plane agree on the address, or a
+    /// receiver anchored by one is unreachable through the other.
     #[test]
-    fn a_device_outside_the_genesis_pair_cannot_publish_a_head_anyone_will_take() {
+    fn profile_for_is_the_plane_own_derivation() {
+        let seeds = vec![ALICE_A, ALICE_B];
+        let derived = ReachPlane::profile_for(&seeds).expect("derive");
+        let plane = ReachPlane::restore(seeds, None, NOW).expect("found");
+        assert_eq!(&derived, plane.profile());
+        assert!(derived.as_str().starts_with("prf_"));
+        assert!(
+            ReachPlane::profile_for(&[ALICE_A]).is_err(),
+            "one seed is no circle"
+        );
+    }
+
+    /// The user-facing consequence of adoption: a correspondent's address
+    /// book learns the placement. Not automatic — the *next announcement*
+    /// avows the whole current device set, adopted device included, and the
+    /// correspondent's `resolve` answers with it. If this test fails, joins
+    /// are real but invisible, which is the worse defect.
+    #[test]
+    fn a_correspondents_address_book_learns_an_adopted_device() {
+        let (a, b) = ([81u8; 32], [82u8; 32]);
+        let placement: [u8; 32] = [84u8; 32];
+        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+
+        let reader = Standing {
+            device: Some(device_from_seed(&[91u8; 32])),
+            ..Standing::default()
+        };
+        // The correspondent holds the pre-adoption card.
+        let before = plane.announce(Audience::Public, &reader).expect("announce");
+        let mut theirs = Registry::new();
+        theirs
+            .absorb(before.projection, &before.genesis, &reader)
+            .expect("absorb the pre-adoption card");
+        let placement_device = device_from_seed(&placement);
+        assert!(
+            !theirs
+                .resolve(plane.profile())
+                .expect("held")
+                .contains(&placement_device),
+            "not yet adopted, not yet resolvable"
+        );
+
+        // Adopt, then announce again — the epoch advances, the avowals cover
+        // the grown device set, and the correspondent's view follows.
+        let (nonce, epoch) = ([13u8; 16], 9);
+        let link = mechanics::kinship::DeviceLink::assemble(
+            (
+                device_from_seed(&a),
+                mechanics::kinship::DeviceLink::half(&a, &placement_device, nonce, epoch),
+            ),
+            (
+                placement_device.clone(),
+                mechanics::kinship::DeviceLink::half(
+                    &placement,
+                    &device_from_seed(&a),
+                    nonce,
+                    epoch,
+                ),
+            ),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        plane.adopt_device(link).expect("adopt");
+        let after = plane
+            .announce(Audience::Public, &reader)
+            .expect("announce again");
+        theirs
+            .absorb(after.projection, &after.genesis, &reader)
+            .expect("absorb the post-adoption card");
+        assert!(
+            theirs
+                .resolve(plane.profile())
+                .expect("held")
+                .contains(&placement_device),
+            "the correspondent's address book resolves the placement"
+        );
+    }
+
+    /// The sponsorship round trip: halves signed on two machines, assembled,
+    /// adopted — and the adopted device signs a head a stranger takes. The
+    /// full remote-join flow minus only the transport that carries the half.
+    #[test]
+    fn an_adopted_device_publishes_from_its_own_seed() {
+        let (a, b) = ([81u8; 32], [82u8; 32]);
+        let placement: [u8; 32] = [84u8; 32];
+        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+
+        // The sponsor (a) and the placement each sign the same preimage where
+        // their seed lives; nobody's seed crosses a machine boundary.
+        let sponsor_device = device_from_seed(&a);
+        let placement_device = device_from_seed(&placement);
+        let (nonce, epoch) = ([13u8; 16], 9);
+        let sponsor_half =
+            mechanics::kinship::DeviceLink::half(&a, &placement_device, nonce, epoch);
+        let placement_half =
+            mechanics::kinship::DeviceLink::half(&placement, &sponsor_device, nonce, epoch);
+        let link = mechanics::kinship::DeviceLink::assemble(
+            (sponsor_device, sponsor_half),
+            (placement_device.clone(), placement_half),
+            nonce,
+            epoch,
+        )
+        .expect("two halves make the link seal would have made");
+        plane.adopt_device(link).expect("adopt the placement");
+
+        // An unrelated pair is refused: adoption is rooted or it is nothing.
+        let unrelated =
+            mechanics::kinship::DeviceLink::seal(&[85u8; 32], &[86u8; 32], [14u8; 16], 10)
+                .expect("seal");
+        assert!(plane.adopt_device(unrelated).is_err());
+
+        // The adopted device signs from its own seed on its own machine: the
+        // registry projections carry its chain, so any reader takes the head.
+        let reader = Standing {
+            device: Some(device_from_seed(&[91u8; 32])),
+            ..Standing::default()
+        };
+        let projection = plane
+            .registry()
+            .project(plane.profile(), &placement, 11, &reader)
+            .expect("project as the placement");
+        let mut theirs = Registry::new();
+        let genesis = mechanics::kinship::DeviceLink::seal(
+            &a,
+            &b,
+            super::GENESIS_NONCE,
+            super::GENESIS_EPOCH,
+        )
+        .expect("the deterministic genesis");
+        theirs
+            .absorb(projection, &genesis, &reader)
+            .expect("an adopted placement's head is evidence to a stranger");
+    }
+
+    /// **A joined device publishes, and every reader can verify it** — the
+    /// device-join the pinned form of this test named as the next piece of
+    /// work. `project` carries the signer's authority chain, `absorb` walks
+    /// it (`signer_rooted`), and the genesis anchor keeps its whole force: a
+    /// chain is co-signed by an already-rooted device at every hop, so a
+    /// stranger substituting a device set still has nothing to carry.
+    ///
+    /// `canonical` therefore stops conflating two authorities: composing was
+    /// always any live device's, and signing a head a correspondent accepts
+    /// is now any *rooted* device's.
+    #[test]
+    fn a_joined_device_publishes_a_head_every_reader_takes() {
         let (a, b, c) = ([81u8; 32], [82u8; 32], [83u8; 32]);
         let mut plane = ReachPlane::found(vec![a, b, c], NOW).expect("found");
 
@@ -1042,13 +1289,10 @@ mod tests {
         let announcement = plane.announce(Audience::Public, &reader).expect("announce");
 
         let mut theirs = Registry::new();
-        assert!(
-            matches!(
-                theirs.absorb(announcement.projection, &announcement.genesis, &reader),
-                Err(registry::Failure::Unanchored)
-            ),
-            "a head signed off the genesis pair is refused by every reader"
-        );
+        let absorbed = theirs
+            .absorb(announcement.projection, &announcement.genesis, &reader)
+            .expect("a chained head is evidence to a stranger");
+        assert_eq!(&absorbed, plane.profile(), "the same identity, verified");
     }
 
     /// Handing the canonical role to another device leaves the address alone.
@@ -1309,5 +1553,56 @@ mod tests {
             ReachPlane::found(vec![ALICE_A], NOW),
             Err(Failure::TooFewDevices)
         ));
+    }
+
+    /// The portrait rides the announcement rail: whoever can learn the
+    /// devices learns the presentation, from the same anchored projection,
+    /// and a later announcement supersedes it the same way the device set
+    /// does.
+    #[test]
+    fn an_announcement_carries_the_portrait_to_whoever_can_learn_it() {
+        let (a, b) = ([61u8; 32], [62u8; 32]);
+        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+        let reader = Standing {
+            device: Some(device_from_seed(&[71u8; 32])),
+            ..Standing::default()
+        };
+
+        let card = plane
+            .announce_presenting(
+                Audience::Public,
+                &reader,
+                &addressbook::Portrait {
+                    name: Some("Alice".to_string()),
+                    picture: Some([7u8; 32]),
+                    detail: "keeps the lighthouse".to_string(),
+                },
+            )
+            .expect("announce presenting");
+
+        let mut theirs = Registry::new();
+        theirs
+            .absorb(card.projection, &card.genesis, &reader)
+            .expect("absorb");
+        assert_eq!(
+            theirs.declared_name(plane.profile(), &reader).as_deref(),
+            Some("Alice")
+        );
+        let portrait = theirs
+            .portrait(plane.profile(), &reader)
+            .expect("the portrait arrived with the devices");
+        assert_eq!(portrait.picture, Some([7u8; 32]));
+        assert_eq!(portrait.detail, "keeps the lighthouse");
+
+        // A plain announce later does not erase the presentation — absence
+        // of a portrait in one publication is not the cleared portrait.
+        let replaced = plane.announce(Audience::Public, &reader).expect("announce");
+        theirs
+            .absorb(replaced.projection, &replaced.genesis, &reader)
+            .expect("absorb again");
+        assert!(
+            theirs.portrait(plane.profile(), &reader).is_some(),
+            "not presenting is not un-presenting"
+        );
     }
 }

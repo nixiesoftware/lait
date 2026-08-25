@@ -6,9 +6,11 @@ import {
   bytesToHex,
   confirmationPhrase,
   isLowerHex,
+  isProfileId,
   PROTOCOL_MAJOR,
   ProtocolError,
   randomHex,
+  requireProfile,
   sha256,
   verifyProgram,
 } from "./protocol.mjs";
@@ -215,6 +217,11 @@ class MseLiveSession {
     this.queuedBytes = 0;
     this.failed = false;
     this.released = false;
+    // A complete session is a film: it plays from the start, never chases an
+    // edge, and a clean close after the last fragment is the end announcing
+    // itself rather than an interruption to recover from.
+    this.complete = false;
+    this.ending = false;
   }
 
   mount(container, summary) {
@@ -247,7 +254,13 @@ class MseLiveSession {
     });
     this.socket.addEventListener("error", () => this.fail(new ProtocolError("network", "Live media socket failed")));
     this.socket.addEventListener("close", () => {
-      if (!this.released && !this.failed) this.fail(new ProtocolError("network", "Live media socket closed"));
+      if (this.released || this.failed) return;
+      if (this.complete) {
+        this.ending = true;
+        this.finishWhenDrained();
+        return;
+      }
+      this.fail(new ProtocolError("network", "Live media socket closed"));
     });
   }
 
@@ -255,10 +268,11 @@ class MseLiveSession {
     if (this.tracks.size !== 0) throw new ProtocolError("live_catalog", "Live catalog was repeated");
     let hello;
     try { hello = JSON.parse(serialized); } catch { throw new ProtocolError("live_catalog", "Live catalog is not JSON"); }
-    exactFields(hello, ["kind", "version", "tracks"], "live catalog");
-    if (hello.kind !== "astrolabe_live" || hello.version !== 1) {
+    exactFields(hello, ["kind", "version", "complete", "tracks"], "live catalog");
+    if (hello.kind !== "astrolabe_live" || hello.version !== 1 || typeof hello.complete !== "boolean") {
       throw new ProtocolError("live_catalog", "Live catalog version is unsupported");
     }
+    this.complete = hello.complete;
     this.tracks = supportedLiveTracks(hello.tracks);
     this.rebuildMediaSource();
   }
@@ -306,7 +320,7 @@ class MseLiveSession {
           });
           this.pump(track.rendition);
         }
-        this.mediaSource.duration = Number.POSITIVE_INFINITY;
+        if (!this.complete) this.mediaSource.duration = Number.POSITIVE_INFINITY;
       } catch (error) {
         this.fail(error);
       }
@@ -351,9 +365,25 @@ class MseLiveSession {
     } catch (error) {
       this.fail(error);
     }
+    if (this.ending) this.finishWhenDrained();
+  }
+
+  /// The film's end: once every queue is empty and no buffer is mid-append,
+  /// tell MediaSource so the element plays out and raises `ended` instead of
+  /// stalling at a buffer edge forever.
+  finishWhenDrained() {
+    if (!this.ending || this.failed || this.released || !this.mediaSource) return;
+    const queued = Array.from(this.queues.values(), (queue) => queue.length)
+      .reduce((total, value) => total + value, 0);
+    const updating = Array.from(this.buffers.values()).some((buffer) => buffer.updating);
+    if (queued > 0 || updating) return;
+    if (this.mediaSource.readyState === "open") {
+      try { this.mediaSource.endOfStream(); } catch { /* already ended */ }
+    }
   }
 
   seekLiveEdge() {
+    if (this.complete) return;
     if (!this.video || !this.video.buffered || this.video.buffered.length === 0) return;
     const edge = this.video.buffered.end(this.video.buffered.length - 1);
     if (!Number.isFinite(this.video.currentTime) || edge - this.video.currentTime > 8) {
@@ -982,8 +1012,8 @@ export class DisplayReceiverClient {
     let stagedBytes = 0;
     for (const item of program.items) {
       if (item.scene.kind === "media") {
-        if (!item.scene.live || item.scene.protocol !== "mse" || item.scene.manifest.media_type !== "mse_manifest") {
-          throw new ProtocolError("unsupported", "Receiver accepts only granted live MSE media");
+        if (item.scene.protocol !== "mse" || item.scene.manifest.media_type !== "mse_manifest") {
+          throw new ProtocolError("unsupported", "Receiver accepts only granted MSE media");
         }
         const manifest = item.scene.manifest;
         if (assets.has(manifest.id)) continue;

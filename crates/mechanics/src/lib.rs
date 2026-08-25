@@ -50,6 +50,7 @@ pub mod assignment;
 mod authority;
 pub mod authorization;
 mod ceremony;
+pub mod chronicle;
 mod compile;
 mod crypto;
 mod custody;

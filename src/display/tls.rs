@@ -14,12 +14,23 @@ use sha2::{Digest, Sha256};
 const TLS_STATE_VERSION: u32 = 1;
 pub const DEFAULT_DISPLAY_PORT: u16 = 7443;
 
+/// What the coordinator *is*, which is deliberately not where it is.
+///
+/// The origin used to live here, composed at creation from whichever interface
+/// answered first and the port that happened to be configured. That welded two
+/// circumstances into an identity: moving the machine described a host that no
+/// longer existed, and changing the port failed validation, minted a fresh
+/// identity, and re-paired every screen. Neither is a fact about the
+/// coordinator. Both are now composed at load from the address it was actually
+/// asked to serve on.
+///
+/// An identity written by an older build still carries `origin`; serde ignores
+/// it, which is the whole migration.
 #[derive(Serialize, Deserialize)]
 struct StoredTlsIdentity {
     version: u32,
     instance: String,
     label: String,
-    origin: String,
     certificate_der: Vec<u8>,
     private_key_der: Vec<u8>,
 }
@@ -35,7 +46,12 @@ pub struct DisplayTlsIdentity {
 }
 
 impl DisplayTlsIdentity {
-    pub fn load_or_create(root: &Path, label: &str, port: u16) -> Result<Self> {
+    pub fn load_or_create(
+        root: &Path,
+        label: &str,
+        profile: display_protocol::ids::CoordinatorProfile,
+        port: u16,
+    ) -> Result<Self> {
         if port == 0 {
             return Err(anyhow!("display coordinator port must be non-zero"));
         }
@@ -47,7 +63,7 @@ impl DisplayTlsIdentity {
                 Some(bytes) => serde_json::from_slice::<StoredTlsIdentity>(&bytes)
                     .with_context(|| format!("decode {}", path.display()))?,
                 None => {
-                    let created = create_identity(label, port)?;
+                    let created = create_identity(label)?;
                     let bytes = serde_json::to_vec(&created)?;
                     mechanics::secretfs::write_private(
                         &path,
@@ -59,7 +75,7 @@ impl DisplayTlsIdentity {
                     created
                 }
             };
-        validate_stored(&stored, port)?;
+        validate_stored(&stored)?;
         let digest = Sha256::digest(&stored.certificate_der);
         let fingerprint = CoordinatorFingerprint::parse(data_encoding::HEXLOWER.encode(&digest))
             .context("parse display certificate fingerprint")?;
@@ -83,8 +99,9 @@ impl DisplayTlsIdentity {
             protocol_major: display_protocol::PROTOCOL_MAJOR,
             instance: stored.instance,
             label: stored.label,
+            profile,
             trust: CoordinatorTrust::PinnedCertificate {
-                origin: stored.origin,
+                origin: served_origin(port),
                 sha256: fingerprint.clone(),
             },
         };
@@ -138,7 +155,7 @@ fn encode_certificate_pem(certificate: &[u8]) -> String {
     pem
 }
 
-fn create_identity(label: &str, port: u16) -> Result<StoredTlsIdentity> {
+fn create_identity(label: &str) -> Result<StoredTlsIdentity> {
     let label = label.trim();
     if label.is_empty()
         || label.len() > display_protocol::bounds::MAX_LABEL_BYTES
@@ -146,11 +163,8 @@ fn create_identity(label: &str, port: u16) -> Result<StoredTlsIdentity> {
     {
         return Err(anyhow!("display coordinator label is invalid"));
     }
-    let address = advertised_address();
-    let host = address.to_string();
-    let origin = format!("https://{host}:{port}");
     let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed(vec![
-        host,
+        advertised_address().to_string(),
         "localhost".into(),
         "astrolabe.local".into(),
     ])
@@ -159,13 +173,20 @@ fn create_identity(label: &str, port: u16) -> Result<StoredTlsIdentity> {
         version: TLS_STATE_VERSION,
         instance: random_hex::<16>()?,
         label: label.to_string(),
-        origin,
         certificate_der: cert.der().to_vec(),
         private_key_der: signing_key.serialize_der(),
     })
 }
 
-fn validate_stored(stored: &StoredTlsIdentity, port: u16) -> Result<()> {
+/// Where this coordinator is answering right now.
+///
+/// A reported route, not a stored one, so the port is a listener detail again
+/// rather than something an enrolled receiver is welded to.
+fn served_origin(port: u16) -> String {
+    format!("https://{}:{port}", advertised_address())
+}
+
+fn validate_stored(stored: &StoredTlsIdentity) -> Result<()> {
     if stored.version != TLS_STATE_VERSION
         || stored.instance.len() != 32
         || !stored
@@ -174,7 +195,6 @@ fn validate_stored(stored: &StoredTlsIdentity, port: u16) -> Result<()> {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || stored.certificate_der.is_empty()
         || stored.private_key_der.is_empty()
-        || !stored.origin.ends_with(&format!(":{port}"))
     {
         return Err(anyhow!("stored display TLS identity is invalid"));
     }
@@ -205,6 +225,10 @@ fn random_hex<const N: usize>() -> Result<String> {
 mod tests {
     use super::*;
 
+    fn test_profile() -> display_protocol::ids::CoordinatorProfile {
+        display_protocol::ids::CoordinatorProfile::parse(format!("prf_{}", "6".repeat(26))).unwrap()
+    }
+
     #[test]
     fn tls_identity_is_stable_and_private() {
         let root = std::env::temp_dir().join(format!(
@@ -212,8 +236,12 @@ mod tests {
             std::process::id(),
             mechanics::wallclock::now_millis()
         ));
-        let first = DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", 7443).unwrap();
-        let second = DisplayTlsIdentity::load_or_create(&root, "Ignored rename", 7443).unwrap();
+        let first =
+            DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", test_profile(), 7443)
+                .unwrap();
+        let second =
+            DisplayTlsIdentity::load_or_create(&root, "Ignored rename", test_profile(), 7443)
+                .unwrap();
         assert_eq!(first.instance(), second.instance());
         assert_eq!(first.fingerprint(), second.fingerprint());
         assert_eq!(first.certificate_pem(), second.certificate_pem());
@@ -225,6 +253,47 @@ mod tests {
         };
         display_protocol::pairing::validate_bootstrap(&bootstrap).unwrap();
         assert!(first.path().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Moving the listener must not mint a coordinator.
+    ///
+    /// The port used to be validated against a stored origin, so changing it
+    /// failed `validate_stored`, wrote a fresh identity, and re-paired every
+    /// enrolled screen — a machine-arrangement detail spending the one thing
+    /// receivers anchor on. The identity is the same coordinator at any port;
+    /// only the route it reports moves.
+    #[test]
+    fn the_port_is_a_listener_detail_and_not_the_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "lait-display-port-{}-{}",
+            std::process::id(),
+            mechanics::wallclock::now_millis()
+        ));
+        let first =
+            DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", test_profile(), 7443)
+                .unwrap();
+        let moved =
+            DisplayTlsIdentity::load_or_create(&root, "Home Astrolabe", test_profile(), 8443)
+                .unwrap();
+
+        assert_eq!(
+            first.fingerprint(),
+            moved.fingerprint(),
+            "the coordinator a receiver pinned is the same one"
+        );
+        assert_eq!(first.instance().instance, moved.instance().instance);
+        assert_eq!(first.certificate_pem(), moved.certificate_pem());
+
+        let route = |identity: &DisplayTlsIdentity| match &identity.instance().trust {
+            CoordinatorTrust::PinnedCertificate { origin, .. } => origin.clone(),
+            CoordinatorTrust::WebPkiOrigin { origin }
+            | CoordinatorTrust::Profile { origin, .. } => origin.clone(),
+        };
+        assert!(route(&first).ends_with(":7443"));
+        assert!(route(&moved).ends_with(":8443"), "only the route moved");
+        assert_eq!(moved.bind().port(), 8443);
+
         let _ = std::fs::remove_dir_all(root);
     }
 }

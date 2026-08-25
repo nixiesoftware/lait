@@ -646,6 +646,124 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// One rule for every hosted service: env override, then the key, then
+    /// the built-in — and present-but-empty env is explicitly offline, not a
+    /// fallthrough. The cloud pole itself lives in `built_in` and is
+    /// release-only, so this debug-built test asserts the layers above it.
+    #[test]
+    fn a_service_url_resolves_env_then_key_and_empty_is_offline() {
+        let with_key = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("post.url", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+
+        // A bespoke env name per case: the real overrides are process-global
+        // and the suite is parallel.
+        std::env::set_var("LAIT_TEST_SVC_A", "https://override.example/");
+        assert_eq!(
+            with_key("https://key.example").service_url("post.url", "LAIT_TEST_SVC_A"),
+            Some("https://override.example".to_string()),
+            "the env override wins over the key"
+        );
+        std::env::set_var("LAIT_TEST_SVC_B", "");
+        assert_eq!(
+            with_key("https://key.example").service_url("post.url", "LAIT_TEST_SVC_B"),
+            None,
+            "present-but-empty is explicitly offline"
+        );
+        assert_eq!(
+            with_key("https://key.example/").service_url("post.url", "LAIT_TEST_SVC_UNSET"),
+            Some("https://key.example".to_string()),
+            "the key answers when nothing overrides"
+        );
+        assert_eq!(
+            with_key("not-a-url").service_url("post.url", "LAIT_TEST_SVC_UNSET"),
+            None,
+            "an explicit non-URL is off, never a fallthrough to the cloud"
+        );
+        std::env::remove_var("LAIT_TEST_SVC_A");
+        std::env::remove_var("LAIT_TEST_SVC_B");
+
+        // The built-in pole: debug builds carry none, so a bare default here
+        // is offline — the release product's cloud default rides `built_in`
+        // and is exercised by the release smoke, not invented here.
+        if cfg!(debug_assertions) {
+            assert_eq!(Settings::default().post_url(), None);
+            assert_eq!(Settings::default().directory_url(), None);
+        }
+    }
+
+    /// Named relays are lait's own rendezvous; none is the public mesh. The
+    /// explicit `LAIT_NETWORK` semantics stay whole above both.
+    #[test]
+    fn the_network_follows_the_relay_list_and_debug_defaults_public() {
+        let with_relays = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("relay.urls", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+        match with_relays("https://relay.example, https://second.example/").network() {
+            Ok(comms::policy::Network::Local(local)) => assert_eq!(
+                local.relays,
+                vec!["https://relay.example", "https://second.example"],
+                "a comma list, trimmed, trailing slash dropped"
+            ),
+            other => panic!("named relays are Local: {other:?}"),
+        }
+        assert!(
+            matches!(
+                with_relays("not-a-url").network(),
+                Ok(comms::policy::Network::Public)
+            ),
+            "nothing usable falls back to the public mesh rather than half a Local"
+        );
+        if cfg!(debug_assertions) {
+            assert!(
+                matches!(
+                    Settings::default().network(),
+                    Ok(comms::policy::Network::Public)
+                ),
+                "the development default is the public mesh; the Foundation relay rides built_in in release"
+            );
+        }
+    }
+
+    /// A coordinator answers where it is told to, and a typo does not cost a
+    /// daemon that will not start.
+    #[test]
+    fn the_display_port_is_configured_and_degrades_to_the_built_in() {
+        let settings = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("display.port", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+
+        assert_eq!(settings("8443").display_port(), 8443);
+        assert_eq!(settings("  8443  ").display_port(), 8443);
+        assert_eq!(
+            Settings::default().display_port(),
+            crate::display::DEFAULT_DISPLAY_PORT,
+            "unset is the built-in"
+        );
+        for refused in ["0", "not-a-port", "99999", ""] {
+            assert_eq!(
+                settings(refused).display_port(),
+                crate::display::DEFAULT_DISPLAY_PORT,
+                "{refused} falls back rather than refusing to start"
+            );
+        }
+    }
+
     #[test]
     fn settings_store_layer_wins_over_global() {
         let dir = std::env::temp_dir().join(format!("gc-settings-{}", std::process::id()));
@@ -802,6 +920,19 @@ fn kinship_key_path(home: &Path) -> PathBuf {
 /// Order is not rank: which device composes is [`ReachPlane::canonical`], and it
 /// moves. The profile is the hash of the link, which names no primary, so a
 /// handover leaves the address alone.
+/// The identity's own profile — the address everything anchors on.
+///
+/// One derivation for the whole daemon: the kinship seeds name a fixed genesis
+/// and the profile is its content address, so this answers the same id on
+/// every call and on every machine holding the same identity. The reach plane
+/// and the display coordinator both anchor here, which is what makes a
+/// receiver paired to the coordinator a receiver paired to the *identity*.
+pub fn identity_profile(home: &Path) -> Result<mechanics::kinship::ProfileId> {
+    let seeds = load_or_create_kinship_seeds(home)?;
+    correspondence::plane::ReachPlane::profile_for(&seeds)
+        .map_err(|error| anyhow!("derive identity profile: {error}"))
+}
+
 pub fn load_or_create_kinship_seeds(home: &Path) -> Result<Vec<[u8; 32]>> {
     let identity = load_identity(home)?;
     let path = kinship_key_path(home);
@@ -896,6 +1027,32 @@ pub struct KeySpec {
     pub built_in: fn() -> Option<String>,
 }
 
+/// The Foundation cloud's service host: the Post, the directory, and the
+/// registry are three mounts on one deployment (`/`, `/directory`,
+/// `/registry`), so they share one base and one default.
+pub const FOUNDATION_SERVICES: &str = "https://post.foundation.pub";
+
+/// The Foundation relay — lait's own rendezvous, `lait-relay` behind a name.
+/// `relay` is on the registry's RESERVED list for exactly this.
+pub const FOUNDATION_RELAY: &str = "https://relay.foundation.pub";
+
+/// The cloud default for a hosted-service endpoint.
+///
+/// Present only in release builds — the product connects out of the box, and
+/// a self-hosted or air-gapped install opts *out* by setting the key (or its
+/// env override) empty. Development builds default to nothing, because every
+/// test in this tree spawns real daemons and a built-in host would put the
+/// network under suites that promise hermeticity. The same debug/release
+/// split the client's image staging already uses, for the same reason: the
+/// two audiences genuinely want different poles.
+fn cloud_default(url: &'static str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
 /// The closed set of recognized config keys.
 pub const KEYS: &[KeySpec] = &[
     KeySpec {
@@ -911,6 +1068,60 @@ pub const KEYS: &[KeySpec] = &[
         daemon_read: false,
         help: "Project key issue-creating commands fall back to when -p is omitted.",
         built_in: || None,
+    },
+    // The identity's public label on the deployment root — `acme` answering
+    // at acme.<root>. Read at daemon start beside the registry URL; the label
+    // has no built-in because a default label is somebody else's, and it is
+    // the one thing that keeps publication opt-in now that the service URLs
+    // default to the cloud.
+    KeySpec {
+        name: "identity.label",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Public label this identity answers at (applies at next daemon start).",
+        built_in: || None,
+    },
+    // The three hosted-service endpoints, one resolution rule each: the env
+    // override wins when present (empty = explicitly offline), then this key,
+    // then the Foundation cloud in release builds. `lait config` lists them,
+    // which the env-only ancestors of the first two never managed.
+    KeySpec {
+        name: "registry.url",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Registry base URL routes publish to (applies at next daemon start; release default is the Foundation cloud, empty opts out).",
+        built_in: || cloud_default(FOUNDATION_SERVICES),
+    },
+    KeySpec {
+        name: "post.url",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Hosted Post correspondence is carried over (applies at next daemon start; LAIT_POST_URL overrides; release default is the Foundation cloud, empty opts out).",
+        built_in: || cloud_default(FOUNDATION_SERVICES),
+    },
+    KeySpec {
+        name: "relay.urls",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Comma-separated relay URLs the overlay rendezvouses through (applies at next daemon start; LAIT_RELAY overrides, LAIT_NETWORK overrides everything; release default is the Foundation relay, empty falls back to the public mesh).",
+        built_in: || cloud_default(FOUNDATION_RELAY),
+    },
+    KeySpec {
+        name: "directory.url",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Identity directory addresses publish and resolve against (applies at next daemon start; LAIT_DIRECTORY_URL overrides; release default is the Foundation cloud, empty opts out).",
+        built_in: || cloud_default(FOUNDATION_SERVICES),
+    },
+    // Not `daemon_read`: the port is spent at bind, so a live daemon cannot
+    // honour a change without dropping the listener every receiver is on. The
+    // help says so rather than a reload pretending otherwise.
+    KeySpec {
+        name: "display.port",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Port the display coordinator serves on (applies at next daemon start).",
+        built_in: || Some(crate::display::DEFAULT_DISPLAY_PORT.to_string()),
     },
 ];
 
@@ -1020,6 +1231,105 @@ impl Settings {
     /// The configured default project key, if any.
     pub fn default_project(&self) -> Option<String> {
         self.get("project.default").map(str::to_string)
+    }
+
+    /// One hosted-service endpoint, resolved by the one rule every service
+    /// shares: the env override wins when present — and **present-but-empty
+    /// is explicitly offline**, the escape hatch a test harness or an
+    /// air-gapped install reaches for — then the config key, then the cloud
+    /// built-in release builds carry. A value that is not an HTTP(S) URL is
+    /// off, never a fallback: an explicit setting that silently fell through
+    /// to the cloud would point an install at a host its operator just tried
+    /// to leave.
+    fn service_url(&self, key: &str, env_override: &str) -> Option<String> {
+        let candidate = match std::env::var(env_override) {
+            Ok(value) => Some(value),
+            Err(_) => self
+                .get(key)
+                .map(str::to_string)
+                .or_else(|| (key_spec(key).ok()?.built_in)()),
+        }?;
+        let candidate = candidate.trim();
+        (candidate.starts_with("http://") || candidate.starts_with("https://"))
+            .then(|| candidate.trim_end_matches('/').to_string())
+    }
+
+    /// The hosted Post this identity carries correspondence over, if any.
+    pub fn post_url(&self) -> Option<String> {
+        self.service_url("post.url", "LAIT_POST_URL")
+    }
+
+    /// The identity directory addresses publish and resolve against, if any.
+    pub fn directory_url(&self) -> Option<String> {
+        self.service_url("directory.url", "LAIT_DIRECTORY_URL")
+    }
+
+    /// The relays this identity's overlay rendezvouses through, if it names
+    /// its own. Same chain as every service endpoint — `LAIT_RELAY` override
+    /// (present-but-empty falls back to the public mesh), then the key, then
+    /// the Foundation relay release builds carry — parsed as a comma list
+    /// with the same tolerance `LocalNet::parse` extends.
+    pub fn relay_urls(&self) -> Option<Vec<String>> {
+        let candidate = match std::env::var("LAIT_RELAY") {
+            Ok(value) => Some(value),
+            Err(_) => self
+                .get("relay.urls")
+                .map(str::to_string)
+                .or_else(|| (key_spec("relay.urls").ok()?.built_in)()),
+        }?;
+        let relays: Vec<String> = candidate
+            .split(',')
+            .map(str::trim)
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+            .map(|url| url.trim_end_matches('/').to_string())
+            .collect();
+        (!relays.is_empty()).then_some(relays)
+    }
+
+    /// The transport environment this identity's daemon builds against.
+    ///
+    /// `LAIT_NETWORK` stays the explicit override with its exact old
+    /// semantics — `public`, `isolated`, and `local` (which reads
+    /// `LAIT_RELAY`) all mean what they always meant. Absent it, the fleet
+    /// question is the relay list's: named relays are `Local` — lait's own
+    /// rendezvous, no third-party discovery, the PeerBook as the whole
+    /// resolution story — and no relays is the public mesh, which is the
+    /// development default and the pre-consolidation behavior.
+    pub fn network(&self) -> anyhow::Result<comms::policy::Network> {
+        if std::env::var_os("LAIT_NETWORK").is_some() {
+            return comms::policy::Network::from_env();
+        }
+        Ok(match self.relay_urls() {
+            Some(relays) => comms::policy::Network::Local(comms::policy::LocalNet { relays }),
+            None => comms::policy::Network::Public,
+        })
+    }
+
+    /// The identity's public label and the registry it publishes routes to.
+    /// The label is the opt-in: with the registry URL defaulting to the cloud,
+    /// choosing a label is what turns publication on, and a label with the
+    /// registry explicitly emptied is a hope with nowhere to go.
+    pub fn route_publication(&self) -> Option<(String, String)> {
+        let label = self.get("identity.label")?.trim().to_string();
+        if label.is_empty() {
+            return None;
+        }
+        let registry = self.service_url("registry.url", "LAIT_REGISTRY_URL")?;
+        Some((label, registry))
+    }
+
+    /// The port the display coordinator serves on.
+    ///
+    /// Unparseable or zero falls back to the built-in rather than refusing:
+    /// a typo here would otherwise mean an identity daemon that will not start
+    /// at all, and a coordinator on the default port is the recoverable
+    /// failure. Zero is excluded because `DisplayTlsIdentity` refuses it —
+    /// an ephemeral port cannot be told to a receiver.
+    pub fn display_port(&self) -> u16 {
+        self.get("display.port")
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .unwrap_or(crate::display::DEFAULT_DISPLAY_PORT)
     }
 }
 

@@ -61,6 +61,57 @@ macro_rules! hex_id {
     };
 }
 
+/// The coordinator's kinship profile id: `prf_` + 26 Crockford-base32
+/// characters — the content address of the identity's genesis, minted by
+/// nothing and validated by rehashing wherever the genesis is held.
+///
+/// Shape-validated here rather than imported: this crate is the language-
+/// neutral contract, and six independent implementations validate the same
+/// grammar from the fixture, not from a Rust dependency.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoordinatorProfile(String);
+
+impl CoordinatorProfile {
+    pub fn parse(value: impl Into<String>) -> Result<Self, Refusal> {
+        let value = value.into();
+        let valid = value.strip_prefix("prf_").is_some_and(|rest| {
+            rest.len() == 26
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'V').contains(&byte))
+        });
+        if !valid {
+            return Err(Refusal::InvalidIdentifier("coordinator profile"));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CoordinatorProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl serde::Serialize for CoordinatorProfile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CoordinatorProfile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(D::Error::custom)
+    }
+}
+
 hex_id!(DisplayDeviceId, 32, "device id");
 hex_id!(DisplayAssignmentId, 32, "assignment id");
 hex_id!(DisplayProgramId, 32, "program id");

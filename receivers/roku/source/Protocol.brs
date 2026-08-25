@@ -183,16 +183,28 @@ function AstrolabePairingCompleteTag(proofKey as string, pairing as string, devi
     return AstrolabeHmacSha256(proofKey, bytes)
 end function
 
-function AstrolabeConfirmationPhrase(fingerprint as string, pairing as string, nonce as string) as object
+function AstrolabeIsProfileId(value as dynamic) as boolean
+    if type(value) <> "roString" and type(value) <> "String" then return false
+    if Len(value) <> 30 then return false
+    if Left(value, 4) <> "prf_" then return false
+    for index = 5 to 30
+        c = Asc(Mid(value, index, 1))
+        if not ((c >= 48 and c <= 57) or (c >= 65 and c <= 86)) then return false
+    end for
+    return true
+end function
+
+function AstrolabeConfirmationPhrase(profile as string, pairing as string, nonce as string) as object
     words = [
         "amber", "anchor", "apple", "beacon", "birch", "cedar", "comet", "coral",
         "delta", "ember", "falcon", "fjord", "garden", "harbor", "hazel", "indigo",
         "juniper", "lantern", "maple", "meadow", "meteor", "olive", "orbit", "pebble",
         "quartz", "river", "saffron", "signal", "spruce", "violet", "willow", "zephyr"
     ]
-    bytes = AstrolabeTranscript("astrolabe-display/confirmation-phrase/v1")
+    ' v2: the phrase commits the identity, not a placement certificate.
+    bytes = AstrolabeTranscript("astrolabe-display/confirmation-phrase/v2")
     AstrolabeU32Field(bytes, 1)
-    AstrolabeTextField(bytes, fingerprint)
+    AstrolabeTextField(bytes, profile)
     AstrolabeTextField(bytes, pairing)
     AstrolabeTextField(bytes, nonce)
     digest = CreateObject("roByteArray")

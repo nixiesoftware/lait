@@ -19,7 +19,7 @@ use world_interface::WorldClientRegistry;
 
 use super::{
     serve_display_https, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
-    DisplayPairingService, DisplayTlsIdentity, DEFAULT_DISPLAY_PORT,
+    DisplayPairingService, DisplayTlsIdentity,
 };
 use super::{AssignmentRecord, AssignmentSync, Custodian, SourceGrant};
 
@@ -162,6 +162,8 @@ pub struct DisplayRuntime {
     pub coordinator: Arc<DisplayCoordinator>,
     pub pairing: Arc<DisplayPairingService>,
     pub tls: Arc<DisplayTlsIdentity>,
+    /// The identity's kinship profile — the anchor receivers pair against.
+    profile: mechanics::kinship::ProfileId,
     /// How this daemon opens its own identifier envelope.
     ///
     /// Held here rather than in the store, which is the boundary the store's
@@ -186,6 +188,8 @@ impl DisplayRuntime {
         router: Arc<crate::orbits::Router>,
         registry: WorldClientRegistry,
         device_seed: &[u8; 32],
+        profile: mechanics::kinship::ProfileId,
+        port: u16,
     ) -> Result<Self> {
         let mut identifier_key = [0u8; 32];
         getrandom::fill(&mut identifier_key).context("mint display identifier key")?;
@@ -196,10 +200,15 @@ impl DisplayRuntime {
             identifier_key,
             &custodian,
         )?);
+        let wire_profile = display_protocol::ids::CoordinatorProfile::parse(profile.as_str())
+            .map_err(|error| {
+                anyhow::anyhow!("identity profile does not fit the wire: {error:?}")
+            })?;
         let tls = Arc::new(DisplayTlsIdentity::load_or_create(
             &root.join("tls"),
             "Astrolabe",
-            DEFAULT_DISPLAY_PORT,
+            wire_profile,
+            port,
         )?);
         let coordinator = Arc::new(DisplayCoordinator::new(
             store.clone(),
@@ -220,7 +229,44 @@ impl DisplayRuntime {
             custodian,
             router,
             registry,
+            profile,
         })
+    }
+
+    /// Admit another device of this identity into the coordinator's custody,
+    /// and hand back the sealed envelope it imports.
+    ///
+    /// This is placement in one act: the identifier key is re-wrapped to the
+    /// recipient — never exposed, never re-encrypted, nothing already
+    /// delivered is invalidated — and what leaves is the envelope, which is
+    /// only as good as the slot the recipient can open. The same act with a
+    /// recovery device as the recipient is the printed-key ceremony's
+    /// substance; which device is being admitted is the caller's meaning, not
+    /// this method's.
+    ///
+    /// What this deliberately does not do is admit the device into the
+    /// kinship log: a second placement can *serve* with this, but a route
+    /// publication the registry accepts is still signed by a genesis device
+    /// until device-join lands in the reach plane — the same seam
+    /// `correspondence`'s own pinned test names as the next piece of work.
+    pub fn admit_placement(&self, recipient: &mechanics::ids::DeviceId) -> Result<Vec<u8>> {
+        self.store.admit_identifier_slot(
+            &self.custodian.unlock,
+            &mechanics::authorization::custody::SlotSpec::RecoveryKey {
+                recipient: recipient.clone(),
+            },
+        )?;
+        self.store.export_identifier()
+    }
+
+    /// The identity this coordinator answers for — what a receiver anchors on.
+    ///
+    /// A property of the identity, never of this placement: every placement of
+    /// one identity reports the same profile, which is what lets a receiver
+    /// follow the coordinator across machines without re-pairing.
+    #[must_use]
+    pub fn profile(&self) -> &mechanics::kinship::ProfileId {
+        &self.profile
     }
 
     /// Serve on a listener the caller already took.
@@ -456,6 +502,9 @@ impl DisplayRuntime {
                 (origin.clone(), sha256.as_str().to_string())
             }
             CoordinatorTrust::WebPkiOrigin { origin } => (origin.clone(), String::new()),
+            CoordinatorTrust::Profile { origin, profile } => {
+                (origin.clone(), profile.as_str().to_string())
+            }
         };
         let devices = state
             .devices
@@ -547,6 +596,7 @@ impl DisplayRuntime {
         Ok(DisplayCoordinatorView {
             instance: self.tls.instance().instance.clone(),
             label: self.tls.instance().label.clone(),
+            coordinator_profile: Some(self.profile.as_str().to_string()),
             origin,
             certificate_sha256: fingerprint,
             certificate_pem: self.tls.certificate_pem().to_string(),

@@ -86,6 +86,9 @@ pub const MAX_ENTRIES: usize = 4096;
 /// Cap on an avowed name, in bytes.
 pub const MAX_NAME_BYTES: usize = 128;
 
+/// Cap on a portrait's detail line, in bytes.
+pub const MAX_DETAIL_BYTES: usize = 256;
+
 /// A detached ed25519 signature.
 ///
 /// A named type rather than a bare `[u8; 64]` at every site: serde implements
@@ -265,6 +268,20 @@ pub enum Claim {
     Called(String),
     /// The subject sponsors this party.
     Sponsors(Party),
+    /// How the subject presents: a picture, by content hash, and a detail
+    /// line. The *name* stays [`Claim::Called`] — one name channel, so a
+    /// portrait never bypasses the ranked resolution names already have.
+    /// Self-signed only in practice: nobody else's signature can say how you
+    /// present, which readers enforce by requiring the self-signature, not
+    /// this type.
+    Portrait {
+        /// The picture's content hash, or `None` for none-or-cleared. Raw
+        /// bytes, never a rendering — two spellings of one hash would be two
+        /// claims.
+        picture: Option<[u8; 32]>,
+        /// A line of self-description. May be empty.
+        detail: String,
+    },
 }
 
 impl Claim {
@@ -273,25 +290,48 @@ impl Claim {
             Self::Profile(_) => b"profile",
             Self::Called(_) => b"called",
             Self::Sponsors(_) => b"sponsors",
+            Self::Portrait { .. } => b"portrait",
         }
     }
 
-    fn body(&self) -> String {
+    /// The claim's preimage bytes. For the single-field variants these are
+    /// the field's own bytes, unchanged since v1 — every signature already
+    /// minted stays valid. A variant with more than one variable-length field
+    /// frames them internally, because `a ‖ b` is ambiguous with `a' ‖ b'`
+    /// whenever the boundary can move.
+    fn body(&self) -> Vec<u8> {
         match self {
-            Self::Profile(profile) => profile.as_str().to_string(),
-            Self::Called(name) => name.clone(),
-            Self::Sponsors(party) => party.wire(),
+            Self::Profile(profile) => profile.as_str().as_bytes().to_vec(),
+            Self::Called(name) => name.as_bytes().to_vec(),
+            Self::Sponsors(party) => party.wire().into_bytes(),
+            Self::Portrait { picture, detail } => {
+                let mut out = Vec::with_capacity(64_usize.saturating_add(detail.len()));
+                match picture {
+                    Some(hash) => framed(&mut out, &hash[..]),
+                    None => framed(&mut out, &[]),
+                }
+                framed(&mut out, detail.as_bytes());
+                out
+            }
         }
     }
 
     fn check(&self) -> Result<(), Refusal> {
-        if let Self::Called(name) = self {
-            if name.is_empty() {
-                return Err(Refusal::Malformed("empty name"));
+        match self {
+            Self::Called(name) => {
+                if name.is_empty() {
+                    return Err(Refusal::Malformed("empty name"));
+                }
+                if name.len() > MAX_NAME_BYTES {
+                    return Err(Refusal::Bound("name bytes"));
+                }
             }
-            if name.len() > MAX_NAME_BYTES {
-                return Err(Refusal::Bound("name bytes"));
+            Self::Portrait { detail, .. } => {
+                if detail.len() > MAX_DETAIL_BYTES {
+                    return Err(Refusal::Bound("detail bytes"));
+                }
             }
+            Self::Profile(_) | Self::Sponsors(_) => {}
         }
         Ok(())
     }
@@ -476,6 +516,49 @@ impl DeviceLink {
     pub fn names(&self, device: &DeviceId) -> bool {
         &self.devices[0] == device || &self.devices[1] == device
     }
+
+    /// One side's signature over the link both sides will hold.
+    ///
+    /// The sponsorship shape: `seal` needs both seeds on one machine, and a
+    /// real join has them on two. Each side signs the same preimage where its
+    /// seed lives; [`DeviceLink::assemble`] puts the halves together and
+    /// refuses anything that does not verify as if `seal` had made it. Nothing
+    /// half-signed is ever a link — the half is a signature, not an artifact.
+    #[must_use]
+    pub fn half(seed: &[u8; 32], other: &DeviceId, nonce: [u8; 16], epoch: u64) -> Signature {
+        let me = crate::actor::device_from_seed(seed);
+        let devices = if me <= *other {
+            [me, other.clone()]
+        } else {
+            [other.clone(), me]
+        };
+        Signature(sign_detached(
+            seed,
+            &Self::preimage(&devices, &nonce, epoch),
+        ))
+    }
+
+    /// Assemble a link from two halves, verifying it is exactly what `seal`
+    /// would have produced.
+    pub fn assemble(
+        a: (DeviceId, Signature),
+        b: (DeviceId, Signature),
+        nonce: [u8; 16],
+        epoch: u64,
+    ) -> Result<Self, Refusal> {
+        if a.0 == b.0 {
+            return Err(Refusal::NotDistinct);
+        }
+        let (first, second) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+        let link = Self {
+            devices: [first.0, second.0],
+            nonce,
+            epoch,
+            signatures: [first.1, second.1],
+        };
+        link.verify()?;
+        Ok(link)
+    }
 }
 
 /// A signed statement that a subject stands in a stated relation, made to a
@@ -513,7 +596,7 @@ impl Avowal {
         framed(&mut out, by.as_str().as_bytes());
         framed(&mut out, subject.wire().as_bytes());
         framed(&mut out, claim.tag());
-        framed(&mut out, claim.body().as_bytes());
+        framed(&mut out, &claim.body());
         framed(&mut out, audience.tag());
         framed(&mut out, audience.body().as_bytes());
         framed(&mut out, &epoch.to_be_bytes());
@@ -872,12 +955,100 @@ impl KinshipLog {
                 bodies.push(entry.clone());
             }
         }
+        // The signer's authority chain rides with the projection whenever the
+        // audience filter would have withheld it: a head signed by a joined
+        // device is only evidence to a reader who can walk from the genesis
+        // to the signer, and **authority is never secret from whoever must
+        // verify it**. What is included is every structural entry — links and
+        // retirements — not avowals; the audience-gated disclosures stay
+        // gated. A reader learns the device topology, which is the disclosed
+        // cost of a verifiable non-genesis signer, and is the same set a
+        // correspondent of the profile's own devices already sees.
+        let signer = crate::actor::device_from_seed(seed);
+        let genesis_rooted = self
+            .entries
+            .first()
+            .is_some_and(|entry| matches!(entry, Entry::Link(link) if link.names(&signer)));
+        if !genesis_rooted {
+            for entry in &self.entries {
+                if matches!(entry, Entry::Link(_) | Entry::Retire(_)) && !bodies.contains(entry) {
+                    bodies.push(entry.clone());
+                }
+            }
+        }
         Ok(Projection {
             profile: self.profile.clone(),
             bodies,
             head: Some(head),
         })
     }
+
+    /// Whether `device` is in this log's current device set — link-reachable
+    /// from the genesis and not retired. The authored-side answer to the
+    /// question [`signer_rooted`] answers for a reader holding only a
+    /// projection.
+    #[must_use]
+    pub fn rooted(&self, device: &DeviceId) -> bool {
+        self.devices().contains(device)
+    }
+}
+
+/// Whether `signer` holds this profile's authority, judged from carried
+/// evidence alone: link-reachable from the genesis pair through the `Link`
+/// entries in `bodies`, and not retired by any `Retire` entry whose author is
+/// itself reachable.
+///
+/// Two passes, deliberately: reachability first over every verified link,
+/// then retirement — so a retirement only counts when its author held
+/// authority to make it, and a stranger's forged retirement severs nothing.
+/// Retire-wins within that rule, matching [`KinshipLog::devices`]. What this
+/// cannot establish is that every retirement was *carried*: a signer
+/// withholding a retirement of itself presents a chain this cannot fault,
+/// which is the same freshness bound the genesis anchor already had — a
+/// compromised genesis device is refused by nothing here either, and both are
+/// answered the same way, by a newer head from a surviving device.
+#[must_use]
+pub fn signer_rooted(genesis: &DeviceLink, bodies: &[Entry], signer: &DeviceId) -> bool {
+    if genesis.verify().is_err() {
+        return false;
+    }
+    // Pass one: reachability over verified links, genesis included.
+    let mut reachable: Vec<DeviceId> = genesis.devices.to_vec();
+    loop {
+        let mut grew = false;
+        for entry in bodies {
+            let Entry::Link(link) = entry else { continue };
+            if link.verify().is_err() {
+                continue;
+            }
+            let touches = link.devices.iter().any(|device| reachable.contains(device));
+            if touches {
+                for device in &link.devices {
+                    if !reachable.contains(device) {
+                        reachable.push(device.clone());
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // Pass two: retirements by reachable authors sever their subjects.
+    let mut live = reachable.clone();
+    for entry in bodies {
+        let Entry::Retire(retirement) = entry else {
+            continue;
+        };
+        if retirement.verify().is_err() {
+            continue;
+        }
+        if reachable.contains(&retirement.by) {
+            live.retain(|device| device != &retirement.device);
+        }
+    }
+    live.contains(signer)
 }
 
 /// An audience-scoped view of a log, plus the head that makes omission visible.
@@ -918,7 +1089,15 @@ impl Projection {
             if !head.entries.contains(&id) {
                 return Err(Refusal::Unlisted);
             }
-            if !entry.audience().admits(standing) {
+            // Structural entries are exempt from the audience gate: they are
+            // the head signer's authority chain, and **authority is never
+            // secret from whoever must verify it** — a reader who cannot read
+            // the chain cannot verify the head at all. What reaches a reader
+            // is still decided at projection time (the minimal chain, not the
+            // topology); this only refuses to call proof a disclosure.
+            if !matches!(entry, Entry::Link(_) | Entry::Retire(_))
+                && !entry.audience().admits(standing)
+            {
                 return Err(Refusal::OutsideAudience);
             }
             delivered.push(id);

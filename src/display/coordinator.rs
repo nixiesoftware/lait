@@ -546,12 +546,6 @@ impl DisplayCoordinator {
             tokio::time::timeout(LIVE_SOURCE_WAIT, ready)
                 .await
                 .context("live media source did not publish its catalog")?;
-        } else if transport == LiveTransport::Mse {
-            // A planned presentation serves HLS. Its MSE half — init and
-            // fragment pushes built from the plan — does not exist yet, and
-            // installing a presentation that cannot answer a socket would
-            // turn this named gap into a hang at the receiver.
-            return Err(anyhow!("stored media is not packaged for MSE yet"));
         } else if !self.live.has_resource(&orbit, &resource, transport) {
             // A finite source is installed from its own bytes, once. The
             // resource *is* the content id — that is what the compiler writes
@@ -879,6 +873,51 @@ impl DisplayCoordinator {
             );
         }
         super::LiveMediaHub::package_planned(&plan, sequence, &bytes)
+    }
+
+    /// The MSE packets for one planned segment, or `None` past the film's end.
+    ///
+    /// The same read `hls_segment`'s planned half performs — ranges off the
+    /// hub lock, bytes through the content plane, fetched from a peer when
+    /// this Station lacks them — packaged by a fresh CMAF muxer instead of a
+    /// TS one. `None` is the end saying so, distinct from every failure.
+    pub(crate) async fn mse_planned_segment(
+        &self,
+        stream: &AuthorizedLiveStream,
+        sequence: u64,
+        now_unix_ms: u64,
+    ) -> Result<Option<Vec<super::LiveMediaPacket>>> {
+        let Some(plan) = self.live.planned_for_mse(&stream.orbit, &stream.resource) else {
+            return Err(anyhow!("this presentation is not planned"));
+        };
+        let index = usize::try_from(sequence).map_err(|_| anyhow!("segment sequence overflow"))?;
+        let Some(segment) = plan.plan(index) else {
+            return Ok(None);
+        };
+        let assignment = self
+            .active_assignment_for_device(&stream.ticket.device, now_unix_ms)?
+            .ok_or_else(|| anyhow!("stored assignment is gone"))?;
+        let resolved = self
+            .router
+            .resolve(&assignment.orbit)
+            .context("resolve stored display Orbit")?;
+        let route = crate::control::ControlRoute::Orbit {
+            address: resolved.address.clone(),
+        };
+        let mut bytes = Vec::with_capacity(segment.ranges.len());
+        for (offset, size) in &segment.ranges {
+            bytes.push(
+                self.read_stored(
+                    &resolved.home,
+                    &route,
+                    &stream.resource,
+                    *offset,
+                    u64::from(*size),
+                )
+                .await?,
+            );
+        }
+        super::LiveMediaHub::package_planned_mse(&plan, sequence, &bytes).map(Some)
     }
 
     fn device_playback_tier(&self, device: &DisplayDeviceId) -> Result<PlaybackTier> {

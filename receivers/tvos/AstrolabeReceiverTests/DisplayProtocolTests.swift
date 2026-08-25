@@ -13,7 +13,7 @@ final class DisplayProtocolTests: XCTestCase {
         let value = try XCTUnwrap(fixture["confirmation_phrase"] as? [String: Any])
         XCTAssertEqual(
             try DisplayProtocolV1.confirmationPhrase(
-                fingerprint: value["fingerprint"] as! String,
+                profile: value["profile"] as! String,
                 pairing: value["pairing"] as! String,
                 nonce: value["receiver_nonce"] as! String
             ),

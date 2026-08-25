@@ -2,6 +2,7 @@ use display_protocol::auth::{
     authenticate_request, derive_asset_id, derive_program_item_id, request_transcript, sha256,
     RequestContext, RequestMethod, RequestRoute,
 };
+use display_protocol::ids::CoordinatorProfile;
 use display_protocol::ids::{
     Challenge, CoordinatorFingerprint, DisplayAssignmentId, DisplayDeviceId, DisplayPairingId,
     DisplayProgramId, ProgramRevision, ProofKey, ReceiverNonce,
@@ -107,9 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &device,
         &enrollment_challenge,
     )?;
-    let fingerprint = CoordinatorFingerprint::parse("6".repeat(64))?;
+    let profile = CoordinatorProfile::parse(format!("prf_{}", "6".repeat(26)))?;
     let phrase = confirmation_phrase(
-        &fingerprint,
+        &profile,
         &DisplayPairingId::parse("7".repeat(32))?,
         &ReceiverNonce::parse("8".repeat(64))?,
     )?;
@@ -141,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "authentication_tag": pairing_tag,
         },
         "confirmation_phrase": {
-            "fingerprint": fingerprint,
+            "profile": profile,
             "pairing": "7".repeat(32),
             "receiver_nonce": "8".repeat(64),
             "words": phrase,

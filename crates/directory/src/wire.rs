@@ -22,7 +22,7 @@ const PUBLISH_DOMAIN: &[u8] = b"lait/directory/1/publish";
 /// captured resolution can never be re-presented as a publication.
 const RESOLVE_DOMAIN: &[u8] = b"lait/directory/1/resolve";
 
-fn framed(out: &mut Vec<u8>, part: &[u8]) {
+pub(crate) fn framed(out: &mut Vec<u8>, part: &[u8]) {
     // Truncation is unreachable: every part is a device id, a nonce, an address
     // or an announcement, each bounded far below 4 GiB by the time it arrives.
     // Saturating rather than casting, so the bound is expressed rather than
@@ -190,7 +190,7 @@ mod hex_nonce {
     }
 }
 
-mod hex_signature {
+pub(crate) mod hex_signature {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(value: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
@@ -207,7 +207,7 @@ mod hex_signature {
     }
 }
 
-mod hex_bytes {
+pub(crate) mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(value: &[u8], s: S) -> Result<S::Ok, S::Error> {

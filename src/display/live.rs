@@ -283,8 +283,22 @@ impl LiveMediaHub {
         plan: super::StoredPlan,
     ) -> Result<()> {
         let catalog = plan.catalog.clone();
-        let hls = HlsCatalogPackager::new(&catalog)
-            .map_err(|error| anyhow!("this catalog cannot be packaged: {error}"))?;
+        // Either transport's absence is survivable alone; both missing is a
+        // catalog nothing can serve — the same rule the eager install applies.
+        let hls = HlsCatalogPackager::new(&catalog).ok();
+        let cmaf = CmafCatalogPackager::new(&catalog).ok();
+        if hls.is_none() && cmaf.is_none() {
+            return Err(anyhow!("no rendition in this catalog can be packaged"));
+        }
+        // The CMAF *descriptions* are held — init segments and mime types, a
+        // few kilobytes — so an MSE socket can say hello without touching the
+        // film. Fragments stay unmaterialised: each is packaged from the plan
+        // for the life of one push, exactly as HLS segments are for one
+        // response.
+        let cmaf_tracks = cmaf
+            .as_ref()
+            .map(|packager| planned_track_descriptions(packager, resource))
+            .unwrap_or_default();
         let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
         let mut state = lock(&self.inner)?;
         state.presentations.insert(
@@ -294,9 +308,12 @@ impl LiveMediaHub {
                 connection: resource.to_string(),
             },
             Presentation {
-                cmaf_tracks: Vec::new(),
+                cmaf_tracks,
                 cmaf_fragments: BTreeMap::new(),
-                hls_renditions: hls.descriptions().to_vec(),
+                hls_renditions: hls
+                    .as_ref()
+                    .map(|packager| packager.descriptions().to_vec())
+                    .unwrap_or_default(),
                 hls_segments: BTreeMap::new(),
                 retention: Retention::Whole { complete: true },
                 plan: Some(Arc::new(plan)),
@@ -304,6 +321,55 @@ impl LiveMediaHub {
             },
         );
         Ok(())
+    }
+
+    /// The plan behind an MSE-capable presentation, when it has one.
+    ///
+    /// This is the socket's fork: a live presentation streams from its
+    /// broadcast, a planned one is walked segment by segment, and the two
+    /// must not be confused because a planned presentation's broadcast never
+    /// fires and a receiver waiting on it waits forever.
+    pub fn planned_for_mse(&self, orbit: &str, resource: &str) -> Option<Arc<super::StoredPlan>> {
+        let state = lock(&self.inner).ok()?;
+        let (_, presentation) =
+            unique_presentation(&state, orbit, resource, LiveTransport::Mse).ok()?;
+        presentation.plan.clone()
+    }
+
+    /// Package one planned segment for MSE: fresh packager, one group, the
+    /// fragments it routes. The film is never resident; each push exists for
+    /// the life of one send.
+    pub fn package_planned_mse(
+        plan: &super::StoredPlan,
+        sequence: u64,
+        bytes: &[Vec<u8>],
+    ) -> Result<Vec<LiveMediaPacket>> {
+        let index = usize::try_from(sequence).map_err(|_| anyhow!("segment sequence overflow"))?;
+        let groups = plan
+            .build(index, bytes)
+            .map_err(|error| anyhow!("segment {sequence} would not build: {error}"))?;
+        let mut packager = CmafCatalogPackager::new(&plan.catalog)
+            .map_err(|error| anyhow!("this catalog cannot be packaged for MSE: {error}"))?;
+        let mut packets = Vec::new();
+        for group in &groups {
+            match packager.push_group(group) {
+                Ok(routed) => packets.push(LiveMediaPacket::Fragment {
+                    rendition: routed.rendition,
+                    group_sequence: routed.fragment.group_sequence,
+                    published_at_micros: routed.fragment.published_at_micros,
+                    start_timestamp: routed.fragment.start_timestamp,
+                    duration: routed.fragment.duration,
+                    discontinuity: routed.fragment.discontinuity,
+                    bytes: routed.fragment.bytes,
+                }),
+                // A group the CMAF side cannot take is not fatal — the same
+                // tolerance the eager install extends, for the same reason.
+                Err(error) => {
+                    tracing::debug!(%error, "planned group refused by the CMAF packager")
+                }
+            }
+        }
+        Ok(packets)
     }
 
     /// Which bytes a planned segment needs, answered off the lock.
@@ -851,6 +917,17 @@ fn publish_hls(
     retention.trim(retained);
 }
 
+/// The receiver-facing track descriptions a planned presentation holds.
+///
+/// Renamed from the packager's own so the resource gate (`cmaf_matches`)
+/// finds them exactly as it finds a live presentation's.
+fn planned_track_descriptions(
+    packager: &CmafCatalogPackager,
+    _resource: &str,
+) -> Vec<CmafTrackDescription> {
+    packager.descriptions().to_vec()
+}
+
 fn unique_presentation<'a>(
     state: &'a HubState,
     orbit: &str,
@@ -1235,6 +1312,80 @@ mod tests {
                 "segment {absent} was never installed"
             );
         }
+    }
+
+    /// The planned MSE half: the presentation says hello from its held
+    /// descriptions — the film untouched — and any segment packages into
+    /// CMAF fragments on demand, out of order, exactly as the HLS half
+    /// serves segment 41 before segment 3.
+    #[test]
+    fn a_planned_presentation_serves_mse_from_its_table() {
+        use crate::display::{CatalogPolicy, StoredPlan};
+        let probe = demux_file(&demux_trak(vec![6; 60], 0));
+        let mdat_payload_at = u32::try_from(
+            probe
+                .windows(4)
+                .position(|window| window == b"mdat")
+                .expect("the file has an mdat")
+                + 4,
+        )
+        .unwrap();
+        let trak = demux_trak(vec![6; 60], mdat_payload_at);
+        let policy = CatalogPolicy {
+            max_group_duration_ms: 1_000,
+            target_latency_ms: 3_000,
+            jitter_hint_ms: 50,
+            rendition: "film".into(),
+        };
+        let file = demux_file(&trak);
+        let total = u64::try_from(file.len()).unwrap();
+        let reader = |offset: u64, size: u32| {
+            let start = usize::try_from(offset).unwrap();
+            let end = start + usize::try_from(size).unwrap();
+            Ok(file
+                .get(start..end.min(file.len()))
+                .unwrap_or_default()
+                .to_vec())
+        };
+        let plan = StoredPlan::read(total, reader, &policy).expect("a plan reads");
+        let hub = LiveMediaHub::default();
+        hub.install_planned("space/orbit", "film", plan)
+            .expect("a plan installs");
+
+        // MSE-ready the moment it is installed: descriptions held, no
+        // fragment resident, and the fork the socket takes is visible.
+        assert!(hub.has_resource("space/orbit", "film", LiveTransport::Mse));
+        let plan = hub
+            .planned_for_mse("space/orbit", "film")
+            .expect("a planned presentation names its plan");
+        let snapshot = hub.mse_snapshot("space/orbit", "film").unwrap();
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(
+            snapshot.packets.len(),
+            1,
+            "exactly the init segment — the film is not resident"
+        );
+
+        // Segment 41 before segment 3: fresh muxer, real fragments.
+        for sequence in [41u64, 3] {
+            let segment = plan.plan(usize::try_from(sequence).unwrap()).unwrap();
+            let bytes: Vec<Vec<u8>> = segment
+                .ranges
+                .iter()
+                .map(|(offset, size)| reader(*offset, *size).unwrap())
+                .collect();
+            let packets = LiveMediaHub::package_planned_mse(&plan, sequence, &bytes).unwrap();
+            assert!(
+                packets.iter().any(|packet| matches!(
+                    packet,
+                    LiveMediaPacket::Fragment { rendition, bytes, .. }
+                        if rendition == "film" && !bytes.is_empty()
+                )),
+                "segment {sequence} produced CMAF fragments"
+            );
+        }
+        // Past the end is the end, not an error.
+        assert!(plan.plan(60).is_none());
     }
 
     /// The MSE half of the same install, since both packagers run on one pass.

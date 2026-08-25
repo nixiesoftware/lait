@@ -237,8 +237,13 @@ impl ReferenceReceiver {
                 bail!("pairing offer fingerprint differs from the TLS certificate pin");
             }
         }
+        if let CoordinatorTrust::Profile { profile, .. } = &self.bootstrap.trust {
+            if &response.coordinator_profile != profile {
+                bail!("pairing offer identity differs from the bootstrap anchor");
+            }
+        }
         let phrase = confirmation_phrase(
-            &response.coordinator_fingerprint,
+            &response.coordinator_profile,
             &response.pairing,
             &receiver_nonce,
         )
@@ -252,6 +257,7 @@ impl ReferenceReceiver {
             receiver_nonce,
             poll_key,
             fingerprint: response.coordinator_fingerprint,
+            profile: response.coordinator_profile,
             phrase,
             user_confirmed: false,
         })
@@ -264,13 +270,14 @@ impl ReferenceReceiver {
             receiver_nonce,
             poll_key,
             fingerprint,
+            profile,
             phrase,
             user_confirmed,
         } = state
         else {
             return Err(anyhow!("receiver is not awaiting pairing confirmation"));
         };
-        let expected = confirmation_phrase(&fingerprint, &pairing, &receiver_nonce)
+        let expected = confirmation_phrase(&profile, &pairing, &receiver_nonce)
             .context("verify stored pairing phrase")?;
         if expected != phrase {
             bail!("stored pairing phrase failed its integrity check");
@@ -294,6 +301,7 @@ impl ReferenceReceiver {
             receiver_nonce,
             poll_key,
             fingerprint,
+            profile,
             phrase,
             user_confirmed: true,
         };

@@ -353,11 +353,12 @@ sub AstrolabePair()
     })
     if response = invalid or response.status <> 200 or response.json = invalid then return
     pairing = response.json
-    if not AstrolabeExactFields(pairing, ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"]) then return
+    if not AstrolabeExactFields(pairing, ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint", "coordinator_profile"]) then return
     if pairing.protocol_major <> 1 or not AstrolabeIntegerIn(pairing.expires_in_ms, 1, 600000) then return
     if not AstrolabeIsHex(pairing.pairing, 32) or not AstrolabeIsHex(pairing.coordinator_fingerprint, 64) then return
+    if not AstrolabeIsProfileId(pairing.coordinator_profile) then return
     if m.fingerprint <> invalid and pairing.coordinator_fingerprint <> m.fingerprint then return
-    phrase = AstrolabeConfirmationPhrase(pairing.coordinator_fingerprint, pairing.pairing, nonce)
+    phrase = AstrolabeConfirmationPhrase(pairing.coordinator_profile, pairing.pairing, nonce)
     if FormatJson(phrase) <> FormatJson(pairing.confirmation_phrase) then return
     m.credential = {
         mode: "pairing",
@@ -366,6 +367,7 @@ sub AstrolabePair()
         receiverNonce: nonce,
         pollKey: pollKey,
         fingerprint: pairing.coordinator_fingerprint,
+        profile: pairing.coordinator_profile,
         phrase: phrase,
         userConfirmed: false
     }

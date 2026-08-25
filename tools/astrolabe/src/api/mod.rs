@@ -1392,15 +1392,13 @@ pub fn start_with_catalog(
     // Opt in to the in-process correspondence fixture — off by default, so
     // correspondence refuses honestly until a real carrier exists.
     config.correspondence_demo = env_flag("LAIT_CORRESPONDENCE_DEMO");
-    // Carry real correspondence over a hosted Post when one is named. Takes
-    // precedence over the fixture: real carriage beats a loopback one. A bare
-    // `LAIT_POST_URL=1` is not a URL, so the truthy-but-not-a-URL spellings the
-    // fixture flag accepts are ignored here.
-    config.post_url = std::env::var("LAIT_POST_URL").ok().and_then(|value| {
-        let value = value.trim();
-        (value.starts_with("http://") || value.starts_with("https://"))
-            .then(|| value.trim_end_matches('/').to_owned())
-    });
+    // Carry real correspondence over a hosted Post when one resolves. Takes
+    // precedence over the fixture: real carriage beats a loopback one. The
+    // resolution is the daemon's own — env override, config key, then the
+    // cloud built-in release builds carry — so the client and the daemon it
+    // spawns cannot disagree about which Post this identity is on, which is
+    // exactly the disagreement the env-only read used to permit.
+    config.post_url = lait::config::Settings::load(None).post_url();
     let runtime = Runtime::start(config, move || {
         // A failed send means the pump is gone, which happens only on the
         // way out. Nothing to report and nobody to report it to.

@@ -93,10 +93,16 @@ enum DisplayProtocolV1 {
         return try hmac(keyHex: key, data: transcript.data)
     }
 
-    static func confirmationPhrase(fingerprint: String, pairing: String, nonce: String) throws -> [String] {
-        var transcript = try Transcript(domain: "astrolabe-display/confirmation-phrase/v1")
+    static func isProfileId(_ value: String) -> Bool {
+        guard value.count == 30, value.hasPrefix("prf_") else { return false }
+        return value.dropFirst(4).allSatisfy { ("0"..."9").contains($0) || ("A"..."V").contains($0) }
+    }
+
+    // v2: the phrase commits the identity, not a placement certificate.
+    static func confirmationPhrase(profile: String, pairing: String, nonce: String) throws -> [String] {
+        var transcript = try Transcript(domain: "astrolabe-display/confirmation-phrase/v2")
         try transcript.u32(major)
-        try transcript.text(fingerprint)
+        try transcript.text(profile)
         try transcript.text(pairing)
         try transcript.text(nonce)
         return SHA256.hash(data: transcript.data).prefix(6).map { words[Int($0 & 0x1f)] }
