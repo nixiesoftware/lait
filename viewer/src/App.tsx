@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import {
   PanelLeft,
@@ -1679,12 +1679,16 @@ export function App() {
   const fullWidthDetail = detailVisible;
 
   // The third panel survives so the layout keeps one topology for every view —
-  // declaring it conditionally made the library rebalance the sidebar whenever it
-  // came and went — but nothing is drawn in it, so it stays shut. Layout effects
-  // run before paint, so its stored width never flashes.
-  useLayoutEffect(() => {
-    detailPanel.current?.collapse();
-  }, [detailPanel, detailVisible]);
+  // declaring it conditionally made the library rebalance the sidebar whenever
+  // it came and went — but nothing is drawn in it, so it is declared zero-wide
+  // where it is rendered.
+  //
+  // It used to be shut here instead, by a layout effect, on the reasoning that
+  // layout effects run before paint. They do, and it did not help: the group
+  // measures its container asynchronously and lays out from the panel's props
+  // afterwards, so the effect was overwritten by a `defaultSize` of 34% and the
+  // window opened with a third of it empty. Nothing re-ran the effect, so it
+  // stayed that way until something else saved a layout.
 
   useEffect(() => {
     registry.validate();
@@ -2808,9 +2812,24 @@ export function App() {
       <Panel
         id="detail"
         panelRef={detailPanel}
-        defaultSize="34%"
-        minSize="300px"
-        maxSize="58%"
+        // Zero by declaration, because nothing is ever drawn here. It used to
+        // say 34% — the width it had when it held an issue — and be shut again
+        // by a layout effect. That effect cannot win: the group measures its
+        // container asynchronously and lays out from these props *after* the
+        // effect has run, so the first paint of a fresh window gave a third of
+        // it to a panel with nothing in it. Measured at 1399px wide: sidebar
+        // 251, main 671, and 475 of empty. It looked like the app failing to
+        // fill the window, which is exactly what it was.
+        //
+        // It cleared on a reload because the group had saved a layout by then,
+        // and in the client it cleared on reopening the window for the same
+        // reason — the head keeps its port, so the page keeps its origin and
+        // its storage. First open of a new head had nothing saved and no way to
+        // recover, since the effect never runs again.
+        //
+        // The other sizes are gone with it. A panel that is always zero has no
+        // minimum, no maximum and nothing to drag.
+        defaultSize="0%"
         collapsible
         collapsedSize="0%"
         className="ui-detail overflow-hidden"
