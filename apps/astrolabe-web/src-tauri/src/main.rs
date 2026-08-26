@@ -1061,6 +1061,17 @@ enum WebAction {
     InstallWorld {
         world: String,
     },
+    /// Serve this World from a directory on this machine, or (`None`) from its
+    /// release again. Recorded, and picked up by the World's next head.
+    LinkWorld {
+        world: String,
+        dir: Option<String>,
+    },
+    /// Follow a channel for this World alone, or (`None`) the node's.
+    FollowWorldChannel {
+        world: String,
+        channel: Option<String>,
+    },
     StartDevice {
         id: String,
     },
@@ -1291,6 +1302,10 @@ impl From<WebAction> for ActionRequest {
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
             WebAction::InstallWorld { world } => Self::InstallWorld { world },
+            WebAction::LinkWorld { world, dir } => Self::LinkWorld { world, dir },
+            WebAction::FollowWorldChannel { world, channel } => {
+                Self::FollowWorldChannel { world, channel }
+            }
             WebAction::StartDevice { id } => Self::StartDevice { id },
             WebAction::StopDevice { id } => Self::StopDevice { id },
             WebAction::RestartDevice { id } => Self::RestartDevice { id },

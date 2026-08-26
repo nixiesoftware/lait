@@ -19,6 +19,13 @@ export interface LibraryWorld {
   people: WorldPerson[] | null;
   update: WorldUpdate | null;
   install: WorldInstall | null;
+  /** The directory this World is served from instead of its release, when
+   *  somebody has linked one. A surface that draws a World and not this says
+   *  the release's version while serving a working tree. */
+  linked: string | null;
+  /** The channel this World follows by its own choice. `null` follows the
+   *  device's, which is a different fact and must not draw as this one. */
+  channel: string | null;
 }
 
 export interface WorldInstall {
@@ -275,6 +282,8 @@ export type ClientAction =
   | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
   | { type: "installWorld"; world: string }
+  | { type: "linkWorld"; world: string; dir: string | null }
+  | { type: "followWorldChannel"; world: string; channel: string | null }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
   | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
   | { type: "startHead" } | { type: "stopHead"; id: string } | { type: "forgetOrbit"; space: string }
@@ -306,6 +315,8 @@ export const actionKey = {
   open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
   installWorld: (world: string) => `world.install:${world}`,
+  linkWorld: (world: string) => `world.link:${world}`,
+  followWorldChannel: (world: string) => `world.channel:${world}`,
   startDevice: (id: string) => `device.start:${id}`,
   stopDevice: (id: string) => `device.stop:${id}`,
   restartDevice: (id: string) => `device.restart:${id}`,
@@ -360,6 +371,8 @@ export function keyFor(action: ClientAction): string {
     case "openLink": return `link.open:${action.url}`;
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
+    case "linkWorld": return actionKey.linkWorld(action.world);
+    case "followWorldChannel": return actionKey.followWorldChannel(action.world);
     case "installWorld": return actionKey.installWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
     case "stopDevice": return actionKey.stopDevice(action.id);
@@ -899,6 +912,8 @@ export const fixtureClientView: ClientView = {
     ],
     update: null,
     install: null,
+    linked: null,
+    channel: null,
   }],
   heads: [],
   host: {

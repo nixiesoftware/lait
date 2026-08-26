@@ -67,6 +67,16 @@ pub enum Action {
     UpdateWorld {
         world: String,
     },
+    /// Record — or clear — the directory this World is served from.
+    LinkWorld {
+        world: String,
+        dir: Option<String>,
+    },
+    /// Record — or clear — the channel this World follows on its own.
+    FollowWorldChannel {
+        world: String,
+        channel: Option<String>,
+    },
     /// Install a catalogued World's selected signed channel release.
     InstallWorld {
         world: String,
@@ -250,6 +260,8 @@ impl Action {
             Self::Refresh => "refresh".into(),
             Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
+            Self::LinkWorld { world, .. } => format!("world.link:{world}"),
+            Self::FollowWorldChannel { world, .. } => format!("world.channel:{world}"),
             Self::InstallWorld { world } => format!("world.install:{world}"),
             Self::OpenLink { url } => format!("link.open:{url}"),
             Self::Reload => "image.reload".into(),
@@ -337,6 +349,14 @@ impl Action {
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
+            Self::LinkWorld { world, dir } => match dir {
+                Some(dir) => format!("serve {world} from {dir}"),
+                None => format!("serve {world} from its release"),
+            },
+            Self::FollowWorldChannel { world, channel } => match channel {
+                Some(channel) => format!("follow {channel} for {world}"),
+                None => format!("follow the node's channel for {world}"),
+            },
             Self::InstallWorld { world } => format!("install {world}"),
             Self::OpenLink { url } => format!("open {url}"),
             Self::Reload => "roll forward onto the rebuilt image".into(),
@@ -617,6 +637,26 @@ struct Worker {
     /// honestly. Behind a `Mutex` because the `Worker` is shared across the
     /// tasks that answer actions.
     correspondence: Option<std::sync::Mutex<DemoCarrier>>,
+}
+
+/// Resolve a Library mount to the World id and installations root that the
+/// records beneath it are keyed by.
+///
+/// The surface names a World by its mount — the Library row's stable key —
+/// and everything under `world-bundles-v1` is keyed by World id. Sending one
+/// where the other belongs is refused a long way from here, in a voice that
+/// names neither.
+fn world_state(
+    client: &crate::client::Client,
+    mount: &str,
+) -> Result<(String, std::path::PathBuf), ClientError> {
+    let world_id = crate::client::library::world_id_for_mount(mount).ok_or_else(|| {
+        ClientError::refused(format!("no installed World is mounted at '{mount}'"))
+    })?;
+    let identity = client
+        .identity_dir()
+        .ok_or_else(|| ClientError::internal("the World installation has no identity directory"))?;
+    Ok((world_id, lait::serve::head::installations_root(&identity)))
 }
 
 fn world_launch(mount: &str, url: String) -> crate::browser::WorldLaunch {
@@ -1039,6 +1079,40 @@ impl Worker {
                     "update accepted ({})",
                     job.operation_hex()
                 )))
+            }
+            Action::LinkWorld { world, dir } => {
+                let (world_id, worlds) = world_state(client, world)?;
+                let dir = dir.as_deref().map(std::path::Path::new);
+                // Refused here, where somebody is looking at the field they
+                // typed it into. A path that cannot be served is a fact this
+                // machine can establish now, and establishing it later means
+                // establishing it as a World that serves nothing.
+                lait::update::world::link(&worlds, &world_id, dir)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(match dir {
+                    Some(dir) => format!(
+                        "{world} will serve from {} — restart it to pick this up",
+                        dir.display()
+                    ),
+                    None => format!("{world} will serve its release — restart it to pick this up"),
+                }))
+            }
+            Action::FollowWorldChannel { world, channel } => {
+                let (world_id, worlds) = world_state(client, world)?;
+                let channel = match channel {
+                    Some(name) => {
+                        Some(lait::update::feed::Channel::parse(name).ok_or_else(|| {
+                            ClientError::refused(format!("'{name}' is not a channel"))
+                        })?)
+                    }
+                    None => None,
+                };
+                lait::update::world::follow(&worlds, &world_id, channel)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(match channel {
+                    Some(channel) => format!("{world} follows {}", channel.as_str()),
+                    None => format!("{world} follows this device's channel"),
+                }))
             }
             Action::InstallWorld { world } => {
                 let entry = client

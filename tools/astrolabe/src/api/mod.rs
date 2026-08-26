@@ -859,6 +859,21 @@ pub enum ActionRequest {
     InstallWorld {
         world: String,
     },
+    /// Serve this World from a directory on this machine instead of its
+    /// release, or (`None`) go back to the release.
+    ///
+    /// Recorded, not applied: a head reads its source when it starts, so this
+    /// is what the *next* head serves. The surface offering it is the one that
+    /// has to say so.
+    LinkWorld {
+        world: String,
+        dir: Option<String>,
+    },
+    /// Follow a channel for this World alone, or (`None`) follow the node's.
+    FollowWorldChannel {
+        world: String,
+        channel: Option<String>,
+    },
     StartDevice {
         id: String,
     },
@@ -1077,6 +1092,10 @@ impl ActionRequest {
         Ok(match self {
             Self::Refresh => Action::Refresh,
             Self::UpdateWorld { world } => Action::UpdateWorld { world },
+            Self::LinkWorld { world, dir } => Action::LinkWorld { world, dir },
+            Self::FollowWorldChannel { world, channel } => {
+                Action::FollowWorldChannel { world, channel }
+            }
             Self::InstallWorld { world } => Action::InstallWorld { world },
             Self::Reload => Action::Reload,
             Self::Exit { go_offline } => Action::Exit(if go_offline {
