@@ -1065,6 +1065,15 @@ enum WebAction {
         world: String,
         channel: Option<String>,
     },
+    /// Register a tree on this device as a local World of its own. The
+    /// directory is the whole ask; the name is derived from the tree.
+    RegisterLocalWorld {
+        dir: String,
+    },
+    /// Stop carrying a row for one. Nothing on disk is deleted.
+    ForgetLocalWorld {
+        key: String,
+    },
     StartDevice {
         id: String,
     },
@@ -1298,6 +1307,8 @@ impl From<WebAction> for ActionRequest {
             WebAction::FollowWorldChannel { world, channel } => {
                 Self::FollowWorldChannel { world, channel }
             }
+            WebAction::RegisterLocalWorld { dir } => Self::RegisterLocalWorld { dir },
+            WebAction::ForgetLocalWorld { key } => Self::ForgetLocalWorld { key },
             WebAction::StartDevice { id } => Self::StartDevice { id },
             WebAction::StopDevice { id } => Self::StopDevice { id },
             WebAction::RestartDevice { id } => Self::RestartDevice { id },
@@ -1957,6 +1968,7 @@ fn main() {
         Err(error) => eprintln!("astrolabe: {error}"),
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .append_invoke_initialization_script(PLATFORM_INIT)
         .setup(|app| {
             astrolabe::client::update::identify_running_version(

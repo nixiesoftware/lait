@@ -12,6 +12,9 @@ astrolabe = { path = "../../../tools/astrolabe" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
+# The native folder picker. First-party, and the one control this app will want
+# in every place a person names a path.
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 serde_json = "1"

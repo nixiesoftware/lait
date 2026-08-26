@@ -175,10 +175,50 @@ function DeveloperPane({ snapshot, world, view, dispatch }: {
     <Group>
       <SwitchRow label="Developer options" checked={enabled} onChange={enable} />
     </Group>
-    {enabled && world !== null && <ChannelGroup world={world} view={view} dispatch={dispatch} />}
+    {enabled && world !== null && (world.sourceDir === null
+      ? <ChannelGroup world={world} view={view} dispatch={dispatch} />
+      : <LocalGroup world={world} view={view} dispatch={dispatch} />)}
     {enabled && world === null && <p className="settings-absent">
       This World is not in the Library this client is showing.
     </p>}
+  </>;
+}
+
+/**
+ * A World read from a tree on this device.
+ *
+ * It has no channel: nothing publishes it, so there is no stream to follow and
+ * a channel row here would be a control over nothing. What it has instead is
+ * where it is read from, and the way to stop carrying it.
+ *
+ * Forget lives here rather than in the Library because the Library lists
+ * Worlds and this is not a fact about the list — and because removing an entry
+ * from beside the row that opens it is how somebody removes the wrong one.
+ * Nothing on disk is touched: the tree belongs to whoever made it.
+ */
+function LocalGroup({ world, view, dispatch }: {
+  world: LibraryWorld;
+  view: ClientView;
+  dispatch(action: ClientAction): Promise<void>;
+}) {
+  // `local.issues` on the row, `local/issues` in the registry — a World id
+  // admits no `/`, which is exactly what keeps a local entry out of every
+  // installed World's namespace.
+  const key = `local/${world.key.replace(/^local\./, "")}`;
+  const busy = view.inFlight.includes(actionKey.forgetLocalWorld(key));
+  return <>
+    <Group>
+      <Row label="Read from" value={world.sourceDir ?? "Not recorded"} mono />
+    </Group>
+    <Group>
+      <div className="settings-row">
+        <span className="settings-row-label">Remove from Library</span>
+        <button type="button" className="settings-button" disabled={busy}
+          onClick={() => void dispatch({ type: "forgetLocalWorld", key })}>
+          Forget
+        </button>
+      </div>
+    </Group>
   </>;
 }
 

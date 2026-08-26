@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Astrolabe's Library plus its owned Book, Displays, Chat, and per-World settings windows.",
   "windows": ["main", "address-book", "displays", "correspondence", "world-settings*"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

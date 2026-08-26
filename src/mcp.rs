@@ -182,10 +182,23 @@ impl LaitMcp {
         world: Option<String>,
     ) -> Result<Self> {
         let identity = selection.identity_dir()?;
-        let registry = std::sync::Arc::new(
-            crate::world::installed::load(&crate::serve::head::installations_root(&identity))?
-                .clients,
+        let installation =
+            crate::world::installed::load(&crate::serve::head::installations_root(&identity))?;
+        // Local Worlds are here for the same reason they are in a head: an
+        // agent working on a World is the ordinary case for one to exist, and
+        // a World with no agent surface is a World an agent cannot be pointed
+        // at. Its tools carry its own mount — `local_issues_list`, never
+        // `issues_list` — so an editor bound to a tree cannot reach the
+        // release by name, or the other way round.
+        let (_packages, clients, refused) = crate::world::installed::load_local(
+            &identity,
+            installation.packages,
+            installation.clients,
         );
+        for reason in &refused {
+            tracing::warn!(%reason, "a local World was not loaded");
+        }
+        let registry = std::sync::Arc::new(clients);
         Self::from_registry(home, selection, act_as, world, registry)
     }
 

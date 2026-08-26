@@ -283,6 +283,8 @@ export type ClientAction =
   | { type: "updateWorld"; world: string }
   | { type: "installWorld"; world: string }
   | { type: "followWorldChannel"; world: string; channel: string | null }
+  | { type: "registerLocalWorld"; dir: string }
+  | { type: "forgetLocalWorld"; key: string }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
   | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
   | { type: "startHead" } | { type: "stopHead"; id: string } | { type: "forgetOrbit"; space: string }
@@ -315,6 +317,8 @@ export const actionKey = {
   updateWorld: (world: string) => `world.update:${world}`,
   installWorld: (world: string) => `world.install:${world}`,
   followWorldChannel: (world: string) => `world.channel:${world}`,
+  registerLocalWorld: (dir: string) => `world.local.add:${dir}`,
+  forgetLocalWorld: (key: string) => `world.local.forget:${key}`,
   startDevice: (id: string) => `device.start:${id}`,
   stopDevice: (id: string) => `device.stop:${id}`,
   restartDevice: (id: string) => `device.restart:${id}`,
@@ -370,6 +374,8 @@ export function keyFor(action: ClientAction): string {
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
     case "followWorldChannel": return actionKey.followWorldChannel(action.world);
+    case "registerLocalWorld": return actionKey.registerLocalWorld(action.dir);
+    case "forgetLocalWorld": return actionKey.forgetLocalWorld(action.key);
     case "installWorld": return actionKey.installWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
     case "stopDevice": return actionKey.stopDevice(action.id);
@@ -669,6 +675,25 @@ export async function setFullscreen(fullscreen: boolean): Promise<void> {
  * the Tauri command/event bridge (or an embedding host bridge) before this
  * bundle considers the development fallback.
  */
+/**
+ * Ask the person for a directory, natively.
+ *
+ * `null` is either a cancelled dialog or a context with no picker to open —
+ * a browser preview, or a build without the plugin. Both mean "carry on with
+ * what is typed", which is why the field stays and this only fills it in.
+ * A picker that could not open must never leave somebody unable to proceed.
+ */
+export async function pickDirectory(title: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const chosen = await open({ directory: true, multiple: false, title });
+    return typeof chosen === "string" ? chosen : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createClientTransport(): ClientTransport {
   const bridge = window.__ASTROLABE_CLIENT__;
   if (bridge !== undefined) return {

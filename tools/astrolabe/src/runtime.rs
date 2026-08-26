@@ -72,6 +72,14 @@ pub enum Action {
         world: String,
         channel: Option<String>,
     },
+    /// Register a tree on this device as a local World.
+    RegisterLocalWorld {
+        dir: String,
+    },
+    /// Stop carrying a row for one. Nothing on disk is deleted.
+    ForgetLocalWorld {
+        key: String,
+    },
     /// Install a catalogued World's selected signed channel release.
     InstallWorld {
         world: String,
@@ -256,6 +264,8 @@ impl Action {
             Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
             Self::FollowWorldChannel { world, .. } => format!("world.channel:{world}"),
+            Self::RegisterLocalWorld { dir } => format!("world.local.add:{dir}"),
+            Self::ForgetLocalWorld { key } => format!("world.local.forget:{key}"),
             Self::InstallWorld { world } => format!("world.install:{world}"),
             Self::OpenLink { url } => format!("link.open:{url}"),
             Self::Reload => "image.reload".into(),
@@ -347,6 +357,8 @@ impl Action {
                 Some(channel) => format!("follow {channel} for {world}"),
                 None => format!("follow the node's channel for {world}"),
             },
+            Self::RegisterLocalWorld { dir } => format!("add a local World from {dir}"),
+            Self::ForgetLocalWorld { key } => format!("forget {key}"),
             Self::InstallWorld { world } => format!("install {world}"),
             Self::OpenLink { url } => format!("open {url}"),
             Self::Reload => "roll forward onto the rebuilt image".into(),
@@ -1069,6 +1081,41 @@ impl Worker {
                     "update accepted ({})",
                     job.operation_hex()
                 )))
+            }
+            Action::RegisterLocalWorld { dir } => {
+                let identity = client.identity_dir().ok_or_else(|| {
+                    ClientError::internal("this client has no identity directory")
+                })?;
+                let dir = std::path::Path::new(dir.trim());
+                // Read before registering, so the name comes from the tree and
+                // a directory that is not a World tree is refused here rather
+                // than becoming a row that never loads.
+                let manifest = std::fs::read(dir.join("world.json"))
+                    .ok()
+                    .and_then(|bytes| world_interface::manifest::WorldManifest::parse(&bytes).ok())
+                    .ok_or_else(|| {
+                        ClientError::refused(format!(
+                            "{} has no readable world.json — a local World is a built World \
+                             tree, not a directory of pages",
+                            dir.display()
+                        ))
+                    })?;
+                let handle = lait::world::local::handle_from(&identity, &manifest)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                let key = lait::world::local::register(&identity, &handle, dir)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(format!("{key} added to the Library")))
+            }
+            Action::ForgetLocalWorld { key } => {
+                let identity = client.identity_dir().ok_or_else(|| {
+                    ClientError::internal("this client has no identity directory")
+                })?;
+                // The tree is not this client's to delete. Forgetting removes
+                // the row and the registration; whatever it pointed at is
+                // whoever's it was.
+                lait::world::local::forget(&identity, key)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(format!("{key} is no longer in the Library")))
             }
             Action::FollowWorldChannel { world, channel } => {
                 let (world_id, worlds) = world_state(client, world)?;

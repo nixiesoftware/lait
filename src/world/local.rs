@@ -186,6 +186,49 @@ fn file_for(identity: &Path, key: &str) -> Result<PathBuf> {
     Ok(registrations_root(identity).join(format!("{handle}.json")))
 }
 
+/// A handle for a tree, derived from what it declares and free on this device.
+///
+/// Asking for a name is asking somebody to invent one for a thing that already
+/// has one: the tree's `world.json` states a mount, and the mount is the name
+/// this World answers to everywhere else. So the pick *is* the act, and this is
+/// what turns a directory into an entry without a form in between.
+///
+/// A second copy of a World already registered gets `-2`, then `-3`. Refusing
+/// the pick because a name is taken would be refusing the only thing somebody
+/// did, and two working trees of one World is an ordinary thing to want.
+pub fn handle_from(identity: &Path, manifest: &WorldManifest) -> Result<String> {
+    let base: String = manifest
+        .mount()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' {
+                ch
+            } else if ch.is_ascii_uppercase() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = base.trim_matches('-').to_owned();
+    if base.is_empty() {
+        bail!("this World's mount makes no usable name");
+    }
+    let taken: Vec<String> = list(identity).into_iter().map(|local| local.key).collect();
+    let free = |handle: &str| {
+        key_for(handle)
+            .map(|key| !taken.contains(&key))
+            .unwrap_or(false)
+    };
+    if free(&base) {
+        return Ok(base);
+    }
+    (2..100)
+        .map(|n| format!("{base}-{n}"))
+        .find(|candidate| free(candidate))
+        .ok_or_else(|| anyhow::anyhow!("too many copies of {base} are already registered"))
+}
+
 /// Register a tree as a local World.
 ///
 /// Refuses at the moment of the act, so the refusal lands on whoever is asking
@@ -329,6 +372,28 @@ mod tests {
         assert!(
             key_for("issues.dev").is_err(),
             "a World id label admits no dot"
+        );
+    }
+
+    /// The pick is the act: a name is derived from what the tree already
+    /// declares rather than asked for. A second copy of one World is an
+    /// ordinary thing to want, so it is numbered rather than refused.
+    #[test]
+    fn a_handle_is_derived_from_the_tree_and_numbered_when_taken() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+        let manifest =
+            WorldManifest::parse(declaration("com.lait.issues").as_bytes()).expect("a manifest");
+
+        assert_eq!(
+            handle_from(identity.path(), &manifest).expect("a handle"),
+            "issues"
+        );
+        register(identity.path(), "issues", dir.path()).expect("registers");
+        assert_eq!(
+            handle_from(identity.path(), &manifest).expect("a second handle"),
+            "issues-2"
         );
     }
 

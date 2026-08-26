@@ -862,6 +862,19 @@ pub enum ActionRequest {
         world: String,
         channel: Option<String>,
     },
+    /// Register a tree on this device as a local World of its own.
+    ///
+    /// The directory is the whole ask. What it is called is derived from what
+    /// the tree already declares — asking for a name would be asking somebody
+    /// to invent one for a thing that has one.
+    RegisterLocalWorld {
+        dir: String,
+    },
+    /// Forget one, by the key it was registered under. The tree is untouched:
+    /// this device stops carrying a row for it, and nothing is deleted.
+    ForgetLocalWorld {
+        key: String,
+    },
     StartDevice {
         id: String,
     },
@@ -1083,6 +1096,8 @@ impl ActionRequest {
             Self::FollowWorldChannel { world, channel } => {
                 Action::FollowWorldChannel { world, channel }
             }
+            Self::RegisterLocalWorld { dir } => Action::RegisterLocalWorld { dir },
+            Self::ForgetLocalWorld { key } => Action::ForgetLocalWorld { key },
             Self::InstallWorld { world } => Action::InstallWorld { world },
             Self::Reload => Action::Reload,
             Self::Exit { go_offline } => Action::Exit(if go_offline {

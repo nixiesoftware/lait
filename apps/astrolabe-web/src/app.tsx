@@ -14,6 +14,7 @@ import {
   summonOwnedWindow,
   restartForUpdate,
   opensWorldsInOwnWindows,
+  pickDirectory,
   summonWorldSettings,
   updateInProgress,
   watchMenu,
@@ -291,9 +292,51 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
         {unavailable.length > 0 && <WorldSection label="UNAVAILABLE" rows={unavailable} view={view} showing={showing} onSelect={onSelect} />}
         {uninstalled.length > 0 && <WorldSection label="NOT INSTALLED" rows={uninstalled} view={view} showing={showing} onSelect={onSelect} />}
       </div>
+      <div className="library-footer"><AddLocalWorld view={view} dispatch={dispatch} /></div>
     </aside>
     {showing !== null && <WorldDetail view={view} world={showing} dispatch={dispatch} dark={dark} />}
   </section>;
+}
+
+/**
+ * Add a World this device is being used to write.
+ *
+ * At the foot of the rail because it makes an entry, and entries are what the
+ * rail lists. Deliberately not in a World's settings window: a tree being
+ * worked on is not a setting of the World it was copied from.
+ *
+ * One gesture, no form. The picker opens on the press and the pick is the
+ * whole act — what the World is called comes from the `world.json` in the
+ * tree, which already says. Asking for a name as well would be asking somebody
+ * to invent one for a thing that has one.
+ */
+function AddLocalWorld({ view, dispatch }: {
+  view: ClientView;
+  dispatch(action: ClientAction): Promise<void>;
+}) {
+  const busy = view.inFlight.some((key) => key.startsWith("world.local.add:"));
+  const add = () => {
+    void pickDirectory("Choose a built World tree").then((dir) => {
+      // A cancelled dialog is not a failure and has nothing to say about it.
+      if (dir !== null) void dispatch({ type: "registerLocalWorld", dir });
+    });
+  };
+  return <button type="button" className="library-add" onClick={add} disabled={busy}>
+    <span className="library-add-plus" aria-hidden="true">+</span>
+    <span>{busy ? "Adding…" : "Add local World"}</span>
+  </button>;
+}
+
+/**
+ * The key a local World is registered under, from the id the host assigned it.
+ *
+ * `local.issues` on the row, `local/issues` in the registry — one is a World
+ * id and the other is a filed entry, and they are spelled differently because
+ * a World id admits no `/` and that is precisely what keeps a local entry out
+ * of every installed World's namespace.
+ */
+function localKeyOf(world: LibraryWorld): string {
+  return `local/${world.key.replace(/^local\./, "")}`;
 }
 
 /**
@@ -323,7 +366,6 @@ function WorldSection({ label, rows, view, showing, onSelect }: {
         onPress={() => onSelect(world.key)} aria-label={`${world.displayName}${world.sourceDir === null ? "" : " (local)"} — ${lifecycle(view, world)}`}>
         <WorldMark world={world} />
         <span className="world-row-name">{world.displayName}</span>
-        {world.sourceDir !== null && <span className="world-row-local">LOCAL</span>}
       </Button>
     </span>)}
   </section>;
@@ -440,12 +482,7 @@ function WorldHero({ world }: { world: LibraryWorld }) {
     style.background = `linear-gradient(135deg, color-mix(in srgb, ${accent} 72%, transparent), `
       + `color-mix(in srgb, ${wash} 88%, transparent)), url("${art.hero}") center / cover`;
   }
-  return <div className="world-hero" style={style}>
-    <div className="world-hero-name">
-      {world.sourceDir !== null && <span className="world-local-badge" title={world.sourceDir}>LOCAL</span>}
-      <h1>{world.displayName}</h1>
-    </div>
-  </div>;
+  return <div className="world-hero" style={style}><h1>{world.displayName}</h1></div>;
 }
 
 /**

@@ -209,12 +209,19 @@ impl Mode {
                 let installation = lait::world::installed::load(
                     &lait::serve::head::installations_root(&identity),
                 )?;
-                lait::daemon::run_lait_daemon(
+                // And in the daemon, which is what the host plane and every
+                // display resolve through. A World that only some of this
+                // device's registries know about is a World that works until
+                // somebody reaches it by a route nobody tested.
+                let (packages, clients, refused) = lait::world::installed::load_local(
+                    &identity,
                     installation.packages,
                     installation.clients,
-                    selection,
-                )
-                .await
+                );
+                for reason in &refused {
+                    tracing::warn!(%reason, "a local World was not loaded");
+                }
+                lait::daemon::run_lait_daemon(packages, clients, selection).await
             }
             Mode::Mcp => {
                 let selection = Selection::default();
