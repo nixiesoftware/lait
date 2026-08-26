@@ -22,13 +22,44 @@ use std::path::{Component, Path, PathBuf};
 pub struct Source {
     /// The activated bundle's root, when one is activated.
     bundle: Option<PathBuf>,
+    /// Why this source holds nothing, when the reason is worth a sentence.
+    ///
+    /// Only a declared-and-unusable link sets this. "No release is selected"
+    /// is the ordinary absence and explains itself; "you named a directory and
+    /// it is not there" is a mistake somebody just made and can fix, and it
+    /// reaches them only if it is carried to where they are looking.
+    refused: Option<String>,
 }
 
 impl Source {
     /// No selected release. Tests and diagnostics use this to model an
     /// unavailable World without inventing product bytes.
     pub fn unavailable() -> Self {
-        Self { bundle: None }
+        Self {
+            bundle: None,
+            refused: None,
+        }
+    }
+
+    /// A link was declared for this World and cannot be served.
+    ///
+    /// Distinct from [`Self::unavailable`] because the two are different facts
+    /// with different remedies, and the response says which. A `tracing::error`
+    /// is not enough on its own: the head runs in a process that installs a
+    /// subscriber only when it was started as a daemon, so in the loop this
+    /// seam exists for the reason had nowhere to go and the page reported that
+    /// the *release* carried no entry document — blaming a release that was
+    /// fine for a typo in an environment variable.
+    pub fn refused(why: String) -> Self {
+        Self {
+            bundle: None,
+            refused: Some(why),
+        }
+    }
+
+    /// Why this source refuses, when it was a link that refused it.
+    pub fn refusal(&self) -> Option<&str> {
+        self.refused.as_deref()
     }
 
     /// Serve from the selected immutable release when it holds the path.
@@ -40,6 +71,7 @@ impl Source {
     pub fn activated(bundle: PathBuf) -> Self {
         Self {
             bundle: Some(bundle),
+            refused: None,
         }
     }
 
@@ -126,7 +158,17 @@ pub const LINK_VAR: &str = "LAIT_WORLD_LINK";
 /// a machine serving somebody's working tree while believing it serves 0.9.3
 /// is a worse defect than the friction either removes.
 pub fn activate(worlds: &Path, world: &str) -> Source {
-    match linked(&std::env::var(LINK_VAR).unwrap_or_default(), world) {
+    activate_with(&std::env::var(LINK_VAR).unwrap_or_default(), worlds, world)
+}
+
+/// [`activate`], with the declaration handed in.
+///
+/// Split from the environment for the reason [`linked`] is: these tests share
+/// a process, so a variable set in one is set in all of them, and the decision
+/// this function makes — *which* source answers, and whether a refusal keeps
+/// its reason — is the half worth asserting.
+fn activate_with(declared: &str, worlds: &Path, world: &str) -> Source {
+    match linked(declared, world) {
         Link::None => {}
         Link::Directory(dir) => {
             tracing::warn!(
@@ -142,7 +184,7 @@ pub fn activate(worlds: &Path, world: &str) -> Source {
         // failure this whole seam exists to stop producing.
         Link::Unusable(why) => {
             tracing::error!(%world, %why, "refusing a linked World; serving nothing");
-            return Source::unavailable();
+            return Source::refused(why);
         }
     }
     // The recorded link re-proves its directory as it reads it, so a record
@@ -280,6 +322,38 @@ mod tests {
             linked(&declared, "com.lait.issues"),
             Link::Unusable(_)
         ));
+    }
+
+    /// Refusing is half of it; the refusal has to be carried. `activate` is
+    /// where the reason either survives into something a surface can read or
+    /// is dropped into a `tracing::error` that this process has no subscriber
+    /// for — which is exactly how a typo came to be reported as a release with
+    /// no entry document.
+    #[test]
+    fn a_refused_link_carries_its_reason_out_of_activate() {
+        let worlds = bundle_with(&[]);
+        let gone = worlds.path().join("was-never-here");
+        let declared = format!("com.lait.issues={}", gone.display());
+        let source = activate_with(&declared, worlds.path(), "com.lait.issues");
+        assert!(source.bundle().is_none(), "a refusal serves nothing");
+        let why = source.refusal().expect("a refusal explains itself");
+        assert!(
+            why.contains("was-never-here"),
+            "the reason must name the directory: {why}"
+        );
+    }
+
+    /// The ordinary absence stays ordinary: nothing linked, nothing installed,
+    /// and so nothing to explain beyond the empty release itself.
+    #[test]
+    fn an_unlinked_world_refuses_nothing_and_explains_nothing() {
+        let worlds = tempfile::tempdir().expect("an installations root");
+        let source = activate_with("", worlds.path(), "com.lait.issues");
+        assert!(source.bundle().is_none());
+        assert!(
+            source.refusal().is_none(),
+            "an empty release is not a refused link"
+        );
     }
 
     /// A relative path resolves against the daemon's working directory, which

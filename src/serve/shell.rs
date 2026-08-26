@@ -141,9 +141,29 @@ pub fn index(overlay: bool, head: &crate::serve::head::Source) -> Response {
         };
         return ([(header::CONTENT_TYPE, HTML)], body).into_response();
     }
+    // A refused link is a different fact from an empty release, and saying the
+    // wrong one costs an afternoon: the release named here is usually fine, and
+    // the mistake is a directory that does not exist. The `tracing::error` the
+    // refusal already emits cannot be relied on to carry it — a head installs a
+    // subscriber only when it was started as a daemon — so the reason travels
+    // to the one place somebody is certainly looking.
+    if let Some(why) = head.refusal() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "{}=… names a directory this head refuses to serve: {why}\n\
+                 \n\
+                 The installed release was not consulted: a link that falls back \
+                 would answer a question nobody asked, and a typo would look \
+                 exactly like an edit that did nothing.",
+                crate::serve::head::LINK_VAR
+            ),
+        )
+            .into_response();
+    }
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        "the selected World release carries no web entry document",
+        "the selected World release carries no web entry document".to_owned(),
     )
         .into_response()
 }
@@ -525,6 +545,56 @@ mod tests {
         // Unknown extensions must not be guessed into something executable.
         assert_eq!(content_type("weird.xyz"), "application/octet-stream");
         assert_eq!(content_type("noext"), "application/octet-stream");
+    }
+
+    async fn body_of(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .expect("read the refusal body");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The failure this seam exists to stop producing, arriving by the door it
+    /// left open: a typo in the link is not a broken release, and saying so is
+    /// the whole difference between a two-second fix and an afternoon spent
+    /// reinstalling a World that was never at fault.
+    #[tokio::test]
+    async fn a_refused_link_says_so_instead_of_blaming_the_release() {
+        let source =
+            crate::serve::head::Source::refused("/no/such/directory is not a directory".to_owned());
+        let response = index(false, &source);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = body_of(response).await;
+        assert!(
+            body.contains(crate::serve::head::LINK_VAR),
+            "the refusal must name the variable that caused it: {body}"
+        );
+        assert!(
+            body.contains("/no/such/directory"),
+            "the refusal must carry the path that was refused: {body}"
+        );
+        assert!(
+            !body.contains("release carries no web entry"),
+            "a refused link must not be reported as an empty release: {body}"
+        );
+    }
+
+    /// The ordinary absence keeps the ordinary sentence. Both are 503 and only
+    /// the reason differs, so this is what stops the fix above from turning
+    /// every empty release into a story about an environment variable nobody
+    /// set.
+    #[tokio::test]
+    async fn an_empty_release_is_still_reported_as_an_empty_release() {
+        let response = index(false, &crate::serve::head::Source::unavailable());
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = body_of(response).await;
+        assert!(body.contains("carries no web entry document"), "{body}");
+        assert!(
+            !body.contains(crate::serve::head::LINK_VAR),
+            "nothing was linked, so nothing should mention linking: {body}"
+        );
     }
 }
 

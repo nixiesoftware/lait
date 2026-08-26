@@ -240,6 +240,26 @@ impl Mode {
                 home,
                 world,
             } => {
+                // The head had no subscriber at all, so every `warn!` and
+                // `error!` reached by this process was a no-op — including the
+                // one a linked World logs to say it is *not* serving the
+                // installed release, which is the safety half of that seam.
+                //
+                // To **stderr**, for the reason the daemon arm spells out and
+                // one more: `--json` writes a readiness line to stdout that
+                // callers parse, and a log line landing in the middle of it
+                // would break every one of them.
+                //
+                // `try_init` rather than `init`: this is the launcher, it may
+                // run beside anything, and a second subscriber is not worth a
+                // panic on the way up.
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "lait=warn,warn".into()),
+                    )
+                    .try_init();
                 let port = match port {
                     Some(p) => p.parse::<u16>().map_err(|_| {
                         anyhow::anyhow!("--port must be a number 0-65535, got {p:?}")
