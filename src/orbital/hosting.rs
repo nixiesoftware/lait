@@ -4511,14 +4511,39 @@ const AGENT_NAME_RULE: &str =
 /// persisted outside any working-directory sandbox (§10 finding 1).
 fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
     let path = agent_seed_path(home, name)?;
+    // Owner-only, through the module that exists because `std::fs` cannot set a
+    // DACL. This seed *is* the agent: it signs as it, and a credential derived
+    // from it is how the agent reaches this device over HTTP. Written with
+    // `std::fs::write` it landed 0644 under a typical umask, so any other local
+    // account could read it — and loopback has no peer credential we check, a
+    // point `serve::auth`'s own module doc makes.
+    //
+    // Portable rather than device-bound, deliberately: the bytes stay the hex
+    // string every already-provisioned agent has on disk, so hardening does not
+    // become a migration. What changes is who may open the file.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        mechanics::secretfs::create_private_dir(parent)
+            .with_context(|| format!("make agent '{name}' private"))?;
     }
     if path.exists() {
+        // An agent provisioned before this was private stays readable until
+        // something re-writes it, so re-harden in place on the way past. A
+        // failure here is not fatal — refusing to load an agent because its
+        // permissions could not be tightened would take the identity away over
+        // a lesser problem — but it is worth saying out loud.
+        if let Err(error) = mechanics::secretfs::harden_in_place(&path) {
+            tracing::warn!(%name, %error, "could not tighten an agent seed's permissions");
+        }
         load_agent_seed(home, name)
     } else {
         let seed = mechanics::actor::random_seed().context("generate agent seed")?;
-        std::fs::write(&path, data_encoding::HEXLOWER.encode(&seed))?;
+        mechanics::secretfs::write_private(
+            &path,
+            data_encoding::HEXLOWER.encode(&seed).as_bytes(),
+            mechanics::secretfs::Create::New,
+            mechanics::secretfs::Wrap::Portable,
+        )
+        .with_context(|| format!("write agent '{name}' seed"))?;
         Ok(seed)
     }
 }

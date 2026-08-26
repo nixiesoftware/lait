@@ -39,32 +39,26 @@
 //!
 //! # Which agent a session acts as
 //!
-//! `StreamableHttpService` builds its handler through a factory taking no
-//! arguments, so the handler cannot read the request that caused it. The agent
-//! identity therefore travels in a task-local, set by the layer that
-//! authenticated it and read by the factory inside the same request.
+//! A first cut carried the identity in a task-local, set by the layer that
+//! authenticated it and read by the SDK's handler factory. That was wrong, and
+//! wrong in the way this project has been bitten by twice: every component
+//! correct, the composition broken, and a symptom that names nothing.
 //!
-//! It is worth being plain that this is a workaround for the SDK's shape rather
-//! than a design: the alternative is a service per agent mounted at a path per
-//! agent, which leaks agent names into URLs and has to be rebuilt whenever
-//! somebody is sponsored. The task-local keeps the authenticated identity and
-//! its use in one request, and [`agent_for_session`] is the only way to read
-//! it.
+//! Tokio task-locals do not cross `tokio::spawn`, and rmcp spawns a session
+//! worker — so every request after `initialize` runs outside the scope. The
+//! read would return `None`, and `None` in `mcp::LaitMcp.act_as` means *the
+//! primary identity*: the human whose machine hosts the daemon. An agent would
+//! have silently acted as its sponsor. Nothing would have failed to compile and
+//! nothing would have logged.
+//!
+//! So identity is not ambient. [`Session`] binds a session id to the agent that
+//! opened it, established once when `initialize` is admitted and enforced on
+//! every later request *before* the SDK sees it — because a session id rides in
+//! a response header and is not a secret, while the token is.
 
 use std::sync::Arc;
 
 use crate::agent_token::Reach;
-
-tokio::task_local! {
-    /// The agent this request authenticated as, between the layer that proved
-    /// it and the factory that builds a handler for it.
-    static SESSION_AGENT: String;
-}
-
-/// The agent the current request authenticated as, or `None` outside one.
-pub fn agent_for_session() -> Option<String> {
-    SESSION_AGENT.try_with(|agent| agent.clone()).ok()
-}
 
 /// Everything the endpoint needs to decide who may connect.
 #[derive(Clone)]
@@ -146,15 +140,50 @@ impl Access {
     }
 }
 
-/// Run `work` with `agent` established as the session's identity.
+/// Who opened which session.
 ///
-/// The only way the task-local is set, so every path that establishes an
-/// identity goes through the one that authenticated it.
-pub async fn as_agent<F, T>(agent: String, work: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    SESSION_AGENT.scope(agent, work).await
+/// lait owns this rather than the SDK, which has no notion of a principal.
+/// `Access::admit` authenticates the *presenter*; without this, a second
+/// sponsored agent could present its own valid token alongside the first
+/// agent's session id and be handed that session's replayed stream. Two
+/// sponsored agents on one device is the point of the address book, so this is
+/// an ordinary configuration rather than an exotic one.
+#[derive(Clone, Default)]
+pub struct Sessions {
+    bound: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+}
+
+impl Sessions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `agent` opened `session`.
+    pub fn opened(&self, session: &str, agent: &str) {
+        if let Ok(mut bound) = self.bound.lock() {
+            bound.insert(session.to_owned(), agent.to_owned());
+        }
+    }
+
+    /// Whether `agent` may act on `session`.
+    ///
+    /// A session nobody recorded is refused rather than admitted: an id this
+    /// device never issued is not one to resume, and treating unknown as
+    /// allowed is how a session id becomes a credential.
+    pub fn admits(&self, session: &str, agent: &str) -> bool {
+        self.bound
+            .lock()
+            .ok()
+            .and_then(|bound| bound.get(session).cloned())
+            .is_some_and(|owner| owner == agent)
+    }
+
+    /// Forget a session, on an explicit DELETE or when it expires.
+    pub fn closed(&self, session: &str) {
+        if let Ok(mut bound) = self.bound.lock() {
+            bound.remove(session);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -248,12 +277,33 @@ mod tests {
         assert_ne!(Refused::Origin.message(), Refused::Missing.message());
     }
 
-    #[tokio::test]
-    async fn the_session_identity_is_readable_only_inside_the_request_that_proved_it() {
-        assert!(agent_for_session().is_none(), "nothing outside a request");
-        let seen = as_agent("scribe".into(), async { agent_for_session() }).await;
-        assert_eq!(seen.as_deref(), Some("scribe"));
-        assert!(agent_for_session().is_none(), "and nothing after it");
+    /// The hole a task-local left. A second sponsored agent presenting its own
+    /// valid token and the first agent's session id must not be handed that
+    /// session — the id rides in a response header and lands in logs, so it is
+    /// not a secret, while the token is.
+    #[test]
+    fn a_session_belongs_to_the_agent_that_opened_it() {
+        let sessions = Sessions::new();
+        sessions.opened("sess-1", "scribe");
+        assert!(sessions.admits("sess-1", "scribe"));
+        assert!(
+            !sessions.admits("sess-1", "auditor"),
+            "another sponsored agent holding a valid token of its own is still not this session"
+        );
+    }
+
+    /// Unknown is refused, never admitted. Treating a session nobody recorded
+    /// as allowed is how a session id quietly becomes a credential.
+    #[test]
+    fn a_session_this_device_never_issued_is_not_one_to_resume() {
+        let sessions = Sessions::new();
+        assert!(!sessions.admits("sess-never", "scribe"));
+        sessions.opened("sess-1", "scribe");
+        sessions.closed("sess-1");
+        assert!(
+            !sessions.admits("sess-1", "scribe"),
+            "and a closed session does not linger"
+        );
     }
 
     #[test]

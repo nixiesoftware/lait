@@ -81,6 +81,17 @@ pub fn create_private_dir(path: &Path) -> Result<()> {
     imp::create_private_dir(path)
 }
 
+/// Tighten an existing secret's permissions in place, without reading or
+/// rewriting it.
+///
+/// For material written before it was private. Rewriting to fix permissions
+/// would mean reading the secret, holding it, and putting it back — three
+/// chances to lose it over a problem that is only about who may open the file.
+/// Idempotent, and safe to call on every load.
+pub fn harden_in_place(path: &Path) -> Result<()> {
+    imp::harden_in_place(path)
+}
+
 /// Write `bytes` to `path` with owner-only access, applying `wrap`.
 ///
 /// The parent directory must already be private — call [`create_private_dir`]
@@ -169,6 +180,16 @@ mod imp {
         f.write_all(bytes).context("write secret file")?;
         f.sync_all().context("fsync secret file")?;
         Ok(())
+    }
+
+    pub(super) fn harden_in_place(path: &Path) -> Result<()> {
+        let metadata = std::fs::metadata(path).context("read secret file metadata")?;
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o077 == 0 {
+            return Ok(());
+        }
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions).context("tighten secret file")
     }
 
     /// No user-bound wrap outside Windows; the `0o600` DACL equivalent is the
@@ -360,6 +381,23 @@ mod imp {
         Ok(())
     }
 
+    /// Not implemented here, and that is stated rather than faked.
+    ///
+    /// Windows has no mode bits to flip — the DACL is the permission — so
+    /// hardening in place means replacing an existing file's security
+    /// descriptor with `SetNamedSecurityInfoW`. That is Windows-only code, and
+    /// writing security code that no one has compiled or run is worse than not
+    /// having it: it reads as a control and is not one.
+    ///
+    /// A file *created* here still gets the owner-only descriptor from
+    /// `write_private`, so this affects only material written before that was
+    /// true. The caller logs the refusal, which is the honest state of it.
+    pub(super) fn harden_in_place(_path: &Path) -> Result<()> {
+        anyhow::bail!(
+            "tightening an existing secret's permissions in place is not implemented on Windows"
+        )
+    }
+
     pub(super) fn write_private(path: &Path, bytes: &[u8], create: Create) -> Result<()> {
         use std::io::Write;
         let mut sd = PrivateSd::new()?;
@@ -454,6 +492,35 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    /// Material written before it was private stays readable until something
+    /// tightens it. An agent seed is the case that made this necessary: it was
+    /// written 0644, and it both signs as the agent and is the root of the
+    /// credential that reaches this device over HTTP.
+    #[cfg(unix)]
+    #[test]
+    fn hardening_in_place_closes_a_secret_that_was_written_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("harden");
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let path = dir.join("secret.key");
+        std::fs::write(&path, b"seed").expect("written the old way");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("as it landed under a typical umask");
+
+        harden_in_place(&path).expect("tightened");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "no group or other access remains");
+        assert_eq!(
+            std::fs::read(&path).expect("still readable by us"),
+            b"seed",
+            "and the secret itself is untouched"
+        );
+        harden_in_place(&path).expect("idempotent");
+    }
+
     use super::*;
 
     fn tmp(name: &str) -> std::path::PathBuf {
