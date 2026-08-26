@@ -116,38 +116,38 @@ function RailItem({ pane, current, onPick, label, dot = false }: {
   </button>;
 }
 
+/**
+ * A settings window, not a page.
+ *
+ * The rail names the section, so a pane does not repeat it in a heading, and
+ * a row states its fact on one line instead of introducing it in a sentence
+ * first. Prose here is a cost: at 560 wide it pushes the thing somebody came
+ * for below the fold, and a person opening a settings window already knows
+ * what settings are.
+ *
+ * What survives is the text that carries a fact nothing else can — an absence
+ * that has to say which kind it is, and nothing else.
+ */
 function GeneralPane({ snapshot }: { snapshot: WorldSettingsSnapshot }) {
-  return <>
-    <h1>{snapshot.name}</h1>
-    <p className="settings-prose">Runtime and location details reported by this World.</p>
-    <SettingsSection title="APPLICATION">
-      <Setting label="IMPLEMENTATION VERSION"
-        value={snapshot.version === null ? "Not reported" : `v${snapshot.version}`} />
-    </SettingsSection>
-    <SettingsSection title="LOCATIONS">
-      <Setting label="WORLD MOUNT" value={snapshot.worldMount} mono />
-      <Setting label="ENTRY PATH" value={snapshot.entryPath ?? "Not declared"} mono />
-    </SettingsSection>
-  </>;
+  return <Group>
+    <Row label="Version" value={snapshot.version === null ? "Not reported" : `v${snapshot.version}`} />
+    <Row label="Mount" value={snapshot.worldMount} mono />
+    <Row label="Entry path" value={snapshot.entryPath ?? "Not declared"} mono />
+  </Group>;
 }
 
 function InstancePane({ snapshot }: { snapshot: WorldSettingsSnapshot }) {
-  return <>
-    <h1>Instance</h1>
-    <p className="settings-prose">Where this World is being served from right now.</p>
-    <SettingsSection title="ACTIVE INSTANCE">
-      <Setting label="ORIGIN" value={snapshot.activeOrigin ?? "Not reported"} mono />
-    </SettingsSection>
-  </>;
+  return <Group>
+    <Row label="Origin" value={snapshot.activeOrigin ?? "Not reported"} mono />
+  </Group>;
 }
 
 /**
  * Developer options.
  *
  * Always present, never hidden behind a gesture: a mode that has to be
- * discovered is a mode nobody audits. What is deliberate is *entering* it —
- * one switch, remembered per World — and what it turns on is stated before it
- * is offered.
+ * discovered is a mode nobody audits. Entering it is the deliberate part —
+ * one switch, remembered per World.
  */
 function DeveloperPane({ snapshot, world, view, dispatch }: {
   snapshot: WorldSettingsSnapshot;
@@ -167,38 +167,17 @@ function DeveloperPane({ snapshot, world, view, dispatch }: {
 
   if (view === null) {
     // Not "no developer options" — this window could not reach the client, and
-    // the two are different facts. Offering controls that cannot dispatch
-    // would be the worse of the two.
-    return <>
-      <h1>Developer</h1>
-      <p className="settings-prose settings-absent">
-        This window could not reach Astrolabe, so these options cannot be offered.
-        The details on the other pages are from when the window opened.
-      </p>
-    </>;
+    // the two are different facts.
+    return <p className="settings-absent">Astrolabe is not reachable from this window.</p>;
   }
 
   return <>
-    <h1>Developer</h1>
-    <p className="settings-prose">
-      Which of {snapshot.name}&rsquo;s published streams this device follows. It
-      changes what this device installs, not what anyone else runs.
-    </p>
-    <p className="settings-note">
-      To work on this World&rsquo;s own pages, add a local World instead — a
-      directory on this device is its own entry, never a released one wearing a
-      different source.
-    </p>
-    <label className="settings-switch-row">
-      <span className="settings-switch-label">Developer options</span>
-      <input type="checkbox" checked={enabled} onChange={(event) => enable(event.target.checked)} />
-    </label>
-    {enabled && world !== null && <>
-      <ChannelCard world={world} view={view} dispatch={dispatch} />
-    </>}
-    {enabled && world === null && <p className="settings-prose settings-absent">
-      This World is not in the Library this client is showing, so there is nothing
-      to point at yet.
+    <Group>
+      <SwitchRow label="Developer options" checked={enabled} onChange={enable} />
+    </Group>
+    {enabled && world !== null && <ChannelGroup world={world} view={view} dispatch={dispatch} />}
+    {enabled && world === null && <p className="settings-absent">
+      This World is not in the Library this client is showing.
     </p>}
   </>;
 }
@@ -206,60 +185,60 @@ function DeveloperPane({ snapshot, world, view, dispatch }: {
 /**
  * Which stream this World follows.
  *
- * Per World, because a World is published on its own channel pointer. Its own
- * choice and the device's are different facts and the control says which one is
- * answering — "Test" because this World was set to test is not the same state
- * as "Test" because the device is on test, and a radio that showed them
- * identically would make the second look like a decision somebody made here.
+ * One row, one control. "Follow this device" is a separate option from the
+ * channel the device happens to be on: one follows whatever the device
+ * becomes, the other is a decision, and a control that drew them the same way
+ * would report a default as a choice.
  */
-function ChannelCard({ world, view, dispatch }: {
+function ChannelGroup({ world, view, dispatch }: {
   world: LibraryWorld;
   view: ClientView;
   dispatch(action: ClientAction): Promise<void>;
 }) {
   const busy = view.inFlight.includes(actionKey.followWorldChannel(world.worldMount));
   const selection = channelSelection(world);
-  const choose = (channel: string | null) =>
-    void dispatch({ type: "followWorldChannel", world: world.worldMount, channel });
-
-  return <SettingsSection title="CHANNEL">
-    <p className="settings-prose">
-      Which of this World's published streams this device follows when it checks
-      for an update.
-    </p>
-    <ChannelChoice label="Follow this device" hint="Whatever the device is set to"
-      checked={selection === "device"} busy={busy} onPick={() => choose(null)} />
-    <ChannelChoice label="Stable" hint="Published releases"
-      checked={selection === "stable"} busy={busy} onPick={() => choose("stable")} />
-    <ChannelChoice label="Test" hint="Candidates, before they are promoted"
-      checked={selection === "test"} busy={busy} onPick={() => choose("test")} />
-    {selection === "unknown" && <p className="settings-note">
-      This World is set to follow &ldquo;{world.channel}&rdquo;, which this build
-      does not know. Choosing above replaces it.
-    </p>}
-  </SettingsSection>;
+  return <Group>
+    <div className="settings-row">
+      <span className="settings-row-label">Channel</span>
+      <select
+        className="settings-select"
+        aria-label="Channel"
+        disabled={busy}
+        value={selection}
+        onChange={(event) => void dispatch({
+          type: "followWorldChannel",
+          world: world.worldMount,
+          channel: event.target.value === "device" ? null : event.target.value,
+        })}>
+        <option value="device">Follow this device</option>
+        <option value="stable">Stable</option>
+        <option value="test">Test</option>
+        {selection === "unknown" && <option value="unknown" disabled>{world.channel}</option>}
+      </select>
+    </div>
+  </Group>;
 }
 
-function ChannelChoice({ label, hint, checked, busy, onPick }: {
-  label: string; hint: string; checked: boolean; busy: boolean; onPick(): void;
-}) {
-  return <label className="settings-choice">
-    <input type="radio" checked={checked} disabled={busy} onChange={onPick} />
-    <span className="settings-choice-label">{label}</span>
-    <span className="settings-choice-hint">{hint}</span>
-  </label>;
+/** A grouped card: the desktop idiom, rows divided by a hairline. */
+function Group({ children }: { children: React.ReactNode }) {
+  return <section className="settings-group">{children}</section>;
 }
 
-function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="settings-card">
-    <span className="fact-label">{title}</span>
-    {children}
-  </section>;
-}
-
-function Setting({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return <div className="setting-row">
-    <span className="fact-label">{label}</span>
-    {mono ? <code>{value}</code> : <span>{value}</span>}
+/** Label left, fact right, one line. */
+function Row({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return <div className="settings-row">
+    <span className="settings-row-label">{label}</span>
+    {mono ? <code className="settings-row-value">{value}</code>
+      : <span className="settings-row-value">{value}</span>}
   </div>;
+}
+
+function SwitchRow({ label, checked, onChange }: {
+  label: string; checked: boolean; onChange(next: boolean): void;
+}) {
+  return <label className="settings-row">
+    <span className="settings-row-label">{label}</span>
+    <input type="checkbox" role="switch" checked={checked}
+      onChange={(event) => onChange(event.target.checked)} />
+  </label>;
 }
