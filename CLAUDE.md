@@ -346,6 +346,42 @@ reads that readiness line.
 Kill running daemons first — a running `lait` binary holds the `.exe` lock and the
 link step fails (`taskkill //F //IM lait.exe` on Windows).
 
+### Seeing a viewer change in the real client window
+
+`npm run dev` puts the viewer in a browser tab. It is *not* what the client
+serves: a head reads a World's page only from that World's selected installed
+release, so a page built here is invisible to the window until it is packaged,
+signed, published to a feed and installed. That is how a World travels; it is
+not how one is written.
+
+`LAIT_WORLD_LINK` is the seam between the two. It names a directory to serve in
+place of the release, for one World, for the life of the process that holds it:
+
+```sh
+LAIT_WORLD_LINK="com.lait.issues=$PWD/products/issues-app/assets/web" \
+  npm run tauri dev                   # in apps/astrolabe-web
+```
+
+The loop is then `(cd viewer && npm run build)` and reload the World window.
+Several Worlds can be linked at once, comma separated. Read by the head, so it
+reaches the daemon the client spawns and the head under that — set it on
+whatever you launch.
+
+Three rules it holds to, each of them a defect it exists to avoid:
+
+- **A link outranks the release, and says so.** Every head that comes up on one
+  logs a warning naming the directory. A machine serving somebody's working
+  tree while believing it serves 0.9.3 is worse than the friction removed.
+- **A link that cannot be served refuses.** A path that is relative, missing,
+  or not a directory serves *nothing* rather than falling back — falling back
+  serves stale release bytes to somebody who just asked for their own, and
+  looks exactly like an edit that did nothing.
+- **It is environmental, never recorded.** A link in a file outlives the
+  afternoon that wanted it.
+
+It does not make the World appear in the Library — that is the installation's
+job, and linking is about which bytes a head reads, not about what is installed.
+
 ## Verifying
 
 - Viewer: `cd viewer && npm run check && npm run test` (`tsc -b --noEmit`, then

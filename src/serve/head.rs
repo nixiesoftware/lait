@@ -95,18 +95,100 @@ pub fn installations_root(identity: &Path) -> PathBuf {
     identity.join("world-bundles-v1")
 }
 
+/// The environment variable that links a World to a directory being worked on.
+pub const LINK_VAR: &str = "LAIT_WORLD_LINK";
+
 /// Serve a World's selected installed bundle, when one is installed for it.
 ///
 /// Nothing here reads a declaration or verifies bytes: staging is what proves
 /// a bundle *and* what decides whether this build can run it, so a directory
 /// present under a World's name is one that was proven and admitted when it
 /// landed. What this settles is only *which* source a head serves from.
+///
+/// A link ([`LINK_VAR`]) is the one thing that outranks the release, and it
+/// exists because the alternative was worse. Building a World's page and
+/// looking at it in the real window otherwise meant packaging a release,
+/// signing it, publishing it to a feed and installing it — so the loop for a
+/// one-line change ran through the whole distribution pipeline, and the
+/// pipeline is not what was being tested. This is the seam that was missing:
+/// **an immutable signed release is how a World travels, not how it is
+/// written.**
+///
+/// It is deliberately environmental rather than recorded. A link that lives
+/// in a file outlives the afternoon that wanted it, and a machine serving
+/// somebody's working tree while believing it serves 0.9.3 is a worse defect
+/// than the friction it removes. This one dies with the process that was
+/// launched holding it, and says so in the log every time a head comes up.
 pub fn activate(worlds: &Path, world: &str) -> Source {
+    match linked(&std::env::var(LINK_VAR).unwrap_or_default(), world) {
+        Link::None => {}
+        Link::Directory(dir) => {
+            tracing::warn!(
+                %world,
+                dir = %dir.display(),
+                "serving a linked directory — this head is NOT serving the installed release"
+            );
+            return Source::activated(dir);
+        }
+        // Declared and unusable: refuse rather than fall through. Serving the
+        // release here would answer a question nobody asked — a typo in a path
+        // would look exactly like an edit that did nothing, which is the one
+        // failure this whole seam exists to stop producing.
+        Link::Unusable(why) => {
+            tracing::error!(%world, %why, "refusing a linked World; serving nothing");
+            return Source::unavailable();
+        }
+    }
     if let Some(candidate) = crate::update::world::active_dir(worlds, world) {
         tracing::info!(bundle = %candidate.display(), %world, "serving a staged World payload");
         return Source::activated(candidate);
     }
     Source::unavailable()
+}
+
+/// What [`LINK_VAR`] says about one World.
+#[derive(Debug, PartialEq, Eq)]
+enum Link {
+    /// Nothing was declared for this World. Every other World is unaffected by
+    /// a link naming one of its neighbours.
+    None,
+    /// Serve this directory.
+    Directory(PathBuf),
+    /// Declared, and cannot be served.
+    Unusable(String),
+}
+
+/// Read `<world>=<dir>` pairs, comma separated, and answer for one World.
+///
+/// Split from the environment so the parsing is testable without a process to
+/// set variables on — every interesting case here is a malformed declaration,
+/// and none of them should need a subprocess to reach.
+fn linked(declared: &str, world: &str) -> Link {
+    for entry in declared.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // The first `=` only: a World id never contains one, and a path is
+        // entitled to.
+        let Some((named, dir)) = entry.split_once('=') else {
+            continue;
+        };
+        if named.trim() != world {
+            continue;
+        }
+        let dir = Path::new(dir.trim());
+        // Relative would resolve against the daemon's working directory, which
+        // is whatever launched it and is nobody's intent.
+        if !dir.is_absolute() {
+            return Link::Unusable(format!("{} is not an absolute path", dir.display()));
+        }
+        if !dir.is_dir() {
+            return Link::Unusable(format!("{} is not a directory", dir.display()));
+        }
+        return Link::Directory(dir.to_path_buf());
+    }
+    Link::None
 }
 
 #[cfg(test)]
@@ -123,6 +205,98 @@ mod tests {
             std::fs::write(&at, bytes).expect("a bundle file");
         }
         dir
+    }
+
+    /// The loop this exists for: a directory being worked on, named for one
+    /// World, served in place of its release.
+    #[test]
+    fn a_linked_world_is_served_from_the_directory_it_names() {
+        let dir = bundle_with(&[("index.html", b"from the working tree")]);
+        let declared = format!("com.lait.issues={}", dir.path().display());
+        assert_eq!(
+            linked(&declared, "com.lait.issues"),
+            Link::Directory(dir.path().to_path_buf())
+        );
+    }
+
+    /// A link names one World. Its neighbours must go on serving their
+    /// releases, or linking a World under development would take out every
+    /// other World on the machine.
+    #[test]
+    fn a_link_says_nothing_about_a_world_it_does_not_name() {
+        let dir = bundle_with(&[]);
+        let declared = format!("com.lait.issues={}", dir.path().display());
+        assert_eq!(linked(&declared, "com.lait.signage"), Link::None);
+    }
+
+    #[test]
+    fn several_worlds_can_be_linked_at_once() {
+        let issues = bundle_with(&[]);
+        let signage = bundle_with(&[]);
+        let declared = format!(
+            "com.lait.issues={} , com.lait.signage={}",
+            issues.path().display(),
+            signage.path().display()
+        );
+        assert_eq!(
+            linked(&declared, "com.lait.signage"),
+            Link::Directory(signage.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn nothing_declared_links_nothing() {
+        assert_eq!(linked("", "com.lait.issues"), Link::None);
+    }
+
+    /// The failure this refuses to make quiet. A path that is gone — renamed,
+    /// or never right — must not fall back to the installed release: that
+    /// serves stale bytes to somebody who just asked for their own, and it
+    /// looks exactly like an edit that did nothing.
+    #[test]
+    fn a_link_pointing_nowhere_is_refused_rather_than_falling_back() {
+        let dir = bundle_with(&[]);
+        let gone = dir.path().join("was-never-here");
+        let declared = format!("com.lait.issues={}", gone.display());
+        assert!(matches!(
+            linked(&declared, "com.lait.issues"),
+            Link::Unusable(_)
+        ));
+    }
+
+    /// A relative path resolves against the daemon's working directory, which
+    /// is whatever happened to launch it — the client, a shell, or launchd.
+    #[test]
+    fn a_relative_link_is_refused_because_nobody_means_the_daemons_cwd() {
+        assert!(matches!(
+            linked(
+                "com.lait.issues=products/issues-app/assets/web",
+                "com.lait.issues"
+            ),
+            Link::Unusable(_)
+        ));
+    }
+
+    /// `activate` prefers the link, and says so loudly enough that a machine
+    /// cannot be serving a working tree while believing it serves a release.
+    #[test]
+    fn a_link_outranks_the_installed_release() {
+        let worlds = tempfile::tempdir().expect("an installations root");
+        let working = bundle_with(&[("index.html", b"from the working tree")]);
+        let declared = format!("com.lait.issues={}", working.path().display());
+        // Not through the environment: these tests share a process, and a
+        // variable set in one is set in all of them.
+        assert_eq!(
+            linked(&declared, "com.lait.issues"),
+            Link::Directory(working.path().to_path_buf())
+        );
+        // And with nothing declared, the release path is untouched.
+        assert!(
+            activate(worlds.path(), "com.lait.issues")
+                .bundle()
+                .is_none(),
+            "an unlinked, uninstalled World still serves nothing"
+        );
     }
 
     #[test]
