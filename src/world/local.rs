@@ -57,6 +57,43 @@ pub fn registrations_root(identity: &Path) -> PathBuf {
 pub struct Registration {
     /// The tree this World is read from. Absolute, and re-proved on read.
     pub dir: PathBuf,
+    /// What the tree said about itself and what it would execute, when it was
+    /// added.
+    ///
+    /// Consent to a *path* is not consent to *bytes*. A registered tree stays
+    /// fully writable — a `git pull`, a rebuild, or anything else with write
+    /// access to the folder silently changes what launches at every daemon
+    /// start, forever, with an unbounded window. This is the same falsifiability
+    /// argument this module makes against a recorded override, and it applies
+    /// here too.
+    ///
+    /// `None` is a registration written before this was recorded. It reads as
+    /// unverifiable rather than as verified — see [`Local::changed`].
+    #[serde(default)]
+    pub admitted: Option<Admitted>,
+}
+
+/// The digests taken when a tree was added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Admitted {
+    /// `world.json` — what the tree declares it is.
+    pub declaration: String,
+    /// The runner programs it declares, by relative path. A tree that declares
+    /// several is pinned on all of them.
+    pub programs: std::collections::BTreeMap<String, String>,
+}
+
+/// Whether a tree still matches what was consented to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The bytes are the ones that were added.
+    Unchanged,
+    /// The tree has changed since it was added, and needs confirming again.
+    Changed,
+    /// Nothing was recorded to compare against — a registration older than
+    /// this. Not "unchanged": an absence that cannot say which kind it is has
+    /// to say *that*, and the remedy is the same as Changed.
+    Unrecorded,
 }
 
 /// A registered local World, resolved against the tree it names.
@@ -74,6 +111,8 @@ pub struct Local {
     /// silently stops existing. A registration nobody can see is a
     /// registration nobody can remove.
     pub manifest: Option<WorldManifest>,
+    /// Whether the tree still holds the bytes that were consented to.
+    pub standing: Standing,
 }
 
 impl Local {
@@ -258,11 +297,58 @@ pub fn register(identity: &Path, handle: &str, dir: &Path) -> Result<String> {
     std::fs::create_dir_all(&root).context("create the local World registry")?;
     let encoded = serde_json::to_vec_pretty(&Registration {
         dir: dir.to_path_buf(),
+        admitted: Some(admitted(dir)?),
     })
     .context("encode the local World registration")?;
     std::fs::write(file_for(identity, &key)?, encoded)
         .context("write the local World registration")?;
     Ok(key)
+}
+
+/// Digest what a tree declares and what it would execute.
+///
+/// Taken at the moment somebody consents, so the consent is to these bytes
+/// rather than to a path that keeps changing under it. No signing authority is
+/// involved and none is claimed: this cannot say a tree is *trustworthy*, only
+/// that it is the same tree.
+fn admitted(dir: &Path) -> Result<Admitted> {
+    let declared = std::fs::read(dir.join("world.json")).context("read world.json")?;
+    let manifest = WorldManifest::parse(&declared)
+        .map_err(|error| anyhow::anyhow!("read world.json: {error}"))?;
+    let mut programs = std::collections::BTreeMap::new();
+    for runner in &manifest.runners {
+        let relative = runner.program.clone();
+        // A program this platform does not admit is still pinned: the tree is
+        // the same tree or it is not, and which runner *this* machine would
+        // pick is not the question being answered.
+        if let Ok(bytes) = std::fs::read(dir.join(&runner.program)) {
+            programs.insert(relative, blake3::hash(&bytes).to_hex().to_string());
+        }
+    }
+    Ok(Admitted {
+        declaration: blake3::hash(&declared).to_hex().to_string(),
+        programs,
+    })
+}
+
+/// Whether a tree still holds the bytes that were consented to.
+fn standing_of(dir: &Path, admitted: Option<&Admitted>) -> Standing {
+    let Some(admitted) = admitted else {
+        return Standing::Unrecorded;
+    };
+    let Ok(declared) = std::fs::read(dir.join("world.json")) else {
+        return Standing::Changed;
+    };
+    if blake3::hash(&declared).to_hex().to_string() != admitted.declaration {
+        return Standing::Changed;
+    }
+    for (relative, digest) in &admitted.programs {
+        match std::fs::read(dir.join(relative)) {
+            Ok(bytes) if blake3::hash(&bytes).to_hex().to_string() == *digest => {}
+            _ => return Standing::Changed,
+        }
+    }
+    Standing::Unchanged
 }
 
 /// Forget a local World. Forgetting one that is not registered is not a
@@ -296,10 +382,12 @@ pub fn list(identity: &Path) -> Vec<Local> {
             let manifest = std::fs::read(registration.dir.join("world.json"))
                 .ok()
                 .and_then(|bytes| WorldManifest::parse(&bytes).ok());
+            let standing = standing_of(&registration.dir, registration.admitted.as_ref());
             Some(Local {
                 key,
                 dir: registration.dir,
                 manifest,
+                standing,
             })
         })
         .collect();
@@ -373,6 +461,50 @@ mod tests {
             key_for("issues.dev").is_err(),
             "a World id label admits no dot"
         );
+    }
+
+    /// Consent to a path is not consent to bytes. A registered tree stays
+    /// fully writable, so a `git pull` — or anything else with write access to
+    /// the folder — silently changes what launches at every daemon start,
+    /// forever. The window is unbounded, which is the same falsifiability
+    /// argument this module makes against a recorded override.
+    #[test]
+    fn a_tree_that_changed_after_it_was_added_says_so() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+        register(identity.path(), "issues", dir.path()).expect("registers");
+        assert_eq!(list(identity.path())[0].standing, Standing::Unchanged);
+
+        std::fs::write(
+            dir.path().join("world.json"),
+            declaration("com.lait.issues").replace("0.0.0-local", "0.0.1-local"),
+        )
+        .expect("the tree moves on");
+        assert_eq!(
+            list(identity.path())[0].standing,
+            Standing::Changed,
+            "the row says the bytes are not the ones anybody agreed to"
+        );
+    }
+
+    /// A registration written before this was recorded reads as unverifiable,
+    /// never as verified. An absence that cannot say which kind it is has to
+    /// say *that*.
+    #[test]
+    fn a_registration_with_nothing_recorded_is_not_reported_as_unchanged() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+        register(identity.path(), "issues", dir.path()).expect("registers");
+        // Rewrite it the way an older build would have.
+        std::fs::write(
+            registrations_root(identity.path()).join("issues.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({ "dir": dir.path() }))
+                .expect("an older registration"),
+        )
+        .expect("written");
+        assert_eq!(list(identity.path())[0].standing, Standing::Unrecorded);
     }
 
     /// The pick is the act: a name is derived from what the tree already

@@ -230,6 +230,9 @@ pub struct LibraryRow {
     /// this device is working on — unsealed, with an id and mount the host
     /// assigned it, and not the World it may have been copied from.
     pub source_dir: Option<String>,
+    /// Whether a local World's tree still holds the bytes somebody agreed to.
+    /// `None` for a released World, which is not the same question.
+    pub source_standing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1762,6 +1765,7 @@ fn project(app: &App) -> ClientView {
                         .world_standing(&entry.world)
                         .and_then(|standing| standing.channel.clone()),
                     source_dir: entry.source_dir.clone(),
+                    source_standing: entry.source_standing.clone(),
                 })
                 .collect()
         }),
@@ -2404,6 +2408,7 @@ mod tests {
                 accent: Some(0x00AA_66FF),
                 version: Some(7),
                 source_dir: None,
+                source_standing: None,
             },
             LibraryEntry {
                 world_mount: "notes".into(),
@@ -2415,6 +2420,7 @@ mod tests {
                 accent: None,
                 version: None,
                 source_dir: None,
+                source_standing: None,
             },
         ]);
 

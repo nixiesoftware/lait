@@ -196,6 +196,23 @@ function DeveloperPane({ snapshot, world, view, dispatch }: {
  * from beside the row that opens it is how somebody removes the wrong one.
  * Nothing on disk is touched: the tree belongs to whoever made it.
  */
+/**
+ * What the tree's digests say, in words.
+ *
+ * "Changed" is the one that matters: consent was to the bytes that were there
+ * when it was added, and a tree stays writable afterwards. "Unrecorded" is not
+ * "unchanged" — a registration older than the check cannot say, and an absence
+ * that cannot say which kind it is has to say that.
+ */
+function treeStanding(standing: string | null): string {
+  switch (standing) {
+    case "unchanged": return "As added";
+    case "changed": return "Changed since you added it";
+    case "unrecorded": return "Not recorded when added";
+    default: return "Not a local World";
+  }
+}
+
 function LocalGroup({ world, view, dispatch }: {
   world: LibraryWorld;
   view: ClientView;
@@ -209,6 +226,7 @@ function LocalGroup({ world, view, dispatch }: {
   return <>
     <Group>
       <Row label="Read from" value={world.sourceDir ?? "Not recorded"} mono />
+      <Row label="Tree" value={treeStanding(world.sourceStanding)} />
     </Group>
     <Group>
       <div className="settings-row">

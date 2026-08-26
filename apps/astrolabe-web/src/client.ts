@@ -26,6 +26,10 @@ export interface LibraryWorld {
    *  A row carrying this is a tree being worked on — unsealed, under an id and
    *  mount the host assigned it, and not the World it was copied from. */
   sourceDir: string | null;
+  /** Whether a local World's tree still holds the bytes somebody agreed to:
+   *  "unchanged", "changed", or "unrecorded". `null` for a released World —
+   *  a different question, not a reassuring answer to this one. */
+  sourceStanding: string | null;
 }
 
 export interface WorldInstall {
@@ -936,6 +940,7 @@ export const fixtureClientView: ClientView = {
     install: null,
     channel: null,
     sourceDir: null,
+    sourceStanding: null,
   }],
   heads: [],
   host: {

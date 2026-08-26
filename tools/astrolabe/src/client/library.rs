@@ -188,6 +188,13 @@ pub struct LibraryEntry {
     /// of its own. A surface that draws a World and not this would be offering
     /// unsealed bytes under a released World's face.
     pub source_dir: Option<String>,
+    /// Whether a local World's tree still holds the bytes somebody agreed to.
+    ///
+    /// `"unchanged"`, `"changed"`, or `"unrecorded"` — and `None` for a
+    /// released World, which is not the same question. `"unrecorded"` is not
+    /// `"unchanged"`: a registration written before this was taken cannot say,
+    /// and an absence that cannot say which kind it is has to say that.
+    pub source_standing: Option<String>,
 }
 
 /// A World's own artwork, read from its selected immutable release.
@@ -353,6 +360,7 @@ fn local_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
                     accent: None,
                     version: None,
                     source_dir: None,
+                    source_standing: None,
                 },
             };
             // The host's assignment, never the tree's declaration — a local
@@ -360,6 +368,14 @@ fn local_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
             entry.world_mount = mount;
             entry.world = world.as_str().to_owned();
             entry.source_dir = Some(local.dir.to_string_lossy().into_owned());
+            entry.source_standing = Some(
+                match local.standing {
+                    lait::world::local::Standing::Unchanged => "unchanged",
+                    lait::world::local::Standing::Changed => "changed",
+                    lait::world::local::Standing::Unrecorded => "unrecorded",
+                }
+                .to_owned(),
+            );
             Some(entry)
         })
         .collect()
@@ -404,9 +420,10 @@ fn library_entry(
         tagline: manifest.tagline,
         accent: manifest.accent,
         version: manifest.implementation_version,
-        // A released World reads from its release. `local_for` overrides this
+        // A released World reads from its release. `local_for` overrides these
         // for the rows that do not.
         source_dir: None,
+        source_standing: None,
     }
 }
 
@@ -597,6 +614,7 @@ mod tests {
             accent: None,
             version: None,
             source_dir: None,
+            source_standing: None,
         };
         assert!(
             entry.entry_path.is_none(),

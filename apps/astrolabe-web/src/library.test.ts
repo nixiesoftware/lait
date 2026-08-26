@@ -27,6 +27,7 @@ function world(mount: string): LibraryWorld {
     install: null,
     channel: null,
     sourceDir: null,
+    sourceStanding: null,
   };
 }
 

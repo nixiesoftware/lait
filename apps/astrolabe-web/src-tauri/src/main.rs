@@ -207,6 +207,8 @@ struct WebLibraryWorld {
     channel: Option<String>,
     /// The directory a local World is read from; `None` is a released World.
     source_dir: Option<String>,
+    /// Whether that tree still holds the bytes somebody agreed to.
+    source_standing: Option<String>,
     display_name: String,
     opens_at: Option<String>,
     version: Option<u32>,
@@ -575,6 +577,7 @@ impl From<ClientView> for WebClientView {
                             install,
                             channel,
                             source_dir,
+                            source_standing,
                         } = row;
                         WebLibraryWorld {
                             key,
@@ -587,6 +590,7 @@ impl From<ClientView> for WebClientView {
                             accent,
                             channel,
                             source_dir,
+                            source_standing,
                             people: people.map(|people| {
                                 people
                                     .into_iter()
