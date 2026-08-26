@@ -48,12 +48,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-restart-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("restart-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -165,7 +163,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
     // Founder: form, seed a project + first issue, mint an auto-approving invite.
     let founder_home = temp_home("founder");
     crate::world_fixture::found_space(&founder_home, &FOUNDER_SEED, "Restart Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &founder_home);
@@ -209,7 +207,11 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
     // Joiner: bootstrap the store from the invite, serve, drive admission.
     let joiner_home = temp_home("joiner");
     crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
-    let mut joiner_handle = Some(spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone()));
+    let mut joiner_handle = Some(spawn_daemon(
+        joiner_home.to_path_buf(),
+        JOINER_SEED,
+        net.clone(),
+    ));
     wait_online(&rt, &joiner_home);
 
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
@@ -288,7 +290,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
 
     // Restart the joiner on the SAME home. It re-docks from its persisted
     // membership (no re-admission) and, once Contact is re-driven, reconverges.
-    let joiner_handle = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), JOINER_SEED, net.clone());
     wait_online(&rt, &joiner_home);
 
     // It comes back already a member — membership is persisted, not re-earned.

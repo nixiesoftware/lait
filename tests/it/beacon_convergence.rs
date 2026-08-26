@@ -63,12 +63,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-beacon-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("beacon-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -235,13 +233,13 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     let net = MemNet::new();
     let founder_home = temp_home("f");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
 
     let member_home = temp_home("m");
     admit(&client, &member_home, &MEMBER_A_SEED, &founder_home);
-    let member_handle = spawn_daemon(member_home.clone(), MEMBER_A_SEED, net.clone());
+    let member_handle = spawn_daemon(member_home.to_path_buf(), MEMBER_A_SEED, net.clone());
     wait_online(&client, &member_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
     drive_admission(&client, &member_home, &founder_device);
@@ -405,13 +403,13 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
     let net = MemNet::new();
     let founder_home = temp_home("ring-f");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
 
     let member_home = temp_home("ring-m");
     admit(&client, &member_home, &MEMBER_A_SEED, &founder_home);
-    let member_handle = spawn_daemon(member_home.clone(), MEMBER_A_SEED, net.clone());
+    let member_handle = spawn_daemon(member_home.to_path_buf(), MEMBER_A_SEED, net.clone());
     wait_online(&client, &member_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
     drive_admission(&client, &member_home, &founder_device);
@@ -549,14 +547,14 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
     let net = MemNet::new();
     let founder_home = temp_home("acl-f");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "ACL Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
 
     let a_home = temp_home("acl-a");
     admit(&client, &a_home, &MEMBER_A_SEED, &founder_home);
-    let a_handle = spawn_daemon(a_home.clone(), MEMBER_A_SEED, net.clone());
+    let a_handle = spawn_daemon(a_home.to_path_buf(), MEMBER_A_SEED, net.clone());
     wait_online(&client, &a_home);
     drive_admission(&client, &a_home, &founder_device);
 
@@ -566,7 +564,7 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
     let watcher = {
-        let (frames, stop, home) = (frames.clone(), stop.clone(), a_home.clone());
+        let (frames, stop, home) = (frames.clone(), stop.clone(), a_home.to_path_buf());
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
@@ -592,7 +590,7 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
 
     let b_home = temp_home("acl-b");
     admit(&client, &b_home, &MEMBER_B_SEED, &founder_home);
-    let b_handle = spawn_daemon(b_home.clone(), MEMBER_B_SEED, net.clone());
+    let b_handle = spawn_daemon(b_home.to_path_buf(), MEMBER_B_SEED, net.clone());
     wait_online(&client, &b_home);
     drive_admission(&client, &b_home, &founder_device);
 
@@ -647,7 +645,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
     let net = MemNet::new();
     let founder_home = temp_home("hub");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Dead Hub Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
@@ -655,13 +653,13 @@ fn surviving_members_converge_after_the_approach_station_dies() {
     // Two members, admitted one after the other through the founder.
     let a_home = temp_home("a");
     admit(&client, &a_home, &MEMBER_A_SEED, &founder_home);
-    let a_handle = spawn_daemon(a_home.clone(), MEMBER_A_SEED, net.clone());
+    let a_handle = spawn_daemon(a_home.to_path_buf(), MEMBER_A_SEED, net.clone());
     wait_online(&client, &a_home);
     drive_admission(&client, &a_home, &founder_device);
 
     let b_home = temp_home("b");
     admit(&client, &b_home, &MEMBER_B_SEED, &founder_home);
-    let b_handle = spawn_daemon(b_home.clone(), MEMBER_B_SEED, net.clone());
+    let b_handle = spawn_daemon(b_home.to_path_buf(), MEMBER_B_SEED, net.clone());
     wait_online(&client, &b_home);
     drive_admission(&client, &b_home, &founder_device);
 
@@ -718,7 +716,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
             "{} never received the founder-created project",
             home.display()
         );
-        if home == &b_home {
+        if home.as_path() == b_home.as_path() {
             survivor_project = sees_project;
         }
     }

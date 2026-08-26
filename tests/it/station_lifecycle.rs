@@ -43,12 +43,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home() -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-odaemon-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home() -> crate::head::TempRoot {
+    crate::head::temp_root("odaemon")
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -114,7 +112,7 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Station Host Space").unwrap();
 
     // Run the daemon on its own thread.
-    let daemon_home = home.clone();
+    let daemon_home = home.to_path_buf();
     let daemon_net = net.clone();
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();

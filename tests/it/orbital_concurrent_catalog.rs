@@ -42,12 +42,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-ccat-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("concat-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -180,7 +178,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
     let net = MemNet::new();
     let founder_home = temp_home("founder");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Concurrent Catalog").unwrap();
-    let _founder = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let _founder = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &founder_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
@@ -219,7 +217,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
     };
     let joiner_home = temp_home("joiner");
     crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
-    let _joiner = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
+    let _joiner = spawn_daemon(joiner_home.to_path_buf(), JOINER_SEED, net.clone());
     wait_online(&rt, &joiner_home);
     let admitted = poll_until(Duration::from_secs(30), || {
         req(
@@ -269,7 +267,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
     };
     let viewer_home = temp_home("viewer");
     crate::world_fixture::enter_space(&viewer_home, &VIEWER_SEED, &vinvite).unwrap();
-    let _viewer = spawn_daemon(viewer_home.clone(), VIEWER_SEED, net.clone());
+    let _viewer = spawn_daemon(viewer_home.to_path_buf(), VIEWER_SEED, net.clone());
     wait_online(&rt, &viewer_home);
     let viewer_device = mechanics::actor::device_from_seed(&VIEWER_SEED).to_string();
     let vadmitted = poll_until(Duration::from_secs(30), || {

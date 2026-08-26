@@ -19,12 +19,81 @@ pub fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_lait")
 }
 
+/// A throwaway root for one test, removed when the test ends.
+///
+/// It has to be a guard rather than a path. The name carries the process id so
+/// two tests never share one, which also means the `remove_dir_all` this used
+/// to do on the way *in* could never match a previous run's directory — so
+/// nothing ever deleted one. A head test installs both World fixtures under
+/// here, so a full suite left gigabytes behind, every run, and the machine
+/// filled up days later with directories named after tests that had long since
+/// passed.
+///
+/// Removing on drop also covers the case that matters most: a test that
+/// panics. It unwinds through here, and the root goes with it.
+pub struct TempRoot {
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TempRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempRoot {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl TempRoot {
+    /// This root as a plain path.
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Adopt this root's canonical spelling.
+    ///
+    /// Windows' named pipe and the probe that looks for it have to agree on one
+    /// spelling of the same directory — the trap `launcher_safety` documents.
+    /// It is the same directory either way, so the guard still removes it.
+    #[must_use]
+    pub fn canonicalized(self) -> Self {
+        #[cfg(windows)]
+        {
+            let path = lait::config::canonical(&self.path);
+            // `self` still owns the original path and must not run its
+            // destructor while a second guard holds the same directory.
+            let held = std::mem::ManuallyDrop::new(self);
+            let _ = &held;
+            return TempRoot { path };
+        }
+        #[cfg(not(windows))]
+        self
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        // A root that will not go is not worth failing a passing test over —
+        // and on Windows it is usually a handle that closes a moment later.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// A throwaway root for one test, named after it.
-pub fn temp_root(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("lait-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
-    std::fs::create_dir_all(&root).expect("temp root");
-    root
+pub fn temp_root(tag: &str) -> TempRoot {
+    // A counter as well as the pid: `cargo test` runs a whole target in one
+    // process, so the pid alone collides between tests in the same binary.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("lait-{tag}-{}-{n}", std::process::id()));
+    std::fs::remove_dir_all(&path).ok();
+    std::fs::create_dir_all(&path).expect("temp root");
+    TempRoot { path }
 }
 
 /// Install the process fixtures through the same signed-channel and immutable
@@ -108,6 +177,8 @@ pub struct Head {
     child: Child,
     config: PathBuf,
     home: Option<PathBuf>,
+    /// Whether [`Head::stop`] already ran, so [`Drop`] does not redo it.
+    stopped: bool,
     pub port: u16,
     pub token: String,
 }
@@ -147,6 +218,7 @@ impl Head {
             child,
             config: config.to_path_buf(),
             home: home.map(Path::to_path_buf),
+            stopped: false,
             #[allow(clippy::as_conversions, reason = "a bound TCP port is a u16")]
             port: port as u16,
             token,
@@ -265,6 +337,11 @@ impl Head {
             .to_string()
     }
 
+    /// This head's own process id, for a test whose subject is reaping.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Is the head still up?
     ///
     /// `try_wait` polls rather than blocks, and reaps if the head has already
@@ -275,9 +352,32 @@ impl Head {
 
     /// Stop the head, then the daemon it started.
     pub fn stop(mut self) {
+        self.shut_down();
+    }
+
+    fn shut_down(&mut self) {
+        if std::mem::replace(&mut self.stopped, true) {
+            return;
+        }
         let _ = self.child.kill();
+        // `kill` only asks. Without the wait the child is a zombie, and on a
+        // suite that starts one per test the reaping is the point.
         let _ = self.child.wait();
         stop_daemon(&self.config, self.home.as_deref());
+    }
+}
+
+/// A test that panics must not leave a head — or the daemon under it — running.
+///
+/// `stop` is the graceful path and every passing test calls it. Nothing called
+/// anything on the failing path, and `Child`'s own drop neither kills nor
+/// reaps, so a single failed assertion orphaned a head, its daemon and every
+/// World runner beneath. Those hold the display coordinator's fixed port, so
+/// the *next* test failed too, and orphaned its own — one bad assertion turned
+/// into a suite-wide cascade that read as flakiness.
+impl Drop for Head {
+    fn drop(&mut self) {
+        self.shut_down();
     }
 }
 
@@ -351,9 +451,22 @@ pub fn stop_daemon(config: &Path, home: Option<&Path>) {
 /// signed and attributed as.
 pub struct Mcp {
     child: Child,
-    stdin: ChildStdin,
+    /// `None` once the session has been ended: closing this pipe is the signal
+    /// the server exits on, so shutting down has to be able to take it.
+    stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    /// Whether [`Mcp::stop`] already ran, so [`Drop`] does not redo it.
+    stopped: bool,
+}
+
+impl Mcp {
+    /// The pipe the server reads, while the session is open.
+    fn writer(&mut self) -> &mut ChildStdin {
+        self.stdin
+            .as_mut()
+            .expect("the MCP session was already ended")
+    }
 }
 
 impl Mcp {
@@ -380,9 +493,10 @@ impl Mcp {
         let stdout = BufReader::new(child.stdout.take().expect("mcp stdout"));
         let mut mcp = Mcp {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
             next_id: 0,
+            stopped: false,
         };
         mcp.request(
             "initialize",
@@ -398,7 +512,7 @@ impl Mcp {
 
     fn notify(&mut self, method: &str) {
         writeln!(
-            self.stdin,
+            self.writer(),
             "{}",
             serde_json::json!({ "jsonrpc": "2.0", "method": method })
         )
@@ -411,7 +525,7 @@ impl Mcp {
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
         writeln!(
-            self.stdin,
+            self.writer(),
             "{}",
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -421,7 +535,7 @@ impl Mcp {
             })
         )
         .expect("write request");
-        self.stdin.flush().ok();
+        self.writer().flush().ok();
         loop {
             let mut line = String::new();
             let read = self.stdout.read_line(&mut line).expect("read mcp stdout");
@@ -478,11 +592,26 @@ impl Mcp {
 
     /// End the session. Dropping stdin is what tells the server to flush and
     /// exit, so it has to go before the wait.
-    pub fn stop(self) {
-        let Mcp {
-            mut child, stdin, ..
-        } = self;
-        drop(stdin);
-        let _ = child.wait();
+    pub fn stop(mut self) {
+        self.shut_down();
+    }
+
+    fn shut_down(&mut self) {
+        if std::mem::replace(&mut self.stopped, true) {
+            return;
+        }
+        // Closing stdin is what tells the server to flush and exit, so it has
+        // to go before the wait — otherwise this waits on a process that is
+        // still waiting on us.
+        self.stdin.take();
+        let _ = self.child.wait();
+    }
+}
+
+/// The same reaping [`Head`] needs, for the same reason: a panicking test
+/// never reaches `stop`, and `Child`'s drop neither closes stdin nor waits.
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        self.shut_down();
     }
 }

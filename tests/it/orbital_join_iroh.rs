@@ -30,12 +30,10 @@ const JOINER_SEED: [u8; 32] = [92u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root(tag: &str) -> std::path::PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-joiniroh-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_root(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("joiniroh-{tag}"))
 }
 
 fn registry() -> runtime::world::Catalog {

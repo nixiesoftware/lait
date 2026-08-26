@@ -41,12 +41,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-feat-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("prod-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -234,7 +232,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let net = MemNet::new();
     let home = temp_home("solo");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Feature Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &home);
 
@@ -1059,7 +1057,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     let net = MemNet::new();
     let founder_home = temp_home("f");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Follow Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
     ok(
@@ -1087,7 +1085,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     };
     let member_home = temp_home("m");
     crate::world_fixture::enter_space(&member_home, &MEMBER_SEED, &invite).unwrap();
-    let member_handle = spawn_daemon(member_home.clone(), MEMBER_SEED, net.clone());
+    let member_handle = spawn_daemon(member_home.to_path_buf(), MEMBER_SEED, net.clone());
     wait_online(&client, &member_home);
     let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
     assert!(

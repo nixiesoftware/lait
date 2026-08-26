@@ -21,16 +21,14 @@ const JOINER2_SEED: [u8; 32] = [63u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-adm-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_root(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("adm-{tag}"))
 }
 
 /// A founder with product policy seeded.
-fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
+fn founder(tag: &str) -> (crate::head::TempRoot, SpaceAuthority) {
     let root = temp_root(tag);
     let (mech, _c) = SpaceAuthority::form(&root, &FOUNDER_SEED, "Adm", vec![]).unwrap();
     crate::world_fixture::seed_founder_policy(&mech).unwrap();
@@ -43,7 +41,7 @@ fn joiner_admission(
     invite: &runtime::coordinates::SignedCoordinates,
     seed: &[u8; 32],
     tag: &str,
-) -> (PathBuf, SpaceAuthority, Vec<u8>) {
+) -> (crate::head::TempRoot, SpaceAuthority, Vec<u8>) {
     let root = temp_root(tag);
     let mech = SpaceAuthority::enter(&root, seed, invite).unwrap();
     let admission_record = mech

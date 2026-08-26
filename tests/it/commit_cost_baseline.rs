@@ -46,12 +46,10 @@ const EPOCH_KEY: [u8; 32] = [4u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_store(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-baseline-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_store(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("baseline-{tag}"))
 }
 
 fn space() -> SpaceId {
@@ -257,7 +255,7 @@ struct Measurement {
 /// Build `bodies` Bodies, then time `samples` further single-Body edits.
 fn measure(bodies: u64, samples: usize) -> Measurement {
     let dir = temp_store(&format!("{bodies}"));
-    let mut replica = Replica::open(&dir, keys()).expect("open store");
+    let mut replica = Replica::open(dir.as_path(), keys()).expect("open store");
     replica.set_supported(supported());
 
     let quota = *replica.quota();

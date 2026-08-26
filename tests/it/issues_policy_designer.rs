@@ -41,12 +41,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home() -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-policy-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home() -> crate::head::TempRoot {
+    crate::head::temp_root("policy")
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -159,7 +157,7 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     write_identity(&home, &FOUNDER_SEED);
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Policy Space").unwrap();
 
-    let daemon_home = home.clone();
+    let daemon_home = home.to_path_buf();
     let daemon_net = net.clone();
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();

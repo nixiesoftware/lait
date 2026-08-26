@@ -25,12 +25,10 @@ const C3_SEED: [u8; 32] = [15u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-cer-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_root(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("cer-{tag}"))
 }
 
 fn now_secs() -> u64 {
@@ -47,7 +45,7 @@ fn device_of(seed: &[u8; 32]) -> String {
 }
 
 /// A founder with product policy seeded.
-fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
+fn founder(tag: &str) -> (crate::head::TempRoot, SpaceAuthority) {
     let root = temp_root(tag);
     let (mech, _c) = SpaceAuthority::form(&root, &FOUNDER_SEED, "Cer", vec![]).unwrap();
     crate::world_fixture::seed_founder_policy(&mech).unwrap();
@@ -56,7 +54,11 @@ fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
 
 /// Admit a fresh member under the founder via the real acceptance→redemption
 /// path, returning the member's own mechanics handle.
-fn admit(founder: &SpaceAuthority, seed: &[u8; 32], tag: &str) -> (PathBuf, SpaceAuthority) {
+fn admit(
+    founder: &SpaceAuthority,
+    seed: &[u8; 32],
+    tag: &str,
+) -> (crate::head::TempRoot, SpaceAuthority) {
     let admission = founder
         .mint_admission(
             &FOUNDER_SEED,
@@ -524,16 +526,22 @@ fn a_cold_restart_mid_ceremony_resumes_without_regenerating_material() {
     let space = f.space();
     drop(f);
     let f = SpaceAuthority::open(&rf, &space, &FOUNDER_SEED).unwrap();
-    let c1m = {
+    // The roots are bound for the rest of the test, not inside the block that
+    // reopens from them: they remove their directory when they go, and a store
+    // deleted the moment it is reopened is a cold restart onto nothing.
+    let (rc1, c1m) = {
         let (root, m) = c1;
         drop(m);
-        SpaceAuthority::open(&root, &space, &C1_SEED).unwrap()
+        let reopened = SpaceAuthority::open(&root, &space, &C1_SEED).unwrap();
+        (root, reopened)
     };
-    let c2m = {
+    let (rc2, c2m) = {
         let (root, m) = c2;
         drop(m);
-        SpaceAuthority::open(&root, &space, &C2_SEED).unwrap()
+        let reopened = SpaceAuthority::open(&root, &space, &C2_SEED).unwrap();
+        (root, reopened)
     };
+    let _held = (&rc1, &rc2);
     converge(&[&f, &c1m, &c2m]);
     let after = f.recovery_status();
     assert_eq!(

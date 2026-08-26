@@ -48,12 +48,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-ctrl-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("ctrl-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -142,7 +140,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
     let space = lait::orbital::discover_space(&home).single().unwrap();
     let address = OrbitAddress::for_store(&home, space.clone());
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net);
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
 
@@ -310,7 +308,7 @@ fn stale_since_after_restart_yields_reset() {
     let net = MemNet::new();
     let home = temp_home("stale");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -391,7 +389,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
     let net = MemNet::new();
     let home = temp_home("dirty");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -521,7 +519,7 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
     let net = MemNet::new();
     let home = temp_home("fanout");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -578,7 +576,7 @@ fn validate_then_commit_rings_no_doorbell() {
     let net = MemNet::new();
     let home = temp_home("reject");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);

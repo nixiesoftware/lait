@@ -47,12 +47,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-2node-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("2node-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -135,7 +133,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     let founder_home = temp_home("founder");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Two Node Space").unwrap();
 
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -206,7 +204,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     let joiner_home = temp_home("joiner");
     crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
 
-    let joiner_handle = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), JOINER_SEED, net.clone());
     wait_online(&client, &joiner_home);
 
     // Before admission the joiner is pending: no epoch key, no standing.
@@ -380,7 +378,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
 
     let founder_home = temp_home("recip-founder");
     crate::world_fixture::found_space(&founder_home, &F_SEED, "Reciprocal Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), F_SEED, net.clone());
 
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -401,7 +399,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
     // Joiner bootstraps from the link and serves.
     let joiner_home = temp_home("recip-joiner");
     crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
-    let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
 
     // Only the JOINER drives Connect (to the invite's approach Station). The
@@ -444,7 +442,7 @@ fn members_promote_and_demote_over_the_socket() {
 
     let founder_home = temp_home("role-founder");
     crate::world_fixture::found_space(&founder_home, &F_SEED, "Role Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), F_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
 
@@ -462,7 +460,7 @@ fn members_promote_and_demote_over_the_socket() {
     };
     let joiner_home = temp_home("role-joiner");
     crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
-    let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
     let approach = mechanics::actor::device_from_seed(&F_SEED).to_string();
     let admitted = poll_until(Duration::from_secs(25), || {

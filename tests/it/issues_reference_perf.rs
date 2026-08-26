@@ -83,12 +83,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-perf-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("perf-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -186,7 +184,9 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
 
 /// One admitted non-founder actor: its home, seed, device hex, and role tier.
 struct FleetActor {
-    home: PathBuf,
+    /// Held, not just named: this removes the directory when the test
+    /// ends, so it has to outlive everything reading from it.
+    home: crate::head::TempRoot,
     device: String,
     writer: bool,
 }
@@ -544,8 +544,13 @@ fn issues_reference_performance_gate() {
     // writer[i % writers] on ITS OWN replica; each issue's per-issue events
     // (comments + the workflow start/stop gate pair) are authored by the same
     // actor. The distribution is a pure function of the issue index.
-    let mut writer_homes: Vec<PathBuf> = vec![founder_home.clone()];
-    writer_homes.extend(fleet.iter().filter(|f| f.writer).map(|f| f.home.clone()));
+    let mut writer_homes: Vec<PathBuf> = vec![founder_home.to_path_buf()];
+    writer_homes.extend(
+        fleet
+            .iter()
+            .filter(|f| f.writer)
+            .map(|f| f.home.to_path_buf()),
+    );
     let label_pool: Vec<String> = (0..16).map(|l| format!("area-{l:02}")).collect();
 
     let per_writer: Vec<Vec<usize>> = (0..writer_homes.len())
@@ -744,7 +749,7 @@ fn issues_reference_performance_gate() {
 
     // ---- measured families (on the founder's public socket) ----------------
     let refs = founder_refs;
-    let home = founder_home.clone();
+    let home = founder_home.to_path_buf();
     let focus = |rt: &tokio::runtime::Runtime| {
         issue_ok(
             rt,

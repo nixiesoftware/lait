@@ -49,12 +49,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-ipc-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("ccat-{tag}"))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -72,7 +70,9 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
 
 /// A running Space with its control socket live.
 struct Node {
-    home: PathBuf,
+    /// Held, not just named: this removes the directory when the test
+    /// ends, so it has to outlive everything reading from it.
+    home: crate::head::TempRoot,
     route: ControlRoute,
     rt: tokio::runtime::Runtime,
     _daemon: std::thread::JoinHandle<()>,
@@ -87,7 +87,7 @@ fn node(tag: &str) -> Node {
         address: OrbitAddress::for_store(&home, space),
     };
     let daemon = {
-        let home = home.clone();
+        let home = home.to_path_buf();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {

@@ -29,11 +29,8 @@ fn bin() -> &'static str {
 /// A self-contained identity home. Canonicalized on Windows so the daemon's
 /// named pipe and the probe agree on the spelling — the same trap
 /// `launcher_safety` documents.
-fn isolated_home(tag: &str) -> PathBuf {
-    let dir = temp_root(tag);
-    #[cfg(windows)]
-    let dir = lait::config::canonical(&dir);
-    dir
+fn isolated_home(tag: &str) -> crate::head::TempRoot {
+    temp_root(tag).canonicalized()
 }
 
 fn wait_healthy(client: &Client, budget: Duration) {
