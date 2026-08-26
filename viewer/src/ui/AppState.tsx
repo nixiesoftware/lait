@@ -16,7 +16,7 @@ import {
 
 import { errorKindOf } from "../api";
 import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
-import { Button, Popover } from "@astryxdesign/core";
+import { Button, Popover, Skeleton } from "@astryxdesign/core";
 import { cn } from "./primitives";
 
 export type ApplicationStateKind =
@@ -87,6 +87,44 @@ export function ApplicationState({
 export function EmptyState(props: Omit<React.ComponentProps<typeof ApplicationState>, "kind"> & { kind?: Extract<ApplicationStateKind, "empty" | "filtered-empty" | "unavailable"> }) {
   const { kind = "empty", ...rest } = props;
   return <ApplicationState kind={kind} {...rest} />;
+}
+
+/**
+ * The shape of the list that is coming, while it comes.
+ *
+ * A centred spinner over an empty pane says "something is happening" and
+ * nothing else: the pane is blank, the chrome is absent, and when the rows
+ * arrive everything jumps into place at once. Rows are a fixed `h-ctl-xl` — a
+ * rung on the control ladder, scaled by `--scale` — so standing in for them at
+ * the same rung means the arrival costs no movement.
+ *
+ * The `Skeleton` is the design system's own, and so is `--color-skeleton`: both
+ * were already here, and neither had a caller.
+ *
+ * Marked `aria-hidden` and wrapped in a live region that says the honest thing
+ * once. A screen reader has no use for eight grey bars, and eight of them
+ * announced individually is worse than silence.
+ */
+export function SkeletonRows({ rows = 8, label = "Loading" }: { rows?: number; label?: string }) {
+  return (
+    <div className="flex flex-1 flex-col" data-application-state="loading" aria-busy>
+      <span className="sr-only" role="status" aria-live="polite">
+        {label}
+      </span>
+      <div aria-hidden className="flex flex-col">
+        {Array.from({ length: rows }, (_, row) => (
+          <div key={row} className="border-line h-ctl-xl flex items-center gap-3 border-b px-4">
+            <Skeleton width={16} height={16} radius={4} />
+            <Skeleton width={64} height={10} radius={4} />
+            {/* Uneven, because a list is: a column of identical bars reads as a
+                table of one repeated value rather than as titles arriving. */}
+            <Skeleton width={`${34 + ((row * 13) % 38)}%`} height={10} radius={4} />
+            <span className="flex-1" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function LoadingState(props: Omit<React.ComponentProps<typeof ApplicationState>, "kind">) {

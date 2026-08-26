@@ -44,7 +44,7 @@ import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
 import { SPEC_KIND_LABEL } from "./core/specs";
 import { Activity } from "./ui/Activity";
-import { classifyFailure, EmptyState, InlineError, LoadingState, recoveryForError, StandingNotice, TrustPopover } from "./ui/AppState";
+import { classifyFailure, EmptyState, InlineError, recoveryForError, SkeletonRows, StandingNotice, TrustPopover } from "./ui/AppState";
 import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
@@ -2766,7 +2766,7 @@ export function App() {
               }}
             />
           ) : emptiness === "loading" ? (
-            <LoadingState title="Loading issues" body="Reading this project's local projection." />
+            <SkeletonRows label="Loading issues" />
           ) : emptiness === "no-projects" ? (
             // A first run, taught rather than apologised for: the heading names
             // the thing, the body says what it is and why you would want one,
