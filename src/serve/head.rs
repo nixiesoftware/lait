@@ -114,11 +114,17 @@ pub const LINK_VAR: &str = "LAIT_WORLD_LINK";
 /// **an immutable signed release is how a World travels, not how it is
 /// written.**
 ///
-/// It is deliberately environmental rather than recorded. A link that lives
-/// in a file outlives the afternoon that wanted it, and a machine serving
-/// somebody's working tree while believing it serves 0.9.3 is a worse defect
-/// than the friction it removes. This one dies with the process that was
-/// launched holding it, and says so in the log every time a head comes up.
+/// Two of them, in the order [`crate::update::feed::Channel::current`] already
+/// established for the node's channel: the environment first as a development
+/// convenience, then what somebody recorded, then the release.
+///
+/// The environment one dies with the process launched holding it, which makes
+/// it right for CI and a one-off. The recorded one is a deliberate choice made
+/// in a window, and it pays for outliving the afternoon by being **visible**
+/// wherever the World is — the Library row, its settings window, and the
+/// World's own window. Either way a head that comes up on one says so, because
+/// a machine serving somebody's working tree while believing it serves 0.9.3
+/// is a worse defect than the friction either removes.
 pub fn activate(worlds: &Path, world: &str) -> Source {
     match linked(&std::env::var(LINK_VAR).unwrap_or_default(), world) {
         Link::None => {}
@@ -126,7 +132,7 @@ pub fn activate(worlds: &Path, world: &str) -> Source {
             tracing::warn!(
                 %world,
                 dir = %dir.display(),
-                "serving a linked directory — this head is NOT serving the installed release"
+                "serving a linked directory ({LINK_VAR}) — this head is NOT serving the installed release"
             );
             return Source::activated(dir);
         }
@@ -138,6 +144,18 @@ pub fn activate(worlds: &Path, world: &str) -> Source {
             tracing::error!(%world, %why, "refusing a linked World; serving nothing");
             return Source::unavailable();
         }
+    }
+    // The recorded link re-proves its directory as it reads it, so a record
+    // whose directory has since been renamed reads as absent — and absent
+    // here means the release, which is the honest answer for a choice that is
+    // visible in three places and can be cleared from one of them.
+    if let Some(dir) = crate::update::world::linked_dir(worlds, world) {
+        tracing::warn!(
+            %world,
+            dir = %dir.display(),
+            "serving a linked directory (recorded) — this head is NOT serving the installed release"
+        );
+        return Source::activated(dir);
     }
     if let Some(candidate) = crate::update::world::active_dir(worlds, world) {
         tracing::info!(bundle = %candidate.display(), %world, "serving a staged World payload");
