@@ -271,6 +271,131 @@ fn fenced_schema(schema: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Which sessions a shell tool belongs in.
+///
+/// The reason this exists rather than a fence being enough: an unsealed World's
+/// text sits in the same `tools/list` as the tools that change who is in a
+/// Space. Fencing raises the cost of persuading an agent; it does not bound
+/// what a persuaded agent can reach. The design-patterns literature is blunt
+/// about which of those is the real control — once an agent has ingested
+/// untrusted input, it must be *unable* to trigger consequential actions, not
+/// merely discouraged from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Offered in any session. Reading, orienting, and this World's own work.
+    Anywhere,
+    /// Withheld from a session that carries an unsealed World.
+    ///
+    /// Not because the tool is dangerous in itself, but because it changes
+    /// standing, membership, or keys — and those are the actions an injected
+    /// instruction wants. An agent working on a World tree has no reason to
+    /// rotate a key, so this removes capability nobody was exercising.
+    SealedOnly,
+}
+
+/// Every tool the shell itself offers, so each one's reach is a decision.
+///
+/// An enum with an exhaustive match rather than a list of names: adding a
+/// variant without classifying it does not compile. The companion test asserts
+/// this set is exactly the router's, so adding a `#[tool]` without adding a
+/// variant fails there — between them, a new shell tool cannot reach an
+/// unsealed session by being forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellTool {
+    AgentAdd,
+    Connect,
+    Doctor,
+    Find,
+    InviteTicket,
+    JoinRoom,
+    KeyRotate,
+    MemberAdd,
+    MemberLog,
+    MemberRemove,
+    Members,
+    MyId,
+    Status,
+    Sync,
+    Wait,
+    Who,
+    Whoami,
+    WorldUpgrade,
+}
+
+impl ShellTool {
+    const ALL: [ShellTool; 18] = [
+        ShellTool::AgentAdd,
+        ShellTool::Connect,
+        ShellTool::Doctor,
+        ShellTool::Find,
+        ShellTool::InviteTicket,
+        ShellTool::JoinRoom,
+        ShellTool::KeyRotate,
+        ShellTool::MemberAdd,
+        ShellTool::MemberLog,
+        ShellTool::MemberRemove,
+        ShellTool::Members,
+        ShellTool::MyId,
+        ShellTool::Status,
+        ShellTool::Sync,
+        ShellTool::Wait,
+        ShellTool::Who,
+        ShellTool::Whoami,
+        ShellTool::WorldUpgrade,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            ShellTool::AgentAdd => "agent_add",
+            ShellTool::Connect => "connect",
+            ShellTool::Doctor => "doctor",
+            ShellTool::Find => "find",
+            ShellTool::InviteTicket => "invite_ticket",
+            ShellTool::JoinRoom => "join_room",
+            ShellTool::KeyRotate => "key_rotate",
+            ShellTool::MemberAdd => "member_add",
+            ShellTool::MemberLog => "member_log",
+            ShellTool::MemberRemove => "member_remove",
+            ShellTool::Members => "members",
+            ShellTool::MyId => "my_id",
+            ShellTool::Status => "status",
+            ShellTool::Sync => "sync",
+            ShellTool::Wait => "wait",
+            ShellTool::Who => "who",
+            ShellTool::Whoami => "whoami",
+            ShellTool::WorldUpgrade => "world_upgrade",
+        }
+    }
+
+    /// Exhaustive on purpose. A tool added to the enum has to be placed.
+    fn reach(self) -> Reach {
+        match self {
+            // Changes who is in a Space, what they may do, or what key seals
+            // it. These are what an injected instruction reaches for.
+            ShellTool::AgentAdd
+            | ShellTool::InviteTicket
+            | ShellTool::KeyRotate
+            | ShellTool::MemberAdd
+            | ShellTool::MemberRemove => Reach::SealedOnly,
+            // Brings this device into another Space, or moves a World between
+            // releases. Consequential in the same way, one step further out.
+            ShellTool::Connect | ShellTool::JoinRoom | ShellTool::WorldUpgrade => Reach::SealedOnly,
+            // Reading, orienting, waiting, converging. An agent working on a
+            // World tree needs all of these and none of the above.
+            ShellTool::Doctor
+            | ShellTool::Find
+            | ShellTool::MemberLog
+            | ShellTool::Members
+            | ShellTool::MyId
+            | ShellTool::Status
+            | ShellTool::Sync
+            | ShellTool::Wait
+            | ShellTool::Who
+            | ShellTool::Whoami => Reach::Anywhere,
+        }
+    }
+}
+
 #[tool_router]
 impl LaitMcp {
     pub fn new(home: PathBuf, selection: crate::config::Selection) -> Result<Self> {
@@ -329,6 +454,23 @@ impl LaitMcp {
             .validate_reserved(shell.list_all().iter().map(|tool| tool.name.as_ref()))
             .map_err(pin_failure)?;
         let mut tool_router = shell;
+        // An unsealed World's session does not carry the tools that change
+        // standing, membership or keys. Fencing raises the cost of persuading
+        // an agent; this bounds what a persuaded agent can reach, which is the
+        // control the other one is not.
+        //
+        // It removes capability nobody was exercising: an agent working on a
+        // World tree calls that World's own tools, and has no reason to rotate
+        // a key. What it costs is a genuinely mixed task — adding a member and
+        // filing an issue in one session — which now needs the sealed World's
+        // session or a person.
+        if !package.sealed() {
+            for tool in ShellTool::ALL {
+                if matches!(tool.reach(), Reach::SealedOnly) {
+                    tool_router.remove_route(tool.name());
+                }
+            }
+        }
         tool_router.merge(Self::world_tool_router(package));
         let world_mount = package.mount().to_owned();
         // Teaching text is the sharpest surface here: it lands in what an agent
@@ -751,6 +893,76 @@ pub async fn run_mcp(home: &Path, selection: crate::config::Selection) -> Result
         .await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::{Reach, ShellTool};
+
+    /// The half the compiler cannot do.
+    ///
+    /// An exhaustive `match` forces a *variant* to be classified. It cannot
+    /// force the enum to be complete, because the router's tools are named by
+    /// a macro attribute and are strings by the time anything can see them. So
+    /// this asserts the two sets are identical: add a `#[tool]` without adding
+    /// a variant and it fails here, add a variant without a tool and it fails
+    /// here too. Between the match and this test, a new shell tool cannot
+    /// reach an unsealed session by being forgotten.
+    #[test]
+    fn every_shell_tool_is_classified_and_nothing_is_classified_twice() {
+        let classified: std::collections::BTreeSet<&str> =
+            ShellTool::ALL.iter().map(|tool| tool.name()).collect();
+        assert_eq!(
+            classified.len(),
+            ShellTool::ALL.len(),
+            "a tool is named twice in the classification"
+        );
+
+        let router = super::LaitMcp::tool_router();
+        let offered: std::collections::BTreeSet<String> = router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let classified: std::collections::BTreeSet<String> =
+            classified.into_iter().map(str::to_owned).collect();
+
+        let unclassified: Vec<_> = offered.difference(&classified).collect();
+        assert!(
+            unclassified.is_empty(),
+            "these shell tools have no reach and would be offered to an unsealed              session by default: {unclassified:?}"
+        );
+        let phantom: Vec<_> = classified.difference(&offered).collect();
+        assert!(
+            phantom.is_empty(),
+            "these are classified but the shell does not offer them: {phantom:?}"
+        );
+    }
+
+    /// What the split is for. The tools an injected instruction reaches for are
+    /// the ones an unsealed session does not carry.
+    #[test]
+    fn nothing_that_changes_standing_is_offered_to_an_unsealed_session() {
+        for tool in ShellTool::ALL {
+            let withheld = matches!(tool.reach(), Reach::SealedOnly);
+            match tool.name() {
+                "member_add" | "member_remove" | "agent_add" | "key_rotate" | "invite_ticket"
+                | "connect" | "join_room" | "world_upgrade" => {
+                    assert!(
+                        withheld,
+                        "{} changes standing and must be withheld",
+                        tool.name()
+                    )
+                }
+                "whoami" | "status" | "sync" | "wait" | "find" | "my_id" => assert!(
+                    !withheld,
+                    "{} is how an agent orients and must stay",
+                    tool.name()
+                ),
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
