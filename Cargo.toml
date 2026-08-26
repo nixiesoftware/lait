@@ -33,6 +33,7 @@ members = [
     "tools/stub",
     "tools/world-fixture",
     "tools/world-channel-installer",
+    "tools/world-stage",
     "tools/world-semantic-fixture",
 ]
 # Two packages live in this repository but are NOT members, each because it

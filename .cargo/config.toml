@@ -1,0 +1,6 @@
+[alias]
+# The World trees, for the tree you are working in and for a release.
+#
+# An alias so the loop is one word, and a workspace binary rather than a shell
+# script so the same code assembles both — see `tools/world-stage`.
+stage-worlds = "run --quiet -p world-stage --"

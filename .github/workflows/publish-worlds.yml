@@ -12,7 +12,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/publish-worlds.yml
-      - .github/scripts/stage-worlds.sh
+      - tools/world-stage/**
       - ci/publish-world.sh
       - tools/feed/**
       - crates/world-interface/**
@@ -142,7 +142,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash .github/scripts/stage-worlds.sh "${{ matrix.target }}" stage
+          # The same program the inner loop runs. A tree somebody worked on
+          # and a tree that gets published are assembled by one code path, so
+          # they cannot differ in a way neither of us noticed.
+          cargo run --quiet -p world-stage -- \
+            --target "${{ matrix.target }}" --profile release \
+            --artifacts "target/${{ matrix.target }}/release" --out stage
           tar czf "world-bundles-${{ matrix.target }}.tar.gz" -C stage worlds
           sha256sum "world-bundles-${{ matrix.target }}.tar.gz" \
             > "world-bundles-${{ matrix.target }}.tar.gz.sha256"

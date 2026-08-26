@@ -22,8 +22,7 @@ it there:
 
 ```bash
 (cd viewer && npm run build)          # → ../products/issues-app/assets/web
-PROFILE=debug ARTIFACT_ROOT=target/debug \
-  bash .github/scripts/stage-worlds.sh <target-triple> target/local-worlds
+cargo stage-worlds
 ```
 
 Then in Astrolabe: **+ Add local World** at the foot of the Library rail, and

@@ -855,7 +855,6 @@ jobs:
           # publication as a local, seed-holding act that verifies the exact
           # audited bytes before any channel moves.
           bash -n ci/publish-world.sh
-          bash -n .github/scripts/stage-worlds.sh
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
             aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc; do
             grep -q "$target" .github/workflows/publish-worlds.yml \
