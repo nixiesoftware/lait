@@ -318,11 +318,12 @@ function WorldSection({ label, rows, view, showing, onSelect }: {
 }) {
   return <section className="world-section">
     {label !== undefined && <h2>{label}</h2>}
-    {rows.map((world) => <span className="row-tip" key={world.key} title={`${world.displayName} — ${lifecycle(view, world)}`}>
+    {rows.map((world) => <span className="row-tip" key={world.key} title={`${world.displayName}${world.sourceDir === null ? "" : " (local)"} — ${lifecycle(view, world)}`}>
       <Button className="world-row" data-selected={world.key === showing?.key || undefined}
-        onPress={() => onSelect(world.key)} aria-label={`${world.displayName} — ${lifecycle(view, world)}`}>
+        onPress={() => onSelect(world.key)} aria-label={`${world.displayName}${world.sourceDir === null ? "" : " (local)"} — ${lifecycle(view, world)}`}>
         <WorldMark world={world} />
-        <span>{world.displayName}</span>
+        <span className="world-row-name">{world.displayName}</span>
+        {world.sourceDir !== null && <span className="world-row-local">LOCAL</span>}
       </Button>
     </span>)}
   </section>;
@@ -440,8 +441,10 @@ function WorldHero({ world }: { world: LibraryWorld }) {
       + `color-mix(in srgb, ${wash} 88%, transparent)), url("${art.hero}") center / cover`;
   }
   return <div className="world-hero" style={style}>
-    <h1>{world.displayName}</h1>
-    {world.sourceDir !== null && <span className="world-local-badge" title={world.sourceDir}>LOCAL</span>}
+    <div className="world-hero-name">
+      {world.sourceDir !== null && <span className="world-local-badge" title={world.sourceDir}>LOCAL</span>}
+      <h1>{world.displayName}</h1>
+    </div>
   </div>;
 }
 

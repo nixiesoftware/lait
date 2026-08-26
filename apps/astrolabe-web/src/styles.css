@@ -234,7 +234,18 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 .world-source-badge { align-self:flex-start; margin-top:6px; border:1px solid var(--warning-border,#6b5320); border-radius:4px; padding:2px 7px; background:var(--warning-bg,rgba(224,163,62,.16)); color:var(--warning-text,#e0a33e); font-size:10px; letter-spacing:.08em; }
 
 /* A World read from a directory on this device rather than from a signed
-   release. On the hero beside the name, because a row is the only claim this
-   client makes about what a person is running and an unsealed tree must not
-   wear a released World's face. */
-.world-local-badge { align-self:flex-start; margin-top:6px; border:1px solid var(--border); border-radius:4px; padding:2px 7px; background:var(--surface-200); color:var(--muted); font-size:10px; letter-spacing:.08em; }
+   release. A row is the only claim this client makes about what a person is
+   running, and an unsealed tree must not wear a released World's face.
+
+   Stacked above the name rather than beside it: `.world-hero` is a row flexed
+   to `flex-end`, so a sibling badge lands wherever the title's width leaves
+   it and `align-self` sends it to the top of the cross axis — which is how it
+   ended up floating in the middle of the artwork. The name and its eyebrow are
+   one block; the hero lays out one child, not two. */
+.world-hero-name { display:flex; flex-direction:column; align-items:flex-start; gap:7px; min-width:0; }
+.world-local-badge { border:1px solid rgb(255 255 255 / .35); border-radius:4px; padding:1px 7px; background:rgb(0 0 0 / .35); color:#fff; font-size:10px; font-weight:700; letter-spacing:.1em; }
+/* And in the rail, where two Worlds of the same name are otherwise one word
+   twice. The mark alone does not carry it — an accent square and a slightly
+   different glyph is not a distinction anybody should have to make. */
+.world-row-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.world-row-local { flex:none; margin-left:auto; border:1px solid var(--border); border-radius:3px; padding:0 5px; color:var(--muted); font-size:9px; font-weight:700; letter-spacing:.09em; }
