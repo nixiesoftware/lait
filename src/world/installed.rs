@@ -236,6 +236,22 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
     // The tree's own name for itself, used for every consistency check and
     // every message about it. What the host registers it as is `admission`.
     let world = manifest.id.clone();
+    // The local namespace is reserved, and this is where the reservation is
+    // kept rather than merely documented. A sealed World declaring a mount in
+    // it would otherwise win the duplicate-mount refusal — `load` runs before
+    // `load_local`, so the *working tree* was what got refused, the exact
+    // inverse of what the reservation promises.
+    if matches!(admission.provenance, Provenance::Sealed(_))
+        && manifest
+            .mount()
+            .starts_with(crate::world::local::MOUNT_PREFIX)
+    {
+        bail!(
+            "World {world} declares mount '{}', and '{}' is reserved for Worlds being worked on",
+            manifest.mount(),
+            crate::world::local::MOUNT_PREFIX
+        );
+    }
     let applicable: Vec<_> = manifest
         .runners
         .iter()
@@ -291,14 +307,17 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
             // declaration. The two checks just above compared the runner to
             // `world.json` — the tree against itself — which is a different
             // question and still the right one to ask.
-            let mut declared = client_package(admission.world.clone(), client)?;
+            // The same fact the World's own process is told through
+            // `LAIT_WORLD_RELEASE`, carried to the surface an agent reads —
+            // and stated at construction, so no path can produce a package
+            // that claims to be signed by forgetting to say otherwise.
+            let sealing = match admission.provenance {
+                Provenance::Sealed(_) => world_interface::Sealing::Sealed,
+                Provenance::Local => world_interface::Sealing::Unsealed,
+            };
+            let mut declared = client_package(admission.world.clone(), client, sealing)?;
             if let Some(mount) = &admission.mount {
                 declared = declared.mounted_at(mount.clone());
-            }
-            // The same fact the World's own process is told through
-            // `LAIT_WORLD_RELEASE`, carried to the surface an agent reads.
-            if matches!(admission.provenance, Provenance::Local) {
-                declared = declared.unsealed();
             }
             admitted.client = Some(declared);
         }
@@ -331,6 +350,7 @@ fn remote_decode(
 fn client_package(
     world: replica::body::WorldId,
     client: Arc<RemoteClient>,
+    sealing: world_interface::Sealing,
 ) -> Result<world_interface::WorldClientPackage> {
     let declaration = client.declaration().clone();
     let adapter: Arc<dyn world_interface::ClientAdapter> = client.clone();
@@ -362,6 +382,7 @@ fn client_package(
         leaked(declaration.mount),
         world_interface::AgentSurface::designed(tools, instructions, without),
         remote_decode,
+        sealing,
     )?
     .with_client_adapter(adapter)
     .with_display(

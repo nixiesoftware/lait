@@ -44,6 +44,10 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         MOUNT,
         world_interface::AgentSurface::designed(Vec::new(), "", &[]),
         decode_client_reply,
+        // Compiled into this host build, so it travelled however the host did.
+        // A World cannot know its own provenance; what it can say is that this
+        // package is not read from a tree on somebody's disk.
+        world_interface::Sealing::Sealed,
     )?
     .with_web_parser(host::parse_web)
     .with_local_handler(host::execute)

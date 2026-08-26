@@ -786,6 +786,13 @@ pub struct WorldClientPackage {
     /// Whether the bytes behind this package were sealed and verified, or come
     /// from a tree on this device that nobody signed.
     ///
+    /// Set from a **required** constructor argument rather than defaulted and
+    /// opted out of. It defaulted to sealed once, which meant any new admission
+    /// path that forgot one builder call produced a package claiming to be
+    /// signed, with nothing failing to compile. Provenance that fails open is
+    /// not provenance. This follows the rule the Tauri boundary already holds:
+    /// a fact added here has to be decided, not inherited.
+    ///
     /// Carried here because an agent reads this World's teaching text and tool
     /// descriptions as guidance, and those are free text authored by whatever
     /// is running. For a released World that text arrived through a signed
@@ -1042,6 +1049,7 @@ impl WorldClientPackage {
         mount: &'static str,
         surface: AgentSurface,
         decode_reply: ReplyDecoder,
+        sealed: Sealing,
     ) -> Result<Self, Failure> {
         validate_name("mount", mount)?;
         let mut local_tools = BTreeSet::new();
@@ -1058,9 +1066,7 @@ impl WorldClientPackage {
         Ok(Self {
             world,
             mount: mount.to_owned(),
-            // Sealed until a host says otherwise: the default is the case that
-            // went through staging, and a caller has to opt a package out.
-            sealed: true,
+            sealed: matches!(sealed, Sealing::Sealed),
             mcp_tools: surface.tools,
             mcp_instructions: surface.instructions,
             without: surface.without,
@@ -1344,12 +1350,6 @@ impl WorldClientPackage {
         self
     }
 
-    /// Mark this package as coming from a tree nobody sealed.
-    pub fn unsealed(mut self) -> Self {
-        self.sealed = false;
-        self
-    }
-
     /// Whether this World's bytes were proven when they landed.
     pub fn sealed(&self) -> bool {
         self.sealed
@@ -1525,6 +1525,19 @@ impl WorldClientPackage {
     }
 }
 
+/// Whether a package's bytes were proven when they landed.
+///
+/// A two-variant enum taken by value rather than a `bool` defaulted to the
+/// safe-looking case: at a callsite `Sealing::Unsealed` says what it means and
+/// `false` does not, and neither can be omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sealing {
+    /// Verified against a signed manifest when it was staged.
+    Sealed,
+    /// A tree on this device that nobody signed and nothing verified.
+    Unsealed,
+}
+
 /// A mounted tool with its collision-safe public name.
 pub struct MountedMcpTool<'a> {
     pub world: &'a WorldId,
@@ -1537,6 +1550,20 @@ pub struct MountedMcpTool<'a> {
 pub struct WorldClientRegistry {
     packages: BTreeMap<String, WorldClientPackage>,
     mounts: BTreeMap<String, String>,
+    /// Every public MCP tool name this registry has composed, to the World that
+    /// composed it.
+    ///
+    /// Unique ids and unique mounts do **not** imply unique public names: a
+    /// public name is `{mount}_{tool}`, and `_` is admitted inside a mount, so
+    /// mount `local` with tool `issues_list` and mount `local_issues` with tool
+    /// `list` both compose `local_issues_list`. While one World is pinned per
+    /// session that cannot bite. The moment every package is merged into one
+    /// router it does, and `ToolRouter::merge` resolves it silently,
+    /// last-registered wins — with local Worlds loaded after installed ones, so
+    /// the unsealed tree would win. That is an unsigned World answering to a
+    /// signed World's tool name, which is the whole guarantee namespacing is
+    /// supposed to provide.
+    tools: BTreeMap<String, String>,
 }
 
 impl WorldClientRegistry {
@@ -1559,8 +1586,23 @@ impl WorldClientRegistry {
                 world
             )));
         }
+        // Composed before anything is inserted, so a refusal leaves the
+        // registry exactly as it was rather than half-holding a World.
+        let composing: Vec<String> = mounted_tools(&package)
+            .map(|mounted| mounted.public_name)
+            .collect();
+        for public_name in &composing {
+            if let Some(existing) = self.tools.get(public_name) {
+                return Err(Failure::new(format!(
+                    "MCP tool '{public_name}' is composed by Worlds '{existing}' and '{world}'"
+                )));
+            }
+        }
         self.mounts
             .insert(package.mount().to_owned(), world.clone());
+        for public_name in composing {
+            self.tools.insert(public_name, world.clone());
+        }
         self.packages.insert(world, package);
         Ok(self)
     }
@@ -1754,21 +1796,59 @@ mod tests {
             .map_err(|error| Failure::new(format!("decode reply: {error}")))
     }
 
-    /// Sealed until a host says otherwise, and the host says so for exactly
-    /// the packages that came from a tree nobody signed. The default matters:
-    /// a package that forgot to declare its provenance must read as the case
-    /// that went through staging, never the other way round.
+    /// Provenance is stated, never inherited. It used to default to sealed and
+    /// be opted out of, so any admission path that forgot one builder call
+    /// produced a package claiming to be signed with nothing failing to
+    /// compile. Provenance that fails open is not provenance.
     #[test]
-    fn a_package_is_sealed_until_a_host_marks_it_otherwise() {
+    fn a_package_states_its_provenance_and_cannot_omit_it() {
         assert!(package("com.lait.issues", "issues").sealed());
-        assert!(!package("local.issues", "issues").unsealed().sealed());
+        assert!(!sealed_package("local.issues", "issues", Sealing::Unsealed).sealed());
         assert!(
-            !package("local.issues", "issues")
-                .unsealed()
+            !sealed_package("local.issues", "issues", Sealing::Unsealed)
                 .mounted_at("local_issues")
                 .sealed(),
             "and re-mounting does not launder it"
         );
+    }
+
+    /// Unique ids and unique mounts do not imply unique *public* names, and
+    /// the public name is what an agent types. `_` is admitted inside a mount,
+    /// so `local` + `issues_list` and `local_issues` + `list` both compose
+    /// `local_issues_list`. One pinned World per session hid this; merging
+    /// every package into one router exposes it, and `ToolRouter::merge`
+    /// resolves it silently, last-registered wins — with local Worlds loaded
+    /// after installed ones. An unsigned World would answer to a signed
+    /// World's tool name, which is the guarantee namespacing exists to give.
+    #[test]
+    fn two_worlds_cannot_compose_the_same_public_tool_name() {
+        let registry = WorldClientRegistry::new()
+            .with_package(package("com.lait.issues", "local_issues"))
+            .expect("the first registers");
+        // Different World id, different mount — and the same composed name:
+        // `local` + `issues_list` is `local_issues_list`, just as
+        // `local_issues` + `list` is.
+        let collides = package_with_tool("local.issues", "local", Sealing::Unsealed, "issues_list");
+        let refused = registry.with_package(collides);
+        assert!(
+            refused.is_err(),
+            "a second World composing `local_issues_list` must be refused, not silently win"
+        );
+    }
+
+    /// A refusal leaves the registry as it was, rather than half-holding the
+    /// World it just refused.
+    #[test]
+    fn a_refused_package_leaves_the_registry_untouched() {
+        let registry = WorldClientRegistry::new()
+            .with_package(package("com.lait.issues", "issues"))
+            .expect("the first registers");
+        let refused = registry
+            .clone()
+            .with_package(package("com.lait.issues", "other"));
+        assert!(refused.is_err());
+        assert_eq!(registry.packages().count(), 1);
+        assert!(registry.package_for_mount("issues").is_some());
     }
 
     /// A World being worked on runs beside the release it was copied from.
@@ -1781,7 +1861,8 @@ mod tests {
     #[test]
     fn a_local_world_registers_beside_the_release_it_was_copied_from() {
         let released = package("com.lait.issues", "issues");
-        let local = package("local.issues", "issues").mounted_at("local_issues");
+        let local =
+            sealed_package("local.issues", "issues", Sealing::Unsealed).mounted_at("local_issues");
         let registry = WorldClientRegistry::new()
             .with_package(released)
             .expect("the release registers")
@@ -1819,6 +1900,19 @@ mod tests {
     }
 
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
+        sealed_package(world, mount, Sealing::Sealed)
+    }
+
+    fn sealed_package(world: &str, mount: &'static str, sealing: Sealing) -> WorldClientPackage {
+        package_with_tool(world, mount, sealing, "list")
+    }
+
+    fn package_with_tool(
+        world: &str,
+        mount: &'static str,
+        sealing: Sealing,
+        tool: &'static str,
+    ) -> WorldClientPackage {
         let call = if mount == "notes" {
             notes_invocation as McpCallFactory
         } else {
@@ -1828,11 +1922,12 @@ mod tests {
             WorldId::parse(world).unwrap(),
             mount,
             AgentSurface::designed(
-                vec![McpTool::new("list", "List objects.", empty_schema, call)],
+                vec![McpTool::new(tool, "List objects.", empty_schema, call)],
                 "Work with files.",
                 &[],
             ),
             decode_json_reply,
+            sealing,
         )
         .unwrap()
     }

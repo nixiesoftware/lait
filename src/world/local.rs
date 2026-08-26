@@ -186,8 +186,13 @@ pub fn mount_for(handle: &str) -> Result<String> {
 }
 
 /// Reserved, so that a mount assigned here can never collide with one a World
-/// declares for itself. A World that claims it is refused rather than quietly
-/// shadowing somebody's working tree.
+/// declares for itself.
+///
+/// Kept in `installed::admit`, not merely written down here. It said this and
+/// nothing enforced it, and the collision resolved *backwards*: installed
+/// Worlds load before local ones, so a sealed World declaring `local_…` won
+/// the registry's duplicate-mount refusal and the working tree was what got
+/// refused — the exact inverse of the promise.
 pub const MOUNT_PREFIX: &str = "local_";
 
 /// The World id a local tree is registered under.
