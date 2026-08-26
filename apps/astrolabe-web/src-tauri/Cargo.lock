@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "addressbook",
  "anyhow",
@@ -8623,6 +8623,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 
