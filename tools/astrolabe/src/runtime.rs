@@ -1137,10 +1137,11 @@ impl Worker {
                 let updates = self.updates.clone();
                 let wake = self.wake.clone();
                 let outcome = tokio::task::spawn_blocking(move || {
+                    let channel = lait::update::world::channel_for(&worlds, &world_id);
                     lait::update::world::check_with_progress(
                         &world_id,
                         &worlds,
-                        lait::update::feed::Channel::current(),
+                        channel,
                         move |progress| {
                             send(
                                 &updates,

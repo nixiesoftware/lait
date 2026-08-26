@@ -1395,10 +1395,14 @@ async fn advance_world_upgrade_job(
                 current.message = None;
                 current.updated_at = mechanics::wallclock::now_secs();
                 crate::update::consent::save(&worlds_for_fetch, &current)?;
+                // This World's own channel, and the node's only when it has
+                // not chosen one. A choice that is recorded and displayed but
+                // never asked is worse than no choice at all: it draws as a
+                // decision the machine is acting on.
                 let outcome = crate::update::world::check(
                     &world_name,
                     &worlds_for_fetch,
-                    crate::update::feed::Channel::current(),
+                    crate::update::world::channel_for(&worlds_for_fetch, &world_name),
                 );
                 match outcome {
                     Ok(outcome) => {
