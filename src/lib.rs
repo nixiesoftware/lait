@@ -52,6 +52,7 @@
 /// support has to answer first the moment two builds are in the field.
 pub const VERSION: &str = env!("LAIT_VERSION_LONG");
 
+pub mod agent_token;
 pub mod client_action;
 pub mod config;
 pub mod control;
