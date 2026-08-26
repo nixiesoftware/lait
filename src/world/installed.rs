@@ -133,7 +133,15 @@ pub fn load(worlds: &Path) -> Result<Installation> {
             mount: None,
             provenance: Provenance::Sealed(digest),
         };
-        (packages, clients) = admit(&declaration.root, &manifest, &admission, packages, clients)?;
+        let admitted = admit(&declaration.root, &manifest, &admission)?;
+        for package in admitted.packages {
+            packages = packages.with_package(package);
+        }
+        if let Some(client) = admitted.client {
+            clients = clients
+                .with_package(client)
+                .map_err(|error| anyhow!(error))?;
+        }
     }
     Ok(Installation { packages, clients })
 }
@@ -182,36 +190,49 @@ pub fn load_local(
             mount: Some(mount),
             provenance: Provenance::Local,
         };
-        match admit(&local.dir, &manifest, &admission, packages, clients) {
-            Ok((next_packages, next_clients)) => {
-                packages = next_packages;
-                clients = next_clients;
-            }
+        let admitted = match admit(&local.dir, &manifest, &admission) {
+            Ok(admitted) => admitted,
             Err(error) => {
-                // The moved values are gone with the failed call, so a refusal
-                // here ends local loading rather than skipping one entry. That
-                // is the honest bound of this shape and it is recorded, not
-                // hidden: everything already admitted stands.
                 refused.push(format!("{}: {error:#}", local.key));
-                return (
-                    WorldPackages::new(),
-                    world_interface::WorldClientRegistry::new(),
-                    refused,
-                );
+                continue;
             }
+        };
+        // Merged only once the whole tree is up. A client package that
+        // collides is this entry's failure and nobody else's.
+        if let Some(client) = admitted.client {
+            match clients.clone().with_package(client) {
+                Ok(next) => clients = next,
+                Err(error) => {
+                    refused.push(format!("{}: {error}", local.key));
+                    continue;
+                }
+            }
+        }
+        for package in admitted.packages {
+            packages = packages.with_package(package);
         }
     }
     (packages, clients, refused)
 }
 
-/// Bring one tree up and register it under what the host decided.
-fn admit(
-    root: &Path,
-    manifest: &WorldManifest,
-    admission: &Admission,
-    mut packages: WorldPackages,
-    mut clients: world_interface::WorldClientRegistry,
-) -> Result<(WorldPackages, world_interface::WorldClientRegistry)> {
+/// What one tree contributed, before anything is merged.
+///
+/// Returned rather than merged in place so that a tree which fails to come up
+/// takes nothing with it. The registries used to be handed *into* admission,
+/// which meant a refusal consumed them — so one bad tree emptied the lot, and
+/// an unsigned local World could stop this device serving every signed one.
+/// Owning nothing is what makes skipping one entry possible at all.
+struct Admitted {
+    packages: Vec<WorldPackage>,
+    client: Option<world_interface::WorldClientPackage>,
+}
+
+/// Bring one tree up and describe what it offers. Merging is the caller's.
+fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result<Admitted> {
+    let mut admitted = Admitted {
+        packages: Vec::new(),
+        client: None,
+    };
     // The tree's own name for itself, used for every consistency check and
     // every message about it. What the host registers it as is `admission`.
     let world = manifest.id.clone();
@@ -274,17 +295,15 @@ fn admit(
             if let Some(mount) = &admission.mount {
                 declared = declared.mounted_at(mount.clone());
             }
-            clients = clients
-                .with_package(declared)
-                .map_err(|error| anyhow!(error))?;
+            admitted.client = Some(declared);
         }
-        packages = packages.with_package(if runner.preferred {
+        admitted.packages.push(if runner.preferred {
             package
         } else {
             package.historical()
         });
     }
-    Ok((packages, clients))
+    Ok(admitted)
 }
 
 fn leaked(value: String) -> &'static str {
@@ -367,6 +386,61 @@ fn client_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unsigned tree must not be able to stop this device serving signed
+    /// ones.
+    ///
+    /// A local World that cannot come up — a tree with no runner for this
+    /// platform, a binary that is not one, a directory somebody moved — costs
+    /// its own row and nothing else. The first cut handed the registries into
+    /// admission, so a refusal consumed them and returned empty ones: one bad
+    /// local tree and the daemon, every head and every agent session served no
+    /// World at all. That is a denial of service reachable by registering a
+    /// directory.
+    #[test]
+    fn a_local_world_that_cannot_load_costs_only_its_own_row() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let tree = tempfile::tempdir().expect("a tree that will not come up");
+        // A declaration with no runner this platform admits: it parses, so it
+        // registers, and it fails at admission — which is the case that used
+        // to take everything with it.
+        std::fs::write(
+            tree.path().join("world.json"),
+            br#"{"format":1,"id":"com.example.broken","version":"0.0.0",
+                 "mount":"broken","name":"Broken","runners":[]}"#,
+        )
+        .expect("a declaration");
+        crate::world::local::register(identity.path(), "broken", tree.path())
+            .expect("it registers: the tree looks like a World");
+
+        // Stand in for what a device already serves. The whole point is that
+        // this survives; an empty registry would pass either way and prove
+        // nothing.
+        let carried = crate::world::test::client_packages();
+        let before: Vec<String> = carried
+            .packages()
+            .map(|package| package.mount().to_owned())
+            .collect();
+        assert!(!before.is_empty(), "the fixture carries Worlds to lose");
+
+        let (_packages, clients, refused) =
+            load_local(identity.path(), WorldPackages::new(), carried);
+
+        assert_eq!(refused.len(), 1, "the one that failed is named");
+        assert!(
+            refused[0].contains("local/broken"),
+            "and named by its key: {:?}",
+            refused
+        );
+        let after: Vec<String> = clients
+            .packages()
+            .map(|package| package.mount().to_owned())
+            .collect();
+        assert_eq!(
+            after, before,
+            "every World this device already served is still served"
+        );
+    }
 
     /// Recording a link or a channel for a World creates its state directory,
     /// and a head or a daemon calls `load` before it will start. One directory
