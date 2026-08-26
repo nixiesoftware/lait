@@ -36,7 +36,16 @@
 export type WindowControls = {
   /** Height of the band the controls sit in, from the top of the page. */
   top: number;
-  /** Width to keep clear at the leading edge of that band. */
+  /**
+   * Width to keep clear at the leading edge of that band.
+   *
+   * Part of the host's declaration and validated with the rest of it, but this
+   * shell spends no CSS on it: it clears the whole band with `top`, so nothing
+   * it draws is ever beside the controls. A surface that *does* draw inside the
+   * band — a World putting tabs or a title up there — needs this, and reaches
+   * it through [`declaredControls`]. Publishing it as a custom property nobody
+   * reads would be a claim the stylesheet does not keep.
+   */
   leading: number;
 };
 
@@ -70,11 +79,6 @@ export function declaredControls(scope: unknown = globalThis): WindowControls | 
   return { top: t, leading: l };
 }
 
-/**
- * Publish the declaration as custom properties, so the shell can spend it in
- * CSS and every surface that does not care keeps reading a `0px` it never has
- * to branch on.
- */
 /** The host's signal that it has rewritten the global. */
 export const RESTATED = "lait:window-controls";
 
@@ -98,10 +102,20 @@ export function trackWindowControls(
   return () => scope.removeEventListener(RESTATED, apply);
 }
 
+/**
+ * Publish the band's height as a custom property, so the shell can spend it in
+ * CSS and every surface that does not care keeps reading a `0px` it never has
+ * to branch on.
+ *
+ * Only `top`. The shell clears the entire band, so nothing it draws is beside
+ * the controls and `leading` has nothing to inset — and a custom property no
+ * stylesheet reads is a value that drifts out of true without anything failing.
+ * It stays available on the declaration itself for a surface that draws in the
+ * band and therefore has a use for it.
+ */
 export function applyWindowControls(
   root: { style: { setProperty(name: string, value: string): void } },
   controls: WindowControls | null,
 ): void {
   root.style.setProperty("--window-controls-top", `${controls?.top ?? 0}px`);
-  root.style.setProperty("--window-controls-leading", `${controls?.leading ?? 0}px`);
 }

@@ -455,11 +455,15 @@
      that never thinks about the window keeps reading; `main.tsx` writes the
      other case onto this element once, from what the host declared.
 
-     Outside `--scale` on purpose: these describe buttons the operating system
+     Outside `--scale` on purpose: this describes buttons the operating system
      drew, and scaling them with the app's density would move the content off
-     the very controls it is clearing. See `core/windowControls.ts`. */
+     the very controls it is clearing. See `core/windowControls.ts`.
+
+     The band's height and nothing else. The host also declares how much to keep
+     clear at its leading edge, which matters to a surface that draws *inside*
+     the band; this shell clears the whole band instead, so it has nothing to
+     inset and carries no property for it. */
   --window-controls-top: 0px;
-  --window-controls-leading: 0px;
 
   color-scheme: dark;
 }

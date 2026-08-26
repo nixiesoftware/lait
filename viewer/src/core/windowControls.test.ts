@@ -52,9 +52,22 @@ describe("applyWindowControls", () => {
   it("publishes the declaration as pixels", () => {
     const root = element();
     applyWindowControls(root, { top: 28, leading: 78 });
-    expect(root.written).toEqual({
-      "--window-controls-top": "28px",
-      "--window-controls-leading": "78px",
+    expect(root.written).toEqual({ "--window-controls-top": "28px" });
+  });
+
+  // The shell clears the whole band, so nothing it draws is ever beside the
+  // controls and there is nothing for `leading` to inset. It stayed on the
+  // declaration — a World drawing *in* the band needs it — but a custom
+  // property no stylesheet reads drifts out of true without anything failing,
+  // so this pins that it is not published rather than merely unused today.
+  it("spends only the band's height, because nothing draws inside the band", () => {
+    const root = element();
+    applyWindowControls(root, { top: 28, leading: 78 });
+    expect(Object.keys(root.written)).not.toContain("--window-controls-leading");
+    // Still readable by whoever does have a use for it.
+    expect(declaredControls({ __LAIT_WINDOW_CONTROLS__: { top: 28, leading: 78 } })).toEqual({
+      top: 28,
+      leading: 78,
     });
   });
 
@@ -64,10 +77,7 @@ describe("applyWindowControls", () => {
   it("writes zeroes when there is no declaration", () => {
     const root = element();
     applyWindowControls(root, null);
-    expect(root.written).toEqual({
-      "--window-controls-top": "0px",
-      "--window-controls-leading": "0px",
-    });
+    expect(root.written).toEqual({ "--window-controls-top": "0px" });
   });
 });
 
@@ -106,10 +116,7 @@ describe("trackWindowControls", () => {
     const host = scope({ top: 28, leading: 78 });
     trackWindowControls(root, host);
     host.restate(null);
-    expect(root.written).toEqual({
-      "--window-controls-top": "0px",
-      "--window-controls-leading": "0px",
-    });
+    expect(root.written).toEqual({ "--window-controls-top": "0px" });
   });
 
   it("takes the room back again on the way out of full screen", () => {
