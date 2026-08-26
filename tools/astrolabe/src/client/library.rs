@@ -172,6 +172,8 @@ pub struct LibraryEntry {
     /// The entry path the World declared, or `None` when it declares none.
     /// `/` is not a guess to make on a World's behalf.
     pub entry_path: Option<String>,
+    /// Who the World says draws the top edge of the window it opens in.
+    pub chrome: world_interface::manifest::Chrome,
     /// One line saying what this World is for.
     pub tagline: Option<String>,
     /// The colour it is drawn from, packed `0xRRGGBB`. A seed a client
@@ -356,6 +358,7 @@ fn local_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
                     installed: false,
                     display_name: local.display_name(),
                     entry_path: None,
+                    chrome: Default::default(),
                     tagline: None,
                     accent: None,
                     version: None,
@@ -399,6 +402,20 @@ fn library_entry(
     manifest: world_interface::manifest::WorldManifest,
     installed: bool,
 ) -> LibraryEntry {
+    // The entry a client would actually open, so its declarations travel
+    // together — the path it opens and how it wants the window are one answer.
+    let chrome = manifest
+        .launch
+        .iter()
+        .find(|entry| {
+            entry.present == world_interface::manifest::Present::Primary
+                && entry
+                    .when
+                    .as_ref()
+                    .is_none_or(|when| when.admits(std::env::consts::OS, std::env::consts::ARCH))
+        })
+        .map(|entry| entry.chrome)
+        .unwrap_or_default();
     let entry_path = manifest.launch.iter().find_map(|entry| {
         (entry.present == world_interface::manifest::Present::Primary
             && entry
@@ -422,6 +439,7 @@ fn library_entry(
         version: manifest.implementation_version,
         // A released World reads from its release. `local_for` overrides these
         // for the rows that do not.
+        chrome,
         source_dir: None,
         source_standing: None,
     }
@@ -610,6 +628,7 @@ mod tests {
             installed: true,
             display_name: "Issues".into(),
             entry_path: None,
+            chrome: Default::default(),
             tagline: None,
             accent: None,
             version: None,

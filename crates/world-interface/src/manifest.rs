@@ -255,6 +255,38 @@ pub struct Launch {
     pub when: Option<When>,
     /// What starting it actually does.
     pub target: Target,
+    /// Who draws the top edge of the window this entry opens in.
+    #[serde(default)]
+    pub chrome: Chrome,
+}
+
+/// Who draws the top edge of a World's window.
+///
+/// Declared by the World because the World is the authority on its own
+/// presentation, and because the answer is a fact about its pages: a page that
+/// runs to the top edge has to keep the window's controls clear, and only the
+/// pages know whether they do.
+///
+/// It lived as a list of World names inside Astrolabe before this, which was
+/// wrong twice over — a second World meant editing the client, and a *copy* of
+/// a World running under its own mount stopped matching the name and lost the
+/// treatment its own pages were written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Chrome {
+    /// The system draws a title bar above the page. The safe default, and what
+    /// a World that says nothing gets: a page that does not expect the controls
+    /// would otherwise draw underneath them.
+    #[default]
+    System,
+    /// The page gets the whole window and draws the top rail itself; the
+    /// window's controls sit in it.
+    ///
+    /// A World declaring this is asserting that its pages read the host's
+    /// statement of where those controls are and keep that room clear. Nothing
+    /// can check that claim from here — what it buys is that the claim is the
+    /// World's to make, and travels with it.
+    World,
 }
 
 /// How prominently a client offers a launch entry. Closed, because a client
@@ -497,6 +529,29 @@ fn validate_bundle_path(kind: &str, path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// A World that says nothing gets the system's title bar. The default is
+    /// the safe one: a page that does not expect the window's controls would
+    /// otherwise draw underneath them.
+    #[test]
+    fn a_launch_entry_that_declares_no_chrome_leaves_the_title_bar_alone() {
+        let declared = br#"{"format":1,"id":"com.example.world","version":"1.0.0",
+            "launch":[{"id":"app","present":"primary",
+                       "target":{"type":"web","path":"/"}}]}"#;
+        let manifest = WorldManifest::parse(declared).expect("a manifest");
+        assert_eq!(manifest.launch[0].chrome, Chrome::System);
+    }
+
+    /// And one that asks for the whole window says so, in its own declaration,
+    /// where it travels with the World rather than as a name in a client.
+    #[test]
+    fn a_world_declares_that_it_draws_its_own_rail() {
+        let declared = br#"{"format":1,"id":"com.example.world","version":"1.0.0",
+            "launch":[{"id":"app","present":"primary",
+                       "target":{"type":"web","path":"/"},"chrome":"world"}]}"#;
+        let manifest = WorldManifest::parse(declared).expect("a manifest");
+        assert_eq!(manifest.launch[0].chrome, Chrome::World);
+    }
+
     use super::*;
 
     fn manifest(json: serde_json::Value) -> Result<WorldManifest, String> {

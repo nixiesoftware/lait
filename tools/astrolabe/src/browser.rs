@@ -44,6 +44,13 @@ pub struct WorldLaunch {
     pub world: String,
     pub title: String,
     pub url: String,
+    /// Who the World says draws the top edge of this window.
+    ///
+    /// Carried from the World's own declaration rather than decided by
+    /// whatever presents it. A client holding a list of World names could not
+    /// answer for a World it had never heard of, and answered *wrongly* for a
+    /// copy of one running under a mount of its own.
+    pub chrome: world_interface::manifest::Chrome,
 }
 
 static PRESENTER: std::sync::OnceLock<Box<dyn Fn(WorldLaunch) + Send + Sync>> =

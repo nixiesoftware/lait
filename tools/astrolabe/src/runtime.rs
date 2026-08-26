@@ -662,16 +662,22 @@ fn world_state(
 }
 
 fn world_launch(mount: &str, url: String) -> crate::browser::WorldLaunch {
-    let title = crate::client::library::installed()
+    let row = crate::client::library::installed()
         .into_iter()
-        .find(|row| row.world_mount == mount)
-        .map(|row| row.display_name)
-        // A label is not worth blocking a launch over.
+        .find(|row| row.world_mount == mount);
+    // A label is not worth blocking a launch over, and neither is a window
+    // treatment: a World this client cannot find gets the system's title bar,
+    // which is what a page that has said nothing needs.
+    let title = row
+        .as_ref()
+        .map(|row| row.display_name.clone())
         .unwrap_or_else(|| mount.to_owned());
+    let chrome = row.map(|row| row.chrome).unwrap_or_default();
     crate::browser::WorldLaunch {
         world: mount.to_owned(),
         title,
         url,
+        chrome,
     }
 }
 

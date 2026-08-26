@@ -9,6 +9,8 @@ tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
 astrolabe = { path = "../../../tools/astrolabe" }
+# For the window treatment a World declares; the client reads it, never decides it.
+world-interface = { path = "../../../crates/world-interface" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }

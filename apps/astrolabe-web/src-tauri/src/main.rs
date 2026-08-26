@@ -1561,25 +1561,6 @@ async fn summon_world_settings(
     Ok(())
 }
 
-/// Which Worlds draw the top rail themselves.
-///
-/// A World that answers here gets the window's whole height and the system
-/// title bar goes transparent under it, so its own surface runs to the top
-/// edge with the controls sitting in it. Every other World keeps the system
-/// bar: a page that does not know the controls are over its top-left corner
-/// would draw under them, and no page can find that out on its own.
-#[cfg(target_os = "macos")]
-fn draws_its_own_rail(world: &str) -> bool {
-    // Against the mount a World *declares*, not the one it was assigned. A
-    // local World is a copy of a released one and gets a mount of its own so
-    // the two can run side by side — but it is the same pages, and how a World
-    // wants its window is a fact about the pages. Gating on the assigned name
-    // meant the tree you were working on was the one window that did not draw
-    // its own rail, which is precisely backwards.
-    let declared = world.strip_prefix("local_").unwrap_or(world);
-    declared == "issues"
-}
-
 /// Where the controls land once the title bar is transparent, in CSS pixels
 /// from the page's top-left corner. macOS keeps the buttons at a fixed offset
 /// inside a 28pt bar and never tells the document about either, so the host
@@ -1644,8 +1625,13 @@ fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::Worl
         .visible(true);
     // The title stays on the window — the taskbar, the window menu and the
     // switcher all read it — it just stops being drawn over the page.
+    // The World's own declaration, not a list held here. A client cannot
+    // answer this for a World it has never heard of, and a list answered
+    // *wrongly* for a copy of one running under a mount of its own — which was
+    // the tree somebody was working on, the one window most likely to be
+    // looked at.
     #[cfg(target_os = "macos")]
-    let builder = if draws_its_own_rail(&launch.world) {
+    let builder = if matches!(launch.chrome, world_interface::manifest::Chrome::World) {
         builder
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true)
@@ -1656,7 +1642,7 @@ fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::Worl
     let built = builder.build();
     #[cfg(target_os = "macos")]
     if let Ok(window) = &built {
-        if draws_its_own_rail(&launch.world) {
+        if matches!(launch.chrome, world_interface::manifest::Chrome::World) {
             // `Resized` rather than a fullscreen event, because there is no
             // fullscreen event to have: entering and leaving both arrive as a
             // resize, and the flag is only true afterwards. Latched, so an
