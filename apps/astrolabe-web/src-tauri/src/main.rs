@@ -1507,6 +1507,47 @@ async fn summon_world_settings(
     Ok(())
 }
 
+/// Which Worlds draw the top rail themselves.
+///
+/// A World that answers here gets the window's whole height and the system
+/// title bar goes transparent under it, so its own surface runs to the top
+/// edge with the controls sitting in it. Every other World keeps the system
+/// bar: a page that does not know the controls are over its top-left corner
+/// would draw under them, and no page can find that out on its own.
+#[cfg(target_os = "macos")]
+fn draws_its_own_rail(world: &str) -> bool {
+    world == "issues"
+}
+
+/// Where the controls land once the title bar is transparent, in CSS pixels
+/// from the page's top-left corner. macOS keeps the buttons at a fixed offset
+/// inside a 28pt bar and never tells the document about either, so the host
+/// states the fact it owns and the World decides what to keep clear of.
+#[cfg(target_os = "macos")]
+const WINDOW_CONTROLS_INIT: &str = "window.__LAIT_WINDOW_CONTROLS__ = { top: 28, leading: 78 };";
+
+/// The same fact, restated when it stops being true.
+///
+/// Full screen takes the controls away entirely, and a page still holding room
+/// for them wears a band of nothing along its top edge — the defect this whole
+/// change exists to remove, arriving by a different door. The host says so the
+/// way it said it in the first place: it writes the fact and rings, and the
+/// World decides again. One direction only — this is the host talking to a
+/// page, never a page reaching the host, which is why `world:*` windows are
+/// still absent from every capability.
+#[cfg(target_os = "macos")]
+fn restate_controls(overlapping: bool) -> String {
+    let controls = if overlapping {
+        "{ top: 28, leading: 78 }"
+    } else {
+        "null"
+    };
+    format!(
+        "window.__LAIT_WINDOW_CONTROLS__ = {controls};\
+         window.dispatchEvent(new Event('lait:window-controls'));"
+    )
+}
+
 /// Not `owned_by_main`: a World keeps its own taskbar identity.
 fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::WorldLaunch) {
     let sanitized: String = launch
@@ -1532,15 +1573,48 @@ fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::Worl
         let _ = window.set_focus();
         return;
     }
-    let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(&launch.title)
         .inner_size(1280.0, 800.0)
         .min_inner_size(800.0, 600.0)
         .resizable(true)
         .maximizable(true)
         .minimizable(true)
-        .visible(true)
-        .build();
+        .visible(true);
+    // The title stays on the window — the taskbar, the window menu and the
+    // switcher all read it — it just stops being drawn over the page.
+    #[cfg(target_os = "macos")]
+    let builder = if draws_its_own_rail(&launch.world) {
+        builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .initialization_script(WINDOW_CONTROLS_INIT)
+    } else {
+        builder
+    };
+    let built = builder.build();
+    #[cfg(target_os = "macos")]
+    if let Ok(window) = &built {
+        if draws_its_own_rail(&launch.world) {
+            // `Resized` rather than a fullscreen event, because there is no
+            // fullscreen event to have: entering and leaving both arrive as a
+            // resize, and the flag is only true afterwards. Latched, so an
+            // ordinary drag-resize does not re-say a thing that has not
+            // changed.
+            let handle = window.clone();
+            let overlapping = std::sync::atomic::AtomicBool::new(true);
+            window.on_window_event(move |event| {
+                if !matches!(event, tauri::WindowEvent::Resized(_)) {
+                    return;
+                }
+                let now = !handle.is_fullscreen().unwrap_or(false);
+                if now == overlapping.swap(now, std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let _ = handle.eval(restate_controls(now));
+            });
+        }
+    }
     if built.is_err() {
         let _ = astrolabe::browser::open(&launch.url);
     }

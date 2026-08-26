@@ -2193,12 +2193,19 @@ export function App() {
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
         onResize={(size) => setSidebarCollapsed(size.inPixels === 0)}
-        // Just the fill. The `max-[768px]:hidden` that used to ride here could
-        // never do its job: `Panel` routes `className` to a nested div, so it
-        // hid the rail's contents and left the flex item holding 180px of empty
+        // Just the fill, and the room the window's controls take out of the
+        // top of it. The padding is on the column rather than on the row
+        // inside it so the sunken fill still runs to the top edge of the
+        // window — the controls sit *in* the rail, which is the whole reason
+        // the frame gave up drawing a strip of its own. `0px` off a browser
+        // tab. See `core/windowControls.ts`.
+        //
+        // The `max-[768px]:hidden` that used to ride here could never do its
+        // job: `Panel` routes `className` to a nested div, so it hid the
+        // rail's contents and left the flex item holding 180px of empty
         // window. The rule that takes the panel out of the layout is in
         // `styles.css`, keyed on the element the library documents.
-        className="bg-sunken"
+        className="bg-sunken pt-[var(--window-controls-top)]"
       >
         <Sidebar
           spaces={spaces}
@@ -2245,7 +2252,11 @@ export function App() {
         // stands on the raised canvas the columns are sunk into. A seam at the
         // toolbar's edge would split one surface into chrome-over-content; the
         // headers belong to the body they act on.
-        className={`flex min-w-0 flex-col${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
+        //
+        // The same inset the rail carries, for the same reason and on the same
+        // element: with the rail hidden — a narrow window, or Settings — this
+        // column is what the window's controls are sitting on.
+        className={`flex min-w-0 flex-col pt-[var(--window-controls-top)]${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
       >
         {/* One header for every view, mounted once and never swapped. Opening an
             issue extends the trail and hands the actions slot to the issue; it

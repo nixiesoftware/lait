@@ -449,6 +449,18 @@
   --radius-12: 12px;
   --radius-16: 16px;
 
+  /* The frame's claim on this page, in raw pixels — the app's own surface runs
+     to the top edge of the window and the window's controls sit in it, so the
+     shell owes them room. `0px` is the ordinary case and the one every surface
+     that never thinks about the window keeps reading; `main.tsx` writes the
+     other case onto this element once, from what the host declared.
+
+     Outside `--scale` on purpose: these describe buttons the operating system
+     drew, and scaling them with the app's density would move the content off
+     the very controls it is clearing. See `core/windowControls.ts`. */
+  --window-controls-top: 0px;
+  --window-controls-leading: 0px;
+
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
