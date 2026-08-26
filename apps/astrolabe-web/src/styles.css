@@ -230,3 +230,9 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 .install-control:focus-visible { outline:2px solid var(--brand); outline-offset:-2px; }
 .install-progress { max-width:520px; margin:0 0 20px; color:var(--muted); font-size:13px; }
 .install-progress progress { display:block; width:100%; height:8px; margin-top:10px; accent-color:#3d74d8; }
+
+/* The World is not being served from its release. On the hero beside the name,
+   because a device serving a working tree while its Library reads "v3" is the
+   defect the seam exists not to produce, and the head's warning goes to a log
+   nobody opens. */
+.world-source-badge { align-self:flex-start; margin-top:6px; border:1px solid var(--warning-border,#6b5320); border-radius:4px; padding:2px 7px; background:var(--warning-bg,rgba(224,163,62,.16)); color:var(--warning-text,#e0a33e); font-size:10px; letter-spacing:.08em; }
