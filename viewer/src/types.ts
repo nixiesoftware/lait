@@ -1004,6 +1004,19 @@ export interface SpaceRow {
 
 export interface SpacesReply {
   spaces: SpaceRow[];
+  /**
+   * The mount this head serves this World at.
+   *
+   * A head answers for exactly one World and refuses every other mount by name.
+   * The mount is the World's own published API — `issues` — right up until the
+   * host assigns one, which it does for a local World so a tree being worked on
+   * can sit beside the release it was copied from. Then it is `local_issues`,
+   * and nothing in the page can tell.
+   *
+   * Optional because a head older than this field simply does not say, and the
+   * name the World publishes is the right thing to fall back to.
+   */
+  world?: string;
 }
 
 /**

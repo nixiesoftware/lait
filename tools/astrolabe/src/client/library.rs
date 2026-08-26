@@ -372,10 +372,10 @@ fn local_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
             entry.world = world.as_str().to_owned();
             entry.source_dir = Some(local.dir.to_string_lossy().into_owned());
             entry.source_standing = Some(
-                match local.standing {
-                    lait::world::local::Standing::Unchanged => "unchanged",
-                    lait::world::local::Standing::Changed => "changed",
-                    lait::world::local::Standing::Unrecorded => "unrecorded",
+                match local.sameness {
+                    lait::world::local::Sameness::Unchanged => "unchanged",
+                    lait::world::local::Sameness::Changed => "changed",
+                    lait::world::local::Sameness::Unrecorded => "unrecorded",
                 }
                 .to_owned(),
             );

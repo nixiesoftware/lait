@@ -1334,6 +1334,18 @@ impl WorldClientPackage {
         &self.world
     }
 
+    /// The id this World's own code speaks.
+    ///
+    /// Equal to [`Self::world`] for everything the host did not re-key. It
+    /// differs for a local World, and then it — not the host's assignment — is
+    /// the id that addresses the World's semantic package, because the tree's
+    /// runner is registered under the id the tree declares. Anything routing a
+    /// call wants this one; anything naming the World to a person or an agent
+    /// wants [`Self::world`].
+    pub fn declared(&self) -> &WorldId {
+        &self.declared
+    }
+
     pub fn transient_body(&self, document: &str) -> Result<[u8; 16], Failure> {
         if let Some(adapter) = self.adapter.as_deref() {
             return adapter.transient_body(document);
@@ -1510,7 +1522,10 @@ impl WorldClientPackage {
                         .unwrap_or(decoded))
                 }
                 ClientInvocationKind::Find { query, presenter } => {
-                    let value = host.call_find(self.world.clone(), query).await?;
+                    // The declared id for the same reason `validate_invocation`
+                    // uses it: this reaches the semantic package, and a re-keyed
+                    // local World's runner is registered under what its tree says.
+                    let value = host.call_find(self.declared.clone(), query).await?;
                     let Some(present) = presenter else {
                         return Ok(value);
                     };
@@ -1537,13 +1552,19 @@ impl WorldClientPackage {
         })
     }
 
+    /// Refuse an invocation this package does not own.
+    ///
+    /// Against [`Self::declared`], never the host's assignment. A package parses
+    /// requests with the World's own code, which knows one id — the one the tree
+    /// declares — so a re-keyed local World would otherwise refuse every request
+    /// it just parsed, naming both ids and explaining neither.
     pub fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), Failure> {
-        if invocation.world_id() == &self.world {
+        if invocation.world_id() == &self.declared {
             Ok(())
         } else {
             Err(Failure::new(format!(
                 "World '{}' client package cannot execute an invocation for '{}'",
-                self.world,
+                self.declared,
                 invocation.world_id()
             )))
         }
@@ -1955,6 +1976,58 @@ mod tests {
             sealing,
         )
         .unwrap()
+    }
+
+    /// A re-keyed package still answers for the World its own code speaks.
+    ///
+    /// The package parses requests with the World's own parser, which knows one
+    /// id: the one the tree declares. Validating against the host's assignment
+    /// meant a local World refused every request it had just successfully
+    /// parsed, with a message naming two ids and explaining neither — which is
+    /// what `local.issues cannot execute an invocation for com.lait.issues`
+    /// was.
+    #[test]
+    fn a_re_keyed_package_executes_what_its_own_parser_produced() {
+        let declared = WorldId::parse("com.lait.issues").unwrap();
+        let assigned = WorldId::parse("local.issues").unwrap();
+        let package = package_with_tool("com.lait.issues", "files", Sealing::Unsealed, "list")
+            .registered_as(assigned.clone())
+            .mounted_at("local_issues");
+
+        assert_eq!(
+            package.world(),
+            &assigned,
+            "it is addressed by the host's id"
+        );
+        assert_eq!(
+            package.declared(),
+            &declared,
+            "and still knows what its tree says it is"
+        );
+
+        let own = ClientInvocation::local(
+            declared.clone(),
+            "list",
+            Value::Null,
+            ClientAccess::Query,
+            None,
+        );
+        package
+            .validate_invocation(&own)
+            .expect("a package must execute what its own parser produced");
+
+        // And the check is still a check: another World's invocation is refused.
+        let stranger = ClientInvocation::local(
+            WorldId::parse("com.example.atlas").unwrap(),
+            "list",
+            Value::Null,
+            ClientAccess::Query,
+            None,
+        );
+        assert!(
+            package.validate_invocation(&stranger).is_err(),
+            "a package must not execute another World's invocation"
+        );
     }
 
     /// A square PNG of `side`, headed exactly as the spec requires — the

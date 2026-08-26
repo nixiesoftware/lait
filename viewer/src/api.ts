@@ -7,9 +7,8 @@
  * which exposes the control plane directly, so all of that collapses to `fetch`.
  *
  * Everything is same-origin: the page is served by the engine itself, so the
- * `HttpOnly` cookie rides along and no token is ever visible to script. In dev the
- * vite proxy fakes that (see vite.config.ts) rather than the engine relaxing its
- * origin guard.
+ * `HttpOnly` cookie rides along and no token is ever visible to script. There is
+ * no dev server and no proxy — this page only ever runs where the engine put it.
  */
 
 import type {
@@ -79,6 +78,48 @@ async function parse(r: globalThis.Response): Promise<unknown> {
   return r.json().catch(() => null);
 }
 
+/**
+ * The mount this head serves us at, as this head last stated it.
+ *
+ * `null` until the first `spaces()` answers. It is not a guess with a default:
+ * `mount()` waits for the head to say, because sending a product request to the
+ * wrong mount is refused by name and the refusal names a World the page is not.
+ */
+let served: string | null = null;
+/** The one in-flight lookup, so a cold start costs one request and not one per call. */
+let asking: Promise<string> | null = null;
+
+/**
+ * Which mount to address this World at.
+ *
+ * The World publishes `issues` and that is what it is served as everywhere a
+ * release is installed. A local World — a tree being worked on — is assigned a
+ * mount in its own namespace so it cannot answer for the release it was copied
+ * from, and the page is served from that tree with no way to know. So it asks,
+ * once, and every product call after the first spends the recorded answer.
+ *
+ * The fallback is the published name rather than a refusal: a head that does not
+ * carry the field is one that serves exactly what the World declares.
+ */
+async function mount(): Promise<string> {
+  if (served !== null) return served;
+  asking ??= spaces()
+    .then((reply) => reply.world ?? DECLARED_MOUNT)
+    .finally(() => {
+      asking = null;
+    });
+  return asking;
+}
+
+/**
+ * The mount this World publishes.
+ *
+ * `MOUNT` in `products/issues-app/src/lib.rs`, which calls it published API for
+ * the same reason: it prefixes every tool an agent has learned and is the
+ * `{world}` segment of every route a head builds.
+ */
+const DECLARED_MOUNT = "issues";
+
 /** The spaces picker. Supervisor-level: not a control-plane `Request`. */
 export async function spaces(signal?: AbortSignal): Promise<SpacesReply> {
   const r = await fetch("/api/spaces", { credentials: "same-origin", ...(signal ? { signal } : {}) });
@@ -90,7 +131,11 @@ export async function spaces(signal?: AbortSignal): Promise<SpacesReply> {
     );
   }
   if (!body) throw new LaitError("no reply", r.status);
-  return body as SpacesReply;
+  const reply = body as SpacesReply;
+  // Recorded on every answer, not only the first: this is the head restating a
+  // fact about itself, and the page has no other way to learn it.
+  served = reply.world ?? DECLARED_MOUNT;
+  return reply;
 }
 
 /**
@@ -111,7 +156,7 @@ export async function rpc<R extends Response = Response>(
   opts: { confirm?: boolean; signal?: AbortSignal } = {},
 ): Promise<R> {
   const response = await send<IssuesWireResponse>(
-    `/api/spaces/${encodeURIComponent(space)}/worlds/issues/rpc`,
+    `/api/spaces/${encodeURIComponent(space)}/worlds/${encodeURIComponent(await mount())}/rpc`,
     request,
     opts,
   );

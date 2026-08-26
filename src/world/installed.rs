@@ -175,6 +175,31 @@ pub fn load_local(
             ));
             continue;
         };
+        // The tree keeps the id it declares, and its semantic package is
+        // registered under that id — so a copy of a World this identity already
+        // has installed would put two preferred packages under one id. The
+        // Orbit's registry refuses that set as a whole
+        // (`AmbiguousWorldDefault`), which is not a refusal of the local World
+        // at all: it takes down every Space-plane read on every Orbit, and says
+        // only that an id is ambiguous.
+        //
+        // So it is refused here, as one row, naming the release it collides
+        // with. A local World runs beside a release it was copied from only
+        // once its data is separable at the layer that stores data — the World
+        // id is hashed into every Body id — and until then the honest thing is
+        // to say so rather than to half-mount it.
+        if let Some(declared) = replica::body::WorldId::parse(&manifest.id) {
+            if packages.contains(&declared) {
+                refused.push(format!(
+                    "{}: {} declares World {declared}, which this identity already has installed \
+— a local World cannot yet run beside the release it was copied from, because \
+both would keep their data under the same id",
+                    local.key,
+                    local.dir.display()
+                ));
+                continue;
+            }
+        }
         let handle = local.key.trim_start_matches(crate::world::local::PREFIX);
         let admitted = crate::world::local::world_id_for(handle)
             .and_then(|world| Ok((world, crate::world::local::mount_for(handle)?)));
@@ -433,6 +458,63 @@ mod tests {
     /// local tree and the daemon, every head and every agent session served no
     /// World at all. That is a denial of service reachable by registering a
     /// directory.
+    /// The registration-time refusal cannot reach a row that is already
+    /// recorded — one written before the check existed, or by hand. So the
+    /// loader refuses it too, and refuses it as *one row*: the alternative is
+    /// what this device actually did, which was to bring up an Orbit whose
+    /// world registry would not build and answer every Space-plane read with
+    /// `AmbiguousWorldDefault`.
+    #[test]
+    fn a_recorded_copy_of_an_installed_world_costs_only_its_own_row() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let tree = tempfile::tempdir().expect("a copy of a World already installed");
+        std::fs::write(
+            tree.path().join("world.json"),
+            br#"{"format":1,"id":"com.lait.issues","version":"0.0.0-local",
+                 "mount":"issues","name":"Issues","runners":[]}"#,
+        )
+        .expect("a declaration");
+        // Written straight to the registry: `register` refuses this now, and
+        // the point of this test is the row that got in before it did.
+        let root = crate::world::local::registrations_root(identity.path());
+        std::fs::create_dir_all(&root).expect("the registry");
+        std::fs::write(
+            root.join("issues.json"),
+            serde_json::json!({ "dir": tree.path(), "admitted": null }).to_string(),
+        )
+        .expect("a recorded registration");
+
+        // What this device already serves, and must keep serving.
+        let installed = crate::world::test::packages();
+        let carried = crate::world::test::client_packages();
+        let before: Vec<String> = carried
+            .packages()
+            .map(|package| package.mount().to_owned())
+            .collect();
+
+        let (packages, clients, refused) = load_local(identity.path(), installed, carried);
+
+        assert_eq!(refused.len(), 1, "the collision is named: {refused:?}");
+        assert!(
+            refused[0].contains("com.lait.issues") && refused[0].contains("already has installed"),
+            "and names the World it collides with: {:?}",
+            refused
+        );
+        let issues = replica::body::WorldId::parse("com.lait.issues").expect("a World id");
+        assert!(
+            packages.contains(&issues),
+            "the installed release is untouched"
+        );
+        let after: Vec<String> = clients
+            .packages()
+            .map(|package| package.mount().to_owned())
+            .collect();
+        assert_eq!(
+            after, before,
+            "and every World this device already served is still served"
+        );
+    }
+
     #[test]
     fn a_local_world_that_cannot_load_costs_only_its_own_row() {
         let identity = tempfile::tempdir().expect("an identity");

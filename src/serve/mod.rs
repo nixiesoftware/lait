@@ -224,9 +224,14 @@ pub async fn run_until(
     let worlds = head::installations_root(&identity);
     let installation = crate::world::installed::load(&worlds)?;
     // Local Worlds are admitted beside the installed ones, never in place of
-    // them. Each carries the id and mount the host assigns it, so a head
-    // serves both a release and a copy of it being worked on without either
-    // answering for the other.
+    // them. Each carries the mount the host assigns it, so neither answers for
+    // the other's tools or URLs.
+    //
+    // It does *not* carry an id of its own: the World id is hashed into every
+    // Body id, so re-keying the package would move what the World is called
+    // without moving where its data lives. A tree declaring a World this
+    // identity already has installed is therefore refused — see
+    // `world::local::register`, which says so at the moment somebody adds one.
     //
     // A registration that cannot be loaded is named and skipped: one broken
     // working tree must not stop this device serving what it has installed.
@@ -997,9 +1002,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The spaces this head can reach, and the World it serves them through.
+///
+/// `world` is the mount, and it is here because a page cannot work it out and
+/// must not assume it. A head answers for exactly one World and refuses every
+/// other mount by name; a World's page is served from a tree that knows only
+/// the mount it *declares*, which is not the mount a local World is assigned.
+/// So the page hardcoded `issues`, and every request a local World's page made
+/// was refused with the name of a World it was not.
+///
+/// Stated in this reply rather than through a route of its own because this is
+/// already the first request the page makes and the last one it can proceed
+/// without. A second endpoint would be a second round trip that every product
+/// call has to wait behind, to learn a fact this answer was always in a
+/// position to carry.
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
     Json(serde_json::json!({
-        "spaces": orbits::list(&app.directory, &app.daemon).await
+        "spaces": orbits::list(&app.directory, &app.daemon).await,
+        "world": app.world,
     }))
     .into_response()
 }

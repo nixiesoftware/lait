@@ -84,8 +84,13 @@ pub struct Admitted {
 }
 
 /// Whether a tree still matches what was consented to.
+///
+/// Deliberately not named for a person's authority: under `src/world/` that
+/// vocabulary belongs to the coarse grant model the clean break replaced, and
+/// this has nothing to do with authority.
+/// It answers one question about bytes — is this the same tree?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
+pub enum Sameness {
     /// The bytes are the ones that were added.
     Unchanged,
     /// The tree has changed since it was added, and needs confirming again.
@@ -112,7 +117,7 @@ pub struct Local {
     /// registration nobody can remove.
     pub manifest: Option<WorldManifest>,
     /// Whether the tree still holds the bytes that were consented to.
-    pub standing: Standing,
+    pub sameness: Sameness,
 }
 
 impl Local {
@@ -298,6 +303,14 @@ pub fn register(identity: &Path, handle: &str, dir: &Path) -> Result<String> {
             dir.display()
         );
     }
+    // Refused here rather than at the row it would become. A local World keeps
+    // the id its tree declares — the World id is hashed into every Body id, so
+    // its data is not separable from the release's by re-keying the package —
+    // and two preferred packages under one id make the Orbit's whole world
+    // registry refuse to build. That failure is nothing like its cause: every
+    // Space-plane read on every Orbit stops, and all it says is that an id is
+    // ambiguous.
+    already_installed(identity, dir)?;
     let root = registrations_root(identity);
     std::fs::create_dir_all(&root).context("create the local World registry")?;
     let encoded = serde_json::to_vec_pretty(&Registration {
@@ -308,6 +321,32 @@ pub fn register(identity: &Path, handle: &str, dir: &Path) -> Result<String> {
     std::fs::write(file_for(identity, &key)?, encoded)
         .context("write the local World registration")?;
     Ok(key)
+}
+
+/// Refuse a tree whose World this identity already has installed.
+///
+/// Passive: it reads selected declarations and launches nothing, so asking is
+/// as cheap as listing.
+fn already_installed(identity: &Path, dir: &Path) -> Result<()> {
+    let declared = std::fs::read(dir.join("world.json")).context("read world.json")?;
+    let manifest = WorldManifest::parse(&declared)
+        .map_err(|error| anyhow::anyhow!("read world.json: {error}"))?;
+    let installed = crate::serve::head::installations_root(identity);
+    let clash = crate::world::installed::declarations(&installed)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|installation| installation.manifest.id == manifest.id);
+    if clash {
+        bail!(
+            "{} declares World {}, which is already installed here. A local World \
+cannot yet run beside the release it was copied from — both would keep their data \
+under that one id. Uninstall the release first, or work on a tree that declares an \
+id of its own.",
+            dir.display(),
+            manifest.id
+        );
+    }
+    Ok(())
 }
 
 /// Digest what a tree declares and what it would execute.
@@ -337,23 +376,23 @@ fn admitted(dir: &Path) -> Result<Admitted> {
 }
 
 /// Whether a tree still holds the bytes that were consented to.
-fn standing_of(dir: &Path, admitted: Option<&Admitted>) -> Standing {
+fn sameness_of(dir: &Path, admitted: Option<&Admitted>) -> Sameness {
     let Some(admitted) = admitted else {
-        return Standing::Unrecorded;
+        return Sameness::Unrecorded;
     };
     let Ok(declared) = std::fs::read(dir.join("world.json")) else {
-        return Standing::Changed;
+        return Sameness::Changed;
     };
     if blake3::hash(&declared).to_hex().to_string() != admitted.declaration {
-        return Standing::Changed;
+        return Sameness::Changed;
     }
     for (relative, digest) in &admitted.programs {
         match std::fs::read(dir.join(relative)) {
             Ok(bytes) if blake3::hash(&bytes).to_hex().to_string() == *digest => {}
-            _ => return Standing::Changed,
+            _ => return Sameness::Changed,
         }
     }
-    Standing::Unchanged
+    Sameness::Unchanged
 }
 
 /// Forget a local World. Forgetting one that is not registered is not a
@@ -387,12 +426,12 @@ pub fn list(identity: &Path) -> Vec<Local> {
             let manifest = std::fs::read(registration.dir.join("world.json"))
                 .ok()
                 .and_then(|bytes| WorldManifest::parse(&bytes).ok());
-            let standing = standing_of(&registration.dir, registration.admitted.as_ref());
+            let sameness = sameness_of(&registration.dir, registration.admitted.as_ref());
             Some(Local {
                 key,
                 dir: registration.dir,
                 manifest,
-                standing,
+                sameness,
             })
         })
         .collect();
@@ -440,6 +479,78 @@ mod tests {
             r#"{{"format":1,"id":"{id}","version":"0.0.0-local","mount":"issues",
                  "name":"Issues","runners":[]}}"#
         )
+    }
+
+    /// Make `identity` look like a device with `id` installed at `version`.
+    fn installed(identity: &Path, id: &str, version: &str) {
+        let worlds = crate::serve::head::installations_root(identity);
+        let release = worlds.join(id).join("releases").join(version);
+        std::fs::create_dir_all(&release).expect("a release directory");
+        std::fs::write(
+            release.join("world.json"),
+            format!(
+                r#"{{"format":1,"id":"{id}","version":"{version}","mount":"issues",
+                     "name":"Issues","runners":[]}}"#
+            ),
+        )
+        .expect("the release declaration");
+        std::fs::write(
+            worlds.join(id).join("selected.json"),
+            serde_json::json!({
+                "world": id,
+                "version": version,
+                "digest": "0".repeat(64),
+                "files": 1,
+            })
+            .to_string(),
+        )
+        .expect("a selection");
+    }
+
+    /// The collision, refused where somebody can act on it.
+    ///
+    /// A local World keeps the id its tree declares, because that id is hashed
+    /// into every Body id and re-keying the package would not move the data. So
+    /// a copy of an installed World puts two preferred packages under one id,
+    /// and the Orbit's registry refuses the whole set — every Space-plane read
+    /// on every Orbit stops, saying only that an id is ambiguous.
+    #[test]
+    fn a_copy_of_an_installed_world_is_refused_when_it_is_added() {
+        let identity = tempfile::tempdir().expect("an identity");
+        installed(identity.path(), "com.lait.issues", "0.9.3");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+
+        let refusal = register(identity.path(), "issues", dir.path())
+            .expect_err("a copy of an installed World cannot be added");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains("com.lait.issues"),
+            "the refusal names the World: {said}"
+        );
+        assert!(
+            said.contains("already installed"),
+            "and says what the problem is: {said}"
+        );
+        assert!(
+            list(identity.path()).is_empty(),
+            "a refused registration leaves no row behind"
+        );
+    }
+
+    /// The refusal is about *this* World, not about local Worlds. A tree
+    /// declaring something this device does not have installed still registers,
+    /// which is the whole feature.
+    #[test]
+    fn a_tree_declaring_an_uninstalled_world_is_still_added() {
+        let identity = tempfile::tempdir().expect("an identity");
+        installed(identity.path(), "com.lait.issues", "0.9.3");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.example.atlas")));
+
+        register(identity.path(), "atlas", dir.path())
+            .expect("a World this device does not have installed is not a collision");
+        assert_eq!(list(identity.path()).len(), 1);
     }
 
     #[test]
@@ -498,7 +609,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a tree");
         tree(dir.path(), Some(&declaration("com.lait.issues")));
         register(identity.path(), "issues", dir.path()).expect("registers");
-        assert_eq!(list(identity.path())[0].standing, Standing::Unchanged);
+        assert_eq!(list(identity.path())[0].sameness, Sameness::Unchanged);
 
         std::fs::write(
             dir.path().join("world.json"),
@@ -506,8 +617,8 @@ mod tests {
         )
         .expect("the tree moves on");
         assert_eq!(
-            list(identity.path())[0].standing,
-            Standing::Changed,
+            list(identity.path())[0].sameness,
+            Sameness::Changed,
             "the row says the bytes are not the ones anybody agreed to"
         );
     }
@@ -528,7 +639,7 @@ mod tests {
                 .expect("an older registration"),
         )
         .expect("written");
-        assert_eq!(list(identity.path())[0].standing, Standing::Unrecorded);
+        assert_eq!(list(identity.path())[0].sameness, Sameness::Unrecorded);
     }
 
     /// The gap that made a local World route perfectly and serve nothing: its
