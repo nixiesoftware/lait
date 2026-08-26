@@ -40,6 +40,19 @@ struct YouView: View {
                     LabeledContent("Core", value: view.coreVersion)
                     LabeledContent("Keychain", value: keychainText)
                 }
+                #if DEBUG
+                    Section {
+                        NavigationLink {
+                            EffectLabView()
+                        } label: {
+                            Label("Effect Lab", systemImage: "sparkles.rectangle.stack")
+                        }
+                    } header: {
+                        Text("Development")
+                    } footer: {
+                        Text("Explore Astrolabe's ambient Metal effects on this iPhone.")
+                    }
+                #endif
             }
             .navigationTitle("You")
         }

@@ -89,6 +89,7 @@ targets:
           - "$(PROJECT_DIR)/Core/$(PLATFORM_NAME)-$(CONFIGURATION)/libastrolabe_ios.a"
     dependencies:
       - sdk: WebKit.framework
+      - sdk: MetalKit.framework
       # The Rust core's Apple-side dependencies (hickory-resolver reads DNS
       # config through SCDynamicStore; netdev enumerates interfaces through
       # Network.framework on iOS). cargo's framework link flags do not
