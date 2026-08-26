@@ -295,6 +295,11 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
             if let Some(mount) = &admission.mount {
                 declared = declared.mounted_at(mount.clone());
             }
+            // The same fact the World's own process is told through
+            // `LAIT_WORLD_RELEASE`, carried to the surface an agent reads.
+            if matches!(admission.provenance, Provenance::Local) {
+                declared = declared.unsealed();
+            }
             admitted.client = Some(declared);
         }
         admitted.packages.push(if runner.preferred {

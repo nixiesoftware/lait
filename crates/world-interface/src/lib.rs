@@ -783,6 +783,16 @@ pub struct WorldClientPackage {
     /// the release it was copied from without either one answering to the
     /// other's tools or URLs.
     mount: String,
+    /// Whether the bytes behind this package were sealed and verified, or come
+    /// from a tree on this device that nobody signed.
+    ///
+    /// Carried here because an agent reads this World's teaching text and tool
+    /// descriptions as guidance, and those are free text authored by whatever
+    /// is running. For a released World that text arrived through a signed
+    /// channel from a publisher. For a local one it is a directory somebody
+    /// picked. The two must not read identically to the party downstream of
+    /// every check, which is the agent.
+    sealed: bool,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
     without: &'static [&'static str],
@@ -1048,6 +1058,9 @@ impl WorldClientPackage {
         Ok(Self {
             world,
             mount: mount.to_owned(),
+            // Sealed until a host says otherwise: the default is the case that
+            // went through staging, and a caller has to opt a package out.
+            sealed: true,
             mcp_tools: surface.tools,
             mcp_instructions: surface.instructions,
             without: surface.without,
@@ -1329,6 +1342,17 @@ impl WorldClientPackage {
     pub fn mounted_at(mut self, mount: impl Into<String>) -> Self {
         self.mount = mount.into();
         self
+    }
+
+    /// Mark this package as coming from a tree nobody sealed.
+    pub fn unsealed(mut self) -> Self {
+        self.sealed = false;
+        self
+    }
+
+    /// Whether this World's bytes were proven when they landed.
+    pub fn sealed(&self) -> bool {
+        self.sealed
     }
 
     pub fn mcp_tools(&self) -> &[McpTool] {
@@ -1728,6 +1752,23 @@ mod tests {
             .map_err(|error| Failure::new(error.to_string()))?;
         serde_json::from_slice(&payload)
             .map_err(|error| Failure::new(format!("decode reply: {error}")))
+    }
+
+    /// Sealed until a host says otherwise, and the host says so for exactly
+    /// the packages that came from a tree nobody signed. The default matters:
+    /// a package that forgot to declare its provenance must read as the case
+    /// that went through staging, never the other way round.
+    #[test]
+    fn a_package_is_sealed_until_a_host_marks_it_otherwise() {
+        assert!(package("com.lait.issues", "issues").sealed());
+        assert!(!package("local.issues", "issues").unsealed().sealed());
+        assert!(
+            !package("local.issues", "issues")
+                .unsealed()
+                .mounted_at("local_issues")
+                .sealed(),
+            "and re-mounting does not launder it"
+        );
     }
 
     /// A World being worked on runs beside the release it was copied from.
