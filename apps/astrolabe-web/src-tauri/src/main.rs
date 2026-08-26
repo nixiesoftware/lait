@@ -1570,7 +1570,14 @@ async fn summon_world_settings(
 /// would draw under them, and no page can find that out on its own.
 #[cfg(target_os = "macos")]
 fn draws_its_own_rail(world: &str) -> bool {
-    world == "issues"
+    // Against the mount a World *declares*, not the one it was assigned. A
+    // local World is a copy of a released one and gets a mount of its own so
+    // the two can run side by side — but it is the same pages, and how a World
+    // wants its window is a fact about the pages. Gating on the assigned name
+    // meant the tree you were working on was the one window that did not draw
+    // its own rail, which is precisely backwards.
+    let declared = world.strip_prefix("local_").unwrap_or(world);
+    declared == "issues"
 }
 
 /// Where the controls land once the title bar is transparent, in CSS pixels
