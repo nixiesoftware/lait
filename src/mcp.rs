@@ -187,8 +187,17 @@ fn fence_delimiter() -> &'static str {
     static DELIMITER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DELIMITER.get_or_init(|| {
         let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes).expect("system entropy for the unsealed-text fence");
-        format!("unsealed-{}", data_encoding::HEXLOWER.encode(&bytes))
+        // Entropy that cannot be read is a reason to fence more loudly, not
+        // less: falling back to a fixed marker would quietly restore the
+        // forgeable shape this exists to remove, so the fallback is a marker
+        // that says it is one.
+        match getrandom::fill(&mut bytes) {
+            Ok(()) => format!("unsealed-{}", data_encoding::HEXLOWER.encode(&bytes)),
+            Err(error) => {
+                tracing::error!(%error, "no system entropy for the unsealed-text fence");
+                "unsealed-no-entropy-this-marker-is-forgeable".to_owned()
+            }
+        }
     })
 }
 
@@ -778,7 +787,11 @@ mod fence_tests {
     fn the_delimiter_is_this_runs_and_not_a_literal_anyone_can_ship() {
         let delimiter = super::fence_delimiter();
         assert!(delimiter.starts_with("unsealed-"));
-        assert_eq!(delimiter.len(), "unsealed-".len() + 16);
+        assert_eq!(
+            delimiter.len(),
+            "unsealed-".len() + 16,
+            "16 hex characters of system entropy; the fallback marker is longer and says so"
+        );
         assert_eq!(delimiter, super::fence_delimiter(), "stable within a run");
     }
 
