@@ -315,7 +315,17 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
                 Provenance::Sealed(_) => world_interface::Sealing::Sealed,
                 Provenance::Local => world_interface::Sealing::Unsealed,
             };
-            let mut declared = client_package(admission.world.clone(), client, sealing)?;
+            // Built under the id the tree declares, so every check that asks
+            // whether the tree is consistent with itself asks the right
+            // question — a display surface commits its World id into a digest
+            // its own runner computed. Re-keyed to the host's assignment
+            // afterwards, which is what it is addressed by.
+            let tree_id = replica::body::WorldId::parse(&world)
+                .ok_or_else(|| anyhow!("World {world} declares an id that is not well formed"))?;
+            let mut declared = client_package(tree_id, client, sealing)?;
+            if admission.world.as_str() != world {
+                declared = declared.registered_as(admission.world.clone());
+            }
             if let Some(mount) = &admission.mount {
                 declared = declared.mounted_at(mount.clone());
             }

@@ -772,7 +772,18 @@ pub fn agent_surface_coverage(
 /// The client interfaces shipped by one World application package.
 #[derive(Clone)]
 pub struct WorldClientPackage {
+    /// The id this package is registered and addressed by.
     world: WorldId,
+    /// The id the tree declares for itself.
+    ///
+    /// The same distinction the mount already draws, and it exists for the
+    /// same reason: a local World is registered under an id the host assigns
+    /// so it can run beside the release it was copied from. Checks that ask
+    /// whether a *tree is internally consistent* must use this one — a display
+    /// surface commits its World id into a contract digest the World's own
+    /// runner computed, so validating it against the host's assignment fails a
+    /// tree that is perfectly consistent with itself.
+    declared: WorldId,
     /// Where this package is actually mounted.
     ///
     /// Owned, and not the `&'static str` a World compiles in, because the
@@ -1064,6 +1075,7 @@ impl WorldClientPackage {
             }
         }
         Ok(Self {
+            declared: world.clone(),
             world,
             mount: mount.to_owned(),
             sealed: matches!(sealed, Sealing::Sealed),
@@ -1090,7 +1102,9 @@ impl WorldClientPackage {
         mut self,
         surface: display::DisplaySurface,
     ) -> Result<Self, Failure> {
-        surface.descriptor.validate(&self.world)?;
+        // Against what the tree declares, never what the host registered it
+        // as: the runner computed this digest under its own id.
+        surface.descriptor.validate(&self.declared)?;
         let id = surface.descriptor.id.as_str().to_string();
         if self.display_surfaces.contains_key(&id) {
             return Err(Failure::new(format!(
@@ -1345,6 +1359,17 @@ impl WorldClientPackage {
     /// run beside the release it was copied from. Never used for a released
     /// World, whose `MOUNT` is published API precisely so that it does not
     /// move.
+    /// Register this package under an id other than the one it declares.
+    ///
+    /// For a local World, which is usually a copy and so declares the
+    /// original's id. What the tree says about itself is untouched, so every
+    /// check that asks whether the tree is internally consistent still asks the
+    /// right question.
+    pub fn registered_as(mut self, world: WorldId) -> Self {
+        self.world = world;
+        self
+    }
+
     pub fn mounted_at(mut self, mount: impl Into<String>) -> Self {
         self.mount = mount.into();
         self

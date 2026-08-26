@@ -436,6 +436,38 @@ impl LaitMcp {
         Self::from_registry(home, selection, act_as, world, registry)
     }
 
+    /// Attach to a registry somebody else built, as a named agent.
+    ///
+    /// The constructor the HTTP surface uses. Two differences from the stdio
+    /// one, and both are the point:
+    ///
+    /// The registry is handed in. rmcp calls its service factory on request
+    /// paths, so a factory that loaded Worlds would spawn every runner on this
+    /// device — each with a twenty-second readiness budget — on an HTTP
+    /// request. The head built it once when it came up.
+    ///
+    /// The agent is an argument, not an environment variable, and not
+    /// optional in the way `act_as` is. `None` here is a refusal, never a
+    /// fallback to the human whose machine hosts the daemon: a surface that
+    /// cannot name its caller has no business acting for one.
+    pub fn attached(
+        home: PathBuf,
+        selection: crate::config::Selection,
+        registry: std::sync::Arc<world_interface::WorldClientRegistry>,
+        agent: Option<String>,
+    ) -> Result<Self> {
+        let agent = agent.ok_or_else(|| {
+            anyhow::anyhow!("this session did not authenticate as any sponsored agent")
+        })?;
+        Self::from_registry(
+            home,
+            selection,
+            Some(agent),
+            std::env::var("LAIT_WORLD").ok().filter(|s| !s.is_empty()),
+            registry,
+        )
+    }
+
     fn from_registry(
         home: PathBuf,
         selection: crate::config::Selection,

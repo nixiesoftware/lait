@@ -616,7 +616,67 @@ fn router(app: Arc<App>) -> Router {
         // fetch is a worse experience than an honest refusal.
         .fallback(get(static_asset))
         .layer(axum::middleware::from_fn_with_state(app.clone(), gate))
-        .with_state(app)
+        .with_state(app.clone())
+        // Merged *after* the gate is applied, because the agent surface is not
+        // gated by the head's credential. A head token belongs to whoever
+        // opened this window; an agent presents its own, and conflating them
+        // would mean the viewer's origin could act as any sponsored agent.
+        // Its own gate is in `agent_endpoint`.
+        .merge(agent_endpoint(app))
+}
+
+/// The agent surface, mounted on the head that already answers for this World.
+///
+/// On this router rather than a listener of its own, and that is the point: the
+/// origin allowlist an endpoint like this needs is `Guard`'s, and a `Guard` is
+/// built with the port it guards. A second listener would have meant a second
+/// port and an allowlist that had to be kept in step with it — an unproven seam
+/// of exactly the kind this repository has been bitten by twice.
+///
+/// The registry is `App`'s, built once when the head came up. It is not
+/// rebuilt per request, deliberately: rmcp calls its service factory on request
+/// paths — a schema read for header validation, a session restore — and a
+/// factory that loaded Worlds would spawn every runner on this device, each
+/// with a twenty-second readiness budget, on an HTTP request.
+fn agent_endpoint(app: Arc<App>) -> Router {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let Some(home) = app.selection.identity_dir().ok() else {
+        // No identity, no agents to authenticate, nothing to offer. An empty
+        // router is the honest shape: the route simply is not there, rather
+        // than there and refusing everything.
+        return Router::new();
+    };
+    let access = crate::mcp_http::Access {
+        home: home.clone(),
+        guard: app.guard.origin_policy(),
+    };
+    let sessions = crate::mcp_http::Sessions::new();
+    let registry = app.registry.clone();
+    let selection = app.selection.clone();
+    let service = StreamableHttpService::new(
+        move || {
+            // Cloned, never loaded. See this function's doc.
+            crate::mcp::LaitMcp::attached(
+                home.clone(),
+                selection.clone(),
+                registry.clone(),
+                crate::mcp_http::current_agent(),
+            )
+            .map_err(std::io::Error::other)
+        },
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let access = access.clone();
+            let sessions = sessions.clone();
+            crate::mcp_http::admit_request(access, sessions, req, next)
+        }))
 }
 
 /// The gate every request passes: rebinding guard first, credential second.

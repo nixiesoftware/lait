@@ -58,18 +58,17 @@
 
 use std::sync::Arc;
 
-use crate::agent_token::Reach;
-
 /// Everything the endpoint needs to decide who may connect.
 #[derive(Clone)]
 pub struct Access {
     /// This identity's home, where provisioned agents' seeds live.
     pub home: std::path::PathBuf,
-    /// The head credential and origin policy this endpoint shares with the
-    /// server hosting it.
-    pub guard: Arc<crate::serve::auth::Guard>,
-    /// Where a credential may be presented from.
-    pub reach: Reach,
+    /// The rebinding allowlist this endpoint shares with the server hosting
+    /// it — the allowlist alone, not the head's credential. This endpoint
+    /// authenticates an agent, not the person who opened that window, and a
+    /// struct holding a credential it never checks is an invitation to start
+    /// checking it.
+    pub guard: crate::serve::auth::OriginPolicy,
 }
 
 /// Why a connection was refused.
@@ -127,17 +126,100 @@ impl Access {
         fallback: Option<&str>,
     ) -> Result<String, Refused> {
         self.guard
-            .check_origin(host, origin)
+            .check(host, origin)
             .map_err(|_| Refused::Origin)?;
         let presented =
             crate::agent_token::presented(authorization, fallback).ok_or(Refused::Missing)?;
         crate::agent_token::identify(&self.home, presented).ok_or(Refused::Unknown)
     }
+}
 
-    /// Where a listener for this endpoint belongs.
-    pub fn bind_address(&self) -> &'static str {
-        self.reach.bind_address()
+tokio::task_local! {
+    /// The agent the *current request* authenticated as.
+    ///
+    /// Read in exactly one place — [`current_agent`], called by the service
+    /// factory — and captured into the handler it builds. It must never be read
+    /// later.
+    ///
+    /// A first cut read it from handlers, which was wrong: tokio task-locals do
+    /// not cross `tokio::spawn`, and rmcp spawns a session worker, so every
+    /// request after `initialize` runs outside this scope. The read returned
+    /// `None`, and `None` meant *the primary identity* — the human whose
+    /// machine hosts the daemon. An agent would have silently acted as its
+    /// sponsor with nothing failing to compile.
+    ///
+    /// The factory is different, and only the factory: it runs inside the
+    /// request that created the session, before the worker is spawned. So this
+    /// is sound exactly once, at construction, and the value is owned by the
+    /// handler from then on.
+    static REQUEST_AGENT: String;
+}
+
+/// The agent this request authenticated as.
+///
+/// For the service factory, at construction, and nothing else. `None` is not a
+/// fallback to anybody — a caller that cannot name an agent must refuse.
+pub fn current_agent() -> Option<String> {
+    REQUEST_AGENT.try_with(|agent| agent.clone()).ok()
+}
+
+/// Gate one request, then run it with its agent established.
+///
+/// Origin first, then the credential, then the session's owner — each refusing
+/// before the next is consulted, so a rebound page never reaches the token
+/// check and a valid token never reaches somebody else's session.
+pub async fn admit_request(
+    access: Access,
+    sessions: Sessions,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let headers = request.headers();
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let agent = match access.admit(
+        header("host"),
+        header("origin"),
+        header("authorization"),
+        header("x-lait-agent-token"),
+    ) {
+        Ok(agent) => agent,
+        Err(refused) => {
+            tracing::warn!(reason = ?refused, "an agent session was refused");
+            return refusal(refused);
+        }
+    };
+
+    // A session id rides in a response header and lands in logs, so it is not a
+    // secret. Presenting a valid token beside somebody else's session id must
+    // not hand over their stream.
+    if let Some(session) = header("mcp-session-id") {
+        if !sessions.admits(session, &agent) {
+            tracing::warn!(%agent, "an agent presented a session it did not open");
+            return refusal(Refused::Unknown);
+        }
     }
+
+    let response = REQUEST_AGENT.scope(agent.clone(), next.run(request)).await;
+    // Recorded from the response, because that is where a new session's id is
+    // first stated — the initialize request could not have carried it.
+    if let Some(session) = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+    {
+        sessions.opened(session, &agent);
+    }
+    response
+}
+
+fn refusal(refused: Refused) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::from_u16(refused.status())
+            .unwrap_or(axum::http::StatusCode::FORBIDDEN),
+        refused.message(),
+    )
+        .into_response()
 }
 
 /// Who opened which session.
@@ -193,8 +275,7 @@ mod tests {
     fn access(home: &std::path::Path) -> Access {
         Access {
             home: home.to_path_buf(),
-            guard: Arc::new(crate::serve::auth::Guard::new("head-token".into(), 7717)),
-            reach: Reach::Loopback,
+            guard: crate::serve::auth::Guard::new("head-token".into(), 7717).origin_policy(),
         }
     }
 
@@ -303,14 +384,6 @@ mod tests {
         assert!(
             !sessions.admits("sess-1", "scribe"),
             "and a closed session does not linger"
-        );
-    }
-
-    #[test]
-    fn loopback_is_what_this_build_binds() {
-        assert_eq!(
-            access(&std::path::PathBuf::from("/tmp")).bind_address(),
-            "127.0.0.1"
         );
     }
 }
