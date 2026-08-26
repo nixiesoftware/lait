@@ -113,14 +113,18 @@ pub fn key_for(handle: &str) -> Result<String> {
     if handle.is_empty() {
         bail!("a local World needs a name to be filed under");
     }
-    // Narrower than a filename needs to be, because this handle becomes a
-    // mount, and a mount becomes an MCP tool prefix. `local_issues_list` has to
-    // read as a tool name to whatever is looking at it.
+    // Narrower than a filename needs to be, because this handle becomes three
+    // things at once and each one narrows it further. It is a mount, so it is
+    // an MCP tool prefix (`local_issues_list`). It is a label in a World id
+    // (`local.issues`), and a `WorldId` label admits lowercase, digits and `-`
+    // and nothing else. `_` is therefore out — it is the one character this
+    // namespace spends on its own separator, and a handle carrying one would
+    // make `local_issues_dev` ambiguous about where the namespace ends.
     if !handle
         .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
     {
-        bail!("'{handle}' may use lowercase letters, digits and '_' only");
+        bail!("'{handle}' may use lowercase letters, digits and '-' only");
     }
     Ok(format!("{PREFIX}{handle}"))
 }
@@ -146,6 +150,30 @@ pub fn mount_for(handle: &str) -> Result<String> {
 /// declares for itself. A World that claims it is refused rather than quietly
 /// shadowing somebody's working tree.
 pub const MOUNT_PREFIX: &str = "local_";
+
+/// The World id a local tree is registered under.
+///
+/// Not the id the tree declares. A local tree is usually a copy of the release
+/// it came from, so it declares that release's id, and the registry keys
+/// packages by id — two copies of `com.lait.issues` cannot both be in it.
+///
+/// So the host assigns `local.<handle>`, which is a well-formed reverse-domain
+/// id and cannot collide with a real one: nobody owns the `local` TLD, and the
+/// registration refuses any handle that would not make a valid label.
+///
+/// The consequence is worth stating plainly, because it is the point rather
+/// than a side effect: **a local World is a different World.** Everything that
+/// resolves by id — a display assignment, an MCP invocation, a call routed to
+/// a package — reaches the released World when it names the released id, and
+/// the tree being worked on only when it names this one. A local World does
+/// not read or write the released World's records, the same way a separate app
+/// id does not share saves.
+pub fn world_id_for(handle: &str) -> Result<replica::body::WorldId> {
+    key_for(handle)?;
+    let id = format!("local.{}", handle.trim());
+    replica::body::WorldId::parse(&id)
+        .ok_or_else(|| anyhow::anyhow!("'{id}' is not a well-formed World id"))
+}
 
 fn file_for(identity: &Path, key: &str) -> Result<PathBuf> {
     let handle = key
@@ -290,14 +318,34 @@ mod tests {
     /// is held to what a tool name can carry rather than to what a filename
     /// can.
     #[test]
-    fn a_handle_is_held_to_what_a_tool_name_can_carry() {
-        assert!(key_for("issues_dev").is_ok());
+    fn a_handle_is_held_to_what_all_three_of_its_uses_admit() {
+        assert!(key_for("issues-dev").is_ok());
         assert!(key_for("Issues").is_err(), "a tool prefix is lowercase");
         assert!(
-            key_for("issues-dev").is_err(),
-            "a hyphen does not read as one"
+            key_for("issues_dev").is_err(),
+            "'_' is this namespace's own separator; a handle carrying one would \
+             make `local_issues_dev` ambiguous about where the namespace ends"
         );
-        assert!(key_for("issues.dev").is_err());
+        assert!(
+            key_for("issues.dev").is_err(),
+            "a World id label admits no dot"
+        );
+    }
+
+    /// A local tree declares the id of the release it was copied from, and the
+    /// registry keys packages by id — so the host assigns one instead. Nobody
+    /// owns the `local` TLD, so it cannot collide with a real World.
+    #[test]
+    fn a_local_world_is_registered_under_an_id_the_host_assigns() {
+        assert_eq!(
+            world_id_for("issues").expect("an id").as_str(),
+            "local.issues"
+        );
+        assert_eq!(
+            world_id_for("issues-dev").expect("an id").as_str(),
+            "local.issues-dev"
+        );
+        assert!(world_id_for("Issues").is_err());
     }
 
     /// The guarantee the whole namespace exists for. A World id is
