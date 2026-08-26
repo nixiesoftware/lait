@@ -26,7 +26,7 @@
 //!
 //! Hand-rolled rather than clap: a handful of argv shapes, all of them already
 //! deployed (`daemon_spawn` self-execs `<exe> daemon`, agent configs run
-//! `lait mcp`, `viewer/scripts/dev.mjs` runs `lait [--orbit X] --port P
+//! `lait mcp`, and `ci/smoke-p0.sh` runs `lait [--orbit X] --port P
 //! --json`, and installers verify with `lait --version`), and a parser
 //! generator earns nothing against a fixed list of flags.
 //!

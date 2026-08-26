@@ -129,7 +129,7 @@ enum ViewerEvent {
 ///
 /// It exists because tooling needs the token and the only alternative was scraping
 /// it out of a sentence with a regex — which makes prose written for a human into an
-/// API, so improving the wording becomes a breaking change. `viewer/scripts/dev.mjs`
+/// API, so improving the wording becomes a breaking change. `ci/smoke-p0.sh`
 /// is the first caller; an editor plugin that wants to embed the client is the next.
 /// The line is emitted **before** the server starts accepting, so a parent process
 /// can read one line and know it is safe to connect.
@@ -167,7 +167,7 @@ pub async fn run(
 /// itself, and the bound port.
 ///
 /// [`run`] prints it — stdout is the launcher's readiness contract, and
-/// `viewer/scripts/dev.mjs` and `ci/smoke-p0.sh` both read that line. An
+/// `ci/smoke-p0.sh` reads that line. An
 /// embedder that has no stdout to scrape — the iOS client is one process, and
 /// a phone cannot read its own console — receives the same fact through
 /// [`run_announced`]'s callback instead. Same moment, same guarantee: the

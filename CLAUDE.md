@@ -157,10 +157,17 @@ The core is layered, and the boundary is `api/mod.rs` and nothing else:
 
 A control reads
 `view.inFlight.includes(actionKey.…)` and disables itself on the frame it was
-clicked. The keys live in `actionKey` and are pinned by test against
-`Action::key` in `tools/astrolabe/src/runtime.rs` — a key that disagrees fails
-*nowhere*, it just never matches `inFlight`, so the control stays live through
-its own action and can be pressed twice.
+clicked. The keys live in `actionKey`, and `Action::key` in
+`tools/astrolabe/src/runtime.rs` spells the same strings — a key that disagrees
+fails *nowhere*, it just never matches `inFlight`, so the control stays live
+through its own action and can be pressed twice.
+
+**They are not actually pinned against each other, whatever this file used to
+say.** `client.test.ts` asserts TypeScript literals against TypeScript
+literals, which catches a typo in the test and nothing in the core. Rename a
+key on the Rust side and every control keyed on it goes quietly live. Ten keys
+now ride on that; treat a key change as a two-sided edit until something checks
+it.
 
 ### The Library is the catalog, not the install list
 
@@ -328,59 +335,75 @@ The Welcome flow is what a browser sees when no Space exists yet: it founds one
 `POST /api/host/rpc`. Nothing is created implicitly, so a driver script that
 wants a Space must ask for one.
 
-## Rebuilding after a viewer change
+## Working on a World, in the client that runs it
 
-The viewer builds the independently shipped Issues web payload under
-`products/issues-app/assets/web/`. A viewer edit reaches a real head after the
-payload is rebuilt and staged with the Issues runner:
+**There is no viewer dev server.** There was one — Vite on `:5178` proxying to
+an engine on `:7717` — and it was removed. Two origins, a token carried by a
+proxy instead of a cookie, a seam that existed only in development: what it
+showed you was *a* viewer, not the one in the window. Do not reach for it, and
+do not add it back.
 
-```sh
-(cd viewer && npm run build)   # regenerates products/issues-app/assets/web/*
-cargo build -p lait-issues-runner -p lait
-```
-
-`cd viewer && npm run dev` runs a live development head, which is what you want
-while iterating; it shells out to `lait --orbit <sel> --port <n> --json` and
-reads that readiness line.
-
-Kill running daemons first — a running `lait` binary holds the `.exe` lock and the
-link step fails (`taskkill //F //IM lait.exe` on Windows).
-
-### Seeing a viewer change in the real client window
-
-`npm run dev` puts the viewer in a browser tab. It is *not* what the client
-serves: a head reads a World's page only from that World's selected installed
-release, so a page built here is invisible to the window until it is packaged,
-signed, published to a feed and installed. That is how a World travels; it is
-not how one is written.
-
-`LAIT_WORLD_LINK` is the seam between the two. It names a directory to serve in
-place of the release, for one World, for the life of the process that holds it:
+A World is looked at in the client, as a **local World**: its own Library entry,
+its own id and mount, sitting beside the release it was copied from rather than
+replacing it.
 
 ```sh
-LAIT_WORLD_LINK="com.lait.issues=$PWD/products/issues-app/assets/web" \
-  npm run tauri dev                   # in apps/astrolabe-web
+(cd viewer && npm run build)          # → products/issues-app/assets/web
+PROFILE=debug ARTIFACT_ROOT=target/debug \
+  bash .github/scripts/stage-worlds.sh <target-triple> target/local-worlds
 ```
 
-The loop is then `(cd viewer && npm run build)` and reload the World window.
-Several Worlds can be linked at once, comma separated. Read by the head, so it
-reaches the daemon the client spawns and the head under that — set it on
-whatever you launch.
+Then in Astrolabe: **+ Add local World** at the foot of the Library rail, and
+pick `target/local-worlds/worlds/com.lait.issues/<version>`. The directory is
+the whole ask — the name comes from the tree's own `world.json`.
 
-Three rules it holds to, each of them a defect it exists to avoid:
+After that, a page change is a rebuild and a reload, because a head reads a file
+per request:
 
-- **A link outranks the release, and says so.** Every head that comes up on one
-  logs a warning naming the directory. A machine serving somebody's working
-  tree while believing it serves 0.9.3 is worse than the friction removed.
-- **A link that cannot be served refuses.** A path that is relative, missing,
-  or not a directory serves *nothing* rather than falling back — falling back
-  serves stale release bytes to somebody who just asked for their own, and
-  looks exactly like an edit that did nothing.
-- **It is environmental, never recorded.** A link in a file outlives the
-  afternoon that wanted it.
+```sh
+(cd viewer && npm run build)
+cp -R products/issues-app/assets/web/. \
+  target/local-worlds/worlds/com.lait.issues/<version>/
+```
 
-It does not make the World appear in the Library — that is the installation's
-job, and linking is about which bytes a head reads, not about what is installed.
+A **runner** change — `products/issues-app/src` or the crates under it — needs a
+rebuild, a re-stage, and the World stopped and opened again from the Library.
+Stopping and opening is the refresh; there is deliberately no reload command,
+and nothing reaches into a World's page.
+
+Kill running daemons before a test build — a running `lait` holds the `.exe`
+lock (`taskkill //F //IM lait.exe` on Windows).
+
+### What a local World is, and is not
+
+An **unsealed World tree**: what a build produces before anything signs it, a
+`world.json` beside the runner and pages it declares. Not a directory of pages —
+that is refused when you add it.
+
+- **It is a different World.** The host assigns it `local.<handle>` and mounts
+  it at `local_<handle>`, so its MCP tools are `local_issues_list`, its routes
+  are `/local_issues/`, and nothing that resolves by name can confuse it with
+  the release. It therefore has **its own data** — an empty Issues, not yours.
+- **It is never given a release digest.** `LAIT_WORLD_RELEASE` says `local`, so
+  the World's own process can tell.
+- **Consent is to bytes.** `world.json` and every runner it declares are
+  digested when you add it, and re-checked on every read; a tree that changed
+  says so in its settings window.
+- **An agent session on one carries no privileged tools.** No `member_add`,
+  `member_remove`, `key_rotate`, `invite_ticket`, `connect`, `join_room` or
+  `world_upgrade` — see `mcp::ShellTool`, where the classification is
+  exhaustive and a test holds it complete.
+- **Its text is fenced.** Teaching text, tool descriptions, schema descriptions
+  and tool results are wrapped in a per-run random delimiter. That is an
+  attack-cost increase and a provenance label, **not** a mitigation — measured,
+  delimiting of this shape fails against adaptive attacks. What bounds the
+  damage is the tool split above.
+
+`LAIT_WORLD_LINK=<world-id>=<dir>` still exists for CI and a one-off: it serves
+a directory in place of a release for the life of the process holding it, and is
+written down nowhere. A recorded override was tried and removed — a Library
+row's claim is the only thing this client says about what you are running, and
+it is worth what it cannot be made to say falsely.
 
 ## Verifying
 

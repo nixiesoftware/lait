@@ -8,57 +8,44 @@ If you are extending lait — a theme, extra commands, a different frontend agai
 same control plane — this is the reference. The whole client is a **projection of a
 command registry** (`src/core/registry.ts`); read that file first.
 
-## The dev loop
+## The loop
+
+This directory has no dev server, and that is deliberate — it had one and it was
+removed. A Vite server on `:5178` proxying to an engine on `:7717` meant the
+client you were looking at was never the client anybody runs: a different
+origin, a token carried by a proxy instead of a cookie, and a whole seam that
+existed only in development. What it showed you was *a* viewer. It was not the
+one in the window.
+
+The client can now serve this World from the tree you are building, so look at
+it there:
 
 ```bash
-cd viewer
-npm install
-npm run dev          # → http://localhost:5178
+(cd viewer && npm run build)          # → ../products/issues-app/assets/web
+PROFILE=debug ARTIFACT_ROOT=target/debug \
+  bash .github/scripts/stage-worlds.sh <target-triple> target/local-worlds
 ```
 
-That one command does everything: it starts the engine (`lait --json`, the default
-mode), reads
-the run's token off its first line, and launches Vite with the token wired into the
-dev proxy. Edit `src/`, see it in the browser. No token to copy, no second terminal.
+Then in Astrolabe: **+ Add local World** at the foot of the Library rail, and
+pick `target/local-worlds/worlds/com.lait.issues/<version>`. It becomes an entry
+of its own — its own id, its own mount, beside the released Issues rather than
+replacing it.
 
-It drives `../target/debug/lait` by default (then `release`, then `PATH`) — so
-`cargo build` once first. Overrides:
-
-| Env | Effect |
-|---|---|
-| `LAIT_BIN` | Path to the `lait` binary to run instead of the `target/` one. |
-| `LAIT_ORBIT` | Orbit name, id, or path passed to `lait --orbit` (useful from a multi-Orbit checkout). |
-| `LAIT_PORT` | Engine port (default `7717`). |
-| `LAIT_TOKEN` | **Skip spawning.** Use an engine you started yourself, with this token. |
-
-`npm run dev -- --host` and any other flags pass straight through to Vite.
-
-### Driving your own engine
-
-Set `LAIT_TOKEN` and the script won't spawn one — it uses yours. Get the token from
-the engine you started:
+After that the loop is short. A head reads a file per request, so a rebuild is
+visible on reload:
 
 ```bash
-lait --json            # → {"url":"…","token":"…","port":7717}
-LAIT_TOKEN=<that-token> npm run dev
+(cd viewer && npm run build)
+cp -R products/issues-app/assets/web/. \
+  target/local-worlds/worlds/com.lait.issues/<version>/
 ```
 
-`npm run dev:vite` is the bare Vite server with nothing wired up, for when you want to
-manage the engine entirely by hand.
+Reload the World window. No restart, and nothing to copy by hand.
 
-### Why a token at all — the one thing worth understanding
-
-Vite serves the client on `:5178`; the engine listens on `:7717`. **Two origins.**
-The head refuses cross-origin requests on purpose — a strict `Host`/`Origin`
-allowlist is what stops a hostile web page from reaching your loopback engine via DNS
-rebinding (`src/serve/auth.rs`). Relaxing that guard for dev convenience would make it
-stop meaning anything.
-
-So the guard never relaxes. The **dev proxy** adapts instead
-(`vite.config.ts`): it strips the browser's `Origin`, and presents the run's token as
-a bearer credential the cross-origin cookie jar cannot supply. Production ships with
-no dev flag in the release at all — the client is same-origin because the World head
-serves it, which is the precondition for the whole guard.
+Changing the **runner** — anything in `products/issues-app/src` or the crates
+under it — does need a rebuild, a re-stage, and the World stopped and opened
+again from the Library. Stopping and opening is the refresh; there is no
+separate reload command, deliberately.
 
 ## The production path
 
@@ -70,12 +57,11 @@ Issues release beside `world.json` and `lait-world-issues`; subsequent Issues
 updates replace that release independently of the host. CI diffs a fresh
 rebuild against the committed tree, so stale product bytes fail before publish.
 
-**After editing `src/`, a change is visible three ways, in increasing cost:**
+**After editing `src/`, a change is visible two ways:**
 
 | You want | Do |
 |---|---|
-| Fast iteration with HMR | `npm run dev` (nothing else) |
-| The change inside a real head | `npm run build`, stage the Issues release, then launch the head |
+| To see it in the client | `npm run build`, copy into your local World's tree, reload the window |
 | CI to accept the branch | commit the rebuilt `../products/issues-app/assets/web` |
 
 `cargo build` does not consume the web tree. The staging scripts do, which keeps

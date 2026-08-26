@@ -93,7 +93,7 @@ fn exit_code_for_error(e: &anyhow::Error) -> i32 {
 ///
 /// Under `--json` the failure is the versioned `Response::Error` DTO on
 /// **stdout**, because that is where the readiness line would have gone:
-/// `viewer/scripts/dev.mjs` reads the first stdout line and checks
+/// `ci/smoke-p0.sh` reads the first stdout line and checks
 /// `kind === "error"` before it looks for `{token, port}`. Prose on stderr and
 /// an empty stdout would leave it waiting for a line that never comes.
 pub fn report_error(e: &anyhow::Error, json: bool) -> std::process::ExitCode {
