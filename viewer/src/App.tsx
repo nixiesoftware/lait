@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import {
+  Box,
   PanelLeft,
   PanelRight,
   Plus,
@@ -10,6 +11,7 @@ import { ConfirmRequired, hostRpc, LaitError, rpc, spaces as fetchSpaces } from 
 import { setFaceScope } from "./ui/faces";
 import { useDoorbell } from "./doorbell";
 import { runBounded, type BulkProgress } from "./core/bulk";
+import { emptinessOf } from "./core/emptiness";
 import { filterNotice, groupRows, loadDisplay, saveDisplay, type DisplayState } from "./core/display";
 import {
   contribute,
@@ -42,7 +44,7 @@ import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
 import { SPEC_KIND_LABEL } from "./core/specs";
 import { Activity } from "./ui/Activity";
-import { classifyFailure, EmptyState, InlineError, recoveryForError, StandingNotice, TrustPopover } from "./ui/AppState";
+import { classifyFailure, EmptyState, InlineError, LoadingState, recoveryForError, StandingNotice, TrustPopover } from "./ui/AppState";
 import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
@@ -362,6 +364,7 @@ export function App() {
   const boardSpace = isProjectView(view) && !team ? current : null;
   const {
     board: projectBoard,
+    resource: projectBoardResource,
     nextCursor: projectBoardCursor,
     loadMore: loadMoreProjectBoard,
   } = useProjectBoard(
@@ -611,6 +614,31 @@ export function App() {
       optimistic: new Set(projectStore.overlay.docs()),
     };
   }, [allowed, board, filter, projectStore]);
+
+  /**
+   * Why there are no rows — which is three different facts, and they were one.
+   *
+   * `shown` is null while a board loads, when a Space holds no project to draw
+   * one for, and when the read failed. The work area called all three "this
+   * view is unavailable — the local projection could not be loaded", under a
+   * warning triangle, with a Retry that could not help two of them. On a Space
+   * that had simply never had a project, the header said "Ready locally" and
+   * the body said it had failed, and the body was the one that was wrong.
+   *
+   * The store has always known: it publishes `cold | partial | ready |
+   * refreshing | error` on every snapshot. Nothing read it — every surface
+   * inferred state from `data ?? []`, which is exactly where "not asked yet"
+   * and "asked, and there is nothing" become the same value.
+   *
+   * Order matters. A failure is worth saying even if a Space is also empty,
+   * because it is the only one of the three anybody can act on.
+   */
+  const emptiness = emptinessOf({
+    hasRows: Boolean(shown),
+    board: projectBoardResource.state,
+    projects: projectsResource.state,
+    projectCount: liveProjects.length,
+  });
 
   /** The list's arrangement (the board renders columns straight off `shown`). */
   const groups = useMemo(() => (shown ? groupRows(shown, display) : []), [shown, display]);
@@ -2736,6 +2764,26 @@ export function App() {
                   void loadMoreBoard();
                 }
               }}
+            />
+          ) : emptiness === "loading" ? (
+            <LoadingState title="Loading issues" body="Reading this project's local projection." />
+          ) : emptiness === "no-projects" ? (
+            // A first run, taught rather than apologised for: the heading names
+            // the thing, the body says what it is and why you would want one,
+            // and the action is the next step. Nothing here is a warning,
+            // because nothing has gone wrong.
+            <EmptyState
+              icon={<Box className="size-icon-lg" />}
+              title="Projects"
+              body="A project is one body of work with an outcome — a release, a migration, a feature. Issues live in projects, so this workspace needs one before it has anything to show."
+              action={
+                <Button
+                  onClick={() => api.createProject()}
+                  label="Create project"
+                  variant="primary"
+                  size="sm"
+                />
+              }
             />
           ) : (
             <EmptyState

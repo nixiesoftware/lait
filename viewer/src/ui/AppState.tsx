@@ -44,21 +44,41 @@ export function ApplicationState({
   action?: React.ReactNode;
   className?: string;
 }) {
+  // A filter matching nothing is not a first run, and should not cost what one
+  // costs. Somebody who has filtered a list knows what the list holds and what
+  // an issue is; the only thing they do not know is that this filter matched
+  // none of them, and the only thing they want is out. So it is a line and an
+  // escape — no heading weight, no prose restating the button underneath it.
+  //
+  // The states that teach keep their full shape. That difference is the whole
+  // point: how much a surface spends should track how much the person still has
+  // to be told.
+  const quiet = kind === "filtered-empty";
   return (
     <div
-      className={cn("flex flex-1 items-center justify-center p-8", className)}
+      className={cn("flex flex-1 items-center justify-center", quiet ? "p-6" : "p-8", className)}
       data-application-state={kind}
       role={kind === "error" || kind === "retry" ? "alert" : "status"}
       aria-live={kind === "loading" || kind === "progress" ? "polite" : undefined}
       aria-busy={kind === "loading" || kind === "progress" ? true : undefined}
     >
       <div className="flex max-w-sm flex-col items-center text-center">
-        <span className={cn("text-mute mb-3", (kind === "error" || kind === "retry") && "text-danger")}>
+        <span
+          className={cn(
+            "text-mute",
+            quiet ? "mb-2" : "mb-3",
+            (kind === "error" || kind === "retry") && "text-danger",
+          )}
+        >
           {icon ?? <StateIcon kind={kind} />}
         </span>
-        <h2 className="text-base font-semibold">{title}</h2>
-        {body && <p className="text-dim mt-1 text-sm leading-5">{body}</p>}
-        {action && <div className="mt-4">{action}</div>}
+        {quiet ? (
+          <h2 className="text-dim text-sm">{title}</h2>
+        ) : (
+          <h2 className="text-base font-semibold">{title}</h2>
+        )}
+        {body && !quiet && <p className="text-dim mt-1 text-sm leading-5">{body}</p>}
+        {action && <div className={quiet ? "mt-3" : "mt-4"}>{action}</div>}
       </div>
     </div>
   );
@@ -79,7 +99,7 @@ export function ProgressState(props: Omit<React.ComponentProps<typeof Applicatio
 
 function StateIcon({ kind }: { kind: ApplicationStateKind }) {
   if (kind === "loading" || kind === "progress") return <LoaderCircle className="size-icon-lg animate-spin" />;
-  if (kind === "filtered-empty") return <SearchX className="size-icon-lg" />;
+  if (kind === "filtered-empty") return <SearchX className="size-icon-md" />;
   if (kind === "error" || kind === "retry" || kind === "unavailable") return <AlertTriangle className="size-icon-lg" />;
   if (kind === "success") return <CheckCircle2 className="text-ok size-icon-lg" />;
   return <Database className="size-icon-lg" />;
