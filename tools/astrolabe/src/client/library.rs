@@ -283,6 +283,24 @@ pub(crate) fn installed() -> Vec<LibraryEntry> {
     installed_for(None)
 }
 
+/// Every World this identity can actually open: the releases it has installed
+/// and the trees it is working on.
+///
+/// Not the catalog. A row nobody has installed has no window to dress, and no
+/// declaration of its own to dress it from.
+///
+/// Distinct from [`installed`], which is the release half alone and is what the
+/// channel-facing actions want — a tree being worked on follows no channel.
+pub(crate) fn openable() -> Vec<LibraryEntry> {
+    openable_for(None)
+}
+
+pub(crate) fn openable_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
+    let mut entries = installed_for(identity);
+    entries.extend(local_for(identity));
+    entries
+}
+
 fn declarations(identity: Option<&Path>) -> Vec<lait::world::installed::Declaration> {
     let identity = identity
         .map(std::path::PathBuf::from)
@@ -517,6 +535,44 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// The claim the window dressing rests on: a tree being worked on is
+    /// openable, and is *not* among the installed releases.
+    ///
+    /// Testing the lookup alone proved nothing — it passes against either list.
+    /// This is the seam that was actually wrong.
+    #[test]
+    fn a_local_world_is_openable_but_is_not_an_installed_release() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let tree = tempfile::tempdir().expect("a tree");
+        std::fs::write(
+            tree.path().join("world.json"),
+            br#"{"format":1,"id":"com.example.tasks","version":"0.0.0-local",
+                 "mount":"tasks","name":"Tasks",
+                 "launch":[{"id":"app","present":"primary",
+                            "target":{"type":"web","path":"/"},"chrome":"world"}],
+                 "runners":[]}"#,
+        )
+        .expect("a declaration");
+        lait::world::local::register(identity.path(), "tasks", tree.path()).expect("it registers");
+
+        let installed = installed_for(Some(identity.path()));
+        assert!(
+            !installed.iter().any(|row| row.world_mount == "local_tasks"),
+            "a tree being worked on is not an installed release"
+        );
+
+        let openable = openable_for(Some(identity.path()));
+        let row = openable
+            .iter()
+            .find(|row| row.world_mount == "local_tasks")
+            .expect("a registered local World is openable");
+        assert_eq!(row.display_name, "Tasks", "it is named by its own tree");
+        assert!(
+            matches!(row.chrome, world_interface::manifest::Chrome::World),
+            "and carries the window treatment its tree declared"
+        );
+    }
+
     use super::*;
 
     fn selected_manifest() -> world_interface::manifest::WorldManifest {

@@ -662,14 +662,28 @@ fn world_state(
 }
 
 fn world_launch(mount: &str, url: String) -> crate::browser::WorldLaunch {
-    let row = crate::client::library::installed()
-        .into_iter()
-        .find(|row| row.world_mount == mount);
+    launch_from(&crate::client::library::openable(), mount, url)
+}
+
+/// Dress the window from the row the mount belongs to.
+///
+/// Over everything openable, not the installed half. A tree somebody is working
+/// on has no row among the releases, so it used to find nothing and fall
+/// through to both defaults at once: its window was titled `local_issues` — the
+/// mount, which is a key and not a name — and wore the system's title bar while
+/// its own declaration asked to draw the top of the window itself. The World
+/// most likely to be looked at was the one dressed by neither of its own
+/// answers.
+fn launch_from(
+    rows: &[crate::client::library::LibraryEntry],
+    mount: &str,
+    url: String,
+) -> crate::browser::WorldLaunch {
+    let row = rows.iter().find(|row| row.world_mount == mount);
     // A label is not worth blocking a launch over, and neither is a window
     // treatment: a World this client cannot find gets the system's title bar,
     // which is what a page that has said nothing needs.
     let title = row
-        .as_ref()
         .map(|row| row.display_name.clone())
         .unwrap_or_else(|| mount.to_owned());
     let chrome = row.map(|row| row.chrome).unwrap_or_default();
@@ -1753,6 +1767,57 @@ fn send(sender: &UnboundedSender<Update>, wake: &(impl Fn() + ?Sized), update: U
 
 #[cfg(test)]
 mod tests {
+    /// A tree somebody is working on wears its own declaration.
+    ///
+    /// This looked at the installed half of the Library, so a local World
+    /// matched no row and took *both* fallbacks at once: titled with its mount
+    /// — `local_issues`, a key and not a name — and given the system's title
+    /// bar while its own `world.json` asked to draw the top of the window
+    /// itself. Nothing failed; the window was simply dressed by neither of the
+    /// World's own answers, which is the one window most likely to be looked
+    /// at.
+    #[test]
+    fn a_local_world_window_is_dressed_by_the_row_it_belongs_to() {
+        use world_interface::manifest::Chrome;
+
+        fn row(mount: &str, name: &str, chrome: Chrome) -> crate::client::library::LibraryEntry {
+            crate::client::library::LibraryEntry {
+                world_mount: mount.to_owned(),
+                world: format!("com.example.{name}"),
+                installed: true,
+                display_name: name.to_owned(),
+                entry_path: Some("/".to_owned()),
+                chrome,
+                tagline: None,
+                accent: None,
+                version: None,
+                source_dir: None,
+                source_standing: None,
+            }
+        }
+
+        let rows = vec![
+            row("issues", "Issues", Chrome::World),
+            row("local_issues", "Issues", Chrome::World),
+        ];
+
+        let launch = launch_from(&rows, "local_issues", "http://127.0.0.1:1/".to_owned());
+        assert_eq!(
+            launch.title, "Issues",
+            "the window took its mount for a name"
+        );
+        assert!(
+            matches!(launch.chrome, Chrome::World),
+            "the World asked to draw its own top edge and was given the system's"
+        );
+
+        // And a mount nothing claims still opens, wearing what a page that has
+        // said nothing needs.
+        let unknown = launch_from(&rows, "stranger", "http://127.0.0.1:1/".to_owned());
+        assert_eq!(unknown.title, "stranger");
+        assert!(matches!(unknown.chrome, Chrome::System));
+    }
+
     use super::*;
     use lait_workbench::{
         BackendEvent, Capabilities, EnvironmentSnapshot, EventKind, SnapshotReason,
