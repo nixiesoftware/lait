@@ -57,5 +57,10 @@ cp products/issues-app/assets/hero.png \
 
 stage "com.lait.signage" "$SIGNAGE_VERSION" \
   products/signage-runner/world.json.template lait-world-signage
+# Signage declares a primary web launch target, so the release has to carry the
+# bytes that target resolves to. A head serves static files only from the
+# selected immutable release; without this copy the Open button reaches a head
+# with no index.html to answer with.
+cp -R products/signage-app/assets/web/. "$OUTPUT/worlds/com.lait.signage/$SIGNAGE_VERSION/"
 
 echo "staged first-party Worlds for $TARGET at $OUTPUT/worlds"

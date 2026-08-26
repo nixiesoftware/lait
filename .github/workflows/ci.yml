@@ -230,6 +230,52 @@ jobs:
         run: npm run naming-gate
         working-directory: viewer
 
+  # The Signage operator client, on the same terms as the Issues one above: its
+  # bundle is committed as part of the independently shipped Signage release, so
+  # the only thing keeping it honest is a job that rebuilds it and diffs.
+  #
+  # Signage declares a primary web launch target, which is what puts an Open
+  # button on its Library row. A stale or missing bundle therefore does not
+  # degrade quietly — it opens a head with nothing to serve.
+  signage-web:
+    name: signage-web
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: products/signage-app/web/package-lock.json
+
+      # The client declares `npm >= 11`, and Node 22 bundles npm 10.9 — so the
+      # runner fails `npm ci` on EBADENGINE before it reads a single dependency.
+      # Satisfy the declaration rather than relaxing it: the lockfile was
+      # resolved by npm 11, and letting an older npm rewrite it is exactly the
+      # drift the `npm ci` in the next step exists to prevent.
+      - name: Match the declared npm
+        run: npm install -g npm@^11
+
+      - name: Install
+        run: npm ci
+        working-directory: products/signage-app/web
+
+      - name: Typecheck
+        run: npm run check
+        working-directory: products/signage-app/web
+
+      - name: Build
+        run: npm run build
+        working-directory: products/signage-app/web
+
+      - name: Assert the committed Signage bundle is what the client builds
+        run: |
+          if ! git diff --exit-code --stat -- products/signage-app/assets/web; then
+            echo "::error::the Signage web release is stale — run 'npm run build' in products/signage-app/web/ and commit the result."
+            exit 1
+          fi
+
   # ===========================================================================
   # The PR path. Two jobs, split by what each one uniquely proves.
   # ===========================================================================
@@ -693,7 +739,7 @@ jobs:
   orbital-complete:
     name: orbital-complete
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [test, platform, viewer, receivers, coverage-manifest, schema-contract,
+    needs: [test, platform, viewer, signage-web, receivers, coverage-manifest, schema-contract,
             astrolabe-web, astrolabe-web-host]
     if: always()
     steps:

@@ -15,5 +15,7 @@
   "runners": [
     { "preferred": true, "program": "bin/lait-world-signage${EXE}" }
   ],
-  "launch": []
+  "launch": [
+    { "id": "app", "present": "primary", "target": { "type": "web", "path": "/" } }
+  ]
 }
