@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity as ActivityIcon, AlertTriangle } from "lucide-react";
 
 import { rpc } from "../api";
@@ -6,7 +6,7 @@ import { describeEventRich, type EventPhraseContext, type NameResolver } from ".
 import { groupActivity } from "../core/inbox";
 import { boundedTail, indexBy } from "../core/performance";
 import type { ActivityEvent, MemberDto, WorkflowState, WorldPublicationId } from "../types";
-import { EmptyState, LoadingState } from "./AppState";
+import { ApplicationState, EmptyState, LoadingState } from "./AppState";
 import { memberName } from "./Avatar";
 import { when } from "./time";
 import { Button } from "@astryxdesign/core";
@@ -78,6 +78,17 @@ export function Activity({
   onOpen: (reff: string) => void;
 }) {
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
+  /**
+   * Why there is no activity, when there is none.
+   *
+   * `events === null` meant "not loaded", and a failed read left it null — so a
+   * failure drew "Loading activity" forever, a spinner promising progress that
+   * was never coming, while the reason went to a toast that had already faded.
+   */
+  const [failure, setFailure] = useState<string | null>(null);
+  /** Read inside `load`, which must not re-create itself when events change. */
+  const eventsRef = useRef<ActivityEvent[] | null>(null);
+  eventsRef.current = events;
   const [visibleCount, setVisibleCount] = useState(80);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [publication, setPublication] = useState<WorldPublicationId | null>(null);
@@ -132,7 +143,13 @@ export function Activity({
         setNextCursor(r.page.next_cursor ?? null);
         setPublication(r.page.publication);
       } catch (e) {
-        if (alive()) onError(e instanceof Error ? e.message : String(e));
+        if (!alive()) return;
+        const message = e instanceof Error ? e.message : String(e);
+        // With nothing on screen the pane owns the failure; with rows already
+        // drawn it keeps them, so the transient notice is the only place left
+        // to say a refresh did not land.
+        setFailure(message);
+        if (append || eventsRef.current) onError(message);
       } finally {
         if (alive() && append) setLoadingMore(false);
       }
@@ -153,6 +170,18 @@ export function Activity({
   }, [load, revision]);
 
   if (!scopedEvents) {
+    if (failure) {
+      return (
+        <ApplicationState
+          kind="retry"
+          title="Activity is unavailable"
+          body={failure}
+          action={
+            <Button onClick={() => void load(() => true)} label="Retry" variant="ghost" size="sm" />
+          }
+        />
+      );
+    }
     return (
       <LoadingState
         title="Loading activity"

@@ -18,7 +18,7 @@ import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
 import { Combobox } from "./Picker";
 import { Button, IconButton, TextInput } from "@astryxdesign/core";
-import { EmptyState, InlineError, LoadingState } from "./AppState";
+import { ApplicationState, EmptyState, InlineError, LoadingState } from "./AppState";
 import { SettingsPageHeader } from "./settingsLayout";
 
 /**
@@ -44,6 +44,14 @@ export function Members({
   embedded?: boolean;
 }) {
   const [members, setMembers] = useState<MemberDto[] | null>(null);
+  /**
+   * Why there is no roster, when there is none.
+   *
+   * `members === null` meant "not loaded", and the catch below returned without
+   * setting it — so a failed read drew "Loading members" forever, a spinner
+   * promising progress that was never coming.
+   */
+  const [failure, setFailure] = useState<string | null>(null);
   const [log, setLog] = useState<MemberLogEntry[]>([]);
   const [logError, setLogError] = useState("");
   const [ticket, setTicket] = useState<string | null>(null);
@@ -54,8 +62,13 @@ export function Members({
     try {
       const m = await rpc(spaceId, { cmd: "members" });
       if (m.kind === "members") setMembers(m.members);
+      setFailure(null);
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      // The pane owns it when there is no roster to keep showing; otherwise the
+      // roster stays and the transient notice says the refresh did not land.
+      setFailure(message);
+      if (members) onError(message);
       return;
     }
     try {
@@ -104,6 +117,16 @@ export function Members({
   };
 
   if (!members) {
+    if (failure) {
+      return (
+        <ApplicationState
+          kind="retry"
+          title="Members are unavailable"
+          body={failure}
+          action={<Button onClick={() => void load()} label="Retry" variant="ghost" size="sm" />}
+        />
+      );
+    }
     return <LoadingState title="Loading members" body="Verifying this space’s signed access graph." />;
   }
 
