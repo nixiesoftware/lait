@@ -25,9 +25,19 @@ pub enum Staging {
     /// no build to contend with, and copying would only add a path to explain.
     #[default]
     Direct,
-    /// Copy the executable beneath `root` and spawn the copy. `root` is a
-    /// per-run directory, not a shared one — two clients staging into the same
-    /// place would be back to contending, just with extra steps.
+    /// Copy the executable beneath `root` and spawn the copy.
+    ///
+    /// `root` is shared and the copies inside it are keyed by fingerprint, so
+    /// two runs of the same build reuse one image and two different builds get
+    /// their own. That is what keeps a rebuild from contending with a daemon
+    /// that is up.
+    ///
+    /// It is also why it has to be swept. Every distinct build leaves a copy of
+    /// the whole executable — on this project, most of two hundred megabytes —
+    /// and a day of rebuilding leaves a directory per build, permanently. The
+    /// failure that produces is worse than its size: the client comes up
+    /// looking entirely normal and silently has no daemon, because staging the
+    /// next image is the thing that ran out of room. See [`StagedImage::sweep`].
     Staged { root: PathBuf },
 }
 
@@ -67,6 +77,13 @@ impl StagedImage {
             }
         };
 
+        if let Staging::Staged { root } = policy {
+            // Best effort, and after the image this run needs is in place: a
+            // sweep that failed must never be the reason a daemon cannot start,
+            // which is the failure it exists to prevent.
+            Self::sweep(root, &fingerprint);
+        }
+
         Ok(Self {
             facts: ImageFacts {
                 source_path: source.to_string_lossy().into_owned(),
@@ -76,6 +93,54 @@ impl StagedImage {
             },
             executable,
         })
+    }
+
+    /// How many images survive a sweep, including the one just staged.
+    ///
+    /// More than one because a daemon that is up keeps running against the
+    /// image it started with, and the run before this one is the likeliest to
+    /// still be up. Not many more, because every one is a whole executable and
+    /// the reason to sweep at all is that they are large.
+    const KEEP: usize = 3;
+
+    /// Remove staged images this run is not using, newest kept first.
+    ///
+    /// Nothing here can know which images are *in use* — a supervisor knows
+    /// what it started, and this is reached from a constructor that does not.
+    /// So it keeps the one just staged, keeps the most recent few beside it,
+    /// and lets the rest go.
+    ///
+    /// Unlinking an executable a process is running is safe where this matters:
+    /// on Unix the running image survives as an open inode, and on Windows the
+    /// removal simply fails and that image is skipped. Either way a removal
+    /// that goes wrong costs a directory, never a daemon.
+    fn sweep(root: &Path, keep_fingerprint: &str) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        let mut staged: Vec<(std::time::SystemTime, PathBuf, String)> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, entry.path(), name))
+            })
+            .collect();
+        // Newest first, so what survives is what a daemon is likeliest to hold.
+        staged.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut kept: usize = 0;
+        for (_, path, name) in staged {
+            if name == keep_fingerprint {
+                continue;
+            }
+            kept = kept.saturating_add(1);
+            if kept < Self::KEEP {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(&path);
+        }
     }
 
     /// The path to spawn.
@@ -128,6 +193,65 @@ mod tests {
 
     fn write_executable(path: &Path, contents: &[u8]) {
         std::fs::write(path, contents).expect("write executable");
+    }
+
+    /// The leak. Every distinct build left a copy of the whole executable and
+    /// nothing ever removed one, so a day of rebuilding filled the disk — and
+    /// the failure it produced was that staging the *next* image ran out of
+    /// room, which the client reports by coming up looking normal and silently
+    /// having no daemon.
+    #[test]
+    fn staging_does_not_keep_every_build_forever() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("images");
+        let source = directory.path().join("lait.exe");
+
+        for build in 0..8u8 {
+            write_executable(&source, &[build; 64]);
+            StagedImage::prepare(
+                &source,
+                &Staging::Staged { root: root.clone() },
+                build.into(),
+            )
+            .expect("prepare");
+        }
+
+        let staged = std::fs::read_dir(&root)
+            .expect("the staging root")
+            .flatten()
+            .count();
+        assert_eq!(
+            staged,
+            StagedImage::KEEP,
+            "eight builds must not leave eight images"
+        );
+    }
+
+    /// A daemon that is up keeps running against the image it started with, so
+    /// the run before this one is the one most likely to still be held.
+    #[test]
+    fn a_sweep_keeps_the_image_this_run_staged_and_the_one_before_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("images");
+        let source = directory.path().join("lait.exe");
+
+        write_executable(&source, b"the build a daemon is running");
+        let previous = StagedImage::prepare(&source, &Staging::Staged { root: root.clone() }, 1)
+            .expect("prepare");
+        // A moment apart, so "newest" is not a coin toss on a coarse clock.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_executable(&source, b"the build this run staged");
+        let current = StagedImage::prepare(&source, &Staging::Staged { root: root.clone() }, 2)
+            .expect("prepare");
+
+        assert!(
+            std::path::Path::new(&current.facts().staged_path).exists(),
+            "the image this run needs survives its own sweep"
+        );
+        assert!(
+            std::path::Path::new(&previous.facts().staged_path).exists(),
+            "and so does the one a running daemon is likeliest to hold"
+        );
     }
 
     #[test]
