@@ -256,6 +256,13 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
         .runners
         .iter()
         .filter(|runner| runner.admits(std::env::consts::OS, std::env::consts::ARCH))
+        // A World named by this host has no history here to migrate: its store
+        // begins at the implementation it is being admitted with. A historical
+        // runner would also be claiming a reviewed implementation minted for the
+        // id its tree declares — a coordinate no Space has ever activated under
+        // the name this one is being run as, which is a false entry in the
+        // record rather than a useful one.
+        .filter(|runner| runner.preferred || !matches!(admission.provenance, Provenance::Local))
         .collect();
     if applicable.is_empty() {
         bail!("selected World {world} has no runner for this platform");

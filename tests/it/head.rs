@@ -359,11 +359,37 @@ impl Head {
         if std::mem::replace(&mut self.stopped, true) {
             return;
         }
-        let _ = self.child.kill();
-        // `kill` only asks. Without the wait the child is a zombie, and on a
-        // suite that starts one per test the reaping is the point.
-        let _ = self.child.wait();
+        // Ask before insisting. `Child::kill` is SIGKILL, which runs no
+        // destructors — and the head holds a live process per installed World,
+        // started to read its declaration. `Instance::drop` is what stops those,
+        // so a SIGKILLed head leaves every one of them behind, reparented to
+        // init and holding its store open. Twelve passing tests leaked
+        // twenty-four; they are in process groups of their own, deliberately, so
+        // nothing aimed at the head reaches them either.
+        //
+        // The head listens for SIGTERM (`serve::shutdown_signal`), so this is
+        // the shutdown a person's Ctrl-C performs, not a special test path.
+        #[cfg(unix)]
+        {
+            // `kill` rather than libc, for the reason `daemon_reaping` gives:
+            // libc is an apple-only dev-dependency and this is every unix.
+            let _ = Command::new("kill")
+                .arg(self.child.id().to_string())
+                .status();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                if matches!(self.child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         stop_daemon(&self.config, self.home.as_deref());
+        // The backstop, for a head that would not go. `kill` only asks; without
+        // the wait the child is a zombie, and on a suite that starts one per
+        // test the reaping is the point.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

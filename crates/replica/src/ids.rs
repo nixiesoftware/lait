@@ -243,20 +243,20 @@ mod tests {
     fn the_host_names_the_world_and_the_tree_is_the_fallback() {
         // Serial and restored: this reads process-wide state, and a sibling
         // test that saw it set would be reading somebody else's answer.
-        let declared = WorldId::parse("com.lait.issues").expect("a declared id");
+        let declared = WorldId::parse("com.example.tasks").expect("a declared id");
         let restore = std::env::var(SERVED_WORLD_VAR).ok();
         // SAFETY: single-threaded within this test, and restored below.
         unsafe { std::env::remove_var(SERVED_WORLD_VAR) };
         assert_eq!(
             served_world(&declared).as_str(),
-            "com.lait.issues",
+            "com.example.tasks",
             "with nothing said, a World serves what its tree declares"
         );
 
-        unsafe { std::env::set_var(SERVED_WORLD_VAR, "local.issues") };
+        unsafe { std::env::set_var(SERVED_WORLD_VAR, "local.tasks") };
         assert_eq!(
             served_world(&declared).as_str(),
-            "local.issues",
+            "local.tasks",
             "the host's name is what the World serves under"
         );
 
@@ -267,7 +267,7 @@ mod tests {
             unsafe { std::env::set_var(SERVED_WORLD_VAR, bad) };
             assert_eq!(
                 served_world(&declared).as_str(),
-                "com.lait.issues",
+                "com.example.tasks",
                 "{bad:?} is not a World id and must not rename anything"
             );
         }
