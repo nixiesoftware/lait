@@ -7,6 +7,7 @@ import {
   createClientTransport,
   currentOwnedWindowSurface,
   currentWorldSettingsSnapshot,
+  type WorldSettingsSnapshot,
   keyFor,
   loadingClientView,
   setFullscreen,
@@ -43,15 +44,30 @@ const heroHeight = 196;
 export function App() {
   const [platform] = useState<PlatformProfile>(() => resolvePlatform());
   const [dark, setDark] = useState(true);
-  // The settings window never attaches a transport: its snapshot arrived in
-  // the URL, complete, when the window was summoned.
+  // The settings window's *facts* arrived in the URL, complete, when it was
+  // summoned, and still do. Its Developer pane offers choices, which a
+  // snapshot cannot carry: a choice has to go somewhere and its answer has to
+  // come back. So that window attaches the transport too — a second view of
+  // the one model, never a second model. See `settings.tsx`.
   const settingsSnapshot = useMemo(() => currentWorldSettingsSnapshot(), []);
-  if (settingsSnapshot !== null) {
-    return <main className="page owned-window" data-theme={settingsSnapshot.dark ? "dark" : "light"}>
-      <WorldSettingsSurface snapshot={settingsSnapshot} />
-    </main>;
-  }
+  if (settingsSnapshot !== null) return <WorldSettingsWindow snapshot={settingsSnapshot} />;
   return <ClientApp platform={platform} dark={dark} setDark={setDark} />;
+}
+
+/**
+ * The World-settings window, attached.
+ *
+ * Deliberately not routed through `ClientApp`: that component is the client's
+ * own window — its menu watcher, its chrome, its Big Picture branch — and none
+ * of it belongs in a 560-wide settings popout. What this needs from it is the
+ * transport and nothing else.
+ */
+function WorldSettingsWindow({ snapshot }: { snapshot: WorldSettingsSnapshot }) {
+  const transport = useMemo(() => createClientTransport(), []);
+  const { view, dispatch } = useClient(transport);
+  return <main className="page owned-window" data-theme={snapshot.dark ? "dark" : "light"}>
+    <WorldSettingsSurface snapshot={snapshot} view={view} dispatch={dispatch} />
+  </main>;
 }
 
 function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dark: boolean; setDark(next: boolean): void }) {
