@@ -48,6 +48,17 @@ pub struct WorldStanding {
     pub phase: Option<String>,
     pub progress: Option<String>,
     pub message: Option<String>,
+    /// The directory this World is being served from instead of its release.
+    ///
+    /// Carried here so that every surface drawing a World can say so. A
+    /// machine serving somebody's working tree while believing it serves a
+    /// release is the defect the whole seam exists to avoid, and it is only
+    /// avoided if this reaches the Library row, the World's settings window
+    /// and the World's own window — not just the head's log.
+    pub linked: Option<String>,
+    /// The channel this World follows by its own choice. `None` follows the
+    /// node's, which is not the same fact and must not draw as one.
+    pub channel: Option<String>,
 }
 
 /// Progress of an explicit first installation, keyed by the catalog mount.
@@ -93,7 +104,7 @@ impl From<lait::update::world::InstallProgress> for WorldInstallProgress {
 /// Enumerates the Worlds itself rather than taking the Library's rows, because
 /// this is sampled on the host tick — once a second, beside the two control
 /// round trips already there — and a signature that needed the rows would have
-/// made the cheap half depend on the expensive one. Two small file reads per
+/// made the cheap half depend on the expensive one. A few small file reads per
 /// World; the Library is a handful of rows and never a corpus.
 pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStanding> {
     let Some(identity) = identity else {
@@ -105,7 +116,16 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
         .into_iter()
         .filter_map(|declaration| {
             let world = declaration.manifest.id;
-            let standing = lait::update::world::standing(&worlds, &world)?;
+            let standing = lait::update::world::standing(&worlds, &world);
+            let linked = lait::update::world::linked_dir(&worlds, &world);
+            let channel = lait::update::world::channel(&worlds, &world);
+            // A World nothing has ever been checked for still has facts worth
+            // drawing once it is linked or following a channel of its own.
+            // Dropping the row on a missing standing would hide exactly the
+            // two states that must never be invisible.
+            if standing.is_none() && linked.is_none() && channel.is_none() {
+                return None;
+            }
             let upgrade = lait::update::consent::load(&worlds, &world).ok().flatten();
             let progress = upgrade.as_ref().map(|job| {
                 if let Some(remaining) = job.remaining_records {
@@ -123,14 +143,16 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
             Some((
                 world,
                 WorldStanding {
-                    behind: standing.behind(),
-                    serving: standing.serving,
-                    available: standing.channel,
-                    unmet: standing.unmet,
+                    behind: standing.as_ref().is_some_and(|standing| standing.behind()),
+                    serving: standing.as_ref().and_then(|it| it.serving.clone()),
+                    available: standing.as_ref().and_then(|it| it.channel.clone()),
+                    unmet: standing.as_ref().and_then(|it| it.unmet.clone()),
                     operation: upgrade.as_ref().map(|job| job.operation_hex()),
                     phase: upgrade.as_ref().map(|job| job.phase.as_str().to_owned()),
                     progress,
                     message: upgrade.and_then(|job| job.message),
+                    linked: linked.map(|dir| dir.to_string_lossy().into_owned()),
+                    channel: channel.map(|channel| channel.as_str().to_owned()),
                 },
             ))
         })

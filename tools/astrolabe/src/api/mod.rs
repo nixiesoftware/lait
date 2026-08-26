@@ -220,6 +220,18 @@ pub struct LibraryRow {
     /// Live first-install progress. Separate from `update`: there is no serving
     /// release to update until this operation completes.
     pub install: Option<WorldInstallRow>,
+    /// The directory this World is being served from instead of its release.
+    ///
+    /// On the row, not tucked inside `update`, because it is not something
+    /// measured about the World's channel — it is a choice somebody made on
+    /// this machine, and the row is where a choice about this World belongs.
+    /// A surface that draws a World and does not draw this is a surface that
+    /// says "0.9.3" while serving somebody's working tree.
+    pub linked: Option<String>,
+    /// The channel this World follows by its own choice. `None` follows the
+    /// node's — a different fact, and it must not draw as though the World
+    /// had chosen what the node happens to be on.
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1725,6 +1737,12 @@ fn project(app: &App) -> ClientView {
                             total: progress.total,
                         }
                     }),
+                    linked: app
+                        .world_standing(&entry.world)
+                        .and_then(|standing| standing.linked.clone()),
+                    channel: app
+                        .world_standing(&entry.world)
+                        .and_then(|standing| standing.channel.clone()),
                 })
                 .collect()
         }),

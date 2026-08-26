@@ -202,6 +202,12 @@ struct WebLibraryWorld {
     key: String,
     world_mount: String,
     installed: bool,
+    /// The directory this World is served from instead of its release, when
+    /// somebody has linked one. Every surface that draws a World draws this.
+    linked: Option<String>,
+    /// The channel this World follows by its own choice; `None` follows the
+    /// node's.
+    channel: Option<String>,
     display_name: String,
     opens_at: Option<String>,
     version: Option<u32>,
@@ -548,61 +554,87 @@ impl From<ClientView> for WebClientView {
             }),
             library: library.map(|rows| {
                 rows.into_iter()
-                    .map(|row| WebLibraryWorld {
-                        key: row.key,
-                        world_mount: row.world_mount,
-                        installed: row.installed,
-                        display_name: row.display_name,
-                        opens_at: row.opens_at,
-                        version: row.version,
-                        tagline: row.tagline,
-                        accent: row.accent,
-                        people: row.people.map(|people| {
-                            people
-                                .into_iter()
-                                .map(|person| WebWorldPerson {
-                                    name: person.name,
-                                    picture: person.picture,
-                                    presence: person.presence.map(|presence| match presence {
-                                        api::PresenceView::Online => "online",
-                                        api::PresenceView::Away => "away",
-                                        api::PresenceView::Offline => "offline",
-                                    }),
-                                    agent: person.agent,
-                                    here: person.here,
-                                })
-                                .collect()
-                        }),
-                        update: row.update.map(|update| {
-                            // Destructured whole for the same reason ClientView
-                            // is: this row grew fields once and the browser
-                            // quietly drew a view without them.
-                            let api::WorldUpdateRow {
-                                serving,
-                                available,
-                                behind,
-                                unmet,
-                                operation,
-                                phase,
-                                progress,
-                                message,
-                            } = update;
-                            WebWorldUpdate {
-                                serving,
-                                available,
-                                behind,
-                                unmet,
-                                operation,
-                                phase,
-                                progress,
-                                message,
-                            }
-                        }),
-                        install: row.install.map(|install| WebWorldInstall {
-                            phase: install.phase,
-                            received: install.received,
-                            total: install.total,
-                        }),
+                    .map(|row| {
+                        // Destructured whole, without `..`, for the reason the
+                        // row's own `update` already is and one level higher:
+                        // the guarantee at the top of this impl stopped at
+                        // `ClientView` and read fields from here, so a fact
+                        // added to a World row compiled cleanly and never
+                        // reached the browser. That is the same defect the
+                        // nested comment below records having already had.
+                        let api::LibraryRow {
+                            key,
+                            world_mount,
+                            installed,
+                            display_name,
+                            opens_at,
+                            version,
+                            tagline,
+                            accent,
+                            people,
+                            update,
+                            install,
+                            linked,
+                            channel,
+                        } = row;
+                        WebLibraryWorld {
+                            key,
+                            world_mount,
+                            installed,
+                            display_name,
+                            opens_at,
+                            version,
+                            tagline,
+                            accent,
+                            linked,
+                            channel,
+                            people: people.map(|people| {
+                                people
+                                    .into_iter()
+                                    .map(|person| WebWorldPerson {
+                                        name: person.name,
+                                        picture: person.picture,
+                                        presence: person.presence.map(|presence| match presence {
+                                            api::PresenceView::Online => "online",
+                                            api::PresenceView::Away => "away",
+                                            api::PresenceView::Offline => "offline",
+                                        }),
+                                        agent: person.agent,
+                                        here: person.here,
+                                    })
+                                    .collect()
+                            }),
+                            update: update.map(|update| {
+                                // Destructured whole for the same reason ClientView
+                                // is: this row grew fields once and the browser
+                                // quietly drew a view without them.
+                                let api::WorldUpdateRow {
+                                    serving,
+                                    available,
+                                    behind,
+                                    unmet,
+                                    operation,
+                                    phase,
+                                    progress,
+                                    message,
+                                } = update;
+                                WebWorldUpdate {
+                                    serving,
+                                    available,
+                                    behind,
+                                    unmet,
+                                    operation,
+                                    phase,
+                                    progress,
+                                    message,
+                                }
+                            }),
+                            install: install.map(|install| WebWorldInstall {
+                                phase: install.phase,
+                                received: install.received,
+                                total: install.total,
+                            }),
+                        }
                     })
                     .collect()
             }),
@@ -1923,10 +1955,7 @@ fn main() {
             astrolabe::client::update::identify_running_version(
                 app.package_info().version.to_string(),
             );
-            let resources = app
-                .path()
-                .resource_dir()
-                .map_err(std::io::Error::other)?;
+            let resources = app.path().resource_dir().map_err(std::io::Error::other)?;
             let mut catalog = resources.join("world-catalog");
             // The canonical Linux package is a relocatable stable-root tree,
             // not a system package under /usr/lib. Tauri therefore resolves
@@ -1944,12 +1973,8 @@ fn main() {
                     catalog = beside;
                 }
             }
-            api::start_with_catalog(
-                None,
-                None,
-                Some(catalog.to_string_lossy().into_owned()),
-            )
-            .map_err(std::io::Error::other)?;
+            api::start_with_catalog(None, None, Some(catalog.to_string_lossy().into_owned()))
+                .map_err(std::io::Error::other)?;
             // Window creation hops to the main thread; every platform makes
             // windows there.
             let presenter = app.handle().clone();
