@@ -206,7 +206,7 @@ mod tests {
             data_encoding::HEXLOWER.encode(&seed),
         )
         .expect("the seed");
-        crate::agent_token::derive(&seed)
+        crate::agent_token::derive(&seed, 0)
     }
 
     #[test]

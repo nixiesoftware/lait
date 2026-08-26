@@ -43,12 +43,20 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-/// The domain separator. Present so this derivation can never collide with
-/// another use of the same seed — a signature, a device key — and so that
-/// changing what a token means is a change to a string that is searchable.
-const PURPOSE: &[u8] = b"lait/agent-mcp-token/v1";
+/// BLAKE3's key-derivation context.
+///
+/// `derive_key` rather than hashing a prefix and the seed together: BLAKE3's
+/// KDF mode sets a different flag word in the compression function, so a
+/// derived key cannot collide with a plain or keyed hash of *anything*.
+/// `H(prefix ‖ seed)` is safe only while no other BLAKE3 callsite in this tree
+/// ever hashes a concatenation that reproduces those bytes — an invariant
+/// nobody can check, and one that grows more callsites over time.
+const CONTEXT: &str = "lait 2026 agent-mcp-token";
+
+/// The file recording how many times an agent's token has been rotated.
+const EPOCH_FILE: &str = "token-epoch";
 
 /// Where an agent's credential may be presented from.
 ///
@@ -73,12 +81,72 @@ impl Reach {
     }
 }
 
-/// The token for one co-located agent, derived from its seed.
-pub fn derive(seed: &[u8; 32]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(PURPOSE);
-    hasher.update(seed);
-    hasher.finalize().to_hex().to_string()
+/// The token for one co-located agent at one epoch.
+///
+/// The epoch is what makes this rotatable without destroying anything.
+/// Without it the only revocation was deleting the agent — which takes its
+/// ed25519 identity, its sponsorship and everything it has authored with it.
+/// That is a far larger hammer than "this leaked, issue a new one", and a
+/// remedy nobody will reach for is not a remedy. A token lands in an editor's
+/// configuration file, which is exactly the artefact people commit and sync.
+///
+/// Still nothing to sweep: the epoch is derived *from*, not a list of issued
+/// tokens to keep in step. Bumping it invalidates every token ever issued for
+/// the agent, because none of them can be re-derived.
+pub fn derive(seed: &[u8; 32], epoch: u32) -> String {
+    let mut material = [0u8; 36];
+    material[..32].copy_from_slice(seed);
+    material[32..].copy_from_slice(&epoch.to_be_bytes());
+    blake3::derive_key(CONTEXT, &material).iter().fold(
+        String::with_capacity(64),
+        |mut hex, byte| {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        },
+    )
+}
+
+/// This agent's current epoch. Absent, unreadable or malformed reads as 0 —
+/// the epoch a never-rotated agent is at, which is the conservative answer:
+/// a token that verifies is one the holder was issued, and a corrupted file
+/// must not silently rotate somebody out.
+pub fn epoch(home: &Path, name: &str) -> u32 {
+    let Ok(path) = epoch_path(home, name) else {
+        return 0;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Rotate this agent's token, returning the new epoch.
+///
+/// Every token issued for this agent stops verifying. The agent keeps its
+/// identity, its sponsorship and its history.
+pub fn rotate(home: &Path, name: &str) -> Result<u32> {
+    let path = epoch_path(home, name)?;
+    let next = epoch(home, name).saturating_add(1);
+    if let Some(parent) = path.parent() {
+        mechanics::secretfs::create_private_dir(parent)
+            .with_context(|| format!("make agent '{name}' private"))?;
+    }
+    mechanics::secretfs::write_private(
+        &path,
+        next.to_string().as_bytes(),
+        mechanics::secretfs::Create::Replace,
+        mechanics::secretfs::Wrap::Portable,
+    )
+    .with_context(|| format!("record agent '{name}' token epoch"))?;
+    Ok(next)
+}
+
+fn epoch_path(home: &Path, name: &str) -> Result<std::path::PathBuf> {
+    plain_agent_name(name)?;
+    Ok(crate::registry::agents_base(home)
+        .join(name)
+        .join(EPOCH_FILE))
 }
 
 /// The token for a provisioned agent by name, or `None` when no such agent is
@@ -96,7 +164,7 @@ pub fn for_agent(home: &Path, name: &str) -> Option<String> {
         return None;
     }
     seed.copy_from_slice(&decoded);
-    Some(derive(&seed))
+    Some(derive(&seed, epoch(home, name)))
 }
 
 /// Which provisioned agent, if any, a presented token belongs to.
@@ -136,18 +204,70 @@ pub fn provisioned(home: &Path) -> Vec<String> {
     names
 }
 
-fn seed_path(home: &Path, name: &str) -> Result<std::path::PathBuf> {
-    // Re-proved here rather than trusted from the caller: this joins a name
-    // into a path, and a name carrying a separator would read somebody else's
-    // seed.
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-        || name.starts_with('.')
-    {
+/// Windows normalises these away, so a file named for one is a file named for
+/// something else. Checked case-insensitively and against the stem, because
+/// `CON.txt` is `CON` too.
+const RESERVED_ON_WINDOWS: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Whether a name may be joined into a path under this home, and used as an
+/// identity.
+///
+/// **One validator, because there were two and they disagreed in both
+/// directions.** The structural one — "is this exactly one path component" —
+/// admitted `scribe.`, and Win32 strips trailing dots and spaces during
+/// normalisation, so `agents\scribe.\secret.key` opens `agents\scribe\secret.key`.
+/// The name is wire-supplied through `act_as`, so that was an
+/// identity-selection bypass: ask to act as `scribe.` and load scribe's seed.
+/// Meanwhile the character rule here rejected names the structural one let
+/// through, so such an agent provisioned fine and could never authenticate —
+/// which reads to a person as "my token is wrong".
+///
+/// Deliberately not narrowed to the grammar a *new* name should have. This
+/// runs on every load of an already-provisioned agent, and an agent's seed is
+/// its identity, its sponsorship and everything it has authored. Refusing to
+/// load one because its name would not be chosen today destroys more than it
+/// protects. What is refused is what is genuinely unsafe: anything that is not
+/// one plain component, anything Windows renames on the way to the filesystem,
+/// and anything outside ASCII, where two different names can normalise to one.
+pub fn plain_agent_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("an agent name may not be empty");
+    }
+    // Structural first: one ordinary component, no separators, no `..`.
+    let mut parts = std::path::Path::new(name).components();
+    let single =
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    if !single {
         anyhow::bail!("'{name}' is not a plain agent name");
     }
+    if !name.is_ascii() {
+        anyhow::bail!("'{name}' must be ASCII: two names that look different can normalise to one");
+    }
+    if name.chars().any(|ch| ch.is_ascii_control()) {
+        anyhow::bail!("'{name}' may not carry control characters");
+    }
+    // What Win32 strips on the way to the filesystem. A name it renames is a
+    // name that opens somebody else's file.
+    if name.ends_with('.') || name.ends_with(' ') || name.starts_with(' ') {
+        anyhow::bail!("'{name}' may not begin or end with a space, or end with '.'");
+    }
+    if name.starts_with('.') {
+        anyhow::bail!("'{name}' may not begin with '.'");
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    if RESERVED_ON_WINDOWS.contains(&stem.as_str()) {
+        anyhow::bail!("'{name}' is a name Windows reserves for a device");
+    }
+    Ok(())
+}
+
+fn seed_path(home: &Path, name: &str) -> Result<std::path::PathBuf> {
+    // Re-proved here rather than trusted from the caller: this joins a name
+    // into a path, and a name Windows renames would read somebody else's seed.
+    plain_agent_name(name)?;
     Ok(crate::registry::agents_base(home)
         .join(name)
         .join("secret.key"))
@@ -248,6 +368,36 @@ mod tests {
         assert!(for_agent(home.path(), "../scribe").is_none());
     }
 
+    /// The Windows bypass. Win32 strips trailing dots during normalisation, so
+    /// `agents\scribe.\secret.key` opens `agents\scribe\secret.key` — and the
+    /// name is wire-supplied through `act_as`. Asking to act as `scribe.` would
+    /// have loaded scribe's seed and minted scribe's token.
+    #[test]
+    fn a_name_windows_would_rename_is_refused_everywhere() {
+        let home = tempfile::tempdir().expect("a home");
+        provision(home.path(), "scribe", [7u8; 32]);
+        assert!(plain_agent_name("scribe.").is_err(), "trailing dot");
+        assert!(plain_agent_name("scribe ").is_err(), "trailing space");
+        assert!(plain_agent_name(" scribe").is_err(), "leading space");
+        assert!(plain_agent_name("con").is_err(), "a reserved device name");
+        assert!(plain_agent_name("CON.txt").is_err(), "reserved by its stem");
+        assert!(
+            for_agent(home.path(), "scribe.").is_none(),
+            "and it reads no seed"
+        );
+    }
+
+    /// Not narrowed to what a new name should look like. This runs on every
+    /// load of an already-provisioned agent, and refusing one destroys its
+    /// identity, its sponsorship and everything it authored.
+    #[test]
+    fn a_name_somebody_already_uses_still_loads() {
+        for name in ["Claude", "my_agent", "agent-1", "agent.1", "a"] {
+            assert!(plain_agent_name(name).is_ok(), "{name} must still load");
+        }
+        assert!(plain_agent_name("café").is_err(), "but not outside ASCII");
+    }
+
     #[test]
     fn the_standard_header_wins_and_a_blank_one_is_not_a_token() {
         assert_eq!(presented(Some("Bearer abc"), None), Some("abc"));
@@ -257,13 +407,64 @@ mod tests {
         assert_eq!(presented(Some("Basic abc"), None), None);
     }
 
+    /// The remedy that was missing. A token lands in an editor's configuration
+    /// file — the artefact people commit and sync — and before this the only
+    /// revocation was deleting the agent, which takes its identity, its
+    /// sponsorship and everything it authored with it. Nobody reaches for that.
+    #[test]
+    fn rotating_invalidates_every_issued_token_and_keeps_the_identity() {
+        let home = tempfile::tempdir().expect("a home");
+        provision(home.path(), "scribe", [7u8; 32]);
+        let leaked = for_agent(home.path(), "scribe").expect("a token");
+        assert_eq!(identify(home.path(), &leaked).as_deref(), Some("scribe"));
+
+        assert_eq!(rotate(home.path(), "scribe").expect("rotated"), 1);
+        assert!(
+            identify(home.path(), &leaked).is_none(),
+            "the token that leaked stops verifying"
+        );
+        let issued = for_agent(home.path(), "scribe").expect("a new token");
+        assert_eq!(
+            identify(home.path(), &issued).as_deref(),
+            Some("scribe"),
+            "and the agent is still the same agent, still sponsored"
+        );
+        assert_ne!(leaked, issued);
+    }
+
+    /// A corrupted or missing epoch reads as 0 rather than rotating somebody
+    /// out. The conservative direction: a token that verifies is one its holder
+    /// was issued.
+    #[test]
+    fn an_unreadable_epoch_is_the_one_a_never_rotated_agent_is_at() {
+        let home = tempfile::tempdir().expect("a home");
+        provision(home.path(), "scribe", [7u8; 32]);
+        assert_eq!(epoch(home.path(), "scribe"), 0);
+        std::fs::write(
+            crate::registry::agents_base(home.path())
+                .join("scribe")
+                .join("token-epoch"),
+            b"not a number",
+        )
+        .expect("a corrupted epoch");
+        assert_eq!(epoch(home.path(), "scribe"), 0);
+    }
+
     /// The derivation is domain separated, so this token can never be the same
     /// bytes as another use of the same seed.
     #[test]
     fn the_derivation_is_domain_separated_from_the_raw_seed() {
         let seed = [3u8; 32];
-        let token = derive(&seed);
+        let token = derive(&seed, 0);
+        // Two inequalities are two assertions, not domain separation. What
+        // gives the property is BLAKE3's KDF mode, which sets a different flag
+        // word so a derived key cannot collide with a plain or keyed hash of
+        // anything — including a future callsite in this tree that happens to
+        // hash the same bytes. These stay as the two collisions somebody would
+        // reach for first.
         assert_ne!(token, data_encoding::HEXLOWER.encode(&seed));
         assert_ne!(token, blake3::hash(&seed).to_hex().to_string());
+        assert_ne!(token, derive(&seed, 1), "and an epoch is part of it");
+        assert_eq!(token.len(), 64);
     }
 }

@@ -26,7 +26,7 @@
 //! lifecycle concerns. There is no catch-all refusal.
 
 use runtime::poison::LockRecovering;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -4495,12 +4495,14 @@ fn agent_seed_path(home: &Path, name: &str) -> Result<PathBuf> {
 /// into a path and not only where an agent is created. Provisioning validated
 /// it; loading did not, and loading is the site a client can aim.
 fn is_plain_agent_name(name: &str) -> bool {
-    // Asked structurally rather than by substring: a plain name is exactly one
-    // ordinary path component. Spelling this as a character blocklist let "."
-    // through — it holds no separator and no "..", yet names the parent
-    // directory, so a seed path built from it escapes the agents base.
-    let mut parts = Path::new(name).components();
-    matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
+    // One validator, in `agent_token`, because there were two and they
+    // disagreed in both directions. The structural check that used to live
+    // here admitted `scribe.` — one ordinary component, no separator, no ".."
+    // — and Win32 strips trailing dots on the way to the filesystem, so a
+    // wire-supplied `act_as` of `scribe.` opened scribe's seed. It also
+    // admitted names the credential path rejected, so such an agent
+    // provisioned and could never authenticate.
+    crate::agent_token::plain_agent_name(name).is_ok()
 }
 
 const AGENT_NAME_RULE: &str =
