@@ -43,7 +43,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// The domain separator. Present so this derivation can never collide with
 /// another use of the same seed — a signature, a device key — and so that
