@@ -439,30 +439,7 @@ function WorldHero({ world }: { world: LibraryWorld }) {
     style.background = `linear-gradient(135deg, color-mix(in srgb, ${accent} 72%, transparent), `
       + `color-mix(in srgb, ${wash} 88%, transparent)), url("${art.hero}") center / cover`;
   }
-  return <div className="world-hero" style={style}>
-    <h1>{world.displayName}</h1>
-    <WorldSourceBadge world={world} />
-  </div>;
-}
-
-/**
- * Says when a World is not being served from its release.
- *
- * On the hero, where the World names itself, because that is the one place a
- * person cannot miss and cannot mistake for something else. The whole seam
- * that lets a World be served from a working tree is only safe if this is
- * drawn: a device serving somebody's directory while its Library reads
- * "v3" is the defect, and the head's warning goes to a log nobody opens.
- *
- * Deliberately not a state in `lifecycle`. Where a World is read from and
- * whether it is running are independent — a linked World that is stopped is
- * still linked — and folding them would make one of the two unaskable.
- */
-function WorldSourceBadge({ world }: { world: LibraryWorld }) {
-  if (world.linked === null) return null;
-  return <span className="world-source-badge" title={`Served from ${world.linked}`}>
-    LINKED
-  </span>;
+  return <div className="world-hero" style={style}><h1>{world.displayName}</h1></div>;
 }
 
 /**

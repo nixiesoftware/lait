@@ -48,14 +48,6 @@ pub struct WorldStanding {
     pub phase: Option<String>,
     pub progress: Option<String>,
     pub message: Option<String>,
-    /// The directory this World is being served from instead of its release.
-    ///
-    /// Carried here so that every surface drawing a World can say so. A
-    /// machine serving somebody's working tree while believing it serves a
-    /// release is the defect the whole seam exists to avoid, and it is only
-    /// avoided if this reaches the Library row, the World's settings window
-    /// and the World's own window — not just the head's log.
-    pub linked: Option<String>,
     /// The channel this World follows by its own choice. `None` follows the
     /// node's, which is not the same fact and must not draw as one.
     pub channel: Option<String>,
@@ -117,13 +109,12 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
         .filter_map(|declaration| {
             let world = declaration.manifest.id;
             let standing = lait::update::world::standing(&worlds, &world);
-            let linked = lait::update::world::linked_dir(&worlds, &world);
             let channel = lait::update::world::channel(&worlds, &world);
-            // A World nothing has ever been checked for still has facts worth
-            // drawing once it is linked or following a channel of its own.
-            // Dropping the row on a missing standing would hide exactly the
-            // two states that must never be invisible.
-            if standing.is_none() && linked.is_none() && channel.is_none() {
+            // A World nothing has ever been checked for still has a fact worth
+            // drawing once it follows a channel of its own. Dropping the row on
+            // a missing standing would hide the one state that must not be
+            // invisible.
+            if standing.is_none() && channel.is_none() {
                 return None;
             }
             let upgrade = lait::update::consent::load(&worlds, &world).ok().flatten();
@@ -151,7 +142,6 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
                     phase: upgrade.as_ref().map(|job| job.phase.as_str().to_owned()),
                     progress,
                     message: upgrade.and_then(|job| job.message),
-                    linked: linked.map(|dir| dir.to_string_lossy().into_owned()),
                     channel: channel.map(|channel| channel.as_str().to_owned()),
                 },
             ))

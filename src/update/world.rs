@@ -179,63 +179,6 @@ pub fn active_dir(worlds: &Path, world: &str) -> Option<PathBuf> {
     release_dir(worlds, world, &staged.version)
 }
 
-fn link_path(worlds: &Path, world: &str) -> PathBuf {
-    world_root(worlds, world).join("link")
-}
-
-/// The directory this World is being served from instead of its release.
-///
-/// Beside the staged bundle, never inside one: a release directory holds only
-/// what its publisher put there, and this is a fact about *this machine* — the
-/// same reason `selected.json` and `standing.json` live where they do.
-///
-/// Deliberately the same shape as [`crate::update::feed::Channel::current`]:
-/// an environment variable first as a development convenience, then the
-/// recorded choice, then nothing. `LAIT_WORLD_LINK` is scoped to the process
-/// that was launched holding it and is the right tool for CI and a one-off;
-/// what is recorded here is the deliberate choice somebody made in a window
-/// and can see from that window, the Library row, and the World's own window.
-///
-/// **Nothing about this is quiet.** A machine serving somebody's working tree
-/// while believing it serves a release is a worse failure than the friction
-/// either mechanism removes, which is why the head warns on every launch and
-/// why recording one is required to be visible wherever the World appears.
-pub fn linked_dir(worlds: &Path, world: &str) -> Option<PathBuf> {
-    let recorded = std::fs::read_to_string(link_path(worlds, world)).ok()?;
-    let dir = PathBuf::from(recorded.trim());
-    // Re-proved at read time, not trusted from when it was written: a
-    // directory recorded weeks ago may have been renamed since, and a link
-    // that silently resolves to nothing would fall through to the release —
-    // which is the one outcome this must never produce quietly.
-    (dir.is_absolute() && dir.is_dir()).then_some(dir)
-}
-
-/// Record a directory to serve this World from, or clear the record.
-///
-/// Refuses what it cannot serve at the moment of the act, so the refusal
-/// lands on the person who typed it rather than on a World that serves
-/// nothing an hour later.
-pub fn link(worlds: &Path, world: &str, dir: Option<&Path>) -> Result<()> {
-    let path = link_path(worlds, world);
-    let Some(dir) = dir else {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).context("clear the World link"),
-        };
-    };
-    if !dir.is_absolute() {
-        anyhow::bail!("{} is not an absolute path", dir.display());
-    }
-    if !dir.is_dir() {
-        anyhow::bail!("{} is not a directory", dir.display());
-    }
-    let parent = world_root(worlds, world);
-    std::fs::create_dir_all(&parent).context("create the World's state directory")?;
-    std::fs::write(&path, dir.to_string_lossy().as_bytes()).context("record the World link")?;
-    Ok(())
-}
-
 fn channel_path(worlds: &Path, world: &str) -> PathBuf {
     world_root(worlds, world).join("channel")
 }
@@ -740,69 +683,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    /// The loop this exists for, recorded rather than launched into.
-    #[test]
-    fn a_recorded_link_is_read_back_as_the_directory_it_names() {
-        let worlds = tempfile::tempdir().expect("a worlds root");
-        let tree = tempfile::tempdir().expect("a working tree");
-        link(worlds.path(), "com.lait.issues", Some(tree.path())).expect("record the link");
-        assert_eq!(
-            linked_dir(worlds.path(), "com.lait.issues").as_deref(),
-            Some(tree.path())
-        );
-    }
-
-    #[test]
-    fn a_world_with_no_record_is_linked_to_nothing() {
-        let worlds = tempfile::tempdir().expect("a worlds root");
-        assert!(linked_dir(worlds.path(), "com.lait.issues").is_none());
-    }
-
-    /// Clearing is the way back, and clearing what was never set is not an
-    /// error — the window offers the control whether or not a link is on.
-    #[test]
-    fn a_link_can_be_cleared_and_clearing_nothing_is_not_a_failure() {
-        let worlds = tempfile::tempdir().expect("a worlds root");
-        let tree = tempfile::tempdir().expect("a working tree");
-        link(worlds.path(), "com.lait.issues", Some(tree.path())).expect("record the link");
-        link(worlds.path(), "com.lait.issues", None).expect("clear the link");
-        assert!(linked_dir(worlds.path(), "com.lait.issues").is_none());
-        link(worlds.path(), "com.lait.issues", None).expect("clearing nothing is fine");
-    }
-
-    /// The refusal lands on the person who typed it, not on a World that
-    /// serves nothing an hour later.
-    #[test]
-    fn a_directory_that_cannot_be_served_is_refused_when_it_is_recorded() {
-        let worlds = tempfile::tempdir().expect("a worlds root");
-        let tree = tempfile::tempdir().expect("a working tree");
-        assert!(link(
-            worlds.path(),
-            "com.lait.issues",
-            Some(Path::new("relative/path"))
-        )
-        .is_err());
-        assert!(link(
-            worlds.path(),
-            "com.lait.issues",
-            Some(&tree.path().join("was-never-here"))
-        )
-        .is_err());
-    }
-
-    /// Re-proved at read time. A directory recorded weeks ago may have been
-    /// renamed since, and the release is the honest answer for a choice that
-    /// is visible in three places and clearable from one.
-    #[test]
-    fn a_recorded_link_whose_directory_is_gone_reads_as_absent() {
-        let worlds = tempfile::tempdir().expect("a worlds root");
-        let tree = tempfile::tempdir().expect("a working tree");
-        let inner = tree.path().join("web");
-        std::fs::create_dir(&inner).expect("a directory to link");
-        link(worlds.path(), "com.lait.issues", Some(&inner)).expect("record the link");
-        std::fs::remove_dir(&inner).expect("the tree moves on");
-        assert!(linked_dir(worlds.path(), "com.lait.issues").is_none());
-    }
 
     /// A World is published on its own channel pointer, so which stream it
     /// follows is its own fact — but only once it says so.

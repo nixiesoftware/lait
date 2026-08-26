@@ -67,11 +67,6 @@ pub enum Action {
     UpdateWorld {
         world: String,
     },
-    /// Record — or clear — the directory this World is served from.
-    LinkWorld {
-        world: String,
-        dir: Option<String>,
-    },
     /// Record — or clear — the channel this World follows on its own.
     FollowWorldChannel {
         world: String,
@@ -260,7 +255,6 @@ impl Action {
             Self::Refresh => "refresh".into(),
             Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
-            Self::LinkWorld { world, .. } => format!("world.link:{world}"),
             Self::FollowWorldChannel { world, .. } => format!("world.channel:{world}"),
             Self::InstallWorld { world } => format!("world.install:{world}"),
             Self::OpenLink { url } => format!("link.open:{url}"),
@@ -349,10 +343,6 @@ impl Action {
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
-            Self::LinkWorld { world, dir } => match dir {
-                Some(dir) => format!("serve {world} from {dir}"),
-                None => format!("serve {world} from its release"),
-            },
             Self::FollowWorldChannel { world, channel } => match channel {
                 Some(channel) => format!("follow {channel} for {world}"),
                 None => format!("follow the node's channel for {world}"),
@@ -1079,23 +1069,6 @@ impl Worker {
                     "update accepted ({})",
                     job.operation_hex()
                 )))
-            }
-            Action::LinkWorld { world, dir } => {
-                let (world_id, worlds) = world_state(client, world)?;
-                let dir = dir.as_deref().map(std::path::Path::new);
-                // Refused here, where somebody is looking at the field they
-                // typed it into. A path that cannot be served is a fact this
-                // machine can establish now, and establishing it later means
-                // establishing it as a World that serves nothing.
-                lait::update::world::link(&worlds, &world_id, dir)
-                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
-                Ok(Outcome::Said(match dir {
-                    Some(dir) => format!(
-                        "{world} will serve from {} — restart it to pick this up",
-                        dir.display()
-                    ),
-                    None => format!("{world} will serve its release — restart it to pick this up"),
-                }))
             }
             Action::FollowWorldChannel { world, channel } => {
                 let (world_id, worlds) = world_state(client, world)?;

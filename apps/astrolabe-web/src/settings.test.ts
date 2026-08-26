@@ -16,7 +16,6 @@ function world(over: Partial<LibraryWorld> = {}): LibraryWorld {
     people: null,
     update: null,
     install: null,
-    linked: null,
     channel: null,
     ...over,
   };
@@ -25,13 +24,6 @@ function world(over: Partial<LibraryWorld> = {}): LibraryWorld {
 describe("isModified", () => {
   it("is quiet on a World nobody has touched", () => {
     expect(isModified(world())).toBe(false);
-  });
-
-  // Either one alone. The dot answers "is anything in here not the default",
-  // not "is this World linked" — a World left on test with no link is just as
-  // modified, and a window that looked untouched would be lying.
-  it("is on for a link", () => {
-    expect(isModified(world({ linked: "/Users/me/web" }))).toBe(true);
   });
 
   it("is on for a channel of its own", () => {

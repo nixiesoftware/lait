@@ -26,11 +26,9 @@ describe("client transport", () => {
     expect(keyFor({ type: "enterPresentation" })).toBe("present.enter");
     expect(keyFor({ type: "updateWorld", world: "issues" })).toBe("world.update:issues");
     expect(keyFor({ type: "installWorld", world: "issues" })).toBe("world.install:issues");
-    // The dir and channel are deliberately not in the key: the control is one
-    // control per World, and a key that varied with the value it is sending
-    // would leave the old value's key in flight while the new one dispatched.
-    expect(keyFor({ type: "linkWorld", world: "issues", dir: "/tmp/web" })).toBe("world.link:issues");
-    expect(keyFor({ type: "linkWorld", world: "issues", dir: null })).toBe("world.link:issues");
+    // The channel is deliberately not in the key: one control per World, and a
+    // key that varied with the value it sends would leave the old value's key
+    // in flight while the new one dispatched.
     expect(keyFor({ type: "followWorldChannel", world: "issues", channel: "test" })).toBe("world.channel:issues");
     expect(keyFor({ type: "stopHead", id: "identity:default" })).toBe("head.stop:identity:default");
     expect(keyFor({ type: "bookMerge", from: "old", into: "new" })).toBe("book.merge:old:new");

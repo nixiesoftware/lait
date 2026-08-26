@@ -157,26 +157,25 @@ pub const LINK_VAR: &str = "LAIT_WORLD_LINK";
 /// present under a World's name is one that was proven and admitted when it
 /// landed. What this settles is only *which* source a head serves from.
 ///
-/// A link ([`LINK_VAR`]) is the one thing that outranks the release, and it
-/// exists because the alternative was worse. Building a World's page and
-/// looking at it in the real window otherwise meant packaging a release,
-/// signing it, publishing it to a feed and installing it — so the loop for a
-/// one-line change ran through the whole distribution pipeline, and the
-/// pipeline is not what was being tested. This is the seam that was missing:
-/// **an immutable signed release is how a World travels, not how it is
-/// written.**
+/// # The one thing that outranks it, and the one that deliberately does not
 ///
-/// Two of them, in the order [`crate::update::feed::Channel::current`] already
-/// established for the node's channel: the environment first as a development
-/// convenience, then what somebody recorded, then the release.
+/// [`LINK_VAR`] serves a directory in place of the release for the life of the
+/// process launched holding it. It is the development path, and it is scoped
+/// the way a development path should be: it is not written down, so nothing
+/// this device says about itself tomorrow depends on it.
 ///
-/// The environment one dies with the process launched holding it, which makes
-/// it right for CI and a one-off. The recorded one is a deliberate choice made
-/// in a window, and it pays for outliving the afternoon by being **visible**
-/// wherever the World is — the Library row, its settings window, and the
-/// World's own window. Either way a head that comes up on one says so, because
-/// a machine serving somebody's working tree while believing it serves 0.9.3
-/// is a worse defect than the friction either removes.
+/// There was briefly a *recorded* one beside it, and it is gone on purpose.
+/// A Library row's claim — this is release 0.9.3, installed, verified — is the
+/// only claim this client makes about what a person is running, and it is
+/// worth exactly as much as the number of ways it can be false. Making it
+/// overridable and then promising to draw the override everywhere is a
+/// strictly weaker guarantee than not letting it be overridden, and it holds
+/// only as long as every surface remembers.
+///
+/// So a directory somebody is working on does not get to wear an installed
+/// World's identity. It is a World of its own — see the local World registry —
+/// which is also what makes it something that can later be shared on a
+/// channel of its own without ever being confused for a published release.
 pub fn activate(worlds: &Path, world: &str) -> Source {
     activate_with(&std::env::var(LINK_VAR).unwrap_or_default(), worlds, world)
 }
@@ -206,18 +205,6 @@ fn activate_with(declared: &str, worlds: &Path, world: &str) -> Source {
             tracing::error!(%world, %why, "refusing a linked World; serving nothing");
             return Source::refused(why);
         }
-    }
-    // The recorded link re-proves its directory as it reads it, so a record
-    // whose directory has since been renamed reads as absent — and absent
-    // here means the release, which is the honest answer for a choice that is
-    // visible in three places and can be cleared from one of them.
-    if let Some(dir) = crate::update::world::linked_dir(worlds, world) {
-        tracing::warn!(
-            %world,
-            dir = %dir.display(),
-            "serving a linked directory (recorded) — this head is NOT serving the installed release"
-        );
-        return Source::activated(dir);
     }
     if let Some(candidate) = crate::update::world::active_dir(worlds, world) {
         tracing::info!(bundle = %candidate.display(), %world, "serving a staged World payload");

@@ -202,9 +202,6 @@ struct WebLibraryWorld {
     key: String,
     world_mount: String,
     installed: bool,
-    /// The directory this World is served from instead of its release, when
-    /// somebody has linked one. Every surface that draws a World draws this.
-    linked: Option<String>,
     /// The channel this World follows by its own choice; `None` follows the
     /// node's.
     channel: Option<String>,
@@ -574,7 +571,6 @@ impl From<ClientView> for WebClientView {
                             people,
                             update,
                             install,
-                            linked,
                             channel,
                         } = row;
                         WebLibraryWorld {
@@ -586,7 +582,6 @@ impl From<ClientView> for WebClientView {
                             version,
                             tagline,
                             accent,
-                            linked,
                             channel,
                             people: people.map(|people| {
                                 people
@@ -1061,12 +1056,6 @@ enum WebAction {
     InstallWorld {
         world: String,
     },
-    /// Serve this World from a directory on this machine, or (`None`) from its
-    /// release again. Recorded, and picked up by the World's next head.
-    LinkWorld {
-        world: String,
-        dir: Option<String>,
-    },
     /// Follow a channel for this World alone, or (`None`) the node's.
     FollowWorldChannel {
         world: String,
@@ -1302,7 +1291,6 @@ impl From<WebAction> for ActionRequest {
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
             WebAction::InstallWorld { world } => Self::InstallWorld { world },
-            WebAction::LinkWorld { world, dir } => Self::LinkWorld { world, dir },
             WebAction::FollowWorldChannel { world, channel } => {
                 Self::FollowWorldChannel { world, channel }
             }

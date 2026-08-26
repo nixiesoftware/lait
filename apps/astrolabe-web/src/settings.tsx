@@ -28,11 +28,10 @@ type Pane = "general" | "instance" | "developer";
  * Whether anything under Developer is not what a fresh install would be.
  *
  * Drives the dot on the rail, so the window says it is in a modified state
- * without the section having to be opened to find out — which is the whole
- * point of the dot, and the reason this is not "is a link set".
+ * without the section having to be opened to find out.
  */
 export function isModified(world: LibraryWorld | null): boolean {
-  return world !== null && (world.linked !== null || world.channel !== null);
+  return world !== null && world.channel !== null;
 }
 
 /**
@@ -182,15 +181,19 @@ function DeveloperPane({ snapshot, world, view, dispatch }: {
   return <>
     <h1>Developer</h1>
     <p className="settings-prose">
-      Options for working on {snapshot.name} itself. They change what this device
-      serves and follows — nobody else's copy of this World is affected.
+      Which of {snapshot.name}&rsquo;s published streams this device follows. It
+      changes what this device installs, not what anyone else runs.
+    </p>
+    <p className="settings-note">
+      To work on this World&rsquo;s own pages, add a local World instead — a
+      directory on this device is its own entry, never a released one wearing a
+      different source.
     </p>
     <label className="settings-switch-row">
       <span className="settings-switch-label">Developer options</span>
       <input type="checkbox" checked={enabled} onChange={(event) => enable(event.target.checked)} />
     </label>
     {enabled && world !== null && <>
-      <SourceCard snapshot={snapshot} world={world} view={view} dispatch={dispatch} />
       <ChannelCard world={world} view={view} dispatch={dispatch} />
     </>}
     {enabled && world === null && <p className="settings-prose settings-absent">
@@ -198,67 +201,6 @@ function DeveloperPane({ snapshot, world, view, dispatch }: {
       to point at yet.
     </p>}
   </>;
-}
-
-/**
- * Where this World's page is read from.
- *
- * The banner is the point of the card. A machine serving somebody's working
- * tree while believing it serves a release is the defect the whole seam exists
- * not to produce, and a log line the person never reads is not how it gets
- * avoided.
- */
-function SourceCard({ snapshot, world, view, dispatch }: {
-  snapshot: WorldSettingsSnapshot;
-  world: LibraryWorld;
-  view: ClientView;
-  dispatch(action: ClientAction): Promise<void>;
-}) {
-  const [draft, setDraft] = useState(world.linked ?? "");
-  const busy = view.inFlight.includes(actionKey.linkWorld(world.worldMount));
-  // Running, from the heads that name this World. Whether the running head
-  // started before or after the record was written is not something this
-  // window can know, so it does not claim to: it says what a restart is for
-  // and leaves the fact alone.
-  const running = view.heads.some((head) => head.world === world.worldMount && head.state === "running");
-
-  return <SettingsSection title="SOURCE">
-    {world.linked !== null && <p className="settings-warning">
-      This World is served from a directory on this device, not from its
-      release{snapshot.version === null ? "" : ` (v${snapshot.version})`}.
-    </p>}
-    <p className="settings-prose">
-      A World is normally read from the signed release installed for it. Point it
-      at a directory to work on its pages without publishing one.
-    </p>
-    <input
-      className="settings-input"
-      type="text"
-      spellCheck={false}
-      value={draft}
-      placeholder="/path/to/the/built/pages"
-      aria-label="Directory to serve this World from"
-      onChange={(event) => setDraft(event.target.value)} />
-    <div className="settings-actions">
-      <button
-        type="button"
-        disabled={busy || draft.trim() === ""}
-        onClick={() => void dispatch({ type: "linkWorld", world: world.worldMount, dir: draft.trim() })}>
-        Serve from this directory
-      </button>
-      <button
-        type="button"
-        disabled={busy || world.linked === null}
-        onClick={() => { setDraft(""); void dispatch({ type: "linkWorld", world: world.worldMount, dir: null }); }}>
-        Serve the release
-      </button>
-    </div>
-    <p className="settings-note">
-      {running
-        ? "This World is running. Stop it in the Library and open it again to serve what is set here."
-        : "Takes effect the next time this World is opened."}
-    </p>
-  </SettingsSection>;
 }
 
 /**
