@@ -303,14 +303,6 @@ pub fn register(identity: &Path, handle: &str, dir: &Path) -> Result<String> {
             dir.display()
         );
     }
-    // Refused here rather than at the row it would become. A local World keeps
-    // the id its tree declares — the World id is hashed into every Body id, so
-    // its data is not separable from the release's by re-keying the package —
-    // and two preferred packages under one id make the Orbit's whole world
-    // registry refuse to build. That failure is nothing like its cause: every
-    // Space-plane read on every Orbit stops, and all it says is that an id is
-    // ambiguous.
-    already_installed(identity, dir)?;
     let root = registrations_root(identity);
     std::fs::create_dir_all(&root).context("create the local World registry")?;
     let encoded = serde_json::to_vec_pretty(&Registration {
@@ -321,32 +313,6 @@ pub fn register(identity: &Path, handle: &str, dir: &Path) -> Result<String> {
     std::fs::write(file_for(identity, &key)?, encoded)
         .context("write the local World registration")?;
     Ok(key)
-}
-
-/// Refuse a tree whose World this identity already has installed.
-///
-/// Passive: it reads selected declarations and launches nothing, so asking is
-/// as cheap as listing.
-fn already_installed(identity: &Path, dir: &Path) -> Result<()> {
-    let declared = std::fs::read(dir.join("world.json")).context("read world.json")?;
-    let manifest = WorldManifest::parse(&declared)
-        .map_err(|error| anyhow::anyhow!("read world.json: {error}"))?;
-    let installed = crate::serve::head::installations_root(identity);
-    let clash = crate::world::installed::declarations(&installed)
-        .unwrap_or_default()
-        .into_iter()
-        .any(|installation| installation.manifest.id == manifest.id);
-    if clash {
-        bail!(
-            "{} declares World {}, which is already installed here. A local World \
-cannot yet run beside the release it was copied from — both would keep their data \
-under that one id. Uninstall the release first, or work on a tree that declares an \
-id of its own.",
-            dir.display(),
-            manifest.id
-        );
-    }
-    Ok(())
 }
 
 /// Digest what a tree declares and what it would execute.
@@ -507,34 +473,30 @@ mod tests {
         .expect("a selection");
     }
 
-    /// The collision, refused where somebody can act on it.
+    /// A copy of an installed World is exactly what somebody works on, so it
+    /// has to be addable.
     ///
-    /// A local World keeps the id its tree declares, because that id is hashed
-    /// into every Body id and re-keying the package would not move the data. So
-    /// a copy of an installed World puts two preferred packages under one id,
-    /// and the Orbit's registry refuses the whole set — every Space-plane read
-    /// on every Orbit stops, saying only that an id is ambiguous.
+    /// It used to be refused, because both would have kept their data under the
+    /// one id the tree declares. The host names it instead — the id below is in
+    /// the local namespace and the release keeps its own — so there is nothing
+    /// left to collide.
     #[test]
-    fn a_copy_of_an_installed_world_is_refused_when_it_is_added() {
+    fn a_copy_of_an_installed_world_can_be_added() {
         let identity = tempfile::tempdir().expect("an identity");
         installed(identity.path(), "com.lait.issues", "0.9.3");
         let dir = tempfile::tempdir().expect("a tree");
         tree(dir.path(), Some(&declaration("com.lait.issues")));
 
-        let refusal = register(identity.path(), "issues", dir.path())
-            .expect_err("a copy of an installed World cannot be added");
-        let said = format!("{refusal:#}");
-        assert!(
-            said.contains("com.lait.issues"),
-            "the refusal names the World: {said}"
-        );
-        assert!(
-            said.contains("already installed"),
-            "and says what the problem is: {said}"
-        );
-        assert!(
-            list(identity.path()).is_empty(),
-            "a refused registration leaves no row behind"
+        let key = register(identity.path(), "issues", dir.path())
+            .expect("a copy of an installed World is what working on one looks like");
+        assert_eq!(key, "local/issues");
+
+        let named = world_id_for("issues").expect("the host names it");
+        assert_eq!(named.as_str(), "local.issues");
+        assert_ne!(
+            named.as_str(),
+            "com.lait.issues",
+            "a local World that kept the release's id would keep the release's data"
         );
     }
 

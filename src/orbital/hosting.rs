@@ -372,6 +372,57 @@ struct PreparedStationOpen {
     network: comms::policy::Network,
 }
 
+/// Activate any World this device now serves that this Space has not seen.
+///
+/// A Space records which Worlds it has activated and which capabilities the
+/// founder holds, and that record is written when the Space is formed or
+/// entered — over whatever this device served *then*. A World that arrives
+/// afterwards has neither, and its capabilities are namespaced by its own id,
+/// so every request against it is denied with nothing to explain why.
+///
+/// That never showed before because the only way to gain a World was to install
+/// a release the Space already knew. A tree somebody is working on is named in
+/// this host's own namespace, so it is genuinely a World this Space has never
+/// activated, and it arrives while the Space already exists.
+///
+/// Both calls below are idempotent by construction — an already-active
+/// implementation and an already-effective grant author nothing — so this is a
+/// read on every open that has already been done, and work only on the one that
+/// has not.
+///
+/// A refusal is this World's problem and not the Space's: a device without the
+/// authority to activate simply does not get that World, which is the honest
+/// outcome. Failing the open would take every other World down with it.
+fn admit_new_worlds(mechanics: &SpaceAuthority, packages: &WorldPackages) {
+    let known = mechanics.activated_worlds();
+    let policies = match packages.founder_policies() {
+        Ok(policies) => policies,
+        Err(error) => {
+            tracing::warn!(%error, "a World declaration could not be read for activation");
+            return;
+        }
+    };
+    for (world, implementation, version, grants) in policies {
+        if known.iter().any(|active| active == world.as_str()) {
+            continue;
+        }
+        if let Err(error) =
+            mechanics.activate_implementation(world.as_str(), implementation, version)
+        {
+            tracing::warn!(%world, %error, "this Space did not activate a World this device serves");
+            continue;
+        }
+        for grant in grants {
+            if let Err(error) =
+                mechanics.grant_self_capability(grant.capability, grant.resource, grant.salt)
+            {
+                tracing::warn!(%world, %error, "a World was activated without one of its founder grants");
+            }
+        }
+        tracing::info!(%world, "activated a World this Space had not seen before");
+    }
+}
+
 fn prepare_station_open(
     home: &Path,
     device_seed: [u8; 32],
@@ -382,6 +433,7 @@ fn prepare_station_open(
     }
     let space = discover_space(home)?;
     let mechanics = SpaceAuthority::open(&orbital_store_root(home), &space, &device_seed)?;
+    admit_new_worlds(&mechanics, &packages);
     let (registry, worlds) = packages
         .build()
         .map_err(|error| anyhow!("world registry: {error:?}"))?;

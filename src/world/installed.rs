@@ -175,31 +175,6 @@ pub fn load_local(
             ));
             continue;
         };
-        // The tree keeps the id it declares, and its semantic package is
-        // registered under that id — so a copy of a World this identity already
-        // has installed would put two preferred packages under one id. The
-        // Orbit's registry refuses that set as a whole
-        // (`AmbiguousWorldDefault`), which is not a refusal of the local World
-        // at all: it takes down every Space-plane read on every Orbit, and says
-        // only that an id is ambiguous.
-        //
-        // So it is refused here, as one row, naming the release it collides
-        // with. A local World runs beside a release it was copied from only
-        // once its data is separable at the layer that stores data — the World
-        // id is hashed into every Body id — and until then the honest thing is
-        // to say so rather than to half-mount it.
-        if let Some(declared) = replica::body::WorldId::parse(&manifest.id) {
-            if packages.contains(&declared) {
-                refused.push(format!(
-                    "{}: {} declares World {declared}, which this identity already has installed \
-— a local World cannot yet run beside the release it was copied from, because \
-both would keep their data under the same id",
-                    local.key,
-                    local.dir.display()
-                ));
-                continue;
-            }
-        }
         let handle = local.key.trim_start_matches(crate::world::local::PREFIX);
         let admitted = crate::world::local::world_id_for(handle)
             .and_then(|world| Ok((world, crate::world::local::mount_for(handle)?)));
@@ -285,10 +260,15 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
     if applicable.is_empty() {
         bail!("selected World {world} has no runner for this platform");
     }
+    // What this host calls the World, which is what its runner is told and what
+    // its data is keyed by. The same string as `world` for every installed
+    // release; a name in the host's own namespace for a tree being worked on,
+    // so it keeps its own Bodies rather than sharing the release's.
+    let called = admission.world.as_str().to_owned();
     for runner in applicable {
         let release = Release::under(
             &root,
-            manifest.id.clone(),
+            called.clone(),
             manifest.version.clone(),
             admission.provenance,
             &runner.program,
@@ -302,7 +282,21 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
                 .with_context(|| format!("connect selected World {world} semantic service"))?,
         );
         let reviewed = remote.reviewed_implementation();
-        if remote.descriptor().id.to_string() != world {
+        // Against the name this host gave it, not the tree's. A runner that
+        // takes its id from the host reports `called` back; one that compiled
+        // its id in reports what the tree declares, and if those differ this is
+        // a World that cannot be run under a name of the host's choosing. That
+        // is a fact worth stating plainly here rather than discovering later as
+        // a World whose data went to an id nobody addressed.
+        let reported = remote.descriptor().id.to_string();
+        if reported != called {
+            if reported == world {
+                bail!(
+                    "World {world} does not support being run as '{called}': its runner \
+reported the id its tree declares. A World takes its id from the host, so a copy \
+of it can run beside the release it came from."
+                );
+            }
             bail!("World runner for {world} described another World");
         }
         if runner.preferred
@@ -340,21 +334,17 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
                 Provenance::Sealed(_) => world_interface::Sealing::Sealed,
                 Provenance::Local => world_interface::Sealing::Unsealed,
             };
-            // Built under the id the tree declares, so every check that asks
-            // whether the tree is consistent with itself asks the right
-            // question — a display surface commits its World id into a digest
-            // its own runner computed. Re-keyed to the host's assignment
-            // afterwards, which is what it is addressed by.
-            let tree_id = replica::body::WorldId::parse(&world)
-                .ok_or_else(|| anyhow!("World {world} declares an id that is not well formed"))?;
-            let mut declared = client_package(tree_id, client, sealing)?;
-            if admission.world.as_str() != world {
-                declared = declared.registered_as(admission.world.clone());
-            }
+            // Built under the name this host gave it, which is also the name
+            // its own runner just reported and computed every digest under —
+            // a display surface commits its World id into a contract digest,
+            // and the runner is the one that computed it. There is no second
+            // identity to re-key from any more: the tree declares what it is,
+            // the host names it, and the runner serves under that name.
+            let mut package = client_package(admission.world.clone(), client, sealing)?;
             if let Some(mount) = &admission.mount {
-                declared = declared.mounted_at(mount.clone());
+                package = package.mounted_at(mount.clone());
             }
-            admitted.client = Some(declared);
+            admitted.client = Some(package);
         }
         admitted.packages.push(if runner.preferred {
             package
@@ -458,63 +448,6 @@ mod tests {
     /// local tree and the daemon, every head and every agent session served no
     /// World at all. That is a denial of service reachable by registering a
     /// directory.
-    /// The registration-time refusal cannot reach a row that is already
-    /// recorded — one written before the check existed, or by hand. So the
-    /// loader refuses it too, and refuses it as *one row*: the alternative is
-    /// what this device actually did, which was to bring up an Orbit whose
-    /// world registry would not build and answer every Space-plane read with
-    /// `AmbiguousWorldDefault`.
-    #[test]
-    fn a_recorded_copy_of_an_installed_world_costs_only_its_own_row() {
-        let identity = tempfile::tempdir().expect("an identity");
-        let tree = tempfile::tempdir().expect("a copy of a World already installed");
-        std::fs::write(
-            tree.path().join("world.json"),
-            br#"{"format":1,"id":"com.lait.issues","version":"0.0.0-local",
-                 "mount":"issues","name":"Issues","runners":[]}"#,
-        )
-        .expect("a declaration");
-        // Written straight to the registry: `register` refuses this now, and
-        // the point of this test is the row that got in before it did.
-        let root = crate::world::local::registrations_root(identity.path());
-        std::fs::create_dir_all(&root).expect("the registry");
-        std::fs::write(
-            root.join("issues.json"),
-            serde_json::json!({ "dir": tree.path(), "admitted": null }).to_string(),
-        )
-        .expect("a recorded registration");
-
-        // What this device already serves, and must keep serving.
-        let installed = crate::world::test::packages();
-        let carried = crate::world::test::client_packages();
-        let before: Vec<String> = carried
-            .packages()
-            .map(|package| package.mount().to_owned())
-            .collect();
-
-        let (packages, clients, refused) = load_local(identity.path(), installed, carried);
-
-        assert_eq!(refused.len(), 1, "the collision is named: {refused:?}");
-        assert!(
-            refused[0].contains("com.lait.issues") && refused[0].contains("already has installed"),
-            "and names the World it collides with: {:?}",
-            refused
-        );
-        let issues = replica::body::WorldId::parse("com.lait.issues").expect("a World id");
-        assert!(
-            packages.contains(&issues),
-            "the installed release is untouched"
-        );
-        let after: Vec<String> = clients
-            .packages()
-            .map(|package| package.mount().to_owned())
-            .collect();
-        assert_eq!(
-            after, before,
-            "and every World this device already served is still served"
-        );
-    }
-
     #[test]
     fn a_local_world_that_cannot_load_costs_only_its_own_row() {
         let identity = tempfile::tempdir().expect("an identity");
