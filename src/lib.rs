@@ -64,6 +64,7 @@ pub mod dto;
 pub mod host_client;
 pub mod install;
 pub mod mcp;
+pub mod mcp_http;
 /// The product's adoption of the orbital lifecycle (hosts a World, drives
 /// Sessions through the public `runtime` API).
 pub mod orbital;
