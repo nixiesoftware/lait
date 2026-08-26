@@ -37,6 +37,41 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
+/// What a World runner is given from the environment it was launched from.
+///
+/// An allowlist rather than a blocklist: the interesting variables are the
+/// ones nobody thought of, and a blocklist is a list of the ones somebody did.
+/// A World that needs more than this should declare it in `world.json`, where
+/// it is a reviewable part of the release rather than an accident of whichever
+/// process happened to start the daemon.
+const INHERITED: &[&str] = &[
+    // Finding a linker, a shell, a system library.
+    "PATH",
+    // Where a process is allowed to write scratch.
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // Locale and encoding, or text handling differs from the host's.
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    // Windows needs these to resolve system libraries at all.
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "COMSPEC",
+    // A home for platform conventions that resolve one. Not the user's
+    // credentials — those live in files under it that a World has no reason
+    // to open, and this does not hand over the reason.
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+];
+
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_BUDGET: Duration = Duration::from_secs(5);
@@ -259,6 +294,23 @@ impl Instance {
         }
 
         let mut command = Command::new(&executable);
+        // Cleared, then filled deliberately. A World runner used to inherit
+        // whatever launched it — and what launches it is a daemon, a head, or
+        // `lait mcp`, which an editor spawns. So the runner inherited the
+        // *editor's* environment: API keys, cloud credentials, `SSH_AUTH_SOCK`.
+        // That is the payoff in the IDE auto-execution class of vulnerability,
+        // and it costs one line not to hand it over.
+        //
+        // Sealed releases are cleared too, not only unsealed trees. A signed
+        // World has no more business holding somebody's cloud credentials than
+        // an unsigned one, and a control that applies to one kind is a control
+        // somebody has to remember to extend.
+        command.env_clear();
+        for name in INHERITED {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         command
             .args(&release.args)
             .current_dir(&working_directory)
@@ -772,6 +824,47 @@ fn no_console(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
+    /// The list is the policy, so the list is what is asserted.
+    ///
+    /// A runner is launched by a daemon, a head, or `lait mcp` — and an editor
+    /// spawns `lait mcp`, so before `env_clear` the runner inherited the
+    /// *editor's* environment. That is the payoff in the IDE auto-execution
+    /// class of vulnerability.
+    ///
+    /// This guards the allowlist rather than the clearing. Proving the clearing
+    /// end to end needs a child that speaks the runner handshake, which is
+    /// `tests/process.rs`'s job and not something a fixture shell script can
+    /// fake — a test that spawned its own probe with its own `env_clear` would
+    /// pass whether or not `launch` cleared anything, which is no test at all.
+    #[test]
+    fn nothing_a_world_could_authenticate_with_is_on_the_inherited_list() {
+        for name in INHERITED {
+            let upper = name.to_ascii_uppercase();
+            assert!(
+                !upper.contains("KEY")
+                    && !upper.contains("TOKEN")
+                    && !upper.contains("SECRET")
+                    && !upper.contains("PASSWORD")
+                    && !upper.contains("CREDENTIAL")
+                    && !upper.contains("AUTH")
+                    && !upper.contains("SESSION"),
+                "{name} reads like a credential and must not be handed to a World"
+            );
+        }
+        assert!(
+            INHERITED.contains(&"PATH"),
+            "a runner still has to find a linker"
+        );
+        assert!(
+            !INHERITED.contains(&"SSH_AUTH_SOCK"),
+            "an agent socket is the whole point of not inheriting"
+        );
+        assert!(
+            !INHERITED.contains(&"LD_PRELOAD"),
+            "nor anything that injects code"
+        );
+    }
+
     use super::*;
 
     #[test]
