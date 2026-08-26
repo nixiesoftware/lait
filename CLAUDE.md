@@ -379,10 +379,30 @@ An **unsealed World tree**: what a build produces before anything signs it, a
 `world.json` beside the runner and pages it declares. Not a directory of pages —
 that is refused when you add it.
 
-- **It is a different World.** The host assigns it `local.<handle>` and mounts
-  it at `local_<handle>`, so its MCP tools are `local_issues_list`, its routes
-  are `/local_issues/`, and nothing that resolves by name can confuse it with
-  the release. It therefore has **its own data** — an empty Issues, not yours.
+- **It is a different World, and its runner is told so.** The host assigns it
+  `local.<handle>` and mounts it at `local_<handle>`, so its MCP tools are
+  `local_issues_list`, its routes are `/local_issues/`, and nothing that
+  resolves by name can confuse it with the release. The name is not a label on
+  top: it reaches the runner as `LAIT_WORLD_ID`, and the World serves under it —
+  so its Bodies, capabilities and resources are all keyed by it, and it has
+  **its own data**, an empty Issues rather than yours. A World that ignores the
+  name is refused at admission, saying it cannot be run as a copy, because a
+  World that kept its declared id would put its data where the release's lives.
+
+  **Products must ask, never hardcode.** `PRODUCT_WORLD` is private in both
+  first-party Worlds; `contract::world_id()` and `contract::product_world()` are
+  the only ways to the answer, and `replica::body::served_world` is where it is
+  resolved. A site that reaches past them pins a World to one identity per build
+  — which is one set of data per device — so the constant is private and the
+  compiler is the check.
+- **Its Space activates it on open.** A Space records the Worlds it has
+  activated and the capabilities its founder holds, written when the Space was
+  formed. A World added afterwards has neither, and its capabilities carry its
+  own id, so every request would be denied with nothing to explain why. Opening
+  a Space now activates and seeds anything it has not seen; both calls are
+  idempotent, and a refusal costs that one World rather than the open.
+- **It admits no historical runner.** A migrator carries a store forward from an
+  implementation a Space once activated. A World named here has neither.
 - **It is never given a release digest.** `LAIT_WORLD_RELEASE` says `local`, so
   the World's own process can tell.
 - **Consent is to bytes.** `world.json` and every runner it declares are
