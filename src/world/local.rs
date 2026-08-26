@@ -113,14 +113,39 @@ pub fn key_for(handle: &str) -> Result<String> {
     if handle.is_empty() {
         bail!("a local World needs a name to be filed under");
     }
+    // Narrower than a filename needs to be, because this handle becomes a
+    // mount, and a mount becomes an MCP tool prefix. `local_issues_list` has to
+    // read as a tool name to whatever is looking at it.
     if !handle
         .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
     {
-        bail!("'{handle}' may use letters, digits, '-', '_' and '.' only");
+        bail!("'{handle}' may use lowercase letters, digits and '_' only");
     }
     Ok(format!("{PREFIX}{handle}"))
 }
+
+/// Where a local World is mounted, from the handle it was registered under.
+///
+/// The mount is not decoration and this is not a routing detail: it prefixes
+/// every public MCP tool name and it is the `{world}` segment of the HTTP RPC
+/// route. So a local World assigned `local_issues` exposes `local_issues_list`
+/// and answers at `/local_issues/`, and an agent or a link addressing the
+/// released World reaches the released World. That is the point — the two run
+/// side by side and neither can be mistaken for the other by anything that
+/// resolves by name.
+///
+/// A released World's `MOUNT` is published API and never moves; this is only
+/// ever assigned to a tree somebody is working on.
+pub fn mount_for(handle: &str) -> Result<String> {
+    key_for(handle)?;
+    Ok(format!("{MOUNT_PREFIX}{}", handle.trim()))
+}
+
+/// Reserved, so that a mount assigned here can never collide with one a World
+/// declares for itself. A World that claims it is refused rather than quietly
+/// shadowing somebody's working tree.
+pub const MOUNT_PREFIX: &str = "local_";
 
 fn file_for(identity: &Path, key: &str) -> Result<PathBuf> {
     let handle = key
@@ -246,6 +271,33 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "local/issues");
         assert_eq!(found[0].dir, dir.path());
+    }
+
+    /// The mount is what an agent types. `local_issues_list` is a different
+    /// tool from `issues_list`, and `/local_issues/` is a different route from
+    /// `/issues/` — which is what lets a tree somebody is working on run
+    /// beside the release it was copied from without either answering for the
+    /// other.
+    #[test]
+    fn a_local_world_is_mounted_in_its_own_namespace() {
+        assert_eq!(mount_for("issues").expect("a mount"), "local_issues");
+        assert!(mount_for("issues")
+            .expect("a mount")
+            .starts_with(MOUNT_PREFIX));
+    }
+
+    /// A handle becomes a mount and a mount becomes an MCP tool prefix, so it
+    /// is held to what a tool name can carry rather than to what a filename
+    /// can.
+    #[test]
+    fn a_handle_is_held_to_what_a_tool_name_can_carry() {
+        assert!(key_for("issues_dev").is_ok());
+        assert!(key_for("Issues").is_err(), "a tool prefix is lowercase");
+        assert!(
+            key_for("issues-dev").is_err(),
+            "a hyphen does not read as one"
+        );
+        assert!(key_for("issues.dev").is_err());
     }
 
     /// The guarantee the whole namespace exists for. A World id is

@@ -773,7 +773,16 @@ pub fn agent_surface_coverage(
 #[derive(Clone)]
 pub struct WorldClientPackage {
     world: WorldId,
-    mount: &'static str,
+    /// Where this package is actually mounted.
+    ///
+    /// Owned, and not the `&'static str` a World compiles in, because the
+    /// World declares a *preference* and the host decides where it lands. For
+    /// a released World those are the same string and the published-API
+    /// guarantee on `MOUNT` is untouched. A local World — a tree somebody is
+    /// working on — is assigned one in its own namespace, so it can run beside
+    /// the release it was copied from without either one answering to the
+    /// other's tools or URLs.
+    mount: String,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
     without: &'static [&'static str],
@@ -1038,7 +1047,7 @@ impl WorldClientPackage {
         }
         Ok(Self {
             world,
-            mount,
+            mount: mount.to_owned(),
             mcp_tools: surface.tools,
             mcp_instructions: surface.instructions,
             without: surface.without,
@@ -1306,8 +1315,20 @@ impl WorldClientPackage {
 
     /// The namespace key every head addresses this package by — the MCP tool
     /// prefix and the `{world}` route segment. See [`Self::new`].
-    pub fn mount(&self) -> &'static str {
-        self.mount
+    pub fn mount(&self) -> &str {
+        &self.mount
+    }
+
+    /// Mount this package somewhere other than where it asked to be.
+    ///
+    /// The World declares a preference; the host decides. Used to put a local
+    /// World — a tree somebody is working on — in its own namespace so it can
+    /// run beside the release it was copied from. Never used for a released
+    /// World, whose `MOUNT` is published API precisely so that it does not
+    /// move.
+    pub fn mounted_at(mut self, mount: impl Into<String>) -> Self {
+        self.mount = mount.into();
+        self
     }
 
     pub fn mcp_tools(&self) -> &[McpTool] {
@@ -1491,7 +1512,7 @@ pub struct MountedMcpTool<'a> {
 #[derive(Clone, Default)]
 pub struct WorldClientRegistry {
     packages: BTreeMap<String, WorldClientPackage>,
-    mounts: BTreeMap<&'static str, String>,
+    mounts: BTreeMap<String, String>,
 }
 
 impl WorldClientRegistry {
@@ -1514,7 +1535,8 @@ impl WorldClientRegistry {
                 world
             )));
         }
-        self.mounts.insert(package.mount(), world.clone());
+        self.mounts
+            .insert(package.mount().to_owned(), world.clone());
         self.packages.insert(world, package);
         Ok(self)
     }
