@@ -776,7 +776,7 @@ pub fn plan_access_grant(
         )));
     }
     let scope_kind = body["scope_kind"].as_str().unwrap_or("space");
-    let world = issues::contract::PRODUCT_WORLD;
+    let world = issues::contract::product_world();
     let resource = match (scope_kind, project) {
         ("space", None) => mechanics::authorization::Resource::root(world),
         ("space", Some(_)) => {

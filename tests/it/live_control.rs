@@ -110,7 +110,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             since_generation: None,
             body: None,
         },
@@ -134,7 +134,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             since_generation: Some(generation),
             body: None,
         },
@@ -152,7 +152,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             since_generation: None,
             body: Some(
                 issues::contract::issue_body_id("iss_01jz0000000000000000000000").as_bytes(),
@@ -191,7 +191,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             bodies: vec![
                 issues::contract::issue_body_id("iss_01jz0000000000000000000000").as_bytes(),
             ],
@@ -215,7 +215,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             bodies: vec![[1; 16], [2; 16]],
             carets: Vec::new(),
             typing: Vec::new(),
@@ -234,7 +234,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             bodies: Vec::new(),
             carets: Vec::new(),
             typing: Vec::new(),

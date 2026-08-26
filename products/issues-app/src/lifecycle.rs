@@ -422,7 +422,7 @@ pub fn implementation_id() -> [u8; 32] {
 /// Build the idempotent founder policy for this product.
 pub fn founder_policy() -> FounderPolicy {
     FounderPolicy {
-        world: issues::contract::PRODUCT_WORLD,
+        world: issues::contract::product_world(),
         implementation: implementation_id(),
         grants: issues::contract::founder_capabilities()
             .into_iter()

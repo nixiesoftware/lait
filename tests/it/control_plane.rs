@@ -94,7 +94,7 @@ fn planes(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::contro
     frame
         .invalidations
         .iter()
-        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+        .filter(|entry| entry.world.as_str() == issues::contract::product_world())
         .flat_map(|entry| &entry.planes)
 }
 

@@ -17,7 +17,7 @@ pub struct IssuesApplication {
 impl WorldApplication for IssuesApplication {
     fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>> {
         let policy = crate::lifecycle::founder_policy();
-        if policy.world != issues::PRODUCT_WORLD
+        if policy.world != issues::product_world()
             || policy.implementation != crate::lifecycle::implementation_id()
         {
             anyhow::bail!("Issues lifecycle policy does not match its World release");

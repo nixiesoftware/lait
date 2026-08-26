@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::contract::PRODUCT_WORLD;
+use super::contract::product_world;
 use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a workflow revision id.
@@ -84,11 +84,14 @@ impl DemandTemplate {
                 resource,
             } => {
                 let res = match resource {
-                    ResourceTemplate::Space => Resource::root(PRODUCT_WORLD),
-                    ResourceTemplate::Project => Resource::segments(PRODUCT_WORLD, [project_id])
+                    ResourceTemplate::Space => Resource::root(product_world()),
+                    ResourceTemplate::Project => Resource::segments(product_world(), [project_id])
                         .expect("validated project resource"),
                 };
-                AuthorizationDemand::require(PolicyCapability::new(PRODUCT_WORLD, capability), res)
+                AuthorizationDemand::require(
+                    PolicyCapability::new(product_world(), capability),
+                    res,
+                )
             }
             DemandTemplate::All { children } => {
                 AuthorizationDemand::All(children.iter().map(|c| c.resolve(project_id)).collect())

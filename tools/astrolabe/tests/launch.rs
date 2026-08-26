@@ -688,7 +688,7 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
                     std::path::Path::new(&store),
                     space_id,
                 ),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
             },
             call.clone(),
             None,
@@ -824,7 +824,7 @@ async fn write_signage_media(client: &Client, space: &str, media: signage::Signa
                     std::path::Path::new(&store),
                     space_id,
                 ),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
             },
             call.clone(),
             None,
@@ -866,7 +866,7 @@ async fn write_signage_program(client: &Client, space: &str, program: signage::S
         .call_world(
             lait::control::ControlRoute::World {
                 address: lait::control::OrbitAddress::for_store(store, space),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
             },
             call.clone(),
             None,
@@ -1242,7 +1242,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 // resolves this to the exact local Orbit id before it reaches
                 // the daemon.
                 orbit: signage_orbit,
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
                 input: serde_json::json!({ "program": signage_program }),
                 theme: lait::control::DisplayThemeSetting::Dark,
@@ -1329,7 +1329,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             .display_assignment_put(DisplayAssignmentInput {
                 device: second_device.clone(),
                 orbit: assignment.space.clone(),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
                 input: serde_json::json!({ "program": signage_program }),
                 theme: lait::control::DisplayThemeSetting::Dark,
@@ -1446,7 +1446,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             .display_assignment_put(DisplayAssignmentInput {
                 device: device.clone(),
                 orbit: assignment.space.clone(),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
                 input: serde_json::json!({ "program": film_program }),
                 theme: lait::control::DisplayThemeSetting::Dark,

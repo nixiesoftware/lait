@@ -27,10 +27,10 @@ pub mod contract;
 mod world;
 
 pub use contract::{
-    ConfigIntent, ConfigProjection, ConfigQuery, GroupIntent, GroupProjection, GroupQuery,
-    MediaIntent, MediaProjection, MediaQuery, MediaSource, Playback, PlaybackSource, ProgramCycle,
-    ProgramWindow, ScreenIntent, ScreenProjection, ScreenQuery, Settings, SignageConfig,
-    SignageGroup, SignageIntent, SignageItem, SignageMedia, SignageProgram, SignageProjection,
-    SignageQuery, SignageScreen, SignageWindow, PRODUCT_WORLD,
+    product_world, ConfigIntent, ConfigProjection, ConfigQuery, GroupIntent, GroupProjection,
+    GroupQuery, MediaIntent, MediaProjection, MediaQuery, MediaSource, Playback, PlaybackSource,
+    ProgramCycle, ProgramWindow, ScreenIntent, ScreenProjection, ScreenQuery, Settings,
+    SignageConfig, SignageGroup, SignageIntent, SignageItem, SignageMedia, SignageProgram,
+    SignageProjection, SignageQuery, SignageScreen, SignageWindow,
 };
 pub use world::SignageWorld;

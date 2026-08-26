@@ -8,7 +8,13 @@ use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
 
-pub const PRODUCT_WORLD: &str = "com.lait.signage";
+/// The World id this product declares for itself.
+///
+/// Private for the reason [`lait_issues`]'s is: this is what the World *is*,
+/// and the host decides what it is *called here*. Reaching it directly pins a
+/// World to one identity per build, and its Bodies, capabilities and resources
+/// are all keyed off that string.
+const DECLARED_WORLD: &str = "com.lait.signage";
 pub const PROGRAM_SCHEMA: &str = "signage.program";
 pub const PROGRAM_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PROGRAM_ITEMS: usize = 16;
@@ -44,8 +50,22 @@ pub const MAX_SETTING_CHARS: usize = 1024;
 pub const CONFIG_SCHEMA: &str = "signage.config";
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// The id this process serves this World under.
 pub fn world_id() -> WorldId {
-    WorldId::parse(PRODUCT_WORLD).expect("reviewed Signage World id")
+    served().clone()
+}
+
+/// The same fact as a string, for the capability and resource vocabulary.
+pub fn product_world() -> &'static str {
+    served().as_str()
+}
+
+fn served() -> &'static WorldId {
+    static SERVED: std::sync::OnceLock<WorldId> = std::sync::OnceLock::new();
+    SERVED.get_or_init(|| {
+        let declared = WorldId::parse(DECLARED_WORLD).expect("reviewed Signage World id");
+        replica::body::served_world(&declared)
+    })
 }
 
 pub fn program_schema() -> SchemaId {
@@ -311,11 +331,11 @@ pub fn body_key(program: &str) -> Option<BodyKey> {
 /// grant on [`root_resource`]; "these screens" is a grant on a group, whose
 /// membership this World resolves and Mechanics never learns.
 pub mod resource {
-    use super::{Resource, PRODUCT_WORLD};
+    use super::{product_world, Resource};
 
     /// Everything this World owns. Fleet-wide.
     pub fn root() -> Resource {
-        Resource::root(PRODUCT_WORLD)
+        Resource::root(product_world())
     }
 
     /// One authored program.
@@ -347,7 +367,7 @@ pub mod resource {
     /// *narrower* in effect: it demands fleet-wide standing rather than
     /// silently granting on a truncated name.
     fn segments(kind: &str, id: &str) -> Resource {
-        Resource::segments(PRODUCT_WORLD, [kind, id]).unwrap_or_else(|_| root())
+        Resource::segments(product_world(), [kind, id]).unwrap_or_else(|_| root())
     }
 }
 
@@ -356,7 +376,7 @@ fn root_resource() -> Resource {
 }
 
 fn capability(name: &str) -> PolicyCapability {
-    PolicyCapability::new(PRODUCT_WORLD, name)
+    PolicyCapability::new(product_world(), name)
 }
 
 /// Fleet-wide authority to author.
@@ -1670,7 +1690,7 @@ mod tests {
             resource::group("g"),
             resource::media("m"),
         ] {
-            assert_eq!(r.world, PRODUCT_WORLD);
+            assert_eq!(r.world, product_world());
             assert!(r.validate().is_ok());
         }
     }

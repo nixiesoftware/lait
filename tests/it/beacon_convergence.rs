@@ -503,7 +503,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
                     let named = frame
                         .invalidations
                         .iter()
-                        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+                        .filter(|entry| entry.world.as_str() == issues::contract::product_world())
                         .flat_map(|entry| &entry.dirty)
                         .any(|d| d.docs.contains(&doc));
                     if named {

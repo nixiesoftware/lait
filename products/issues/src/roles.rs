@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::contract::PRODUCT_WORLD;
+use super::contract::product_world;
 use mechanics::authorization::{PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a role revision id.
@@ -223,17 +223,17 @@ pub fn role_admission_evidence(
     revision: &RoleRevision,
     parent_manifest_root: [u8; 32],
 ) -> mechanics::authorization::WorldAssignmentEvidence {
-    let res = Resource::root(PRODUCT_WORLD);
+    let res = Resource::root(product_world());
     let mut assignments: Vec<(PolicyCapability, Resource)> = revision
         .body
         .capabilities
         .iter()
-        .map(|c| (PolicyCapability::new(PRODUCT_WORLD, c), res.clone()))
+        .map(|c| (PolicyCapability::new(product_world(), c), res.clone()))
         .collect();
     // The mandatory baseline is ALWAYS inside the signed digest, whatever the
     // role says.
     assignments.push((
-        PolicyCapability::new(PRODUCT_WORLD, "space.issue.read"),
+        PolicyCapability::new(product_world(), "space.issue.read"),
         res.clone(),
     ));
     // Administrator admission additionally installs the Mechanics meta-grant
@@ -247,7 +247,7 @@ pub fn role_admission_evidence(
     assignments.sort();
     assignments.dedup();
     mechanics::authorization::WorldAssignmentEvidence {
-        world: PRODUCT_WORLD.to_string(),
+        world: product_world().to_string(),
         opaque_definition_ref: provenance_ref(&revision.body.role_id, &revision.revision_id),
         definition_digest: revision.body.definition_digest(),
         parent_manifest_root,
@@ -340,7 +340,7 @@ mod tests {
         for id in BUILT_IN_ROLE_IDS {
             let rev = built_in(id).unwrap();
             let evidence = role_admission_evidence(&rev, [7u8; 32]);
-            let read = PolicyCapability::new(PRODUCT_WORLD, "space.issue.read");
+            let read = PolicyCapability::new(product_world(), "space.issue.read");
             assert!(
                 evidence.assignments.iter().any(|(c, _)| c == &read),
                 "{id} evidence carries the mandatory baseline"

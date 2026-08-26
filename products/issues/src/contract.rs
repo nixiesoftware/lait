@@ -15,8 +15,21 @@
 use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
 
-/// The product World id.
-pub const PRODUCT_WORLD: &str = "com.lait.issues";
+/// The World id this product declares for itself.
+///
+/// Private on purpose. It is what this World *is*, not what it is *called on
+/// this device* — the host decides that, and says so through
+/// [`replica::ids::SERVED_WORLD_VAR`]. Read it directly and you pin a World to
+/// one identity per build, which is one set of data per device: a tree
+/// somebody is working on could never sit beside the release it was copied
+/// from, because both would key their Bodies, capabilities and resources off
+/// the same string.
+///
+/// Everything asks [`product_world`] or [`world_id`] instead, and the compiler
+/// is the check: there is no way to reach this constant from outside, so a
+/// site that forgets is a build error rather than a World writing half its
+/// data under one identity and half under another.
+const DECLARED_WORLD: &str = "com.lait.issues";
 /// The issue Body schema.
 ///
 /// Version 3 adds the history log ([`EVENTS_PATH`]) to version 2's comment
@@ -160,8 +173,25 @@ pub const fn valid_text(value: &str) -> bool {
     value.len() <= MAX_TEXT_BYTES
 }
 
+/// The id this process serves this World under.
+///
+/// Resolved once: a World's identity cannot change under it while it runs, and
+/// every Body it writes has to agree with every Body it wrote a moment ago.
 pub fn world_id() -> WorldId {
-    WorldId::parse(PRODUCT_WORLD).expect("product world id")
+    served().clone()
+}
+
+/// The same fact as a string, for the capability and resource vocabulary.
+pub fn product_world() -> &'static str {
+    served().as_str()
+}
+
+fn served() -> &'static WorldId {
+    static SERVED: std::sync::OnceLock<WorldId> = std::sync::OnceLock::new();
+    SERVED.get_or_init(|| {
+        let declared = WorldId::parse(DECLARED_WORLD).expect("product world id");
+        replica::body::served_world(&declared)
+    })
 }
 
 // ---- Authorization demands (plan 04 policy vocabulary) --------------------
@@ -174,12 +204,12 @@ use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 
 /// The Space-level resource of the Issues World.
 fn space_resource() -> Resource {
-    Resource::root(PRODUCT_WORLD)
+    Resource::root(product_world())
 }
 
 /// A Space-scoped capability of the Issues World.
 fn space_cap(name: &str) -> PolicyCapability {
-    PolicyCapability::new(PRODUCT_WORLD, name)
+    PolicyCapability::new(product_world(), name)
 }
 
 /// `Require(space.admin, Space)` — the admin demand.
@@ -218,7 +248,7 @@ pub fn demand_project_any(capability: &str, project: &str) -> Vec<u8> {
     AuthorizationDemand::Any(vec![
         AuthorizationDemand::require(
             space_cap(capability),
-            Resource::segments(PRODUCT_WORLD, [project]).expect("validated project resource"),
+            Resource::segments(product_world(), [project]).expect("validated project resource"),
         ),
         AuthorizationDemand::require(space_cap("space.admin"), space_resource()),
     ])
@@ -234,7 +264,7 @@ pub fn demand_project_work(capability: &str, project: &str) -> Vec<u8> {
     AuthorizationDemand::Any(vec![
         AuthorizationDemand::require(
             space_cap(capability),
-            Resource::segments(PRODUCT_WORLD, [project]).expect("validated project resource"),
+            Resource::segments(product_world(), [project]).expect("validated project resource"),
         ),
         AuthorizationDemand::require(space_cap("space.contributor"), space_resource()),
         AuthorizationDemand::require(space_cap("space.admin"), space_resource()),
@@ -299,7 +329,7 @@ pub fn verify_build(world_build: [u8; 32]) -> runtime::exec::Build {
     };
     runtime::exec::Build {
         id: runtime::exec::BuildId::from_bytes([0; 32]),
-        world: replica::body::WorldId::parse(PRODUCT_WORLD).expect("product World id"),
+        world: replica::body::WorldId::parse(product_world()).expect("product World id"),
         world_build,
         spec: verify_spec_ref(),
         handler,
@@ -616,7 +646,7 @@ pub fn relation_encoding() -> EncodingId {
 /// creates it locally except the founder's one `InitializeTracker`.
 pub fn catalog_body_id(space: &mechanics::ids::SpaceId) -> BodyId {
     let space_bytes = space.as_str().as_bytes();
-    let world_bytes = PRODUCT_WORLD.as_bytes();
+    let world_bytes = product_world().as_bytes();
     let mut input = Vec::with_capacity(4 + space_bytes.len() + world_bytes.len());
     input.extend_from_slice(&(space_bytes.len() as u16).to_be_bytes());
     input.extend_from_slice(space_bytes);

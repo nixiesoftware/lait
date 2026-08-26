@@ -12,7 +12,7 @@ fn the_shipped_issues_process_exposes_every_host_adapter() {
     let program = executable.file_name().expect("runner executable name");
     let release = Release::under(
         root,
-        issues::PRODUCT_WORLD,
+        issues::product_world(),
         env!("CARGO_PKG_VERSION"),
         Provenance::Sealed([0x91; 32]),
         Path::new(program),
