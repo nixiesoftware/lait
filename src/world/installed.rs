@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use data_encoding::HEXLOWER;
 use runtime::world::World as _;
 use world_interface::manifest::WorldManifest;
-use world_runner::{Instance, Release};
+use world_runner::{Instance, Provenance, Release};
 use world_sdk::{remote_exec_package, RemoteClient, RemoteWorld};
 
 use crate::orbital::{WorldPackage, WorldPackages};
@@ -96,90 +96,195 @@ pub fn packages(worlds: &Path) -> Result<WorldPackages> {
 
 /// Load the semantic and client halves of every selected release, sharing one
 /// supervised process per exact runner generation inside this host process.
+/// What the host has decided about one tree, whatever the tree says about
+/// itself.
+///
+/// A tree is checked for internal consistency — its runner must declare the id
+/// and mount its `world.json` declares — and that check stays exactly as it
+/// was. This is the separate question of what the *host* registers it as. For
+/// a sealed release the two are the same and always will be: `MOUNT` is
+/// published API and a World id is its address. For a tree somebody is working
+/// on they are deliberately different, so a copy of a release can run beside
+/// the release without either answering for the other.
+struct Admission {
+    /// The id this World answers to in the registry.
+    world: replica::body::WorldId,
+    /// Where it is mounted, when the host overrides the declaration.
+    mount: Option<String>,
+    /// What this host can honestly say about where the bytes came from.
+    provenance: Provenance,
+}
+
 pub fn load(worlds: &Path) -> Result<Installation> {
     let mut packages = WorldPackages::new();
     let mut clients = world_interface::WorldClientRegistry::new();
     for declaration in declarations(worlds)? {
-        let root = declaration.root;
-        let selected = declaration.release;
         let manifest = declaration.manifest;
         let world = manifest.id.clone();
         let digest = HEXLOWER
-            .decode(selected.digest.as_bytes())
+            .decode(declaration.release.digest.as_bytes())
             .map_err(|error| anyhow!("World {world} has an invalid release digest: {error}"))?;
         let digest: [u8; 32] = digest
             .try_into()
             .map_err(|_| anyhow!("World {world} release digest is not 32 bytes"))?;
-
-        let applicable: Vec<_> = manifest
-            .runners
-            .iter()
-            .filter(|runner| runner.admits(std::env::consts::OS, std::env::consts::ARCH))
-            .collect();
-        if applicable.is_empty() {
-            bail!("selected World {world} has no runner for this platform");
-        }
-        for runner in applicable {
-            let release = Release::under(
-                &root,
-                manifest.id.clone(),
-                manifest.version.clone(),
-                digest,
-                &runner.program,
-                runner.args.clone(),
-                runner.cwd.as_deref(),
-            )?;
-            let instance = Instance::launch(release)
-                .with_context(|| format!("launch selected World {world} runner"))?;
-            let remote = Arc::new(
-                RemoteWorld::connect(instance)
-                    .with_context(|| format!("connect selected World {world} semantic service"))?,
-            );
-            let reviewed = remote.reviewed_implementation();
-            if remote.descriptor().id.to_string() != world {
-                bail!("World runner for {world} described another World");
-            }
-            if runner.preferred
-                && manifest
-                    .implementation_version
-                    .is_some_and(|version| version != remote.descriptor().implementation_version.0)
-            {
-                bail!(
-                    "World runner for {world} does not match its declared implementation version"
-                );
-            }
-            let exec = remote_exec_package(remote.clone())
-                .with_context(|| format!("load selected World {world} Exec declaration"))?;
-            let package = WorldPackage::new(remote.clone(), reviewed)
-                .with_control(remote.clone())
-                .with_exec(exec)
-                .with_projector(remote.clone())
-                .with_lifecycle(remote.clone())
-                .with_release_version(manifest.version.clone());
-            if runner.preferred {
-                let client =
-                    Arc::new(RemoteClient::connect(remote).with_context(|| {
-                        format!("load selected World {world} client declaration")
-                    })?);
-                if client.declaration().mount != manifest.mount() {
-                    bail!("World runner for {world} declared a different mount than world.json");
-                }
-                clients = clients
-                    .with_package(client_package(
-                        replica::body::WorldId::parse(&world)
-                            .ok_or_else(|| anyhow!("installed World id became invalid"))?,
-                        client,
-                    )?)
-                    .map_err(|error| anyhow!(error))?;
-            }
-            packages = packages.with_package(if runner.preferred {
-                package
-            } else {
-                package.historical()
-            });
-        }
+        let admission = Admission {
+            world: replica::body::WorldId::parse(&world)
+                .ok_or_else(|| anyhow!("installed World id {world} is not well formed"))?,
+            mount: None,
+            provenance: Provenance::Sealed(digest),
+        };
+        (packages, clients) = admit(&declaration.root, &manifest, &admission, packages, clients)?;
     }
     Ok(Installation { packages, clients })
+}
+
+/// Load the local Worlds registered on this device, beside the installed ones.
+///
+/// Each is admitted under the id and mount the host assigns it, and with
+/// `Provenance::Local`, so nothing downstream — the registry, a routed call, an
+/// MCP invocation, or the World's own process — can mistake it for a release.
+///
+/// A registration whose tree has gone, or whose tree cannot be loaded, is
+/// skipped with its reason returned rather than failing the others. One
+/// developer's broken working tree must not stop this device serving the Worlds
+/// it has installed.
+pub fn load_local(
+    identity: &Path,
+    mut packages: WorldPackages,
+    mut clients: world_interface::WorldClientRegistry,
+) -> (
+    WorldPackages,
+    world_interface::WorldClientRegistry,
+    Vec<String>,
+) {
+    let mut refused = Vec::new();
+    for local in crate::world::local::list(identity) {
+        let Some(manifest) = local.manifest.clone() else {
+            refused.push(format!(
+                "{}: {} cannot be read",
+                local.key,
+                local.dir.display()
+            ));
+            continue;
+        };
+        let handle = local.key.trim_start_matches(crate::world::local::PREFIX);
+        let admitted = crate::world::local::world_id_for(handle)
+            .and_then(|world| Ok((world, crate::world::local::mount_for(handle)?)));
+        let (world, mount) = match admitted {
+            Ok(pair) => pair,
+            Err(error) => {
+                refused.push(format!("{}: {error:#}", local.key));
+                continue;
+            }
+        };
+        let admission = Admission {
+            world,
+            mount: Some(mount),
+            provenance: Provenance::Local,
+        };
+        match admit(&local.dir, &manifest, &admission, packages, clients) {
+            Ok((next_packages, next_clients)) => {
+                packages = next_packages;
+                clients = next_clients;
+            }
+            Err(error) => {
+                // The moved values are gone with the failed call, so a refusal
+                // here ends local loading rather than skipping one entry. That
+                // is the honest bound of this shape and it is recorded, not
+                // hidden: everything already admitted stands.
+                refused.push(format!("{}: {error:#}", local.key));
+                return (
+                    WorldPackages::new(),
+                    world_interface::WorldClientRegistry::new(),
+                    refused,
+                );
+            }
+        }
+    }
+    (packages, clients, refused)
+}
+
+/// Bring one tree up and register it under what the host decided.
+fn admit(
+    root: &Path,
+    manifest: &WorldManifest,
+    admission: &Admission,
+    mut packages: WorldPackages,
+    mut clients: world_interface::WorldClientRegistry,
+) -> Result<(WorldPackages, world_interface::WorldClientRegistry)> {
+    // The tree's own name for itself, used for every consistency check and
+    // every message about it. What the host registers it as is `admission`.
+    let world = manifest.id.clone();
+    let applicable: Vec<_> = manifest
+        .runners
+        .iter()
+        .filter(|runner| runner.admits(std::env::consts::OS, std::env::consts::ARCH))
+        .collect();
+    if applicable.is_empty() {
+        bail!("selected World {world} has no runner for this platform");
+    }
+    for runner in applicable {
+        let release = Release::under(
+            &root,
+            manifest.id.clone(),
+            manifest.version.clone(),
+            admission.provenance,
+            &runner.program,
+            runner.args.clone(),
+            runner.cwd.as_deref(),
+        )?;
+        let instance = Instance::launch(release)
+            .with_context(|| format!("launch selected World {world} runner"))?;
+        let remote = Arc::new(
+            RemoteWorld::connect(instance)
+                .with_context(|| format!("connect selected World {world} semantic service"))?,
+        );
+        let reviewed = remote.reviewed_implementation();
+        if remote.descriptor().id.to_string() != world {
+            bail!("World runner for {world} described another World");
+        }
+        if runner.preferred
+            && manifest
+                .implementation_version
+                .is_some_and(|version| version != remote.descriptor().implementation_version.0)
+        {
+            bail!("World runner for {world} does not match its declared implementation version");
+        }
+        let exec = remote_exec_package(remote.clone())
+            .with_context(|| format!("load selected World {world} Exec declaration"))?;
+        let package = WorldPackage::new(remote.clone(), reviewed)
+            .with_control(remote.clone())
+            .with_exec(exec)
+            .with_projector(remote.clone())
+            .with_lifecycle(remote.clone())
+            .with_release_version(manifest.version.clone());
+        if runner.preferred {
+            let client = Arc::new(
+                RemoteClient::connect(remote)
+                    .with_context(|| format!("load selected World {world} client declaration"))?,
+            );
+            if client.declaration().mount != manifest.mount() {
+                bail!("World runner for {world} declared a different mount than world.json");
+            }
+            // Registered under the host's decision, not the tree's
+            // declaration. The two checks just above compared the runner to
+            // `world.json` — the tree against itself — which is a different
+            // question and still the right one to ask.
+            let mut declared = client_package(admission.world.clone(), client)?;
+            if let Some(mount) = &admission.mount {
+                declared = declared.mounted_at(mount.clone());
+            }
+            clients = clients
+                .with_package(declared)
+                .map_err(|error| anyhow!(error))?;
+        }
+        packages = packages.with_package(if runner.preferred {
+            package
+        } else {
+            package.historical()
+        });
+    }
+    Ok((packages, clients))
 }
 
 fn leaked(value: String) -> &'static str {

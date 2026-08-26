@@ -1730,6 +1730,53 @@ mod tests {
             .map_err(|error| Failure::new(format!("decode reply: {error}")))
     }
 
+    /// A World being worked on runs beside the release it was copied from.
+    ///
+    /// Both halves are needed and the registry refuses on either alone: two
+    /// packages cannot share a World id, and two cannot share a mount. The
+    /// host assigns a local tree both, which is what makes this pair legal —
+    /// and what keeps every name that resolves to one from resolving to the
+    /// other.
+    #[test]
+    fn a_local_world_registers_beside_the_release_it_was_copied_from() {
+        let released = package("com.lait.issues", "issues");
+        let local = package("local.issues", "issues").mounted_at("local_issues");
+        let registry = WorldClientRegistry::new()
+            .with_package(released)
+            .expect("the release registers")
+            .with_package(local)
+            .expect("and the tree being worked on registers beside it");
+
+        assert_eq!(
+            registry
+                .package_for_mount("issues")
+                .map(|p| p.world().as_str().to_owned()),
+            Some("com.lait.issues".to_owned()),
+            "the released mount still reaches the release"
+        );
+        assert_eq!(
+            registry
+                .package_for_mount("local_issues")
+                .map(|p| p.world().as_str().to_owned()),
+            Some("local.issues".to_owned()),
+            "and only the assigned mount reaches the tree"
+        );
+    }
+
+    /// The mount alone is not enough: the id collides first.
+    #[test]
+    fn two_copies_of_one_world_are_refused_even_at_different_mounts() {
+        let registry = WorldClientRegistry::new()
+            .with_package(package("com.lait.issues", "issues"))
+            .expect("the first registers");
+        assert!(
+            registry
+                .with_package(package("com.lait.issues", "issues").mounted_at("local_issues"))
+                .is_err(),
+            "a second package for one World id is refused before any mount is looked at"
+        );
+    }
+
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
         let call = if mount == "notes" {
             notes_invocation as McpCallFactory

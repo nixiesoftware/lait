@@ -222,7 +222,20 @@ pub async fn run_until(
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
     let worlds = head::installations_root(&identity);
-    let registry = Arc::new(crate::world::installed::load(&worlds)?.clients);
+    let installation = crate::world::installed::load(&worlds)?;
+    // Local Worlds are admitted beside the installed ones, never in place of
+    // them. Each carries the id and mount the host assigns it, so a head
+    // serves both a release and a copy of it being worked on without either
+    // answering for the other.
+    //
+    // A registration that cannot be loaded is named and skipped: one broken
+    // working tree must not stop this device serving what it has installed.
+    let (_packages, clients, refused) =
+        crate::world::installed::load_local(&identity, installation.packages, installation.clients);
+    for reason in &refused {
+        tracing::warn!(%reason, "a local World was not loaded");
+    }
+    let registry = Arc::new(clients);
     run_until_with_registry(
         port,
         open,

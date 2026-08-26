@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use world_runner::Provenance;
 use world_runner::{Instance, Release};
 use world_sdk::{RemoteClient, RemoteWorld};
 
@@ -13,7 +14,7 @@ fn the_shipped_signage_process_exposes_its_host_adapters() {
         root,
         signage::PRODUCT_WORLD,
         env!("CARGO_PKG_VERSION"),
-        [0x92; 32],
+        Provenance::Sealed([0x92; 32]),
         Path::new(program),
         Vec::new(),
         None::<&Path>,

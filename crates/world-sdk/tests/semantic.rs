@@ -6,6 +6,7 @@ use replica::body::{BodyId, BodyKey, SchemaId, WorldId};
 use runtime::world::{
     BodyBytes, BodyReadFailure, BodyReader, Context, PrincipalFacts, Query, World,
 };
+use world_runner::Provenance;
 use world_runner::{Instance, Release};
 
 fn fixture_binary() -> PathBuf {
@@ -93,7 +94,7 @@ fn semantic_queries_execute_in_the_child_but_read_only_through_the_host() {
         release_root.path(),
         "com.lait.semantic-fixture",
         "1.0.0",
-        [0x74; 32],
+        Provenance::Sealed([0x74; 32]),
         Path::new(name),
         Vec::new(),
         None::<&Path>,

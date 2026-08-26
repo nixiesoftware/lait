@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use world_runner::Provenance;
 use world_runner::{Instance, Release};
 use world_sdk::{remote_exec_package, RemoteClient, RemoteWorld};
 
@@ -13,7 +14,7 @@ fn the_shipped_issues_process_exposes_every_host_adapter() {
         root,
         issues::PRODUCT_WORLD,
         env!("CARGO_PKG_VERSION"),
-        [0x91; 32],
+        Provenance::Sealed([0x91; 32]),
         Path::new(program),
         Vec::new(),
         None::<&Path>,

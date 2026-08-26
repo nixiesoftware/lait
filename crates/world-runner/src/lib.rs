@@ -42,12 +42,40 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_BUDGET: Duration = Duration::from_secs(5);
 const STOP_POLL: Duration = Duration::from_millis(50);
 
+/// Where a release's bytes came from, and what this host is able to say about
+/// them.
+///
+/// Not an `Option<[u8; 32]>`, because the absent case is not a missing digest —
+/// it is a different kind of thing to be running, and the World's own process
+/// is told which. Nothing here re-verifies anything: staging is what proves a
+/// sealed release, so this is a provenance label and always was. Which is
+/// exactly why a tree somebody is working on must not be handed a plausible
+/// one — a fabricated digest would make it indistinguishable from a release to
+/// the one party downstream of every check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// A sealed release, admitted when it was staged.
+    Sealed([u8; 32]),
+    /// A tree on this machine that nobody sealed and nothing verified.
+    Local,
+}
+
+impl Provenance {
+    /// What the World's process is told it is running, in `LAIT_WORLD_RELEASE`.
+    pub fn stated(&self) -> String {
+        match self {
+            Self::Sealed(digest) => data_encoding::HEXLOWER.encode(digest),
+            Self::Local => "local".to_owned(),
+        }
+    }
+}
+
 /// The exact immutable release an instance must execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub world: String,
     pub version: String,
-    pub digest: [u8; 32],
+    pub provenance: Provenance,
     pub root: PathBuf,
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -60,7 +88,7 @@ impl Release {
         root: impl Into<PathBuf>,
         world: impl Into<String>,
         version: impl Into<String>,
-        digest: [u8; 32],
+        provenance: Provenance,
         program: impl AsRef<Path>,
         args: Vec<String>,
         cwd: Option<impl AsRef<Path>>,
@@ -73,7 +101,7 @@ impl Release {
         Ok(Self {
             world: world.into(),
             version: version.into(),
-            digest,
+            provenance,
             program,
             args,
             cwd,
@@ -171,10 +199,7 @@ impl std::fmt::Debug for Instance {
             .debug_struct("Instance")
             .field("world", &self.release.world)
             .field("version", &self.release.version)
-            .field(
-                "digest",
-                &data_encoding::HEXLOWER.encode(&self.release.digest),
-            )
+            .field("provenance", &self.release.provenance.stated())
             .field("pid", &self.child.id())
             .finish_non_exhaustive()
     }
@@ -239,10 +264,7 @@ impl Instance {
             .current_dir(&working_directory)
             .env("LAIT_WORLD_ID", &release.world)
             .env("LAIT_WORLD_VERSION", &release.version)
-            .env(
-                "LAIT_WORLD_RELEASE",
-                data_encoding::HEXLOWER.encode(&release.digest),
-            )
+            .env("LAIT_WORLD_RELEASE", release.provenance.stated())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -761,7 +783,7 @@ mod tests {
                     root.path(),
                     "com.example.world",
                     "1.0.0",
-                    [0; 32],
+                    Provenance::Sealed([0; 32]),
                     path,
                     Vec::new(),
                     None::<&Path>,

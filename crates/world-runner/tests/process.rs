@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use world_runner::{Instance, Operation, Release, Reply, Stopped};
+use world_runner::{Instance, Operation, Provenance, Release, Reply, Stopped};
 
 fn fixture_binary() -> PathBuf {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
@@ -26,7 +26,7 @@ fn staged_release(version: &str, digest: [u8; 32]) -> (tempfile::TempDir, Releas
         root.path(),
         "com.lait.fixture",
         version,
-        digest,
+        Provenance::Sealed(digest),
         Path::new(name),
         Vec::new(),
         None::<&Path>,
@@ -73,12 +73,18 @@ fn a_world_is_pinned_until_an_explicit_relaunch() {
 
     // Merely making another release available changes nothing about the live
     // generation. Relaunch is the transition and yields a new owned process.
-    assert_eq!(instance.release().digest, [0x11; 32]);
+    assert_eq!(
+        instance.release().provenance,
+        Provenance::Sealed([0x11; 32])
+    );
     let (stopped, mut replacement) = instance.relaunch(second).expect("relaunch");
     assert_eq!(stopped, Stopped::Stopped);
     assert_ne!(replacement.pid(), first_pid);
     assert_eq!(replacement.release().version, "2.0.0");
-    assert_eq!(replacement.release().digest, [0x22; 32]);
+    assert_eq!(
+        replacement.release().provenance,
+        Provenance::Sealed([0x22; 32])
+    );
     replacement.ping().expect("replacement answers");
     assert_eq!(
         replacement.stop().expect("stop replacement"),
@@ -182,6 +188,9 @@ fn a_crashed_child_is_restored_from_the_same_immutable_generation() {
     }
     assert_ne!(instance.pid(), first_pid, "the dead process was retained");
     assert_eq!(instance.release().version, "1.0.0");
-    assert_eq!(instance.release().digest, [0x44; 32]);
+    assert_eq!(
+        instance.release().provenance,
+        Provenance::Sealed([0x44; 32])
+    );
     instance.ping().expect("replacement answers");
 }
