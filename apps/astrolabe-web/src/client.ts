@@ -22,6 +22,10 @@ export interface LibraryWorld {
   /** The channel this World follows by its own choice. `null` follows the
    *  device's, which is a different fact and must not draw as this one. */
   channel: string | null;
+  /** The directory a local World is read from; `null` is a released World.
+   *  A row carrying this is a tree being worked on — unsealed, under an id and
+   *  mount the host assigned it, and not the World it was copied from. */
+  sourceDir: string | null;
 }
 
 export interface WorldInstall {
@@ -906,6 +910,7 @@ export const fixtureClientView: ClientView = {
     update: null,
     install: null,
     channel: null,
+    sourceDir: null,
   }],
   heads: [],
   host: {

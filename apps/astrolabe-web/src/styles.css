@@ -232,3 +232,9 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
    defect the seam exists not to produce, and the head's warning goes to a log
    nobody opens. */
 .world-source-badge { align-self:flex-start; margin-top:6px; border:1px solid var(--warning-border,#6b5320); border-radius:4px; padding:2px 7px; background:var(--warning-bg,rgba(224,163,62,.16)); color:var(--warning-text,#e0a33e); font-size:10px; letter-spacing:.08em; }
+
+/* A World read from a directory on this device rather than from a signed
+   release. On the hero beside the name, because a row is the only claim this
+   client makes about what a person is running and an unsealed tree must not
+   wear a released World's face. */
+.world-local-badge { align-self:flex-start; margin-top:6px; border:1px solid var(--border); border-radius:4px; padding:2px 7px; background:var(--surface-200); color:var(--muted); font-size:10px; letter-spacing:.08em; }

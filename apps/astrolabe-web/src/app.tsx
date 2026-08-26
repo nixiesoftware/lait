@@ -439,7 +439,10 @@ function WorldHero({ world }: { world: LibraryWorld }) {
     style.background = `linear-gradient(135deg, color-mix(in srgb, ${accent} 72%, transparent), `
       + `color-mix(in srgb, ${wash} 88%, transparent)), url("${art.hero}") center / cover`;
   }
-  return <div className="world-hero" style={style}><h1>{world.displayName}</h1></div>;
+  return <div className="world-hero" style={style}>
+    <h1>{world.displayName}</h1>
+    {world.sourceDir !== null && <span className="world-local-badge" title={world.sourceDir}>LOCAL</span>}
+  </div>;
 }
 
 /**

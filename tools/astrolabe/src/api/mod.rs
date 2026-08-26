@@ -224,6 +224,12 @@ pub struct LibraryRow {
     /// node's — a different fact, and it must not draw as though the World
     /// had chosen what the node happens to be on.
     pub channel: Option<String>,
+    /// The directory this World is read from, when it is a local one.
+    ///
+    /// `None` is a released World. A row carrying this is a tree somebody on
+    /// this device is working on — unsealed, with an id and mount the host
+    /// assigned it, and not the World it may have been copied from.
+    pub source_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1740,6 +1746,7 @@ fn project(app: &App) -> ClientView {
                     channel: app
                         .world_standing(&entry.world)
                         .and_then(|standing| standing.channel.clone()),
+                    source_dir: entry.source_dir.clone(),
                 })
                 .collect()
         }),
@@ -2381,6 +2388,7 @@ mod tests {
                 tagline: Some("Track the work".into()),
                 accent: Some(0x00AA_66FF),
                 version: Some(7),
+                source_dir: None,
             },
             LibraryEntry {
                 world_mount: "notes".into(),
@@ -2391,6 +2399,7 @@ mod tests {
                 tagline: None,
                 accent: None,
                 version: None,
+                source_dir: None,
             },
         ]);
 

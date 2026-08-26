@@ -205,6 +205,8 @@ struct WebLibraryWorld {
     /// The channel this World follows by its own choice; `None` follows the
     /// node's.
     channel: Option<String>,
+    /// The directory a local World is read from; `None` is a released World.
+    source_dir: Option<String>,
     display_name: String,
     opens_at: Option<String>,
     version: Option<u32>,
@@ -572,6 +574,7 @@ impl From<ClientView> for WebClientView {
                             update,
                             install,
                             channel,
+                            source_dir,
                         } = row;
                         WebLibraryWorld {
                             key,
@@ -583,6 +586,7 @@ impl From<ClientView> for WebClientView {
                             tagline,
                             accent,
                             channel,
+                            source_dir,
                             people: people.map(|people| {
                                 people
                                     .into_iter()

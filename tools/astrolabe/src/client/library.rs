@@ -179,6 +179,15 @@ pub struct LibraryEntry {
     pub accent: Option<u32>,
     /// The reviewed implementation version declared by this World release.
     pub version: Option<u32>,
+    /// The directory this World is read from, when it is a local one.
+    ///
+    /// `None` is a released World, and that is the ordinary case. A row
+    /// carrying this is a tree somebody on this device is working on: it has
+    /// no release behind it, no version it did not build itself, and it is not
+    /// the World whose id it may have been copied from — the host gave it one
+    /// of its own. A surface that draws a World and not this would be offering
+    /// unsealed bytes under a released World's face.
+    pub source_dir: Option<String>,
 }
 
 /// A World's own artwork, read from its selected immutable release.
@@ -308,6 +317,54 @@ fn catalog_for(
         .collect()
 }
 
+/// The local Worlds registered on this device, as rows of their own.
+///
+/// Keyed by the id the host assigned, which is why they cannot displace a
+/// released row in the map below however closely the tree resembles it.
+///
+/// A registration whose tree has gone is still a row. It says it cannot be
+/// read rather than disappearing, because "the tree moved" and "nothing is
+/// registered" are different facts and only the first one has something to do
+/// about it — including the Forget that removes it.
+fn local_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
+    let identity = identity
+        .map(std::path::PathBuf::from)
+        .or_else(|| lait::config::Selection::default().identity_dir().ok());
+    let Some(identity) = identity else {
+        return Vec::new();
+    };
+    lait::world::local::list(&identity)
+        .into_iter()
+        .filter_map(|local| {
+            let handle = local.key.trim_start_matches(lait::world::local::PREFIX);
+            let mount = lait::world::local::mount_for(handle).ok()?;
+            let world = lait::world::local::world_id_for(handle).ok()?;
+            let mut entry = match &local.manifest {
+                Some(manifest) => library_entry(manifest.clone(), true),
+                None => LibraryEntry {
+                    world_mount: String::new(),
+                    world: String::new(),
+                    // Not openable: there is nothing to open. The row exists so
+                    // the registration can be seen and removed.
+                    installed: false,
+                    display_name: local.display_name(),
+                    entry_path: None,
+                    tagline: None,
+                    accent: None,
+                    version: None,
+                    source_dir: None,
+                },
+            };
+            // The host's assignment, never the tree's declaration — a local
+            // tree is usually a copy and declares the original's names.
+            entry.world_mount = mount;
+            entry.world = world.as_str().to_owned();
+            entry.source_dir = Some(local.dir.to_string_lossy().into_owned());
+            Some(entry)
+        })
+        .collect()
+}
+
 pub(crate) fn available_for(identity: Option<&Path>, catalog: Option<&Path>) -> Vec<LibraryEntry> {
     let mut entries: BTreeMap<String, LibraryEntry> = catalog_for(catalog)
         .into_iter()
@@ -315,6 +372,9 @@ pub(crate) fn available_for(identity: Option<&Path>, catalog: Option<&Path>) -> 
         .collect();
     for installed in installed_for(identity) {
         entries.insert(installed.world.clone(), installed);
+    }
+    for local in local_for(identity) {
+        entries.insert(local.world.clone(), local);
     }
     entries.into_values().collect()
 }
@@ -344,6 +404,9 @@ fn library_entry(
         tagline: manifest.tagline,
         accent: manifest.accent,
         version: manifest.implementation_version,
+        // A released World reads from its release. `local_for` overrides this
+        // for the rows that do not.
+        source_dir: None,
     }
 }
 
@@ -533,6 +596,7 @@ mod tests {
             tagline: None,
             accent: None,
             version: None,
+            source_dir: None,
         };
         assert!(
             entry.entry_path.is_none(),

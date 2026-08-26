@@ -17,6 +17,7 @@ function world(over: Partial<LibraryWorld> = {}): LibraryWorld {
     update: null,
     install: null,
     channel: null,
+    sourceDir: null,
     ...over,
   };
 }
