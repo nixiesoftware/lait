@@ -206,6 +206,20 @@ fn activate_with(declared: &str, worlds: &Path, world: &str) -> Source {
             return Source::refused(why);
         }
     }
+    // A local World has no installed release to activate — it *is* a tree, and
+    // where that tree is lives in the local registry beside this one. Without
+    // this a local World routes perfectly and serves nothing: its tools answer,
+    // its mount resolves, and its page is "the selected World release carries
+    // no web entry document". Registering a World and serving one are two
+    // questions, and only the first was being asked here.
+    if let Some(dir) = crate::world::local::dir_for_id(worlds, world) {
+        tracing::warn!(
+            %world,
+            dir = %dir.display(),
+            "serving a registered local World — this head is NOT serving a sealed release"
+        );
+        return Source::activated(dir);
+    }
     if let Some(candidate) = crate::update::world::active_dir(worlds, world) {
         tracing::info!(bundle = %candidate.display(), %world, "serving a staged World payload");
         return Source::activated(candidate);

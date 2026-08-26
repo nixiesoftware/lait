@@ -400,6 +400,25 @@ pub fn list(identity: &Path) -> Vec<Local> {
     found
 }
 
+/// The tree a World id names, when that id is a local one.
+///
+/// Takes the *installations* root, because that is what a head holds and the
+/// two registries are siblings under one identity. `None` for any id that is
+/// not local, which is every released World — this is asked first and must not
+/// answer for them.
+pub fn dir_for_id(worlds: &Path, world: &str) -> Option<PathBuf> {
+    let handle = world.strip_prefix("local.")?;
+    let identity = worlds.parent()?;
+    let key = key_for(handle).ok()?;
+    get(identity, &key).and_then(|local| {
+        // Re-proved rather than trusted from the record: a tree recorded weeks
+        // ago may have been renamed since, and a head that served a path which
+        // is no longer there would answer with the release — which is not this
+        // World.
+        local.dir.is_dir().then_some(local.dir)
+    })
+}
+
 /// One local World, by key.
 pub fn get(identity: &Path, key: &str) -> Option<Local> {
     list(identity).into_iter().find(|local| local.key == key)
@@ -510,6 +529,54 @@ mod tests {
         )
         .expect("written");
         assert_eq!(list(identity.path())[0].standing, Standing::Unrecorded);
+    }
+
+    /// The gap that made a local World route perfectly and serve nothing: its
+    /// tools answered, its mount resolved, and its page was "the selected World
+    /// release carries no web entry document". Registering a World and serving
+    /// one are two questions.
+    #[test]
+    fn a_local_world_id_resolves_to_the_tree_it_was_registered_from() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let worlds = identity.path().join("world-bundles-v1");
+        std::fs::create_dir_all(&worlds).expect("the installations root");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+        register(identity.path(), "issues", dir.path()).expect("registers");
+
+        assert_eq!(
+            dir_for_id(&worlds, "local.issues").as_deref(),
+            Some(dir.path()),
+            "the id the host assigned resolves to the tree it named"
+        );
+    }
+
+    /// Asked before the installed release, so it must not answer for one.
+    #[test]
+    fn a_released_world_id_is_not_a_local_tree() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let worlds = identity.path().join("world-bundles-v1");
+        std::fs::create_dir_all(&worlds).expect("the installations root");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+        register(identity.path(), "issues", dir.path()).expect("registers");
+
+        assert!(dir_for_id(&worlds, "com.lait.issues").is_none());
+        assert!(dir_for_id(&worlds, "local.nobody").is_none());
+    }
+
+    /// Re-proved rather than trusted: a head that served a path no longer there
+    /// would fall through to the release, which is not this World.
+    #[test]
+    fn a_local_world_whose_tree_is_gone_resolves_to_nothing() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let worlds = identity.path().join("world-bundles-v1");
+        std::fs::create_dir_all(&worlds).expect("the installations root");
+        let dir = tempfile::tempdir().expect("a tree");
+        tree(dir.path(), Some(&declaration("com.lait.issues")));
+        register(identity.path(), "issues", dir.path()).expect("registers");
+        drop(dir);
+        assert!(dir_for_id(&worlds, "local.issues").is_none());
     }
 
     /// The pick is the act: a name is derived from what the tree already
