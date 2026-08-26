@@ -115,7 +115,27 @@ fn read_under(root: &Path, relative: &str) -> Option<Vec<u8>> {
     {
         return None;
     }
-    std::fs::read(root.join(candidate)).ok()
+    let joined = root.join(candidate);
+    // The lexical check above is not containment on its own, and it only ever
+    // looked like it because of something true one layer away: a sealed
+    // release is extracted by `update::tree`, which skips every entry that is
+    // not a regular file, so a release tree contains no symlinks and a path
+    // with no `..` in it could not leave. A linked directory is somebody's
+    // working tree and carries whatever a checkout carries — `node_modules`,
+    // a `dist` whose assets are symlinked, a stray link to `$HOME`. Then
+    // `/some-link/.ssh/id_ed25519` has no `..` in it, resolves straight
+    // through, and is served same-origin with `/api` to the World's own
+    // script.
+    //
+    // So the proof is made real rather than inherited: resolve both sides and
+    // require the result to still be under the root. A miss is safe here — the
+    // caller falls back to the release's SPA entry — so a path that cannot be
+    // resolved is simply not read.
+    let within = joined.canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
+    within
+        .starts_with(&root)
+        .then(|| std::fs::read(&within).ok())?
 }
 
 /// Where independently installed World bundles live.
@@ -265,6 +285,33 @@ mod tests {
             std::fs::write(&at, bytes).expect("a bundle file");
         }
         dir
+    }
+
+    /// The hole that opened the moment a link could point at a working tree.
+    ///
+    /// A sealed release has no symlinks — `update::tree` skips every entry
+    /// that is not a regular file — so the lexical `..` check was containment
+    /// by inheritance. A checkout carries links, and then a path with no `..`
+    /// in it walks straight out and is served same-origin with `/api`.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_a_linked_directory_is_not_a_way_out_of_it() {
+        let outside = tempfile::tempdir().expect("somewhere else on the disk");
+        std::fs::write(outside.path().join("id_ed25519"), b"a private key")
+            .expect("a secret beside the tree");
+        let tree = bundle_with(&[("index.html", b"the World's page")]);
+        std::os::unix::fs::symlink(outside.path(), tree.path().join("escape"))
+            .expect("the kind of link a checkout carries");
+
+        let source = Source::activated(tree.path().to_path_buf());
+        assert!(
+            source.read("/escape/id_ed25519").is_none(),
+            "a symlink is not a hole: no `..` appears in this path and it still leaves the root"
+        );
+        assert!(
+            source.read("/index.html").is_some(),
+            "and the directory still serves its own pages"
+        );
     }
 
     /// The loop this exists for: a directory being worked on, named for one

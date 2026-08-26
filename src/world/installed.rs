@@ -49,10 +49,24 @@ pub fn declarations(worlds: &Path) -> Result<Vec<Declaration>> {
             continue;
         }
         let world = entry.file_name().to_string_lossy().to_string();
-        let release = crate::update::world::selected(worlds, &world)
-            .ok_or_else(|| anyhow!("World {world} has no valid selected immutable release"))?;
-        let root = crate::update::world::active_dir(worlds, &world)
-            .ok_or_else(|| anyhow!("World {world} selected release is absent"))?;
+        // A directory with nothing selected is not an installed World and is
+        // not an error either. This used to fail the whole enumeration, and
+        // the enumeration is what `installed::load` calls before a head or a
+        // daemon will start — so one directory under this root with no
+        // `selected.json` refused to bring the process up at all, naming a
+        // World id nobody typed.
+        //
+        // Directories arrive here for reasons that have nothing to do with a
+        // release: a World's own state now lives beside its releases, and
+        // recording a link or a channel creates the parent. A single entry
+        // that is not an installation must not be able to stop World loading,
+        // however it got here.
+        let Some(release) = crate::update::world::selected(worlds, &world) else {
+            continue;
+        };
+        let Some(root) = crate::update::world::active_dir(worlds, &world) else {
+            continue;
+        };
         let manifest = WorldManifest::parse(
             &std::fs::read(root.join("world.json"))
                 .with_context(|| format!("read {world} world.json"))?,
@@ -243,4 +257,26 @@ fn client_package(
         )?;
     }
     Ok(package)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recording a link or a channel for a World creates its state directory,
+    /// and a head or a daemon calls `load` before it will start. One directory
+    /// with nothing selected in it used to refuse to bring the process up at
+    /// all, naming a World id nobody typed and recoverable only by deleting a
+    /// directory by hand.
+    #[test]
+    fn a_directory_with_no_selected_release_is_skipped_rather_than_fatal() {
+        let worlds = tempfile::tempdir().expect("an installations root");
+        std::fs::create_dir_all(worlds.path().join("com.lait.issues"))
+            .expect("the state directory a link creates");
+        let found = declarations(worlds.path()).expect("enumeration survives it");
+        assert!(
+            found.is_empty(),
+            "a directory that is not an installation is not an installed World"
+        );
+    }
 }

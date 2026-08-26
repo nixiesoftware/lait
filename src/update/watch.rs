@@ -336,11 +336,22 @@ where
 /// stop the other from being asked. Each outcome is logged and nothing is
 /// prompted — a staged head becomes live at the next head that starts, which
 /// is the same "applied at a boundary" rule the client tree follows.
-fn check_worlds(identity: &Path, channel: feed::Channel) {
+/// Takes no channel, deliberately.
+///
+/// It used to take the node's and hand the same one to every World, which
+/// made this the place a World's own channel quietly stopped being true: the
+/// record kept saying test, the row kept drawing test, and every period this
+/// re-selected the release the *node's* channel named. A choice that is
+/// recorded and displayed but never asked is worse than no choice at all.
+///
+/// The parameter is gone rather than defaulted so that threading a
+/// single channel back through here has to fail to compile.
+fn check_worlds(identity: &Path) {
     let worlds = crate::serve::head::installations_root(identity);
     let installed = crate::world::installed::declarations(&worlds).unwrap_or_default();
     for declaration in installed {
         let world = declaration.manifest.id;
+        let channel = super::world::channel_for(&worlds, &world);
         match super::world::check(&world, &worlds, channel) {
             Ok(outcome) => {
                 // Recorded, not only logged. A World is published in seconds
@@ -374,7 +385,7 @@ fn check(identity: &Path, root: &Path) -> Standing {
     );
     record(identity, &standing);
     apply_if_this_platform_has_no_stub(root);
-    check_worlds(identity, channel);
+    check_worlds(identity);
     standing
 }
 
