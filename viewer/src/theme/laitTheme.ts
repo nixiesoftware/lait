@@ -150,7 +150,11 @@ export const laitTheme = defineTheme({
         "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
         "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.06)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.19)) 0%, transparent 46%)",
-        "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.18)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.18)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))",
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.045)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.26)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 3px light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.26)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        }
       },
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
@@ -195,7 +199,11 @@ export const laitTheme = defineTheme({
         "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
         "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.06)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.19)) 0%, transparent 46%)",
-        "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.18)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.18)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))",
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.045)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.26)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 3px light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.26)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        }
       },
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",

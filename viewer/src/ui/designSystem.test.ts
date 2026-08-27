@@ -700,6 +700,196 @@ function rungsUsed(axis: "icon" | "mark" | "ctl" | "bar"): string[] {
  * `Button`). `interactiveRow` is the only recipe in the codebase that brings
  * none, which is exactly what makes it the only one worth policing.
  */
+/**
+ * The seam with Astryx, held open on purpose.
+ *
+ * Astryx is the system and it is serving us well. What needs guarding is not
+ * Astryx — it is the four places where we have taken something over from it,
+ * because every one of those is a place where the library still *offers* the
+ * thing we replaced and nothing says so at the call site.
+ *
+ * Our theme is `@scope`d to `[data-astryx-theme="lait"]` and layered after
+ * `astryx-base`, so where it speaks it wins outright. That is the whole
+ * mechanism, and it is also the whole hazard: winning is silent. A property we
+ * set here does not merely add to Astryx's — it takes the property, along with
+ * every state Astryx was using it to express.
+ *
+ * Four guards, one per takeover. None of them polices taste; each one catches a
+ * change that would otherwise look completely fine and be wrong.
+ */
+describe("what we take over from Astryx, we own outright", () => {
+  const themeSource = () => readFileSync(join(SRC_DIR, "theme/laitTheme.ts"), "utf8");
+  const buttonBlocks = (src: string) =>
+    src.slice(src.indexOf('"button": {'), src.indexOf('"popover": {'));
+
+  /** Files that exhibit the surface rather than use it. */
+  const SHOWCASE = new Set(["proof.tsx"]);
+
+  /**
+   * Only files that actually import Astryx's Button are Astryx's to police.
+   * `SelectionToolbar` declares a local `Button` of its own — a formatting
+   * control that must never take focus, so it cannot be one of these — and
+   * matching on the tag name alone would file every one of its fourteen
+   * buttons as a violation. Keying on the import means the guard switches
+   * itself back on the day that file starts using the real one.
+   */
+  const usesAstryxButton = (src: string) =>
+    /import \{[^}]*\b(?:Button|IconButton)\b[^}]*\} from "@astryxdesign\/core"/.test(src);
+
+  /**
+   * Comments are prose, and this file's prose is full of example markup —
+   * `primitives.tsx` explains the variant system by writing `<Button
+   * variant="ghost">` in a doc block. Blanked rather than deleted so line
+   * numbers in a failure still point at the real line.
+   */
+  const withoutComments = (src: string) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+
+  /**
+   * Astryx's own `:active` press feedback is a `backgroundImage` overlay. So a
+   * variant we give a resting `backgroundImage` to has quietly taken the press
+   * state with it, and pressing that control stops looking like anything at
+   * all. Nothing breaks, nothing warns; the button just goes dead under the
+   * finger. This is the exact trap the convex/concave surfaces walked into.
+   */
+  it("a variant with a resting backgroundImage states its own :active", () => {
+    const block = buttonBlocks(themeSource());
+    const variants = [...block.matchAll(/"(variant:[\w-]+)": \{([\s\S]*?)\n {6}\}/g)];
+    expect(variants.length, "no variant blocks parsed out of laitTheme.ts").toBeGreaterThan(0);
+
+    const mute = variants
+      .filter((m) => /"backgroundImage":/.test(m[2] ?? "") && !/":active":/.test(m[2] ?? ""))
+      .map((m) => m[1]!);
+
+    expect(
+      mute,
+      "These variants set a resting `backgroundImage`, which is where Astryx " +
+        "keeps its press overlay — so they have taken the pressed state over " +
+        "without replacing it, and pressing them does nothing visible. Give " +
+        "each one a `:active` block in laitTheme.ts.",
+    ).toEqual([]);
+  });
+
+  /**
+   * `laitTheme.ts` is a *source*. The browser reads `lait.css`, which is
+   * produced from it by `astryx theme build`, and the two drift the moment
+   * somebody edits the theme and skips the build. There is already a guard for
+   * this shape on the menu row; the button surface is now the larger override
+   * and carries the same risk, so it gets the same guard — every declaration
+   * the theme states, present verbatim in the stylesheet.
+   */
+  it("every button declaration in the theme survives into the stylesheet", () => {
+    const declared = [
+      ...buttonBlocks(themeSource()).matchAll(
+        /"(?:backgroundImage|boxShadow|backgroundColor|color|borderRadius)":\s*"([^"]+)"/g,
+      ),
+    ].map((m) => m[1]!);
+    expect(declared.length, "no button declarations parsed out of laitTheme.ts").toBeGreaterThan(10);
+
+    const css = readFileSync(join(SRC_DIR, "theme/lait.css"), "utf8");
+    expect(
+      declared.filter((value) => !css.includes(value)),
+      "The theme source and the built stylesheet have diverged: these values " +
+        "are in laitTheme.ts and not in lait.css. Run `npm run tokens:astryx`.",
+    ).toEqual([]);
+  });
+
+  /**
+   * Astryx ships `destructive`; we added `danger`, and they do not look alike —
+   * theirs is a filled call to action, ours is a quiet control that reddens
+   * under the pointer, for revoking and retrying inside a surface that is
+   * already alarmed. Both type-check, because our variants reach the type
+   * system through the generated `lait.variants.d.ts`. So reaching for the
+   * name Astryx documents silently gets a button we never designed.
+   *
+   * The rule is the general one rather than a ban on that single word: the
+   * vocabulary is what our theme defines, plus `ghost`, which we deliberately
+   * leave to Astryx because it has no surface for us to take over.
+   */
+  it("call sites use the variants our theme defines, and ghost", () => {
+    const themed = new Set(
+      [...buttonBlocks(themeSource()).matchAll(/"variant:([\w-]+)":/g)].map((m) => m[1]!),
+    );
+    expect(themed.size, "no variants parsed out of laitTheme.ts").toBeGreaterThan(2);
+    const ours = new Set([...themed, "ghost"]);
+
+    const offenders: string[] = [];
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      if (name.endsWith(".test.tsx") || SHOWCASE.has(name)) continue;
+      const raw = readFileSync(file, "utf8");
+      if (!usesAstryxButton(raw)) continue;
+      withoutComments(raw)
+        .split("\n")
+        .forEach((line, i) => {
+          const m = /<(?:Button|IconButton)\b[^>]*?\bvariant="([\w-]+)"/.exec(line);
+          if (m && !ours.has(m[1]!)) offenders.push(`${name}:${i + 1}  variant="${m[1]}"`);
+        });
+    }
+
+    expect(
+      offenders,
+      "These call sites use a Button variant our theme does not define, so they " +
+        "render Astryx's treatment rather than ours. `destructive` is the one " +
+        "that catches people: we spell it `danger`, and ours is quiet until " +
+        "hovered.",
+    ).toEqual([]);
+  });
+
+  /**
+   * Two props Astryx still offers that no longer mean anything here.
+   *
+   * `elevation` was a lift spelled at the call site — twenty-nine buttons
+   * carried it and one forgot. The variant carries its own surface now, so the
+   * prop is inert on every filled variant and misleading on the rest.
+   *
+   * `size` is worse, because its default is wrong for us: Astryx defaults to
+   * `md` (32px) and the house height is `sm` (28px), so a button that simply
+   * omits the prop comes out a head taller than everything beside it. That is
+   * how fifteen of them ended up oversized in Specs and Settings.
+   */
+  it("no call site spells elevation, or leans on Astryx's size default", () => {
+    const elevation: string[] = [];
+    const unsized: string[] = [];
+
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      if (name.endsWith(".test.tsx") || SHOWCASE.has(name)) continue;
+      const raw = readFileSync(file, "utf8");
+      if (!usesAstryxButton(raw)) continue;
+      const src = withoutComments(raw);
+
+      for (const m of src.matchAll(/<(Button|IconButton)\b/g)) {
+        let i = m.index! + m[0].length;
+        let depth = 0;
+        while (i < src.length) {
+          const c = src[i];
+          if (c === "{") depth += 1;
+          else if (c === "}") depth -= 1;
+          else if (c === ">" && depth === 0) break;
+          i += 1;
+        }
+        const attrs = src.slice(m.index! + m[0].length, i);
+        const at = `${name}:${src.slice(0, m.index).split("\n").length}`;
+        if (/\belevation=/.test(attrs)) elevation.push(at);
+        if (!/\bsize=/.test(attrs)) unsized.push(at);
+      }
+    }
+
+    expect(
+      elevation,
+      "`elevation` is the variant's job now — a filled variant paints its own " +
+        "lift in laitTheme.ts, and this prop is silently inert there.",
+    ).toEqual([]);
+    expect(
+      unsized,
+      "These buttons state no size, so they take Astryx's default of `md` " +
+        "(32px). The house height is `sm` (28px); `md` is a modal's committing " +
+        "action and nothing else.",
+    ).toEqual([]);
+  });
+});
+
 describe("interactiveRow callers declare their own layout", () => {
   it("no alignment utility beside interactiveRow() without a flex box", () => {
     const offenders: string[] = [];
