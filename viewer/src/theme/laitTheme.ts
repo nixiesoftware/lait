@@ -149,9 +149,14 @@ export const laitTheme = defineTheme({
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
         "color": "var(--color-background-body)",
-        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.5)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.13)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.22))",
+        "backgroundImage": "linear-gradient(to bottom, light-dark(rgb(255 255 255 / 0.10), rgb(255 255 255 / 0)), light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.07)))",
+        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.6)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.12)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), transparent)",
         ":hover": {
           "backgroundColor": "color-mix(in oklch, var(--color-background-inverted) 85%, var(--color-background-body))"
+        },
+        ":active": {
+          "backgroundImage": "linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.10)), light-dark(rgb(0 0 0 / 0.02), rgb(0 0 0 / 0)))",
+          "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.28), rgb(0 0 0 / 0.20))"
         }
       },
       "variant:danger": {
@@ -183,9 +188,14 @@ export const laitTheme = defineTheme({
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
         "color": "var(--color-background-body)",
-        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.5)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.13)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.22))",
+        "backgroundImage": "linear-gradient(to bottom, light-dark(rgb(255 255 255 / 0.10), rgb(255 255 255 / 0)), light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.07)))",
+        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.6)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.12)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), transparent)",
         ":hover": {
           "backgroundColor": "color-mix(in oklch, var(--color-background-inverted) 85%, var(--color-background-body))"
+        },
+        ":active": {
+          "backgroundImage": "linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.10)), light-dark(rgb(0 0 0 / 0.02), rgb(0 0 0 / 0)))",
+          "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.28), rgb(0 0 0 / 0.20))"
         }
       },
       "variant:danger": {
