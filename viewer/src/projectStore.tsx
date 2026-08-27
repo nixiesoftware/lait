@@ -38,6 +38,7 @@ import type {
   Row,
   SpaceDoorbell,
   BaselineRef,
+  Packet,
   BaselineSummary,
   BaselineRevisionDto,
   BaselineView,
@@ -272,6 +273,7 @@ export const projectKeys = {
   teams: (space: string) => `${prefix(space)}teams`,
   status: (space: string) => `${prefix(space)}status`,
   standing: (space: string) => `${prefix(space)}standing`,
+  packet: (space: string, reff: string) => `${prefix(space)}packet:${part(reff)}`,
   operation: (space: string, operation: string) => `${prefix(space)}operation:${operation}`,
   latestOperation: (space: string) => `${prefix(space)}operation:latest`,
 };
@@ -1457,6 +1459,31 @@ export class ProjectViewerStore {
     return result;
   }
 
+  /**
+   * What is in force for one Issue, live.
+   *
+   * Two things move it: the Issue's own binding, which is a relation on the
+   * Issue and so a ring that names its doc; and any Spec or Baseline anywhere
+   * -- a Spec in another project may govern this Issue, so the plane is taken
+   * whole rather than scoped to the Issue's project. Before this was a
+   * resource the panel read the packet once, on mount, and never again: a Spec
+   * issued in the next window left the brief showing what governed a minute
+   * ago, with nothing on screen to say so.
+   */
+  ensurePacket(space: string, reff: string, force = false): Promise<Packet> {
+    const key = projectKeys.packet(space, reff);
+    return this.load(key, async () => {
+      const result = await this.rpc(space, { cmd: "packet", reff });
+      if (result.kind !== "packet") throw new Error("Expected packet response");
+      return result;
+      // Same resolution as `ensureIssue`: the ring names docs, this resource
+      // is keyed by `reff`, and the row we hold joins them.
+    }, () => {
+      const doc = this.resources.read<Row>(projectKeys.row(space, reff)).data?.doc_id;
+      return { catalog: ["specs"], issues: doc ? { docs: [doc] } : "any" };
+    }, force);
+  }
+
   /** Pin an exact issued Baseline revision to an Issue, or clear the pin. */
   async bindBaseline(
     space: string,
@@ -1464,6 +1491,8 @@ export class ProjectViewerStore {
     baseline: BaselineRef | null,
   ): Promise<void> {
     await this.rpc(space, { cmd: "issue_baseline", reff, baseline });
+    // The doorbell will say so too; this is the panel not waiting for it.
+    await this.refreshActive([projectKeys.packet(space, reff)]);
   }
 
   private refreshBaselineRegisters(space: string): Promise<void> {
@@ -3041,6 +3070,15 @@ export function useSpecHistory(
     key,
     store,
     () => spec ? store.loadMoreSpecHistory(space, spec) : Promise.resolve(),
+  );
+}
+
+/** What is in force for one Issue, live. */
+export function usePacket(space: string, reff: string): ResourceSnapshot<Packet> {
+  const store = useProjectViewerStore();
+  return useWorldResource<Packet>(
+    projectKeys.packet(space, reff),
+    useCallback(() => store.ensurePacket(space, reff), [reff, space, store]),
   );
 }
 

@@ -37,7 +37,7 @@ import {
 
 import { rpc } from "../api";
 import { downloadUrl, upload as uploadContent } from "../content";
-import { useIssueDetail, useProjectBaselines, useProjectViewerStore } from "../projectStore";
+import { useIssueDetail, usePacket, useProjectBaselines, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import {
   describeEventRich,
@@ -79,7 +79,6 @@ import {
   type IssueView,
   type LabelDto,
   type MemberDto,
-  type Packet,
   type PacketSpec,
   type ProjectDto,
   type WorkflowState,
@@ -1205,36 +1204,31 @@ function SpecPacket({
   onOpenSpec?: ((spec: string) => void) | undefined;
 }) {
   const store = useProjectViewerStore();
-  const [packet, setPacket] = useState<Packet | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
+  // A live resource, so a Spec issued elsewhere -- or this Issue's binding
+  // changing under another window -- redraws the brief through the doorbell.
+  const resource = usePacket(spaceId, reff);
+  const packet = resource.data ?? null;
+  const [bindError, setBindError] = useState<string | null>(null);
   const [binding, setBinding] = useState(false);
   const baselines = baselineCards(useProjectBaselines(spaceId, projectId).data ?? []);
-
-  useEffect(() => {
-    let alive = true;
-    setPacket(null);
-    setError(null);
-    void rpc(spaceId, { cmd: "packet", reff })
-      .then((response) => {
-        if (alive && response.kind === "packet") setPacket(response);
-      })
-      .catch((reason) => {
-        if (alive) setError(reason instanceof Error ? reason.message : String(reason));
-      });
-    return () => { alive = false; };
-  }, [spaceId, reff, reload]);
+  const error =
+    bindError ??
+    (resource.error
+      ? resource.error instanceof Error
+        ? resource.error.message
+        : String(resource.error)
+      : null);
 
   // Only issued sets can be pinned: binding to a draft would pin something
   // nobody has agreed to, and the pin is the agreement.
   const issuedBaselines = baselines.filter((candidate) => candidate.issued.length === 1);
   const bind = (baseline: { baseline: string; revision: string } | null) => {
     setBinding(false);
+    setBindError(null);
     void store
       .bindBaseline(spaceId, reff, baseline)
-      .then(() => setReload((n) => n + 1))
       .catch((reason: unknown) =>
-        setError(reason instanceof Error ? reason.message : String(reason)),
+        setBindError(reason instanceof Error ? reason.message : String(reason)),
       );
   };
 

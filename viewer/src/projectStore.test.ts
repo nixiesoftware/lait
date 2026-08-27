@@ -5,6 +5,8 @@ import { projectKeys, ProjectViewerStore } from "./projectStore";
 import type {
   BoardView,
   Page,
+  DirtyPlane,
+  DirtyScope,
   Response,
   SpecSummary,
   Row,
@@ -655,6 +657,44 @@ describe("ProjectViewerStore", () => {
     await ring(null);
     expect(lists() - before).toBe(2);
     for (const unsubscribe of stop) unsubscribe();
+  });
+
+  it("re-reads an Issue's packet for a Spec anywhere and for the Issue's own doc", async () => {
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "packet") {
+        return {
+          kind: "packet", issue: row.doc_id, governing: [], guidance: [], proof: [], record: [], conflicts: [],
+        } as Response;
+      }
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    store.resources.set(projectKeys.row("local", row.reff), row);
+    await store.ensurePacket("local", row.reff);
+    const key = projectKeys.packet("local", row.reff);
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+    const packets = () => rpc.mock.calls.filter((call) => call[1].cmd === "packet").length;
+    const ring = (frame: { dirty: DirtyScope[]; planes: DirtyPlane[] }) => store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      invalidations: [{ world: "com.lait.issues", ...frame }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+
+    // A Spec in another project may govern this Issue: the plane is whole.
+    let before = packets();
+    await ring({ dirty: [], planes: [{ plane: "specs", scope: { kind: "project", id: "prj_2", label: null } }] });
+    expect(packets() - before).toBe(1);
+
+    // Another Issue moving is not this one.
+    before = packets();
+    await ring({ dirty: [{ kind: "project", id: row.project_id, label: "ONE", docs: ["doc_9"] }], planes: [] });
+    expect(packets() - before).toBe(0);
+
+    // This Issue -- its binding is a relation on it.
+    before = packets();
+    await ring({ dirty: [{ kind: "project", id: row.project_id, label: "ONE", docs: [row.doc_id] }], planes: [] });
+    expect(packets() - before).toBe(1);
+    unsubscribe();
   });
 
   it("ignores an identical invalidation owned by another World", async () => {
