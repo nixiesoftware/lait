@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AtSign, Check, CheckCheck, Circle, Inbox as InboxIcon, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
+import { AtSign, Check, CheckCheck, Circle, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
 
 import { rpc } from "../api";
 import {
@@ -142,6 +142,7 @@ export function Inbox({
       return (
         <ApplicationState
           kind="retry"
+          art="unavailable"
           title="Inbox unavailable"
           body={error}
           action={<Button
@@ -292,12 +293,12 @@ export function Inbox({
 
       {entries.length === 0 && !nextCursor ? (
         <EmptyState
-          icon={<InboxIcon className="size-icon-lg" />}
+          art="inbox"
           title="You’re all caught up"
-          body="Nothing in this local space is currently addressed to you."
+          body="New mentions, assignments, and replies will collect here."
         />
       ) : visible.length === 0 && !nextCursor ? (
-        <EmptyState icon={<InboxIcon className="size-icon-lg" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
+        <EmptyState kind="filtered-empty" art="filtered" title="No notifications match" />
       ) : (
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => (

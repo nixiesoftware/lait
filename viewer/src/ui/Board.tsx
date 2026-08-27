@@ -109,6 +109,7 @@ export function Board({
     return (
       <EmptyState
         kind="filtered-empty"
+        art="filtered"
         title="No matching issues"
         body={hasMore
           ? "More publication-pinned matches are available."

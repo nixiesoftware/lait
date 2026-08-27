@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import {
-  Box,
   PanelLeft,
   PanelRight,
   Plus,
@@ -2151,8 +2150,9 @@ export function App() {
       ) : (
         <EmptyState
           kind="unavailable"
+          art="unavailable"
           title="Issue not found in this local project"
-          body={`${selection} is not present in the current local projection. It may belong to another project, still be arriving, or not exist on this replica.`}
+          body={`${selection} isn’t available in this local replica.`}
           action={<Button
                     onClick={api.closeIssue}
                     label="Clear selection"
@@ -2569,12 +2569,12 @@ export function App() {
             />
           ) : !current ? (
             <EmptyState
-              icon={<PanelLeft className="size-icon-lg" />}
+              art="space"
               title={routeSpace ? "This space is not on this device" : "Choose a local space"}
               body={
                 routeSpace
-                  ? `The link names ${routeSpace}, but no matching local replica is available. Enter the space from an invite on this device, then refresh.`
-                  : "Select a space from the sidebar to open its local replica."
+                  ? `${routeSpace} isn’t on this device. Enter it with an invite.`
+                  : "Select a local replica from the sidebar."
               }
               // A route naming a space this device does not hold is answered by
               // entering it, not by founding a second one under the same name.
@@ -2590,8 +2590,9 @@ export function App() {
           ) : missingProject ? (
             <EmptyState
               kind="unavailable"
+              art="unavailable"
               title="Project not found in this local space"
-              body={`${project} is not available in the current replica. Choose another project from the sidebar or wait for catalog data to arrive.`}
+              body={`${project} isn’t available in this local replica.`}
               action={
                 projects[0] ? (
                   <Button
@@ -2799,9 +2800,9 @@ export function App() {
             // and the action is the next step. Nothing here is a warning,
             // because nothing has gone wrong.
             <EmptyState
-              icon={<Box className="size-icon-lg" />}
+              art="projects"
               title="Projects"
-              body="A project is one body of work with an outcome — a release, a migration, a feature. Issues live in projects, so this workspace needs one before it has anything to show."
+              body="Group related issues around one clear outcome, then move the work from idea to done."
               action={
                 <Button
                   onClick={() => api.createProject()}
@@ -2814,6 +2815,7 @@ export function App() {
           ) : (
             <EmptyState
               kind="unavailable"
+              art="unavailable"
               title="This view is unavailable"
               body="The local projection could not be loaded."
               action={<Button

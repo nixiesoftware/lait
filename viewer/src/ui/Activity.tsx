@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity as ActivityIcon, AlertTriangle } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 
 import { rpc } from "../api";
 import { describeEventRich, type EventPhraseContext, type NameResolver } from "../core/activity";
@@ -174,6 +174,7 @@ export function Activity({
       return (
         <ApplicationState
           kind="retry"
+          art="unavailable"
           title="Activity is unavailable"
           body={failure}
           action={
@@ -193,9 +194,9 @@ export function Activity({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <EmptyState
-          icon={<ActivityIcon className="size-icon-lg" />}
+          art="activity"
           title={projectName ? `No activity in ${projectName}` : "No activity yet"}
-          body={projectName ? "No matching changes are present on this page." : "Changes made in this session will appear here."}
+          body={projectName ? "Changes to this project will build a local timeline here." : "Changes made in this session will build a timeline here."}
         />
         {nextCursor && publication && (
           <Button

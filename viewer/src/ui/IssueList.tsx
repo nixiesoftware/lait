@@ -240,8 +240,9 @@ export function IssueList({
         {total === 0 && (
           <ApplicationState
             kind={deletedMode ? "empty" : filtered ? "filtered-empty" : "empty"}
+            art={deletedMode ? "archive" : filtered ? "filtered" : "issues"}
             title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "No issues yet"}
-            body={deletedMode ? "Deleted issues will appear here so they can be inspected or restored." : filtered ? "Clear or adjust the current filters to see more." : "Create the first issue in this project."}
+            body={deletedMode ? "Deleted issues will collect here for inspection or restoration." : filtered ? undefined : "Create the first issue and give this project something to move forward."}
             action={!deletedMode && !filtered && !readOnly && states[0] ? <Button
                                                                             onClick={() => onCreate(states[0]!.id)}
                                                                             icon={<Plus className="size-icon-sm" />}

@@ -19,6 +19,17 @@ import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
 import { Button, Popover, Skeleton } from "@astryxdesign/core";
 import { cn } from "./primitives";
 
+import activityArt from "../assets/empty-states/activity.png";
+import archiveArt from "../assets/empty-states/archive.png";
+import filteredArt from "../assets/empty-states/filtered.png";
+import inboxArt from "../assets/empty-states/inbox.png";
+import issuesArt from "../assets/empty-states/issues.png";
+import peopleArt from "../assets/empty-states/people.png";
+import projectsArt from "../assets/empty-states/projects.png";
+import spaceArt from "../assets/empty-states/space.png";
+import specsArt from "../assets/empty-states/specs.png";
+import unavailableArt from "../assets/empty-states/unavailable.png";
+
 export type ApplicationStateKind =
   | "loading"
   | "empty"
@@ -29,9 +40,35 @@ export type ApplicationStateKind =
   | "progress"
   | "success";
 
+export type EmptyStateArt =
+  | "activity"
+  | "archive"
+  | "filtered"
+  | "inbox"
+  | "issues"
+  | "people"
+  | "projects"
+  | "space"
+  | "specs"
+  | "unavailable";
+
+const EMPTY_STATE_ART: Record<EmptyStateArt, string> = {
+  activity: activityArt,
+  archive: archiveArt,
+  filtered: filteredArt,
+  inbox: inboxArt,
+  issues: issuesArt,
+  people: peopleArt,
+  projects: projectsArt,
+  space: spaceArt,
+  specs: specsArt,
+  unavailable: unavailableArt,
+};
+
 export function ApplicationState({
   kind,
   icon,
+  art,
   title,
   body,
   action,
@@ -39,6 +76,7 @@ export function ApplicationState({
 }: {
   kind: ApplicationStateKind;
   icon?: React.ReactNode;
+  art?: EmptyStateArt;
   title: string;
   body?: React.ReactNode;
   action?: React.ReactNode;
@@ -62,22 +100,36 @@ export function ApplicationState({
       aria-live={kind === "loading" || kind === "progress" ? "polite" : undefined}
       aria-busy={kind === "loading" || kind === "progress" ? true : undefined}
     >
-      <div className="flex max-w-sm flex-col items-center text-center">
-        <span
-          className={cn(
-            "text-mute",
-            quiet ? "mb-2" : "mb-3",
-            (kind === "error" || kind === "retry") && "text-danger",
-          )}
-        >
-          {icon ?? <StateIcon kind={kind} />}
-        </span>
+      <div className="flex max-w-md flex-col items-center text-center">
+        {art ? (
+          <img
+            aria-hidden
+            alt=""
+            className={cn(
+              "empty-state-art pointer-events-none max-w-full select-none object-contain",
+              quiet ? "mb-3 h-28 w-44" : "mb-5 h-40 w-60",
+            )}
+            data-empty-state-art={art}
+            draggable={false}
+            src={EMPTY_STATE_ART[art]}
+          />
+        ) : (
+          <span
+            className={cn(
+              "text-mute",
+              quiet ? "mb-2" : "mb-3",
+              (kind === "error" || kind === "retry") && "text-danger",
+            )}
+          >
+            {icon ?? <StateIcon kind={kind} />}
+          </span>
+        )}
         {quiet ? (
           <h2 className="text-dim text-sm">{title}</h2>
         ) : (
           <h2 className="text-base font-semibold">{title}</h2>
         )}
-        {body && !quiet && <p className="text-dim mt-1 text-sm leading-5">{body}</p>}
+        {body && !quiet && <p className="text-dim mt-1 max-w-sm text-sm leading-5">{body}</p>}
         {action && <div className={quiet ? "mt-3" : "mt-4"}>{action}</div>}
       </div>
     </div>

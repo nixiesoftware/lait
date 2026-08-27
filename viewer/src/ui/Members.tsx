@@ -121,6 +121,7 @@ export function Members({
       return (
         <ApplicationState
           kind="retry"
+          art="unavailable"
           title="Members are unavailable"
           body={failure}
           action={<Button onClick={() => void load()} label="Retry" variant="ghost" size="sm" />}
@@ -151,11 +152,9 @@ export function Members({
         </div>
         <section>
           {members.length === 0 ? (
-            <EmptyState title="No verified members" body="The local replica does not currently contain a readable membership graph." />
+            <EmptyState art="people" title="No verified members" body="People and agents with verified access will appear here." />
           ) : shownMembers.length === 0 ? (
-            <div className="text-mute flex min-h-40 items-center justify-center text-sm">
-              Nothing matches “{query}”.
-            </div>
+            <EmptyState kind="filtered-empty" art="filtered" title={`Nothing matches “${query}”`} className="min-h-56" />
           ) : <ul className="border-line divide-line divide-y rounded-surface border">
             {shownMembers.map((m) => (
               <li key={m.key} className="flex items-center gap-3 p-3">

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CircleDot } from "lucide-react";
 
 import { rpc } from "../api";
 import type { Row, WorldPublicationId } from "../types";
@@ -112,6 +111,7 @@ export function MyIssues({
       return (
         <ApplicationState
           kind="retry"
+          art="unavailable"
           title="Your issues are unavailable"
           body={failure}
           action={
@@ -131,9 +131,9 @@ export function MyIssues({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <EmptyState
-          icon={<CircleDot className="size-icon-lg" />}
+          art="issues"
           title="No issues assigned to you"
-          body={nextCursor ? "No active assignments are present on this page." : "Issues assigned to you across every project will appear here."}
+          body={nextCursor ? "No assignments are present on this page." : "Work assigned to you across every project will collect here."}
         />
         {nextCursor && publication && (
           <Button

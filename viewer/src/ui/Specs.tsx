@@ -375,6 +375,7 @@ function Register({
     return (
       <ApplicationState
         kind="unavailable"
+        art="unavailable"
         title="Specs unavailable"
         body="This project's specs could not be read from the local replica. Known issues remain available."
       />
@@ -390,8 +391,9 @@ function Register({
     return (
       <ApplicationState
         kind="empty"
+        art="specs"
         title="No specs yet"
-        body="A spec is what the work is meant to satisfy — a goal, a requirement, a design, a record of what was decided."
+        body="Capture goals, requirements, designs, and decisions beside the work they guide."
         action={
           !readOnly && project ? (
             <Button
@@ -617,6 +619,7 @@ function BaselineReader({
     return (
       <ApplicationState
         kind="unavailable"
+        art="unavailable"
         title="Baseline unavailable"
         body="This baseline could not be read from the local replica."
       />
@@ -2066,6 +2069,7 @@ function SpecReader({
     return (
       <ApplicationState
         kind="unavailable"
+        art="unavailable"
         title="Spec unavailable"
         body="This spec could not be read from the local replica."
       />

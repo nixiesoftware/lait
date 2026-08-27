@@ -10,6 +10,7 @@ import { Combobox } from "./Picker";
 import { Button, IconButton, TextInput } from "@astryxdesign/core";
 import { Badge } from "./primitives";
 import { SettingsPageHeader } from "./settingsLayout";
+import { EmptyState } from "./AppState";
 
 /**
  * Teams — the administration surface for the grouping the sidebar navigates by.
@@ -146,7 +147,7 @@ function TeamList({
         title="Teams"
         description="Group projects and members into durable areas of ownership."
         actions={
-          !readOnly ? (
+          !readOnly && teams.length > 0 ? (
             <Button label="Create team" variant="primary" size="sm" onClick={onNew} />
           ) : undefined
         }
@@ -164,10 +165,13 @@ function TeamList({
       </div>
 
       {teams.length === 0 ? (
-        <p className="text-mute text-sm">
-          No teams yet. A team owns projects, and the sidebar navigates by them — Issues, Projects
-          and Projects, each scoped to what that team owns.
-        </p>
+        <EmptyState
+          art="people"
+          title="No teams yet"
+          body="Create a durable area of ownership for related projects and members."
+          action={!readOnly ? <Button label="Create team" variant="primary" size="sm" onClick={onNew} /> : undefined}
+          className="min-h-80"
+        />
       ) : (
         <div className="overflow-hidden">
           <div className="text-mute grid grid-cols-[minmax(0,1fr)_6rem_7rem_7rem] gap-3 px-3 py-2 pr-12 text-2xs">
