@@ -29,17 +29,32 @@ import { dueLabel, dueTone } from "./time";
  * their glyph centres an invariant rather than a pair of matching literals.
  */
 const ISSUE_LIST_INSET = "px-4";
+/**
+ * The horizontal band both a group header and its rows sit in.
+ *
+ * They are one column, not two that happen to agree. The header carried `mx-2`
+ * and the rows carried nothing, so every row's content box was 8px wider on
+ * each side than the header above it -- which put the trailing assignee 8px
+ * to the right of the `+` it should have lined up under, and let a selected
+ * row's fill overhang the header card it belongs to.
+ *
+ * Named once for the same reason `ISSUE_LIST_INSET` is: a shared edge that
+ * lives in two literals is a shared edge that stops being shared.
+ */
+const ISSUE_BAND_INSET = "mx-2";
 const ISSUE_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
 
 /** Issue groups are quiet raised bands, not table headings. The rounded fill
  * provides the separation, so a rule beneath them would duplicate the boundary
  * the surface already draws. Adjacent bands keep only a 4px breathing gap. */
 const ISSUE_GROUP_HEADER = cn(
-  "mx-2 mt-1 rounded-row border-b-0 bg-raised",
+  "mt-1 rounded-row border-b-0 bg-raised",
+  ISSUE_BAND_INSET,
   ISSUE_LIST_INSET,
 );
 const ISSUE_ROW_LAYOUT = cn(
   "group/row flex items-center gap-2 py-2",
+  ISSUE_BAND_INSET,
   ISSUE_LIST_INSET,
 );
 
