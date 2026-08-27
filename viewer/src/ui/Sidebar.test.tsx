@@ -1,5 +1,5 @@
 import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ProjectDto, SpaceRow } from "../types";
@@ -299,6 +299,123 @@ describe("Sidebar navigation", () => {
     expect(button).toBeTruthy();
     act(() => button?.click());
   }
+});
+
+describe("a space this device has not opened since its daemon started", () => {
+  let host: HTMLDivElement | null = null;
+  let root: Root | null = null;
+  afterEach(() => {
+    if (root) act(() => root?.unmount());
+    host?.remove();
+  });
+
+  it("is named by what the device last saw, not by its id", () => {
+    const seen: SpaceRow = {
+      ...space,
+      id: "seen-hash",
+      space: "ws_4GGTOVHSB6KOK9FKFB7AAM21FF",
+      name: null,
+      unnamed: "not-probed",
+      status: "idle",
+      seen: { name: "Kas", observed_at: Math.floor(Date.now() / 1000) - 7200 },
+    };
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => {
+      root?.render(
+        <Sidebar
+          spaces={[seen]}
+          current={seen.id}
+          projects={[]}
+          currentProject={null}
+          view="inbox"
+          unread={0}
+          favoriteProjects={[]}
+          savedViews={[]}
+          onPickSpace={vi.fn()}
+          onSearch={vi.fn()}
+          onOpenProjectView={vi.fn()}
+          onGo={vi.fn()}
+          teams={[]}
+          currentTeam={null}
+          onGoTeam={vi.fn()}
+          onMyIssues={vi.fn()}
+          onApplySavedView={vi.fn()}
+          onToggleFavorite={vi.fn()}
+          onCreateProject={vi.fn()}
+          onAddSpace={vi.fn()}
+          onForgetSpace={vi.fn()}
+          onPruneSpaces={vi.fn()}
+        />,
+      );
+    });
+    expect(host.textContent).toContain("Kas");
+    expect(host.textContent).not.toContain("ws_4GGTOVHSB6KOK9FKFB7AAM21FF");
+  });
+
+  it("says when the name was read, and says nothing of the sort for a live one", () => {
+    const seen: SpaceRow = {
+      ...space,
+      id: "seen-hash",
+      space: "ws_4GGTOVHSB6KOK9FKFB7AAM21FF",
+      name: null,
+      unnamed: "not-probed",
+      status: "idle",
+      seen: { name: "Kas", observed_at: Math.floor(Date.now() / 1000) - 7200 },
+    };
+    // A live row that also carries a reading draws the live name, unmarked.
+    const live: SpaceRow = { ...space, seen: { name: "Old name", observed_at: 1 } };
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => {
+      root?.render(
+        <Sidebar
+          spaces={[live, seen]}
+          current={live.id}
+          projects={[]}
+          currentProject={null}
+          view="inbox"
+          unread={0}
+          favoriteProjects={[]}
+          savedViews={[]}
+          onPickSpace={vi.fn()}
+          onSearch={vi.fn()}
+          onOpenProjectView={vi.fn()}
+          onGo={vi.fn()}
+          teams={[]}
+          currentTeam={null}
+          onGoTeam={vi.fn()}
+          onMyIssues={vi.fn()}
+          onApplySavedView={vi.fn()}
+          onToggleFavorite={vi.fn()}
+          onCreateProject={vi.fn()}
+          onAddSpace={vi.fn()}
+          onForgetSpace={vi.fn()}
+          onPruneSpaces={vi.fn()}
+        />,
+      );
+    });
+    const trigger = host.querySelector<HTMLElement>('[aria-label="Space menu"]')!;
+    act(() => {
+      trigger.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      );
+    });
+    const items = () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const switcher = items().find((item) => (item.textContent ?? "").trim() === "Switch space");
+    expect(switcher, "the switcher").toBeTruthy();
+    act(() => {
+      switcher?.focus();
+      switcher?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    const rows = items().map((item) => item.textContent ?? "");
+    expect(rows.some((text) => text.includes("Kas") && text.includes("Last seen 2h ago"))).toBe(true);
+    expect(rows.filter((text) => text.includes("Last seen"))).toHaveLength(1);
+    expect(rows.some((text) => text.includes("Test space") && !text.includes("Old name"))).toBe(true);
+    expect(rows.join(" ")).not.toContain("ws_4GGTOVHSB6KOK9FKFB7AAM21FF");
+  });
 });
 
 const space: SpaceRow = {

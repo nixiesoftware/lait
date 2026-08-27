@@ -33,6 +33,7 @@
 
 pub mod bootstrap;
 mod catalog;
+pub mod observed;
 mod router;
 
 pub use catalog::Catalog;

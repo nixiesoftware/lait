@@ -1018,6 +1018,12 @@ export interface SpaceRow {
   name: string | null;
   /** Why `name` is null. Absent when a name was read. */
   unnamed?: "store-missing" | "not-probed" | "unreachable" | "not-docked";
+  /**
+   * What this device last saw the Space named, and when (unix seconds) --
+   * written by the Station that held its store. A past reading beside the
+   * live one, never in its place: draw it with its time.
+   */
+  seen?: { name: string; observed_at: number };
   path: string;
   origin: string;
   last_opened: number;
