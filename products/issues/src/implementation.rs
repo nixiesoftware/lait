@@ -12818,6 +12818,15 @@ impl World for IssuesWorld {
                 apply_page_aliases(ctx, &mut catalog, &mut rows.items)?;
                 let me_actor = me.as_deref().and_then(ActorId::parse);
                 enrich_issue_page(ctx, &mut catalog, &mut rows.items, me_actor.as_ref())?;
+                // The board page walks the block posting and cannot count what
+                // it did not visit, so it declined to. But the live count per
+                // state is a posting that exists for exactly this, and the
+                // viewer needs it: it draws every list from this one answer,
+                // and without a total it counted the rows it held and called
+                // that the project. `None` stays `None` -- an unmeasured
+                // state makes the sum unmeasured, never smaller.
+                rows.exact_total = project_issue_counts(ctx, &mut catalog, &project)?
+                    .map(|(total, _done)| u64::from(total));
                 let view = crate::dto::BoardPage {
                     schema_version: VIEW_SCHEMA_VERSION,
                     project: project_view,

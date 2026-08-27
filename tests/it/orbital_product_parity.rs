@@ -1271,6 +1271,12 @@ fn a_collection_row_carries_the_reference_a_person_reads() {
     // The membership the board never asked for.
     assert_eq!(card.assignees, vec![my_actor()]);
     assert_eq!(card.assignee_summary, "you");
+    // The count the board never gave. The viewer renders every list off this
+    // one answer, and with no total it counted the rows in hand and called
+    // that the project -- "3 of 100" about five hundred Issues. One live
+    // Issue, so the measured total is one, and it is a measurement rather
+    // than a row count: the two agree here only because the page is whole.
+    assert_eq!(board.rows.exact_total, Some(1));
 }
 
 #[test]
