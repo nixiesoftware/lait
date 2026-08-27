@@ -183,7 +183,7 @@ function Proof() {
           </Text>
           <div style={{ ...row, marginTop: 8, flexWrap: "wrap" }}>
             <Button variant="primary" size="sm" label="Save" />
-            <Button variant="secondary" size="sm" label="Outline" elevation="low" />
+            <Button variant="secondary" size="sm" label="Outline" />
             <Button variant="secondary" size="sm" label="Toolbar" />
             <Button variant="ghost" size="sm" label="Cancel" />
             {/* `danger` is not an Astryx variant — the theme added it. */}
@@ -216,15 +216,14 @@ function Proof() {
                   key={tab}
                   size="md"
                   variant={tab === "Issues" ? "active" : "secondary"}
-                  elevation={tab === "Issues" ? "none" : "low"}
                   label={tab}
                 />
               ))}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              <IconButton label="Filter" variant="secondary" elevation="low" size="sm" tooltip="Filter" icon={<Icon icon="funnel" />} />
-              <IconButton label="Display" variant="secondary" elevation="low" size="sm" tooltip="Display" icon={<Icon icon="wrench" />} />
-              <IconButton label="New" variant="secondary" elevation="low" size="sm" tooltip="New" icon={<Icon icon="chevronRight" />} />
+              <IconButton label="Filter" variant="secondary" size="sm" tooltip="Filter" icon={<Icon icon="funnel" />} />
+              <IconButton label="Display" variant="secondary" size="sm" tooltip="Display" icon={<Icon icon="wrench" />} />
+              <IconButton label="New" variant="secondary" size="sm" tooltip="New" icon={<Icon icon="chevronRight" />} />
               <IconButton label="Panel" variant="active" size="sm" tooltip="Panel" icon={<Icon icon="viewColumns" />} />
             </div>
           </div>

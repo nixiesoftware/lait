@@ -1,4 +1,4 @@
-import { cn } from "./primitives";
+import { cn, titleText } from "./primitives";
 
 /** The title row shared by every settings sub-page. Collection actions live at
  * the far edge; form pages simply omit them. */
@@ -16,7 +16,7 @@ export function SettingsPageHeader({
   return (
     <header className={cn("mb-7 flex items-start gap-4", className)}>
       <div className="min-w-0 flex-1">
-        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+        <h1 className={titleText({ level: "page" })}>{title}</h1>
         {description && <p className="text-mute mt-1 max-w-2xl text-sm">{description}</p>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}

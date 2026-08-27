@@ -8,7 +8,7 @@ import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
 import { Combobox } from "./Picker";
 import { Button, IconButton, TextInput } from "@astryxdesign/core";
-import { Badge } from "./primitives";
+import { Badge, titleText } from "./primitives";
 import { SettingsPageHeader } from "./settingsLayout";
 import { EmptyState } from "./AppState";
 
@@ -434,7 +434,7 @@ function TeamDetail({
       </ul>
 
       <section className="mt-9">
-        <h2 className="text-xl font-semibold tracking-tight">Team members</h2>
+        <h2 className={titleText({ level: "page" })}>Team members</h2>
 
         <div className="mt-4 flex items-center gap-2">
           <div className="w-full max-w-xs">

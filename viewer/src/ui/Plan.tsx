@@ -128,7 +128,6 @@ export function PlanSeedEditor({
             className="ml-auto"
             label="Cancel"
             variant="secondary"
-            elevation="low"
             size="sm"
             onClick={() => {
               setRoots(plan.roots);

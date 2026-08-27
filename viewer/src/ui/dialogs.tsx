@@ -148,7 +148,6 @@ export function DialogHost() {
             type="button"
             label="Cancel"
             variant="secondary"
-            elevation="low"
             size="md"
             onClick={() => settle(null)}
           />

@@ -80,7 +80,7 @@ import { NewSpecDialog } from "./NewSpec";
 import { Button, CheckboxInput, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
 import { Combobox, type Option } from "./Picker";
 import { fromRowControl } from "./fields";
-import { cn, interactiveRow } from "./primitives";
+import { cn, interactiveRow, titleText } from "./primitives";
 import { short, when } from "./time";
 
 function MoreRows<T>({
@@ -686,11 +686,11 @@ function BaselineReader({
                 }}
                 label="Issue set"
                 variant="primary"
-                size="md"
+                size="sm"
               />
             )}
           </div>
-          <h1 className="text-2xl leading-tight font-semibold tracking-tight">{view.body.name}</h1>
+          <h1 className={titleText({ level: "document" })}>{view.body.name}</h1>
           {draftAhead && issued && (
             <p className="text-dim text-xs">
               Revision <code className="text-mute" title={issued}>{short(issued)}</code> is the
@@ -810,8 +810,7 @@ function BaselineReader({
                     onClick={() => setAdding(false)}
                     label="Done"
                     variant="secondary"
-                    elevation="low"
-                    size="md"
+                    size="sm"
                   />
                 </div>
               ) : (
@@ -820,8 +819,7 @@ function BaselineReader({
                   icon={<Plus className="size-icon-sm" />}
                   label="Add an issued revision"
                   variant="secondary"
-                  elevation="low"
-                  size="md"
+                  size="sm"
                 />
               )}
             </div>
@@ -1053,7 +1051,6 @@ function Relations({
                     icon={<Plus className="size-icon-sm" />}
                     label="Add a relation"
                     variant="secondary"
-                    elevation="low"
                     size="md"
                   />
                 </span>
@@ -1074,7 +1071,6 @@ function Relations({
                     onClick={() => setStaged(null)}
                     label="Discard"
                     variant="secondary"
-                    elevation="low"
                     size="md"
                   />
                   {/* Saving writes a revision, and on an issued document that
@@ -1248,9 +1244,9 @@ function RelationComposer({
           isDisabled={!link}
           label="Add"
           variant="primary"
-          size="md"
+          size="sm"
         />
-        <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
+        <Button onClick={onCancel} label="Cancel" variant="secondary" size="md" />
       </div>
     </div>
   );
@@ -1402,7 +1398,6 @@ function Observations({
               icon={<Plus className="size-icon-sm" />}
               label="Note something"
               variant="secondary"
-              elevation="low"
               size="md"
             />
           </span>
@@ -1522,7 +1517,7 @@ function Resolve({
           I have read all {heads.length} heads and this draft accounts for them.
         </label>
         <div className="flex justify-end gap-2">
-          <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
+          <Button onClick={onCancel} label="Cancel" variant="secondary" size="md" />
           <Button
             isDisabled={!acknowledged || !title.trim()}
             onClick={() => onCommit({
@@ -1609,8 +1604,7 @@ function Compare({
           onClick={onClose}
           label="Close"
           variant="secondary"
-          elevation="low"
-          size="md"
+          size="sm"
         />
       </header>
       <div className="flex flex-col gap-3 p-3 text-xs">
@@ -2180,7 +2174,7 @@ function SpecReader({
                 titleRef.current?.blur();
               }
             }}
-            className="resize-none overflow-hidden bg-transparent text-2xl leading-tight font-semibold tracking-tight outline-none"
+            className={cn(titleText({ level: "document" }), "resize-none overflow-hidden bg-transparent outline-none")}
             aria-label="Title"
           />
           {/* What this document can do to the work, in words, next to the
@@ -2264,15 +2258,14 @@ function SpecReader({
                       }
                       label="Compare heads"
                       variant="secondary"
-                      elevation="low"
-                      size="md"
+                      size="sm"
                     />
                   )}
                   <Button
                     onClick={() => setResolving(true)}
                     label="Resolve…"
                     variant="primary"
-                    size="md"
+                    size="sm"
                   />
                 </span>
               )}
@@ -2440,8 +2433,7 @@ function NewBaseline({ onCreate }: { onCreate: () => void }) {
         icon={<Plus className="size-icon-sm" />}
         label="New baseline"
         variant="secondary"
-        elevation="low"
-        size="md"
+        size="sm"
       />
     </div>
   );

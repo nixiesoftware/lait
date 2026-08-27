@@ -16,7 +16,7 @@ import {
 
 import { errorKindOf } from "../api";
 import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
-import { Button, Popover, Skeleton } from "@astryxdesign/core";
+import { Button, IconButton, Popover, Skeleton } from "@astryxdesign/core";
 import { cn } from "./primitives";
 
 import { EmptyArt, type EmptyStateArt } from "./emptyArt";
@@ -232,14 +232,14 @@ export function InlineError({
         />
       )}
       {onDismiss && (
-        <Button
+        <IconButton
           onClick={onDismiss}
           className="text-danger"
+          icon={<X className="size-icon-xs" />}
           label="Dismiss error"
           variant="ghost"
-          size="sm">
-          <X className="size-icon-xs" />
-        </Button>
+          size="sm"
+        />
       )}
     </div>
   );

@@ -519,7 +519,6 @@ function Invite({
               icon={<UserPlus className="size-icon-sm" />}
               label="Create invite link"
               variant="secondary"
-              elevation="low"
               size="md"
             />
           </>
@@ -545,7 +544,6 @@ function Invite({
                 <div className="flex gap-2">
                   <Button
                     variant="secondary"
-                    elevation="low"
                     size="sm"
                     onClick={() => {
                       void navigator.clipboard.writeText(link).then(() => {

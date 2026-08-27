@@ -187,6 +187,7 @@
   .astryx-button.secondary {
     background-color: var(--color-background-surface);
     color: var(--color-text-primary);
+    box-shadow: inset 0 1px 0 light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.075)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.28)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.18));
   }
 
   .astryx-button.secondary:hover {
@@ -196,12 +197,13 @@
   .astryx-button.active {
     background-color: light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286));
     color: var(--color-text-primary);
-    box-shadow: 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1));
+    box-shadow: 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)), inset 0 1px 0 light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.32)), inset 0 -1px 0 light-dark(rgb(255 255 255 / 0.8), rgb(255 255 255 / 0.055));
   }
 
   .astryx-button.primary {
     background-color: var(--color-background-inverted);
     color: var(--color-background-body);
+    box-shadow: inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.5)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.13)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.22));
   }
 
   .astryx-button.primary:hover {
@@ -225,6 +227,7 @@
   .astryx-iconbutton.secondary {
     background-color: var(--color-background-surface);
     color: var(--color-text-primary);
+    box-shadow: inset 0 1px 0 light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.075)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.28)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.18));
   }
 
   .astryx-iconbutton.secondary:hover {
@@ -234,12 +237,13 @@
   .astryx-iconbutton.active {
     background-color: light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286));
     color: var(--color-text-primary);
-    box-shadow: 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1));
+    box-shadow: 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)), inset 0 1px 0 light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.32)), inset 0 -1px 0 light-dark(rgb(255 255 255 / 0.8), rgb(255 255 255 / 0.055));
   }
 
   .astryx-iconbutton.primary {
     background-color: var(--color-background-inverted);
     color: var(--color-background-body);
+    box-shadow: inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.5)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.13)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.22));
   }
 
   .astryx-iconbutton.primary:hover {

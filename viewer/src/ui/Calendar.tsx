@@ -112,7 +112,6 @@ export function Calendar({
           className="ml-1"
           label="Today"
           variant="secondary"
-          elevation="low"
           size="sm"
         />
         <span className="text-mute ml-auto text-xs">

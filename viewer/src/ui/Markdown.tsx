@@ -290,7 +290,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
       >
         {copied ? <Check className="text-ok size-icon-xs" /> : <Copy className="size-icon-xs" />}
       </button>
-      <pre className="shiki-block overflow-x-auto p-3 font-mono text-[0.8125rem] leading-relaxed">
+      <pre className="shiki-block overflow-x-auto p-3 font-mono text-base leading-relaxed">
         <code>
           {tokens
             ? tokens.map((line, i) => (

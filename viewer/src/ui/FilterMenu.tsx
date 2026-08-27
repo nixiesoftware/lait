@@ -390,7 +390,6 @@ export function FilterMenu({
       <IconButton
         label="Filter"
         variant={active ? "active" : "secondary"}
-        elevation={active ? "none" : "low"}
         size="sm"
         className={toolbarIconControl}
         tooltip="Filter  /"

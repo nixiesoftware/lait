@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { titleText } from "./primitives";
 import { ArrowLeft, FolderPlus, Link2, Loader2 } from "lucide-react";
 
 import { hostRpc } from "../api";
@@ -153,7 +154,7 @@ export function Welcome({
         {/* Centred, because there is nothing to the left of it to align to. The
             fields below stay left-aligned: a label is read down a column. */}
         <header className="text-center">
-          <h1 className="text-xl font-semibold">
+          <h1 className={titleText({ level: "page" })}>
             {mode === "found" ? "Start a space" : "Enter a space"}
           </h1>
           <p className="text-dim mt-1.5 text-sm">

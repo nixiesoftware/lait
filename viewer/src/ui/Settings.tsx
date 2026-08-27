@@ -301,7 +301,7 @@ function GeneralPanel({
               onClick={() => void save()}
               label="Update"
               variant="primary"
-              size="md"
+              size="sm"
             />
           </div>
         </SettingsField>
@@ -330,7 +330,7 @@ function GeneralPanel({
                   onClick={() => void saveDescription()}
                   label="Save description"
                   variant="primary"
-                  size="md"
+                  size="sm"
                 />
               </div>
             )}
@@ -495,7 +495,7 @@ function DevicesPanel({
                   icon={<KeyRound className="size-icon-sm" />}
                   label="Mint token"
                   variant="ghost"
-                  size="md"
+                  size="sm"
                 />
                 {token && (
                 <code className="border-line bg-hover block w-full rounded-control border p-2 font-mono text-xs break-all">
@@ -530,7 +530,7 @@ function DevicesPanel({
                   }
                   label="Add device"
                   variant="ghost"
-                  size="md"
+                  size="sm"
                 />
               </div>
             </SettingsField>
@@ -587,10 +587,10 @@ function DevicesPanel({
                 }
                 label="Export share"
                 variant="ghost"
-                size="md"
+                size="sm"
               />
               <Button
-                size="md"
+                size="sm"
                 variant="ghost"
                 label="Import share"
                 isLoading={busy === "import"}
@@ -708,7 +708,6 @@ function LabelsPanel({
               onClick={() => setCreating(false)}
               label="Cancel"
               variant="secondary"
-              elevation="low"
               size="sm"
             />
             <Button
@@ -808,7 +807,7 @@ function LabelEditor({
       />
       <ColorPicker value={color} onChange={setColor} />
       <div className="flex justify-end gap-2">
-        <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="sm" />
+        <Button onClick={onCancel} label="Cancel" variant="secondary" size="sm" />
         <Button
           isDisabled={!name.trim()}
           onClick={() => onSave(name.trim(), color)}
@@ -1009,7 +1008,6 @@ function WorkflowPanel({
                   onClick={() => setDraft(wf.revision!.body.states.map((s) => ({ ...s })))}
                   label="Reset"
                   variant="secondary"
-                  elevation="low"
                   size="sm"
                 />
                 <Button
@@ -1326,7 +1324,7 @@ function AccessPanel({
               icon={<ShieldPlus className="size-icon-sm" />}
               label="Grant"
               variant="primary"
-              size="md"
+              size="sm"
             />
           </div>
         )}

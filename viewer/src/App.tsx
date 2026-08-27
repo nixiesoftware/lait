@@ -2446,7 +2446,6 @@ export function App() {
                   label="New issue"
                   onClick={() => run("issue.create")}
                   variant="secondary"
-                  elevation="low"
                   size="sm"
                   className={toolbarIconControl}
                   tooltip="New issue  C"
@@ -2461,7 +2460,6 @@ export function App() {
                   label="New spec"
                   onClick={() => setComposingSpec("any")}
                   variant="secondary"
-                  elevation="low"
                   size="sm"
                   className={toolbarIconControl}
                   tooltip="New spec"
@@ -2483,7 +2481,6 @@ export function App() {
                     })
                   }
                   variant={railOpen ? "active" : "secondary"}
-                  elevation={railOpen ? "none" : "low"}
                   size="sm"
                   className={toolbarIconControl}
                   tooltip={railOpen ? "Hide project panel" : "Show project panel"}

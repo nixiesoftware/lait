@@ -17,7 +17,7 @@ import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { MilestoneIcon, ProjectIcon } from "./icons";
 import { Button, IconButton, Popover } from "@astryxdesign/core";
-import { cn } from "./primitives";
+import { cn, titleText } from "./primitives";
 import { when } from "./time";
 
 /** The health signals a project update can carry — Linear's on-track palette. */
@@ -107,7 +107,7 @@ export function ProjectOverview({
                 // Same size as an issue title: both are the name of the document
                 // you are looking at, and the overview was a step smaller for no
                 // reason other than that it was written on a different day.
-                className="min-w-0 flex-1 bg-transparent text-2xl font-semibold tracking-tight outline-none"
+                className={cn(titleText({ level: "document" }), "min-w-0 flex-1 bg-transparent outline-none")}
                 aria-label="Project name"
               />
               {project.archived && (

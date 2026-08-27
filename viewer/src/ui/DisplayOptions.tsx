@@ -177,7 +177,6 @@ export function DisplayOptions({
       <IconButton
         label="Display options"
         variant={changed ? "active" : "secondary"}
-        elevation={changed ? "none" : "low"}
         size="sm"
         className={toolbarIconControl}
         tooltip="Display options  ⇧V"
@@ -252,7 +251,6 @@ function Choice({
       onClick={onClick}
       label={`${label}`}
       variant={active ? "active" : "secondary"}
-      elevation={active ? "none" : "low"}
       size="sm"
     />
   );

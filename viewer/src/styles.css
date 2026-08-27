@@ -295,6 +295,15 @@
   --text-base--line-height: 20px;
   --text-lg: 15px;
   --text-lg--line-height: 22px;
+  /* The two title rungs. They exist here because they did not: every page and
+     document title in the app was reaching for Tailwind's stock `text-xl` /
+     `text-2xl`, which are 20px and 24px flat and — the part that actually bites
+     — do not move when somebody switches to Comfortable. The heading stayed put
+     while every label under it grew. */
+  --text-xl: 17px;
+  --text-xl--line-height: 24px;
+  --text-2xl: 20px;
+  --text-2xl--line-height: 28px;
 
   --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
   /* `light-dark()` returns a *colour*, so it wraps the colour and nothing else.
@@ -498,6 +507,10 @@
   --text-base--line-height: 21px;
   --text-lg: 16px;
   --text-lg--line-height: 23px;
+  --text-xl: 18px;
+  --text-xl--line-height: 26px;
+  --text-2xl: 22px;
+  --text-2xl--line-height: 30px;
 }
 
 @media (forced-colors: active) {

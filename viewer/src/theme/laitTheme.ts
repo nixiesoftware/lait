@@ -136,6 +136,7 @@ export const laitTheme = defineTheme({
       "variant:secondary": {
         "backgroundColor": "var(--color-background-surface)",
         "color": "var(--color-text-primary)",
+        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.075)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.28)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.18))",
         ":hover": {
           "backgroundColor": "var(--color-tint-hover)"
         }
@@ -143,11 +144,12 @@ export const laitTheme = defineTheme({
       "variant:active": {
         "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
-        "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)), inset 0 1px 0 light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.32)), inset 0 -1px 0 light-dark(rgb(255 255 255 / 0.8), rgb(255 255 255 / 0.055))"
       },
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
         "color": "var(--color-background-body)",
+        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.5)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.13)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.22))",
         ":hover": {
           "backgroundColor": "color-mix(in oklch, var(--color-background-inverted) 85%, var(--color-background-body))"
         }
@@ -168,6 +170,7 @@ export const laitTheme = defineTheme({
       "variant:secondary": {
         "backgroundColor": "var(--color-background-surface)",
         "color": "var(--color-text-primary)",
+        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.075)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.28)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.18))",
         ":hover": {
           "backgroundColor": "var(--color-tint-hover)"
         }
@@ -175,11 +178,12 @@ export const laitTheme = defineTheme({
       "variant:active": {
         "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
-        "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)), inset 0 1px 0 light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.32)), inset 0 -1px 0 light-dark(rgb(255 255 255 / 0.8), rgb(255 255 255 / 0.055))"
       },
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
         "color": "var(--color-background-body)",
+        "boxShadow": "inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.5)), inset 0 -1px 0 light-dark(rgb(0 0 0 / 0.30), rgb(0 0 0 / 0.13)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.22))",
         ":hover": {
           "backgroundColor": "color-mix(in oklch, var(--color-background-inverted) 85%, var(--color-background-body))"
         }

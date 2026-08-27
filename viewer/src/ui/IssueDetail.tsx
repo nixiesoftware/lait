@@ -102,7 +102,7 @@ import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
 import { Button, Divider, DropdownMenu, DropdownMenuItem, IconButton, Popover, TextInput } from "@astryxdesign/core";
-import { ChipButton, LabelChip, cn, interactiveRow } from "./primitives";
+import { ChipButton, LabelChip, cn, interactiveRow, titleText } from "./primitives";
 import { Disclosure, EmptyValue, HeaderActions, RailRow, RailSection, Toast } from "./layout";
 import * as ask from "./dialogs";
 import { dueToInput, dueTone, short, when } from "./time";
@@ -526,7 +526,7 @@ export function IssueDetail({
           // over a 13px body — barely three points of hierarchy for the most
           // important string on the page. `text-2xl` against the 15px body is
           // the ratio Hashnode and Mintlify give an article's h1.
-          className="issue-detail-title resize-none overflow-hidden bg-transparent text-2xl leading-tight font-semibold tracking-tight outline-none"
+          className={cn(titleText({ level: "document" }), "issue-detail-title resize-none overflow-hidden bg-transparent outline-none")}
           aria-label="Title"
         />
 
