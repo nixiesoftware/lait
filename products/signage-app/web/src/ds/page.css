@@ -279,6 +279,12 @@
   max-width: 380px;
 }
 
+/* A search that stands alone under the page head is a well, not a banner. */
+.ds-page > .ds-search {
+  max-width: 420px;
+  margin-bottom: var(--ds-space-4);
+}
+
 /* The selection bar is a floating pill: it is held above the list it acts on. */
 .ds-select-bar {
   position: sticky;
@@ -1304,7 +1310,8 @@
 
 /* ── Devices: a monitor, then the facts ────────────────────────────────── */
 
-.ds-devices {
+.ds-devices,
+.ds-device-list {
   display: flex;
   flex-direction: column;
   padding: 0 16px;
