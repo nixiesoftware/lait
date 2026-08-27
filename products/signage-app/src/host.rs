@@ -30,8 +30,11 @@ use crate::protocol::SignageRequest;
 const COMMANDS: &str = "program_get, program_list, program_put, program_delete, \
      media_get, media_list, media_put, media_delete, media_used_by, \
      screen_get, screen_list, screen_put, screen_delete, screen_showing, screen_plays, \
-     group_get, group_list, group_put, group_delete, \
-     config_get, config_list, config_put, config_delete";
+     channel_get, channel_list, channel_put, channel_delete, \
+     audience_get, audience_list, audience_put, audience_delete, audience_reaches, \
+     broadcast_get, broadcast_list, broadcast_put, broadcast_delete, \
+     preset_get, preset_list, preset_put, preset_delete, \
+     as_run_get, as_run_record";
 
 /// The one local operation this package owns.
 ///
@@ -451,7 +454,7 @@ mod tests {
             );
             assert!(question.contains(&target), "got: {question}");
         }
-        assert_eq!(deletes, 5, "one delete per document type");
+        assert_eq!(deletes, 7, "one delete per document type");
     }
 
     #[test]

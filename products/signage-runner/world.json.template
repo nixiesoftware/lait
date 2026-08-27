@@ -5,7 +5,7 @@
   "mount": "signage",
   "name": "Signage",
   "tagline": "Author durable programs for managed displays",
-  "implementation_version": 4,
+  "implementation_version": 5,
   "accent": 10182117,
   "requires": [
     { "name": "lait.control", "range": ">=15, <16" },

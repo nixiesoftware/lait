@@ -3929,6 +3929,7 @@ dependencies = [
  "anyhow",
  "font8x8",
  "image",
+ "jiff",
  "lait-signage",
  "mechanics",
  "mediabox",

@@ -1,737 +1,444 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+/**
+ * One panel.
+ *
+ * Nothing on this page has a Save button, and nothing has an editing mode.
+ * Every field commits itself and says so on itself. What that leaves reads as
+ * a *description of a thing* rather than a form about it — which is what it
+ * is, because a screen is somewhere, is called something, and is tuned to
+ * something whether or not anybody is looking at this page.
+ *
+ * Divided the way the model is:
+ *   **Right now** — resolved live, recomputed on the shared tick.
+ *   **Place** and **Facts** — true of the panel, and the only fields here that
+ *   can make a card correct or wrong.
+ *   **Labels** — the operator's vocabulary, meaning nothing to the substrate.
+ *   **Tuned** — the fallback when nothing is addressed at it.
+ *   **As run** — what the panel says it actually played, in its own words.
+ */
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import Button from "@/components/ui/button/Button";
-import Input from "@/components/form/input/InputField";
-import { useModal } from "@/hooks/useModal";
-import { ConfirmationModal } from "@/components/ui/ConfirmationModal";
-import { ArrowLeft, Calendar, Check, Plus, Trash2, X } from "lucide-react";
-import { PencilIcon } from "../../../../../../public/images/icons/theme-icons";
+import { ArrowLeft, Trash2, X } from "lucide-react";
 import {
-  fetchScreen,
-  saveScreen,
+  Ago,
+  CommitText,
+  Confirm,
+  Field,
+  OnAir,
+  Page,
+  useCommit,
+  useLive,
+  useRevision,
+  useToast,
+} from "@/ds";
+import {
   deleteScreen,
-  assignProgramToScreen,
-  removeProgramFromScreen,
-  setScreenGroup,
+  fetchAsRun,
+  fetchScreenPlays,
+  saveScreen,
 } from "@/utils/screens/api";
-import { fetchPrograms } from "@/utils/broadcasts/api";
-import { fetchGroups } from "@/utils/networks/api";
-import {
-  addScheduleWindow,
-  updateScheduleWindow,
-  deleteScheduleWindow,
-  setScreenOverride,
-  clearScreenOverride,
-} from "@/utils/schedules/api";
-import type {
-  ProgramWindow,
-  Recurrence,
-  ScheduleWindow,
-  SignageGroup,
-  SignageProgram,
-  SignageScreen,
-} from "@/utils/lait/types";
+import { explain, resolvePlayback, type ResolutionInputs } from "@/utils/lait/resolve";
+import { KIND_PANELS } from "@/program-editor/kinds/registry";
+import type { Place, SignageAsRun, SignageScreen } from "@/utils/lait/types";
 
-interface ScreenDetailProps {
-  screenId: string;
-}
-
-interface AlertProps {
-  variant: "success" | "error";
-  children: React.ReactNode;
-  onClose?: () => void;
-}
-
-const Alert: React.FC<AlertProps> = ({ variant, children, onClose }) => {
-  const bgColor = variant === "success" ? "bg-green-50 border-green-200 text-green-800 dark:bg-green-900/50 dark:border-green-800 dark:text-green-200" : "bg-red-50 border-red-200 text-red-800 dark:bg-red-900/50 dark:border-red-800 dark:text-red-200";
-
-  return (
-    <div className={`absolute bottom-3 mx-auto border rounded-lg p-4 ${bgColor}`}>
-      <div className="flex justify-between items-start">
-        <div>{children}</div>
-        {onClose && (
-          <button onClick={onClose} className="ml-2 text-current opacity-70 hover:opacity-100">
-            ×
-          </button>
-        )}
-      </div>
-    </div>
-  );
+const EMPTY: ResolutionInputs = {
+  screen: null,
+  channels: [],
+  broadcasts: [],
+  audiences: [],
+  programs: [],
+  media: [],
+  presets: [],
 };
 
-const RECURRENCES: Recurrence[] = ["none", "daily", "weekly", "monthly"];
-
-/** datetime-local carries a civil datetime; the wire wants seconds too. */
-function toCivil(value: string): string {
-  return value.length === 16 ? `${value}:00` : value;
-}
-
-function fromCivil(value: string): string {
-  return value.slice(0, 16);
-}
-
-function formatDuration(ms: number): string {
-  return ms % 60000 === 0 ? `${ms / 60000} min` : `${ms / 1000} s`;
-}
-
-export const ScreenDetail: React.FC<ScreenDetailProps> = ({ screenId }) => {
+export default function ScreenDetail({ screenId }: { screenId: string }) {
   const navigate = useNavigate();
-  const deleteModal = useModal();
-
-  const [screen, setScreen] = useState<SignageScreen | null>(null);
-  const [programs, setPrograms] = useState<SignageProgram[]>([]);
-  const [groups, setGroups] = useState<SignageGroup[]>([]);
+  const toast = useToast();
+  const { now } = useLive();
+  const revision = useRevision();
+  const [inputs, setInputs] = useState<ResolutionInputs>(EMPTY);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [label, setLabel] = useState("");
 
-  // Form states
-  const [name, setName] = useState("");
-  const [selectedProgramId, setSelectedProgramId] = useState<string>("");
-
-  // Override form
-  const [overrideProgramId, setOverrideProgramId] = useState<string>("");
-  const [overrideUntil, setOverrideUntil] = useState("");
-  const [settingOverride, setSettingOverride] = useState(false);
-
-  // Schedule window form
-  const [showWindowForm, setShowWindowForm] = useState(false);
-  const [editingWindowId, setEditingWindowId] = useState<string | null>(null);
-  const [wfProgram, setWfProgram] = useState("");
-  const [wfStart, setWfStart] = useState("");
-  const [wfDurationMin, setWfDurationMin] = useState("60");
-  const [wfRecurrence, setWfRecurrence] = useState<Recurrence>("none");
-  const [wfTimezone, setWfTimezone] = useState(
-    Intl.DateTimeFormat().resolvedOptions().timeZone
-  );
-  const [wfPriority, setWfPriority] = useState("0");
-  const [wfEnabled, setWfEnabled] = useState(true);
-  const [windowFormError, setWindowFormError] = useState("");
-  const [savingWindow, setSavingWindow] = useState(false);
-
-  const programNames = useMemo(
-    () => new Map(programs.map((p) => [p.id, p.name])),
-    [programs]
-  );
-
-  const refreshScreen = useCallback(async () => {
+  const reload = useCallback(async () => {
     try {
-      const data = await fetchScreen(screenId);
-      setScreen(data);
-      if (data) {
-        setName(data.name);
-        setSelectedProgramId(data.intent.base?.member ?? "");
-      }
-      return data;
+      setError(null);
+      const { inputs } = await fetchScreenPlays(screenId);
+      setInputs(inputs);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch screen");
-      return null;
+      setError(err instanceof Error ? err.message : "Could not load this screen");
+    } finally {
+      setLoading(false);
     }
   }, [screenId]);
 
+  // Somebody else's change arrives the same way ours does.
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      await Promise.all([
-        refreshScreen(),
-        fetchPrograms().then(setPrograms).catch((err) => {
-          console.error("Failed to fetch broadcasts:", err);
-        }),
-        fetchGroups().then(setGroups).catch((err) => {
-          console.error("Failed to fetch networks:", err);
-        }),
-      ]);
-      setLoading(false);
-    };
+    void reload();
+  }, [reload, revision]);
 
-    loadData();
-  }, [refreshScreen]);
+  const screen = inputs.screen;
 
-  // The ladder's inputs — resolution belongs to the engine
-  const activeOverride =
-    screen?.intent.over && screen.intent.over.until_unix_ms > Date.now()
-      ? screen.intent.over
-      : null;
-  const group = screen?.group
-    ? groups.find((g) => g.id === screen.group) ?? null
-    : null;
+  /** Every field on this page funnels through here. */
+  const put = useCallback(async (next: SignageScreen) => {
+    await saveScreen(next);
+    setInputs((held) => ({ ...held, screen: next }));
+  }, []);
 
-  const handleSaveAll = async () => {
-    if (!screen) return;
-    setSaving(true);
-    setError("");
-    setSuccess("");
+  /** Resolution, recomputed on the tick rather than on a fetch. */
+  const playback = useMemo(
+    () => (screen ? resolvePlayback(inputs, now) : null),
+    [inputs, screen, now],
+  );
 
-    try {
-      const successMessages: string[] = [];
+  const showingName = useMemo(() => {
+    if (playback?.showing.showing !== "program") return undefined;
+    const id = playback.showing.program;
+    return inputs.programs.find((program) => program.id === id)?.name;
+  }, [playback, inputs.programs]);
 
-      if (name.trim() && name.trim() !== screen.name) {
-        await saveScreen({ ...screen, name: name.trim() });
-        successMessages.push("Screen renamed");
-      }
+  const tuned = useCommit<string>({
+    committed: screen?.tuned ?? "",
+    write: async (next) => {
+      if (!screen) return;
+      await put({ ...screen, tuned: next || null });
+    },
+  });
 
-      const currentDirect = screen.intent.base?.member ?? "";
-      if (selectedProgramId !== currentDirect) {
-        if (selectedProgramId) {
-          await assignProgramToScreen(screenId, selectedProgramId);
-          successMessages.push("Broadcast assigned");
-        } else {
-          await removeProgramFromScreen(screenId);
-          successMessages.push("Broadcast cleared");
-        }
-      }
-
-      if (successMessages.length > 0) {
-        setSuccess(successMessages.join(" and ") + " successfully");
-        await refreshScreen();
-      } else {
-        setSuccess("No changes to save");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save changes");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleGroupChange = async (groupId: string) => {
-    setError("");
-    try {
-      await setScreenGroup(screenId, groupId || null);
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to move screen");
-    }
-  };
-
-  const handleClearDirect = async () => {
-    setError("");
-    try {
-      await removeProgramFromScreen(screenId);
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear broadcast");
-    }
-  };
-
-  const handleSetOverride = async () => {
-    if (!overrideProgramId || !overrideUntil) {
-      setError("Pick a broadcast and an end time for the override");
-      return;
-    }
-    setSettingOverride(true);
-    setError("");
-    try {
-      await setScreenOverride(
-        screenId,
-        overrideProgramId,
-        new Date(overrideUntil).getTime()
-      );
-      setOverrideProgramId("");
-      setOverrideUntil("");
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to set override");
-    } finally {
-      setSettingOverride(false);
-    }
-  };
-
-  const handleClearOverride = async () => {
-    setError("");
-    try {
-      await clearScreenOverride(screenId);
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear override");
-    }
-  };
-
-  const resetWindowForm = () => {
-    setWfProgram("");
-    setWfStart("");
-    setWfDurationMin("60");
-    setWfRecurrence("none");
-    setWfTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
-    setWfPriority("0");
-    setWfEnabled(true);
-    setWindowFormError("");
-  };
-
-  const handleEditWindow = (row: ProgramWindow) => {
-    setEditingWindowId(row.id);
-    setWfProgram(row.program);
-    setWfStart(fromCivil(row.start_local));
-    setWfDurationMin(String(row.duration_ms / 60000));
-    setWfRecurrence(row.recurrence);
-    setWfTimezone(row.timezone);
-    setWfPriority(String(row.priority));
-    setWfEnabled(row.enabled);
-    setWindowFormError("");
-    setShowWindowForm(true);
-  };
-
-  const handleSaveWindow = async () => {
-    setWindowFormError("");
-    if (!wfProgram || !wfStart || !wfTimezone.trim()) {
-      setWindowFormError("Broadcast, start, and timezone are required");
-      return;
-    }
-    const durationMin = Number(wfDurationMin);
-    if (!Number.isFinite(durationMin) || durationMin <= 0) {
-      setWindowFormError("Duration must be a positive number of minutes");
-      return;
-    }
-    const priority = Number(wfPriority);
-    if (!Number.isInteger(priority)) {
-      setWindowFormError("Priority must be an integer");
-      return;
-    }
-
-    const existing = editingWindowId
-      ? screen?.schedule.find((row) => row.id === editingWindowId)
-      : undefined;
-    const window: ScheduleWindow = {
-      start_local: toCivil(wfStart),
-      duration_ms: Math.round(durationMin * 60000),
-      recurrence: wfRecurrence,
-      until_unix_ms: existing?.until_unix_ms ?? null,
-      priority,
-      enabled: wfEnabled,
-      timezone: wfTimezone.trim(),
-    };
-
-    setSavingWindow(true);
-    try {
-      if (editingWindowId) {
-        await updateScheduleWindow(screenId, {
-          id: editingWindowId,
-          program: wfProgram,
-          ...window,
-        });
-      } else {
-        await addScheduleWindow(screenId, wfProgram, window);
-      }
-      setShowWindowForm(false);
-      setEditingWindowId(null);
-      resetWindowForm();
-      await refreshScreen();
-    } catch (err) {
-      setWindowFormError(err instanceof Error ? err.message : "Failed to save window");
-    } finally {
-      setSavingWindow(false);
-    }
-  };
-
-  const handleDeleteWindow = async (windowId: string) => {
-    try {
-      await deleteScheduleWindow(screenId, windowId);
-      await refreshScreen();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete window");
-    }
-  };
-
-  const handleDelete = async () => {
-    setDeleting(true);
-    setError("");
-
-    try {
-      await deleteScreen(screenId);
-      navigate({ to: "/screen-list" });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete screen");
-      setDeleting(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-lg">Loading screen details...</div>
-      </div>
-    );
-  }
-
+  if (loading) return <Page>Loading…</Page>;
   if (!screen) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-lg text-red-500">Screen not found</div>
-      </div>
+      <Page>
+        <p className="ds-danger-text">{error ?? "That screen is not here."}</p>
+      </Page>
     );
   }
 
-  const handleBackClick = () => {
-    window.history.back();
-  };
+  const place = screen.place;
+  const writePlace = (patch: Partial<Place>) =>
+    put({
+      ...screen,
+      place: {
+        latitude: place?.latitude ?? 0,
+        longitude: place?.longitude ?? 0,
+        timezone: place?.timezone ?? "",
+        region: place?.region ?? null,
+        ...patch,
+      },
+    });
 
-  const directProgramName = screen.intent.base
-    ? programNames.get(screen.intent.base.member) ?? "Unknown broadcast"
-    : null;
-  const groupProgramName = group?.intent.base
-    ? programNames.get(group.intent.base.member) ?? "Unknown broadcast"
-    : null;
+  const interrupted = playback?.source?.via === "broadcast";
 
   return (
-    <div className="space-y-6">
-      {error && (
-        <Alert variant="error" onClose={() => setError("")}>
-          {error}
-        </Alert>
-      )}
-
-      {success && (
-        <Alert variant="success" onClose={() => setSuccess("")}>
-          {success}
-        </Alert>
-      )}
-
-      <div className="flex flex-row justify-between items-center">
-        <div className="flex flex-row items-center gap-4">
-          {/* Back Button */}
-          <button
-            onClick={handleBackClick}
-            className="p-2 hover:bg-gray-800/20 dark:hover:bg-gray-50/20 rounded-md transition-colors"
-          >
-            <ArrowLeft className="w-5 h-5 text-gray-800 dark:text-white" />
-          </button>
-          <h2 className="text-3xl font-semibold dark:text-white">{screen.name}</h2>
-        </div>
+    <Page>
+      <header className="ds-row-between" style={{ marginBottom: 18 }}>
         <button
-          onClick={deleteModal.openModal}
-          className="text-red-600 !border-none hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20 mr-2 p-2 rounded-md"
+          type="button"
+          className="ds-icon"
+          aria-label="Back"
+          onClick={() => void navigate({ to: "/screen-list" })}
         >
-          <Trash2 className="w-5 h-5"/>
+          <ArrowLeft size={20} />
         </button>
-      </div>
+        <ScreenName screen={screen} put={put} />
+        <button
+          type="button"
+          className="ds-btn ds-btn-quiet is-danger"
+          onClick={() => setRemoving(true)}
+        >
+          <Trash2 size={15} />
+          Remove
+        </button>
+      </header>
 
-      {/* Screen settings: name, network, direct broadcast */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
-            <Input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="!h-11"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Network</label>
+      {error && <p className="ds-danger-text">{error}</p>}
+
+      <div className="ds-stack">
+        <section className="ds-panel">
+          <h3>
+            Right now
+            {interrupted && <OnAir label="INTERRUPTED" tone="alarm" />}
+          </h3>
+          <p style={{ margin: 0, fontSize: "var(--ds-text-md)", lineHeight: 1.5 }}>
+            {playback ? explain(playback, showingName) : "Unknown"}
+          </p>
+          {playback?.showing.showing === "unaddressed" && !screen.tuned && (
+            <p className="ds-hint">
+              Nothing reaches this screen. Tune it below, or address a broadcast
+              at it.
+            </p>
+          )}
+        </section>
+
+        <section className="ds-panel">
+          <h3>Tuned to</h3>
+          <Field
+            label="Channel"
+            commit={tuned}
+            hint="What it shows when no broadcast is addressed at it."
+          >
             <select
-              className="h-11 w-full appearance-none rounded-md border border-gray-300 px-4 py-2.5 text-sm shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
-              value={screen.group ?? ""}
-              onChange={(e) => handleGroupChange(e.target.value)}
+              className="ds-input"
+              value={tuned.value}
+              onChange={(event) => tuned.setNow(event.target.value)}
             >
-              <option value="">No network</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Broadcast</label>
-            <select
-              className="h-11 w-full appearance-none rounded-md border border-gray-300 px-4 py-2.5 text-sm shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
-              value={selectedProgramId}
-              onChange={(e) => setSelectedProgramId(e.target.value)}
-            >
-              <option value="">None (follow network)</option>
-              {programs.map((program) => (
-                <option key={program.id} value={program.id}>
-                  {program.name}
+              <option value="">Nothing</option>
+              {inputs.channels.map((channel) => (
+                <option key={channel.id} value={channel.id}>
+                  {channel.name}
                 </option>
               ))}
             </select>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            onClick={handleSaveAll}
-            disabled={saving || !name.trim()}
-            className="px-8"
-          >
-            {saving ? "Saving..." : "Save"}
-          </Button>
-          {screen.intent.base && (
-            <Button variant="outline" onClick={handleClearDirect}>
-              Clear broadcast
-            </Button>
-          )}
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            {directProgramName
-              ? `This screen chooses "${directProgramName}" itself.`
-              : group
-                ? groupProgramName
-                  ? `No choice of its own — follows "${group.name}" (${groupProgramName}).`
-                  : `No choice of its own — follows "${group.name}", which has no broadcast either.`
-                : "No broadcast chosen and no network to fall back to."}
+          </Field>
+        </section>
+
+        <section className="ds-panel">
+          <h3>Place</h3>
+          <p className="ds-hint">
+            Where the panel physically is. Kinds that compute from a location —
+            prayer times, weather, a local clock — read this and nothing else.
           </p>
-        </div>
-      </div>
+          <div className="ds-pair">
+            <CommitText
+              label="Latitude"
+              value={place ? String(place.latitude) : ""}
+              placeholder="42.3314"
+              inputMode="decimal"
+              onWrite={(next) => writePlace({ latitude: Number(next) })}
+            />
+            <CommitText
+              label="Longitude"
+              value={place ? String(place.longitude) : ""}
+              placeholder="-83.0458"
+              inputMode="decimal"
+              onWrite={(next) => writePlace({ longitude: Number(next) })}
+            />
+          </div>
+          <CommitText
+            label="Time zone"
+            value={place?.timezone ?? ""}
+            placeholder="America/Detroit"
+            list="ds-zones"
+            hint="Required. A coordinate without one computes a plausible timetable for the wrong offset, and nothing looks wrong."
+            onWrite={(next) => writePlace({ timezone: next })}
+          />
+          <ZoneOptions />
+          <CommitText
+            label="Region"
+            value={place?.region ?? ""}
+            placeholder="MI"
+            hint="So an audience can say “every screen in Michigan” without anybody maintaining a label that drifts from the coordinates above."
+            onWrite={(next) => writePlace({ region: next || null })}
+          />
+        </section>
 
-      {/* Override — beats everything until a stated moment */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
-        <div className="flex items-center gap-2">
-          <h3 className="text-lg font-medium dark:text-white">Override</h3>
-          {activeOverride && (
-            <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200 rounded-full">
-              Active
-            </span>
-          )}
-        </div>
-        {activeOverride ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <p className="text-sm text-gray-700 dark:text-gray-300">
-              {programNames.get(activeOverride.choice.member) ?? "Unknown broadcast"}
-              {" "}until {new Date(activeOverride.until_unix_ms).toLocaleString()}
+        {KIND_PANELS.map((panel) => (
+          <section className="ds-panel" key={panel.kind}>
+            <h3>{panel.label} at this venue</h3>
+            <p className="ds-hint">
+              What this congregation practises, as distinct from how the card
+              looks. Two venues under one operator can differ here and still
+              share a preset.
             </p>
-            <Button size="sm" variant="outline" onClick={handleClearOverride}>
-              <X className="w-4 h-4 mr-1" />
-              Clear override
-            </Button>
+            {panel.groups
+              .flatMap((group) => group.fields)
+              .map((field) =>
+                "key" in field ? (
+                  <CommitText
+                    key={field.key}
+                    label={field.label}
+                    value={screen.facts?.[panel.kind]?.[field.key] ?? ""}
+                    placeholder="from the preset"
+                    onWrite={async (next) => {
+                      const facts = { ...(screen.facts?.[panel.kind] ?? {}) };
+                      if (next) facts[field.key] = next;
+                      else delete facts[field.key];
+                      await put({
+                        ...screen,
+                        facts: { ...(screen.facts ?? {}), [panel.kind]: facts },
+                      });
+                    }}
+                  />
+                ) : null,
+              )}
+          </section>
+        ))}
+
+        <section className="ds-panel">
+          <h3>Labels</h3>
+          <p className="ds-hint">
+            Yours. A screen can be <code>biz:acme</code>, <code>role:menu</code>{" "}
+            and <code>rented</code> at once, and audiences address whichever
+            slice matters today.
+          </p>
+          <div className="ds-chips">
+            {(screen.labels ?? []).map((held) => (
+              <span className="ds-tag" key={held}>
+                {held}
+                <button
+                  type="button"
+                  aria-label={`Remove ${held}`}
+                  className="ds-icon"
+                  style={{ width: 18, height: 18 }}
+                  onClick={() =>
+                    void put({
+                      ...screen,
+                      labels: (screen.labels ?? []).filter((other) => other !== held),
+                    })
+                  }
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
           </div>
-        ) : (
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Broadcast</label>
-              <select
-                value={overrideProgramId}
-                onChange={(e) => setOverrideProgramId(e.target.value)}
-                className="h-9 rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-              >
-                <option value="">Select broadcast...</option>
-                {programs.map((program) => (
-                  <option key={program.id} value={program.id}>{program.name}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Until</label>
-              <input
-                type="datetime-local"
-                value={overrideUntil}
-                onChange={(e) => setOverrideUntil(e.target.value)}
-                className="h-9 rounded-md border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-              />
-            </div>
-            <Button
-              size="sm"
-              onClick={handleSetOverride}
-              disabled={settingOverride || !overrideProgramId || !overrideUntil}
-            >
-              {settingOverride ? "Setting..." : "Set override"}
-            </Button>
-          </div>
-        )}
+          <form
+            style={{ display: "flex", gap: 8 }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const next = label.trim();
+              if (!next) return;
+              void put({
+                ...screen,
+                labels: [...new Set([...(screen.labels ?? []), next])].sort(),
+              });
+              setLabel("");
+            }}
+          >
+            <input
+              className="ds-input"
+              value={label}
+              placeholder="role:menu"
+              onChange={(event) => setLabel(event.target.value)}
+            />
+            <button type="submit" className="ds-btn ds-btn-ghost">
+              Add
+            </button>
+          </form>
+        </section>
+
+        <section className="ds-panel">
+          <h3>As run</h3>
+          <AsRunList screenId={screen.id} />
+        </section>
       </div>
 
-      {/* Schedule Section */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <Calendar className="w-4 h-4 text-gray-500 dark:text-gray-400" />
-            <h3 className="text-lg font-medium dark:text-white">Scheduled Broadcasts</h3>
-          </div>
-          {!showWindowForm && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setEditingWindowId(null);
-                resetWindowForm();
-                setShowWindowForm(true);
-              }}
-            >
-              <Plus className="w-4 h-4 mr-1" />
-              Add Window
-            </Button>
-          )}
-        </div>
-
-        {/* Window form (add or edit) */}
-        {showWindowForm && (
-          <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-md border border-gray-200 dark:border-gray-700 space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Broadcast</label>
-                <select
-                  value={wfProgram}
-                  onChange={(e) => setWfProgram(e.target.value)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                >
-                  <option value="">Select broadcast...</option>
-                  {programs.map((program) => (
-                    <option key={program.id} value={program.id}>{program.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Start (local time)</label>
-                <input
-                  type="datetime-local"
-                  value={wfStart}
-                  onChange={(e) => setWfStart(e.target.value)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Duration (minutes)</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={wfDurationMin}
-                  onChange={(e) => setWfDurationMin(e.target.value)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Recurrence</label>
-                <select
-                  value={wfRecurrence}
-                  onChange={(e) => setWfRecurrence(e.target.value as Recurrence)}
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                >
-                  {RECURRENCES.map((r) => (
-                    <option key={r} value={r}>{r}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Timezone (IANA)</label>
-                <input
-                  type="text"
-                  value={wfTimezone}
-                  onChange={(e) => setWfTimezone(e.target.value)}
-                  placeholder="America/Chicago"
-                  className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                />
-              </div>
-              <div className="flex items-end gap-3">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Priority</label>
-                  <input
-                    type="number"
-                    value={wfPriority}
-                    onChange={(e) => setWfPriority(e.target.value)}
-                    className="h-9 w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10"
-                  />
-                </div>
-                <label className="flex items-center gap-2 h-9 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={wfEnabled}
-                    onChange={(e) => setWfEnabled(e.target.checked)}
-                    className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500 dark:border-gray-600 dark:bg-gray-800"
-                  />
-                  <span className="text-sm text-gray-700 dark:text-gray-300">Enabled</span>
-                </label>
-              </div>
-            </div>
-            {windowFormError && (
-              <p className="text-xs text-red-600 dark:text-red-400">{windowFormError}</p>
-            )}
-            <div className="flex gap-2">
-              <Button size="sm" onClick={handleSaveWindow} disabled={savingWindow}>
-                <Check className="w-4 h-4 mr-1" />
-                {savingWindow ? "Saving..." : editingWindowId ? "Update" : "Create"}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { setShowWindowForm(false); setEditingWindowId(null); resetWindowForm(); }}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Window table — the schedule as data; what plays now is the engine's call */}
-        {screen.schedule.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-                  <th className="py-2 pr-3 font-medium">Broadcast</th>
-                  <th className="py-2 pr-3 font-medium">Start (local)</th>
-                  <th className="py-2 pr-3 font-medium">Duration</th>
-                  <th className="py-2 pr-3 font-medium">Recurrence</th>
-                  <th className="py-2 pr-3 font-medium">Timezone</th>
-                  <th className="py-2 pr-3 font-medium">Priority</th>
-                  <th className="py-2 pr-3 font-medium">Enabled</th>
-                  <th className="py-2 font-medium"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                {screen.schedule.map((row) => (
-                  <tr key={row.id} className={row.enabled ? "" : "opacity-50"}>
-                    <td className="py-2 pr-3 font-medium dark:text-white">
-                      {programNames.get(row.program) ?? "Unknown broadcast"}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {row.start_local.replace("T", " ")}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {formatDuration(row.duration_ms)}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.recurrence}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                      {row.timezone}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.priority}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600 dark:text-gray-300">
-                      {row.enabled ? "Yes" : "No"}
-                    </td>
-                    <td className="py-2">
-                      <div className="flex items-center gap-1 justify-end">
-                        <button
-                          onClick={() => handleEditWindow(row)}
-                          className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800"
-                          title="Edit"
-                        >
-                          <PencilIcon className="w-4 h-4" viewBox="0 0 22 22" />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteWindow(row.id)}
-                          className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800"
-                          title="Delete"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          !showWindowForm && (
-            <p className="text-sm text-gray-400 dark:text-gray-500 text-center py-4">
-              No scheduled broadcasts. Add a window to schedule content.
-            </p>
-          )
-        )}
-      </div>
-
-      <ConfirmationModal
-        isOpen={deleteModal.isOpen}
-        onClose={deleteModal.closeModal}
-        showCloseButton={false}
-        onConfirm={handleDelete}
-        title={`Delete "${screen.name}"`}
-        message={`This action cannot be undone.`}
-        confirmText={deleting ? "Deleting..." : "Delete"}
-        variant="danger"
+      <Confirm
+        open={removing}
+        onOpenChange={setRemoving}
+        title={`Remove ${screen.name}?`}
+        description="The panel stops being addressable. Pairing and grants are Astrolabe's and are not touched here."
+        confirmLabel="Remove"
+        danger
+        onConfirm={() => {
+          void deleteScreen(screen.id)
+            .then(() => navigate({ to: "/screen-list" }))
+            .catch((err: unknown) =>
+              toast.show(
+                "Could not remove",
+                err instanceof Error ? err.message : String(err),
+              ),
+            );
+        }}
       />
+    </Page>
+  );
+}
+
+/** The title is a field like any other, and commits like one. */
+function ScreenName({
+  screen,
+  put,
+}: {
+  screen: SignageScreen;
+  put: (next: SignageScreen) => Promise<void>;
+}) {
+  const name = useCommit<string>({
+    committed: screen.name,
+    write: (next) => put({ ...screen, name: next.trim() || screen.name }),
+  });
+  return (
+    <span style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
+      <input
+        className="ds-title-input"
+        value={name.value}
+        aria-label="Screen name"
+        onChange={(event) => name.set(event.target.value)}
+        onBlur={() => {
+          if (name.state === "pending") name.setNow(name.value);
+        }}
+      />
+      {name.state !== "settled" && (
+        <span className={`ds-commit is-${name.state}`}>
+          {name.state === "refused" ? name.error : "saving"}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * What the panel says it played.
+ *
+ * Empty means the screen has not spoken — which is not the same as it having
+ * played nothing, and the copy says so. Every telemetry table in this industry
+ * is written by the server *about* a player; this one is written by the player,
+ * under its own identity, which is the only version that attests anything.
+ */
+function AsRunList({ screenId }: { screenId: string }) {
+  const revision = useRevision();
+  const [record, setRecord] = useState<SignageAsRun | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void fetchAsRun(screenId)
+      .then((row) => {
+        if (live) setRecord(row);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [screenId, revision]);
+
+  const entries = (record?.entries ?? []).slice(-8).reverse();
+  if (entries.length === 0) {
+    return (
+      <p className="ds-hint">
+        Nothing reported. A panel writes this itself, so an empty list means this
+        screen has not spoken — not that it played nothing.
+      </p>
+    );
+  }
+
+  return (
+    <div className="ds-stack">
+      <p className="ds-hint">
+        Last reported <Ago at={entries[0]?.ended_unix_ms} />
+      </p>
+      {entries.map((entry, index) => (
+        <div className="ds-row-between" key={`${entry.item}-${index}`}>
+          <span style={{ fontSize: "var(--ds-text-sm)" }}>{entry.item}</span>
+          <Ago at={entry.ended_unix_ms} />
+        </div>
+      ))}
     </div>
   );
-};
+}
+
+function ZoneOptions() {
+  const zones =
+    typeof Intl.supportedValuesOf === "function"
+      ? Intl.supportedValuesOf("timeZone")
+      : [];
+  if (zones.length === 0) return null;
+  return (
+    <datalist id="ds-zones">
+      {zones.map((zone) => (
+        <option key={zone} value={zone} />
+      ))}
+    </datalist>
+  );
+}

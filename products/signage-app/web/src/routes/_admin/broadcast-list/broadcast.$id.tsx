@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import BroadcastDetailPage from '@/app/(admin)/(pages)/broadcast-list/broadcast/Broadcast';
 
 function BroadcastDetailRoute() {
-  document.title = 'Broadcast Details';
+  document.title = "Program";
   return (
     <div className="h-full">
       <BroadcastDetailPage />

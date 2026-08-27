@@ -1,0 +1,652 @@
+/*
+ * The two surfaces.
+ *
+ * Nothing here is shared between them beyond tokens and the field controls.
+ * `.pe-desk` is a three-column workspace; `.pe-mobile` is a vertical stack with
+ * a sheet. They are separate rule sets on purpose — the old file expressed both
+ * as one layout plus overrides at 719px, which is why neither could be changed
+ * without reading the other.
+ */
+
+/* ── Fields, shared by both surfaces ───────────────────────────────────── */
+
+.pe-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pe-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--ds-paper-muted);
+}
+
+.pe-field-label small {
+  font-weight: 500;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.pe-field.is-desktop {
+  gap: 5px;
+}
+
+.pe-field.is-desktop .pe-field-label {
+  font-size: 11px;
+}
+
+.pe-field.is-mobile .ds-input {
+  min-height: 44px;
+  font-size: 16px; /* iOS zooms anything smaller on focus. */
+}
+
+.pe-field.is-toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pe-field.is-bad .ds-input {
+  border-color: var(--ds-danger, #e2686c);
+}
+
+.pe-field-error {
+  font-size: 12px;
+  color: var(--ds-danger, #e2686c);
+}
+
+.pe-switch {
+  appearance: none;
+  border: 0;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--ds-line);
+  padding: 3px;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.pe-switch span {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ds-paper);
+  transition: transform 140ms ease;
+}
+
+.pe-switch.is-on {
+  background: var(--ds-accent, #6f8f7a);
+}
+
+.pe-switch.is-on span {
+  transform: translateX(18px);
+}
+
+.pe-stepper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pe-stepper .ds-input {
+  min-width: 0;
+}
+
+.pe-unit {
+  font-size: 12px;
+  color: var(--ds-paper-muted);
+}
+
+.pe-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pe-swatch {
+  appearance: none;
+  border: 1px solid var(--ds-line);
+  border-radius: 10px;
+  height: 46px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.pe-swatch.is-on {
+  outline: 2px solid var(--ds-paper);
+  outline-offset: 2px;
+}
+
+.pe-matrix {
+  display: grid;
+  gap: 6px 8px;
+  align-items: center;
+}
+
+.pe-matrix-head,
+.pe-matrix-row {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--ds-paper-muted);
+}
+
+/* Both doors fit on one line, or the manual one reads as the fallback. */
+.pe-place-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pe-place-actions .ds-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+  gap: 6px;
+  padding-inline: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pe-place-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.pe-place-search {
+  padding: 10px;
+  border: 1px solid var(--ds-line);
+  border-radius: 10px;
+}
+
+/*
+ * The one thing worth saying out loud on both surfaces.
+ *
+ * A wash of the accent is not available for this: `--ds-accent` is a hot
+ * orange-red, so a tinted fill read as a failure — louder than `--ds-danger`,
+ * which is a paler salmon. The note is carried by a rule down its edge instead,
+ * which marks it without claiming something has gone wrong.
+ */
+.pe-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ds-line);
+  border-left: 3px solid var(--ds-accent);
+  background: var(--ds-ink-3, rgb(255 255 255 / 0.04));
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ds-paper-muted);
+}
+
+.pe-scope strong {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ds-paper);
+}
+
+.pe-scope.is-compact {
+  border-radius: 0;
+  border: 0;
+  border-left: 3px solid var(--ds-accent);
+}
+
+/* ── Desktop ───────────────────────────────────────────────────────────── */
+
+.pe-desk {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) 336px;
+}
+
+.pe-desk.has-source {
+  grid-template-columns: 76px 272px minmax(0, 1fr) 336px;
+}
+
+.pe-source-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 6px;
+  border-right: 1px solid var(--ds-line);
+}
+
+.pe-source-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-paper-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 4px;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pe-source-tab:hover {
+  background: var(--ds-ink-2);
+  color: var(--ds-paper);
+}
+
+.pe-source-tab.is-on {
+  background: var(--ds-ink-2);
+  color: var(--ds-paper);
+}
+
+.pe-source-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--ds-line);
+}
+
+.pe-source-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 8px;
+  font-size: 13px;
+}
+
+.pe-source-panel > *:not(header) {
+  overflow: auto;
+  padding: 0 12px 12px;
+  min-height: 0;
+}
+
+.pe-source-upload,
+.pe-source-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pe-centre {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pe-transport {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--ds-line);
+}
+
+.pe-transport > :last-child {
+  justify-self: end;
+}
+
+.pe-inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  border-left: 1px solid var(--ds-line);
+  background: var(--ds-ink-2);
+}
+
+.pe-insp-section {
+  border-bottom: 1px solid var(--ds-line);
+}
+
+.pe-insp-head {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-paper);
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.pe-insp-head > span:first-child {
+  flex: 1;
+  text-align: left;
+}
+
+.pe-insp-chevron {
+  transition: transform 140ms ease;
+}
+
+.pe-insp-section.is-open .pe-insp-chevron {
+  transform: rotate(180deg);
+}
+
+.pe-insp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 14px 16px;
+}
+
+.pe-insp-subject {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * A screen is 16:9, so the panel preview is too — a fixed pixel height let the
+ * list outgrow the box, which squeezed the header to nothing and sliced the
+ * last prayer in half. The point of this box is seeing the whole card.
+ */
+.pe-insp-preview {
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--ds-line);
+}
+
+.pe-insp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ds-line);
+}
+
+.pe-insp-group h4 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ds-paper-muted);
+}
+
+.pe-insp-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────────────── */
+
+.pe-mobile {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.pe-transport.is-mobile {
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px;
+  border-top: 0;
+}
+
+.pe-actionbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 8px 10px max(10px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--ds-line);
+  background: var(--ds-ink-2);
+}
+
+.pe-actionbar::-webkit-scrollbar {
+  display: none;
+}
+
+.pe-action {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-paper);
+  flex: 0 0 auto;
+  min-width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 6px;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pe-action.is-danger {
+  color: var(--ds-danger, #e2686c);
+}
+
+/*
+ * The sheet rises over the timeline and stops short of the stage: the reason
+ * to configure from here is watching the card change while you type.
+ */
+.pe-sheet {
+  position: absolute;
+  inset: auto 0 0 0;
+  max-height: 62%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  z-index: 5;
+  border-top: 1px solid var(--ds-line);
+  border-radius: 16px 16px 0 0;
+  background: var(--ds-ink-2);
+  box-shadow: 0 -18px 40px rgb(0 0 0 / 0.45);
+  padding-bottom: var(--vv-keyboard, 0px);
+}
+
+.pe-sheet.is-short {
+  max-height: 40%;
+}
+
+.pe-sheet-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 12px 8px;
+}
+
+.pe-sheet-head strong {
+  flex: 1;
+  font-size: 15px;
+}
+
+.pe-sheet-grip {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--ds-line);
+}
+
+.pe-sheet-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 4px 12px 10px;
+  border-bottom: 1px solid var(--ds-line);
+}
+
+.pe-sheet-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.pe-sheet-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ds-paper-muted);
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pe-sheet-tab.is-on {
+  background: var(--ds-ink);
+  border-color: var(--ds-line);
+  color: var(--ds-paper);
+}
+
+.pe-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 14px 16px;
+}
+
+.pe-sheet-foot {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 10px 14px max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--ds-line);
+}
+
+/* ── The kind preview, at three sizes ──────────────────────────────────── */
+
+.pe-athan.is-thumb {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  font-size: 11px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.pe-athan.is-panel {
+  height: 100%;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.pe-athan.is-panel header {
+  flex: 0 0 auto;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.pe-athan.is-panel ol {
+  gap: 1px;
+}
+
+.pe-athan.is-panel li {
+  font-size: 11px;
+}
+
+.pe-athan.is-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+  color: var(--ds-paper-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+
+/*
+ * The rebuild renamed the title input and grouped the history buttons, and
+ * neither name had a rule — so the title sat at its intrinsic width and undo
+ * stacked on top of redo in a block container.
+ */
+.pe-title {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  font-size: 17px;
+  padding: var(--ds-space-2) var(--ds-space-1);
+}
+
+.pe-title:focus {
+  outline: none;
+}
+
+.pe-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+/* A duration is three characters, not a paragraph. */
+.pe-stepper .ds-input {
+  width: 100%;
+  max-width: 7rem;
+}
+
+.pe-field.is-mobile .pe-stepper .ds-input {
+  max-width: 9rem;
+}
+
+/*
+ * The stage takes what the transport and the strip leave. A ceiling here
+ * looks tidier in a tall window and leaves a band of dead ground under the
+ * timeline in every other one, so the strip stays anchored to the bottom
+ * instead.
+ */

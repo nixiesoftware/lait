@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import Label from "@/components/form/Label";
 
 // CitySelection is what we hand back to the parent on a successful pick.
 // We expose every field the form might want to fill: callers commonly
@@ -172,10 +171,8 @@ export const CityPicker: React.FC<CityPickerProps> = ({
   }, [currentLatitude, currentLongitude]);
 
   return (
-    <div ref={containerRef} className="relative">
-      <Label htmlFor="city-picker">
-        Location <span className="text-red-500">*</span>
-      </Label>
+    <div ref={containerRef} className="ds-field" style={{ position: "relative" }}>
+      <span>Location *</span>
       <input
         id="city-picker"
         ref={inputRef}
@@ -184,48 +181,32 @@ export const CityPicker: React.FC<CityPickerProps> = ({
         value={query}
         placeholder="Search for a city…"
         onChange={(e) => {
-          // First user-driven change after a pick replaces the displayed
-          // label with their typing — clear the "this is a picked label"
-          // flag so the search effect runs again.
           isShowingPickedLabel.current = false;
           setQuery(e.target.value);
           setOpen(true);
         }}
         onFocus={(e) => {
-          // Highlight the current value on focus so the user's first
-          // keystroke replaces it. If they don't type, the picked city
-          // stays visible — matches typical browser select-on-focus UX.
           if (isShowingPickedLabel.current) e.currentTarget.select();
           if (results.length > 0) setOpen(true);
         }}
-        className="h-11 w-full rounded-md border border-gray-300 bg-transparent px-4 py-2.5 text-sm shadow-theme-xs placeholder:text-gray-400 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30 dark:focus:border-brand-800"
+        className="ds-input"
       />
-      {coordsHint && (
-        <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-          Coordinates: {coordsHint}
-        </p>
-      )}
-      {loading && (
-        <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">Searching…</p>
-      )}
-      {error && (
-        <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{error}</p>
-      )}
+      {coordsHint && <p className="ds-hint">Coordinates: {coordsHint}</p>}
+      {loading && <p className="ds-hint">Searching…</p>}
+      {error && <p className="ds-danger-text">{error}</p>}
       {open && results.length > 0 && (
-        <ul className="absolute z-50 mt-1 max-h-72 w-full overflow-auto rounded-md border border-gray-200 bg-white shadow-lg dark:border-gray-700 dark:bg-gray-900">
+        <ul className="ds-find-pop" style={{ listStyle: "none", margin: 0, padding: 0 }}>
           {results.map((r) => (
-            <li
-              key={r.id}
-              onClick={() => handlePick(r)}
-              className="cursor-pointer px-3 py-2 text-sm hover:bg-brand-50 dark:hover:bg-brand-950/40"
-            >
-              <div className="font-medium text-gray-900 dark:text-white/90">
-                {r.name}
-              </div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">
-                {[r.admin1, r.country].filter(Boolean).join(", ")}
-                {r.timezone ? ` · ${r.timezone}` : ""}
-              </div>
+            <li key={r.id}>
+              <button type="button" className="ds-find-hit" onClick={() => handlePick(r)}>
+                <span className="ds-row-copy">
+                  <strong>{r.name}</strong>
+                  <span>
+                    {[r.admin1, r.country].filter(Boolean).join(", ")}
+                    {r.timezone ? ` · ${r.timezone}` : ""}
+                  </span>
+                </span>
+              </button>
             </li>
           ))}
         </ul>

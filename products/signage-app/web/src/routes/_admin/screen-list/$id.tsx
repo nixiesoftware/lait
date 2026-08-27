@@ -1,9 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { ScreenDetail } from '@/app/(admin)/(pages)/screen-list/[id]/ScreenDetail';
+import ScreenDetail from '@/app/(admin)/(pages)/screen-list/[id]/ScreenDetail';
 
 function ScreenDetailPage() {
   const { id } = Route.useParams();
-  document.title = 'Screen Details | AD2SP';
+  document.title = 'Screen | Signage';
   return <ScreenDetail screenId={id} />;
 }
 

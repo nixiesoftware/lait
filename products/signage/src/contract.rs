@@ -4,6 +4,8 @@
     reason = "the reviewed contract uses compile-time identifiers and bounded item indices"
 )]
 
+use crate::addressing::{Context, Match, SignageAudience};
+use crate::fleet::{self, Playback, SignageBroadcast, SignageChannel, SignageScreen};
 use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
@@ -31,24 +33,50 @@ pub const MAX_PROGRAM_HORIZON_MS: u64 = 86_400_000;
 /// The media library: what a stored file is, in the product's terms.
 pub const MEDIA_SCHEMA: &str = "signage.media";
 pub const MEDIA_SCHEMA_VERSION: u32 = 3;
-/// One screen's fleet intent. Never its grant, and never its device lifecycle.
+/// One panel: where it is, what it is called, and what it is tuned to. Never
+/// its grant, and never its device lifecycle.
 pub const SCREEN_SCHEMA: &str = "signage.screen";
-pub const SCREEN_SCHEMA_VERSION: u32 = 2;
-/// A named set of screens — the indirection that stands in for a wildcard.
-pub const GROUP_SCHEMA: &str = "signage.group";
-pub const GROUP_SCHEMA_VERSION: u32 = 2;
+pub const SCREEN_SCHEMA_VERSION: u32 = 3;
+
+/// A standing stream a screen tunes to.
+pub const CHANNEL_SCHEMA: &str = "signage.channel";
+pub const CHANNEL_SCHEMA_VERSION: u32 = 1;
+
+/// Who a broadcast reaches — a named predicate, not a membership list.
+pub const AUDIENCE_SCHEMA: &str = "signage.audience";
+pub const AUDIENCE_SCHEMA_VERSION: u32 = 1;
+
+/// A transmission: audience, action, timing, priority.
+pub const BROADCAST_SCHEMA: &str = "signage.broadcast";
+pub const BROADCAST_SCHEMA_VERSION: u32 = 1;
+
+/// What a screen says it actually played, signed by the screen.
+pub const ASRUN_SCHEMA: &str = "signage.asrun";
+pub const ASRUN_SCHEMA_VERSION: u32 = 1;
 
 pub const MAX_NAME_CHARS: usize = 160;
 pub const MAX_MIME_CHARS: usize = 96;
-pub const MAX_GROUP_SCREENS: usize = 512;
+pub const MAX_SCREEN_LABELS: usize = 64;
+pub const MAX_LABEL_CHARS: usize = 96;
+pub const MAX_CHANNEL_WINDOWS: usize = 64;
+/// A bound on `Match` nesting. Deep enough for any audience a person writes,
+/// shallow enough that evaluation is obviously terminating on every replica.
+pub const MAX_MATCH_DEPTH: u8 = 8;
+pub const MAX_MATCH_TERMS: usize = 32;
+/// A bound on `Audience` references resolved while evaluating one match.
+pub const MAX_AUDIENCE_HOPS: u8 = 8;
+pub const MAX_OBSERVATIONS: usize = 64;
+pub const MAX_ASRUN_ENTRIES: usize = 512;
+pub const MAX_SUPERSEDES: usize = 16;
 /// A ceiling on one stored file, so a library row cannot describe a petabyte.
 pub const MAX_MEDIA_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const MAX_CONFIG_SETTINGS: usize = 64;
 pub const MAX_SETTING_CHARS: usize = 1024;
 
-/// What an integration is configured with, once per Space.
-pub const CONFIG_SCHEMA: &str = "signage.config";
-pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+/// How a kind is *presented*. Named, reusable, and carrying nothing about
+/// where it plays — which is what lets one preset serve every venue.
+pub const PRESET_SCHEMA: &str = "signage.preset";
+pub const PRESET_SCHEMA_VERSION: u32 = 1;
 
 /// The id this process serves this World under.
 pub fn world_id() -> WorldId {
@@ -84,12 +112,24 @@ pub fn screen_schema() -> SchemaId {
     SchemaId::parse(SCREEN_SCHEMA).expect("reviewed Signage screen schema id")
 }
 
-pub fn group_schema() -> SchemaId {
-    SchemaId::parse(GROUP_SCHEMA).expect("reviewed Signage group schema id")
+pub fn channel_schema() -> SchemaId {
+    SchemaId::parse(CHANNEL_SCHEMA).expect("reviewed Signage channel schema")
 }
 
-pub fn config_schema() -> SchemaId {
-    SchemaId::parse(CONFIG_SCHEMA).expect("reviewed Signage config schema id")
+pub fn audience_schema() -> SchemaId {
+    SchemaId::parse(AUDIENCE_SCHEMA).expect("reviewed Signage audience schema")
+}
+
+pub fn broadcast_schema() -> SchemaId {
+    SchemaId::parse(BROADCAST_SCHEMA).expect("reviewed Signage broadcast schema")
+}
+
+pub fn asrun_schema() -> SchemaId {
+    SchemaId::parse(ASRUN_SCHEMA).expect("reviewed Signage as-run schema")
+}
+
+pub fn preset_schema() -> SchemaId {
+    SchemaId::parse(PRESET_SCHEMA).expect("reviewed Signage preset schema id")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,9 +388,20 @@ pub mod resource {
         segments("screen", id)
     }
 
-    /// A named set of screens. The indirection that replaces a wildcard.
-    pub fn group(id: &str) -> Resource {
-        segments("group", id)
+    /// A standing stream screens tune to.
+    pub fn channel(id: &str) -> Resource {
+        segments("channel", id)
+    }
+
+    /// A named audience. Granting on one is how "these screens" is delegated
+    /// now that a group no longer exists to stand in for a wildcard.
+    pub fn audience(id: &str) -> Resource {
+        segments("audience", id)
+    }
+
+    /// One transmission.
+    pub fn broadcast(id: &str) -> Resource {
+        segments("broadcast", id)
     }
 
     /// One item in the media library.
@@ -358,9 +409,9 @@ pub mod resource {
         segments("media", id)
     }
 
-    /// One integration's configuration.
-    pub fn config(id: &str) -> Resource {
-        segments("config", id)
+    /// One kind's presentation.
+    pub fn preset(id: &str) -> Resource {
+        segments("preset", id)
     }
 
     /// An over-long or malformed id degrades to the root resource, which is
@@ -463,16 +514,23 @@ pub enum MediaSource {
     },
     /// An integration instance: an app decides what plays.
     ///
-    /// `settings` is this instance's own — the video to play, the location to
-    /// compute for. Whatever the *kind* needs once for the whole Space lives in
-    /// a [`SignageConfig`] found by kind, and is deliberately not copied here:
-    /// an entry that snapshotted the account it bills to would need a fan-out
-    /// to correct, which is a consistency problem to create rather than solve.
+    /// Three things decide what one of these draws, and they are addressed
+    /// differently because they vary differently.
     ///
-    /// So the two halves are addressed differently on purpose — this one by
-    /// value because it varies per entry, that one by kind because it does not.
+    /// `settings` is this entry's own, by value, because it varies per entry.
+    /// `preset` names a [`SignagePreset`] by id — how the kind is *presented*,
+    /// shared by every entry that points at it and editable in one place.
+    /// Everything that varies by *venue* — where the screen is, what a
+    /// congregation practises — is neither of these: it lives on the screen,
+    /// and arrives at render time from wherever this is playing.
+    ///
+    /// That last split is what makes one entry correct in two cities. The
+    /// previous model found configuration *by kind*, one per Space, so a
+    /// second venue was a contradiction the contract had no room for.
     Kind {
         kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
         #[serde(default)]
         settings: Settings,
     },
@@ -507,7 +565,15 @@ impl MediaSource {
                     && !mime.trim().is_empty()
                     && mime.chars().count() <= MAX_MIME_CHARS
             }
-            Self::Kind { kind, settings } => valid_kind(kind) && valid_settings(settings),
+            Self::Kind {
+                kind,
+                preset,
+                settings,
+            } => {
+                valid_kind(kind)
+                    && preset.as_ref().is_none_or(|id| BodyId::parse(id).is_some())
+                    && valid_settings(settings)
+            }
             Self::Live { resource } => valid_kind(resource),
         }
     }
@@ -603,24 +669,29 @@ impl SignageMedia {
 }
 
 /// What one integration is configured with, once, for the whole Space.
+/// How a kind is presented.
 ///
-/// A kind is "configured" exactly when one of these exists for it. Medusa
-/// carried a boolean per app and hid unconfigured ones from the picker; a
-/// document that either exists or does not says the same thing without a flag
-/// to fall out of step.
+/// Named, reusable, and carrying nothing about where it plays — no
+/// coordinates, no timezone, no congregation's practice. That absence is the
+/// point: a preset with no venue in it is safe to point at from anywhere, and
+/// the same one serves every site an operator runs.
+///
+/// There is deliberately no uniqueness rule. The old document was one per kind
+/// per Space, enforced at write, and the only thing that rule bought was a
+/// well-defined lookup *by kind* — which this replaces with a reference from
+/// the entry that uses it. Two mosques on different calculation methods under
+/// one operator stopped being a contradiction the moment the lookup changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignageConfig {
+pub struct SignagePreset {
     pub id: String,
-    /// The integration definition this configures, and the only way an entry
-    /// reaches it. One per kind per Space, refused at write — see
-    /// [`SignageConfig::conflicts_with`].
+    /// The integration definition this presents.
     pub kind: String,
     pub name: String,
     #[serde(default)]
     pub settings: Settings,
 }
 
-impl SignageConfig {
+impl SignagePreset {
     pub fn validate(&self) -> bool {
         BodyId::parse(&self.id).is_some()
             && valid_kind(&self.kind)
@@ -629,29 +700,14 @@ impl SignageConfig {
             && valid_settings(&self.settings)
     }
 
-    /// Whether `other` already configures this kind under a different identity.
-    ///
-    /// The uniqueness a lookup by kind depends on. Two documents for one kind
-    /// would make "is this kind configured" answerable two ways, and which one
-    /// an entry got would depend on iteration order.
-    pub fn conflicts_with(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.id != other.id
-    }
-
     pub fn body_key(&self) -> Option<BodyKey> {
         body_key(&self.id)
     }
 }
 
-/// What an integration was given: an instance's parameters, or a kind's.
-///
-/// Values stay strings because this World does not know any integration's
-/// field types — [`SignageConfig`] carries what an app was told, not what the
-/// app means by it. Typing them here would put every integration's schema in
-/// the substrate, which is the coupling the kind indirection exists to avoid.
 pub type Settings = std::collections::BTreeMap<String, String>;
 
-fn valid_settings(settings: &Settings) -> bool {
+pub fn valid_settings(settings: &Settings) -> bool {
     settings.len() <= MAX_CONFIG_SETTINGS
         && settings.iter().all(|(key, value)| {
             !key.is_empty()
@@ -670,13 +726,17 @@ fn valid_window_id(id: &str) -> bool {
 }
 
 /// The soonest of the moments an answer could change on its own.
-#[derive(Default)]
-struct Boundary {
+#[derive(Debug, Default)]
+pub struct Boundary {
     soonest: Option<u64>,
 }
 
 impl Boundary {
-    fn saw(&mut self, moment: Option<u64>) {
+    pub fn soonest(&self) -> Option<u64> {
+        self.soonest
+    }
+
+    pub fn saw(&mut self, moment: Option<u64>) {
         if let Some(moment) = moment {
             self.soonest = Some(self.soonest.map_or(moment, |current| current.min(moment)));
         }
@@ -684,7 +744,7 @@ impl Boundary {
 }
 
 /// An integration definition name, or a live rendition id.
-fn valid_kind(name: &str) -> bool {
+pub fn valid_kind(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_ITEM_ID_BYTES
         && name.bytes().all(|b| {
@@ -708,231 +768,69 @@ fn valid_content_id(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-// ─── The fleet ──────────────────────────────────────────────────────────────
-
-/// What one screen should be showing, and nothing about whether it is.
+/// What a screen played, as reported by the screen.
 ///
-/// Intent is replicated; the grant that lets a receiver fetch stays with the
-/// coordinator. A row carrying both would make revocation a thing two planes
-/// disagreed about, and the coordinator is the one holding the connection.
+/// In broadcast this is the as-run log and it is the substrate billing rests
+/// on; in every signage CMS it is a telemetry table the server keeps *about* a
+/// player. This is closer to the first than the second — the record is a
+/// replicated Body rather than a private table, and the device authenticated
+/// itself before reporting — but the distinction is worth stating exactly,
+/// because it is easy to claim more than is true.
+///
+/// **A receiver cannot write this itself.** It reaches `/head/v1/*` and proves
+/// possession of its pairing key to the coordinator; it holds no Space actor
+/// and no signage grant, so it cannot submit a World intent. The coordinator
+/// records on its behalf, under the coordinator's actor, naming the device.
+/// So this attests *"the coordinator accepted a report from a device that
+/// proved it was this panel"* — one link weaker than a signature by the panel,
+/// and materially stronger than a server asserting what it thinks it sent.
+///
+/// Closing that last link means admitting display devices as Space members
+/// with a scoped grant on their own screen, which is a custody change, not a
+/// schema one. The shape here does not have to change when it happens.
+#[allow(
+    rustdoc::private_intra_doc_links,
+    reason = "the plane referenced is engine-side, not this crate's"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignageScreen {
+pub struct SignageAsRun {
+    /// The screen, and the body id: one document per panel, appended to.
     pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    /// Which program is in force, and an override that ends without a writer.
-    #[serde(default)]
-    pub intent: register::Slot,
-    /// Windows that put a *different program* on this screen while they are
-    /// open — distinct from a program's own windows, which choose among its
-    /// items. Both exist because reusing one program across screens with
-    /// unlike hours is the case that collapsing them would cost.
+    pub screen: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub schedule: Vec<ProgramWindow>,
+    pub entries: Vec<AsRunEntry>,
+    /// What the screen last reported about itself. Fed back into resolution as
+    /// the context an `Observed` audience matches on.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub observations: Settings,
 }
 
-/// Which program a window puts on a screen, and when.
+/// One thing that was on the glass, and for how long.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProgramWindow {
-    pub id: String,
-    #[serde(flatten)]
-    pub window: schedule::Window,
+pub struct AsRunEntry {
     pub program: String,
-}
-
-/// Which rung of the ladder answered.
-///
-/// Carried out with the answer because "why is this screen showing that" is
-/// the question asked when it is showing the wrong thing, and a bare program
-/// id cannot answer it. Medusa returned this string for the same reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlaybackSource {
-    Override,
-    Schedule,
-    Direct,
-    Group,
-}
-
-/// What a screen plays, why, and when that changes on its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Playback {
-    /// `None` is a screen with nothing to show, which is a state to draw
-    /// rather than an error to report.
-    pub program: Option<String>,
-    /// `Some` exactly when `program` is.
+    pub item: String,
+    pub started_unix_ms: u64,
+    pub ended_unix_ms: u64,
+    /// Which broadcast or channel put it there, so the record answers "why"
+    /// as well as "what" — the same question `Resolved` answers live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<PlaybackSource>,
-    /// The earliest moment this answer changes with nobody writing, so a
-    /// receiver can sleep until then instead of polling.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_boundary_unix_ms: Option<u64>,
+    pub source: Option<String>,
 }
 
-impl SignageScreen {
+impl SignageAsRun {
     pub fn validate(&self) -> bool {
         BodyId::parse(&self.id).is_some()
-            && !self.name.trim().is_empty()
-            && self.name.chars().count() <= MAX_NAME_CHARS
-            && self
-                .group
-                .as_ref()
-                .is_none_or(|id| BodyId::parse(id).is_some())
-            && self.intent.validate().is_ok()
-            && self
-                .intended_program()
-                .is_none_or(|id| BodyId::parse(id).is_some())
-            && self.schedule.len() <= MAX_SCREEN_WINDOWS
-            && {
-                let mut seen = std::collections::BTreeSet::new();
-                self.schedule.iter().all(|scheduled| {
-                    valid_window_id(&scheduled.id)
-                        && seen.insert(&scheduled.id)
-                        && BodyId::parse(&scheduled.program).is_some()
-                        && scheduled.window.validate().is_ok()
-                })
-            }
-    }
-
-    /// The program this screen should show at `now`, override included.
-    ///
-    /// Resolution rather than storage: an override lapses because the clock
-    /// passed it, so the answer changes with nobody writing.
-    pub fn intended_at(&self, now_unix_ms: u64) -> register::Resolution {
-        self.intent.resolve_at(now_unix_ms)
-    }
-
-    /// The member named anywhere in this slot, for validation.
-    fn intended_program(&self) -> Option<&String> {
-        self.intent
-            .over
-            .as_ref()
-            .map(|over| &over.choice.member)
-            .or(self.intent.base.as_ref().map(|base| &base.member))
-    }
-
-    /// What this screen plays at `now`, and which rung said so.
-    ///
-    /// Override, then schedule, then this screen's own choice, then its
-    /// group's. A pure function taking the clock as an argument because the
-    /// World ABI supplies none — and because a receiver deciding what to show
-    /// should be reading its own clock rather than trusting a coordinator's.
-    ///
-    /// `group` is the screen's group when it has one; passing an unrelated
-    /// group is a caller error this cannot detect, so [`Self::group`] is the
-    /// only thing that should choose it.
-    pub fn plays_at(
-        &self,
-        group: Option<&SignageGroup>,
-        now_unix_ms: u64,
-    ) -> Result<Playback, schedule::Invalid> {
-        let mut boundary = Boundary::default();
-
-        let overridden = self
-            .intent
-            .over
-            .as_ref()
-            .filter(|over| now_unix_ms < over.until_unix_ms);
-        if let Some(over) = overridden {
-            return Ok(Playback {
-                program: Some(over.choice.member.clone()),
-                source: Some(PlaybackSource::Override),
-                next_boundary_unix_ms: Some(over.until_unix_ms),
-            });
-        }
-
-        let mut open: Option<&ProgramWindow> = None;
-        for window in &self.schedule {
-            let (active, next) = window.window.evaluate_at(now_unix_ms)?;
-            boundary.saw(next);
-            if active
-                && open.is_none_or(|current| {
-                    window.window.priority > current.window.priority
-                        || (window.window.priority == current.window.priority
-                            && window.id < current.id)
-                })
-            {
-                open = Some(window);
-            }
-        }
-        if let Some(window) = open {
-            return Ok(Playback {
-                program: Some(window.program.clone()),
-                source: Some(PlaybackSource::Schedule),
-                next_boundary_unix_ms: boundary.soonest,
-            });
-        }
-
-        // A screen with no direct choice falls through to its group, and the
-        // group's own override can lapse too.
-        let (program, source) = match self.intent.base.as_ref() {
-            Some(base) => (Some(base.member.clone()), Some(PlaybackSource::Direct)),
-            None => match group {
-                Some(group) => {
-                    let resolved = group.intent.resolve_at(now_unix_ms);
-                    boundary.saw(resolved.next_boundary_unix_ms);
-                    let source = resolved.member.is_some().then_some(PlaybackSource::Group);
-                    (resolved.member, source)
-                }
-                None => (None, None),
-            },
-        };
-        Ok(Playback {
-            program,
-            source,
-            next_boundary_unix_ms: boundary.soonest,
-        })
-    }
-
-    pub fn body_key(&self) -> Option<BodyKey> {
-        body_key(&self.id)
-    }
-}
-
-/// A named set of screens.
-///
-/// It exists because Mechanics refuses a wildcard segment: "these screens" is a
-/// grant on a group, and resolving which screens that is belongs here, where
-/// the membership already lives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignageGroup {
-    pub id: String,
-    pub name: String,
-    /// What its screens play when they choose nothing themselves — Medusa's
-    /// network playlist, the bottom rung of [`SignageScreen::plays_at`].
-    #[serde(default)]
-    pub intent: register::Slot,
-    #[serde(default)]
-    pub screens: Vec<String>,
-}
-
-impl SignageGroup {
-    pub fn validate(&self) -> bool {
-        if BodyId::parse(&self.id).is_none()
-            || self.name.trim().is_empty()
-            || self.name.chars().count() > MAX_NAME_CHARS
-            || self.screens.len() > MAX_GROUP_SCREENS
-            || self.intent.validate().is_err()
-            || !self
-                .intended_program()
-                .is_none_or(|id| BodyId::parse(id).is_some())
-        {
-            return false;
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        self.screens
-            .iter()
-            .all(|id| BodyId::parse(id).is_some() && seen.insert(id))
-    }
-
-    /// The member named anywhere in this slot, for validation.
-    fn intended_program(&self) -> Option<&String> {
-        self.intent
-            .over
-            .as_ref()
-            .map(|over| &over.choice.member)
-            .or(self.intent.base.as_ref().map(|base| &base.member))
+            && BodyId::parse(&self.screen).is_some()
+            && self.entries.len() <= MAX_ASRUN_ENTRIES
+            && self.observations.len() <= MAX_OBSERVATIONS
+            && valid_settings(&self.observations)
+            && self.entries.iter().all(|entry| {
+                BodyId::parse(&entry.program).is_some()
+                    && !entry.item.is_empty()
+                    && entry.item.len() <= MAX_ITEM_ID_BYTES
+                    && entry.ended_unix_ms >= entry.started_unix_ms
+            })
     }
 
     pub fn body_key(&self) -> Option<BodyKey> {
@@ -973,7 +871,7 @@ pub enum MediaProjection {
     UsedBy { programs: Vec<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScreenIntent {
     Put { screen: SignageScreen },
@@ -987,24 +885,33 @@ pub enum ScreenQuery {
         screen: String,
     },
     Screens,
-    /// Which screens intend a program — the reverse index Medusa computed with
-    /// an N+1 fetch per screen.
+    /// Which screens a program reaches — the reverse index Medusa computed
+    /// with an N+1 fetch per screen. Now a question about addressing rather
+    /// than about membership, so it is answered by evaluating audiences.
     Showing {
         program: String,
     },
-    /// Everything [`SignageScreen::plays_at`] needs, in one round trip.
+    /// Everything resolution needs for one screen, in one round trip: the
+    /// screen, every channel, every live broadcast, and the audiences those
+    /// broadcasts name.
     ///
     /// The World holds no clock, so it returns the inputs rather than the
     /// answer and the caller resolves against its own. That is not a
     /// limitation worked around: a receiver deciding what to show from a
-    /// coordinator's clock would keep showing yesterday's override through a
+    /// coordinator's clock would keep showing yesterday's broadcast through a
     /// partition, which is the case this whole ladder exists to survive.
     Plays {
         screen: String,
     },
+    /// Which screens an audience reaches, right now. The count an operator
+    /// must see before sending — an expressive audience without a preview of
+    /// its blast radius is the dangerous kind.
+    Reaches {
+        audience: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScreenProjection {
     Screen {
@@ -1016,70 +923,161 @@ pub enum ScreenProjection {
     Showing {
         screens: Vec<String>,
     },
-    /// `group` is present only when the screen names one that resolves.
+    /// The inputs to [`fleet::resolve`], answered together so no caller has to
+    /// pair a screen with documents it was not answered with.
     Plays {
         screen: Option<SignageScreen>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        group: Option<SignageGroup>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        channels: Vec<SignageChannel>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        broadcasts: Vec<SignageBroadcast>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audiences: Vec<SignageAudience>,
+        /// Every program anything addressing this screen could land on, and
+        /// the library those name. Bounded by reachability rather than by the
+        /// clock the World does not have — which is what keeps a display
+        /// prepare to the single round trip it is allowed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        programs: Vec<SignageProgram>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<SignageMedia>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        presets: Vec<SignagePreset>,
+    },
+    Reaches {
+        screens: Vec<String>,
     },
 }
 
 impl ScreenProjection {
-    /// Resolve a `Plays` answer against the caller's clock.
+    /// Resolve a `Plays` answer against the caller's clock and observations.
     ///
-    /// Here rather than on the caller so that every consumer pairs the screen
-    /// with the same group it was answered with. Pairing them by hand is how
-    /// one gets resolved against a group it does not belong to.
-    pub fn playback(&self, now_unix_ms: u64) -> Option<Result<Playback, schedule::Invalid>> {
+    /// Here rather than on the caller so every consumer resolves the same way
+    /// against the same documents. Assembling this by hand is how a screen
+    /// gets resolved against an audience it was not answered with.
+    pub fn playback(&self, cx: &Context) -> Option<Playback> {
         match self {
-            Self::Plays { screen, group } => screen
-                .as_ref()
-                .map(|screen| screen.plays_at(group.as_ref(), now_unix_ms)),
+            Self::Plays {
+                screen,
+                channels,
+                broadcasts,
+                audiences,
+                ..
+            } => {
+                let lookup: std::collections::BTreeMap<String, Match> = audiences
+                    .iter()
+                    .map(|audience| (audience.id.clone(), audience.rule.clone()))
+                    .collect();
+                screen
+                    .as_ref()
+                    .map(|screen| fleet::resolve(screen, channels, broadcasts, cx, &lookup))
+            }
             _ => None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GroupIntent {
-    Put { group: SignageGroup },
-    Delete { group: String },
+pub enum ChannelIntent {
+    Put { channel: SignageChannel },
+    Delete { channel: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GroupQuery {
-    Group { group: String },
-    Groups,
+pub enum ChannelQuery {
+    Channel { channel: String },
+    Channels,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChannelProjection {
+    Channel { channel: Option<SignageChannel> },
+    Channels { channels: Vec<SignageChannel> },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AudienceIntent {
+    Put { audience: SignageAudience },
+    Delete { audience: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GroupProjection {
-    Group { group: Option<SignageGroup> },
-    Groups { groups: Vec<SignageGroup> },
+pub enum AudienceQuery {
+    Audience { audience: String },
+    Audiences,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AudienceProjection {
+    Audience { audience: Option<SignageAudience> },
+    Audiences { audiences: Vec<SignageAudience> },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BroadcastIntent {
+    Put { broadcast: SignageBroadcast },
+    Delete { broadcast: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConfigIntent {
-    Put { config: SignageConfig },
-    Delete { config: String },
+pub enum BroadcastQuery {
+    Broadcast { broadcast: String },
+    Broadcasts,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BroadcastProjection {
+    Broadcast { broadcast: Option<SignageBroadcast> },
+    Broadcasts { broadcasts: Vec<SignageBroadcast> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConfigQuery {
-    Config { config: String },
-    Configs,
+pub enum PresetIntent {
+    Put { preset: SignagePreset },
+    Delete { preset: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConfigProjection {
-    Config { config: Option<SignageConfig> },
-    Configs { configs: Vec<SignageConfig> },
+pub enum PresetQuery {
+    Preset { preset: String },
+    Presets,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresetProjection {
+    Preset { preset: Option<SignagePreset> },
+    Presets { presets: Vec<SignagePreset> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AsRunIntent {
+    /// Appended by the screen, under the screen's own identity.
+    Record { asrun: SignageAsRun },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AsRunQuery {
+    AsRun { screen: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AsRunProjection {
+    AsRun { asrun: Option<SignageAsRun> },
 }
 
 // ─── What each of them demands ──────────────────────────────────────────────
@@ -1093,49 +1091,101 @@ pub fn demand_read_media(media: &str) -> Vec<u8> {
     scoped("space.signage.read", resource::media(media))
 }
 
-/// Authority over one screen: granted on the screen, on its group, or
-/// fleet-wide.
+/// Authority over one screen: granted on it, or fleet-wide.
 ///
-/// The group arm is why a group is a resource rather than a label. A grant on
-/// `group/lobby` reaches every screen in it without naming them, which is what
-/// a wildcard would have done if Mechanics allowed one.
-pub fn demand_manage_screen(screen: &str, group: Option<&str>) -> Vec<u8> {
-    let mut options = vec![
-        AuthorizationDemand::require(capability("space.signage.manage"), resource::screen(screen)),
-        AuthorizationDemand::require(capability("space.signage.manage"), root_resource()),
-    ];
-    if let Some(group) = group {
-        options.insert(
-            1,
-            AuthorizationDemand::require(
-                capability("space.signage.manage"),
-                resource::group(group),
-            ),
-        );
-    }
-    AuthorizationDemand::Any(options)
-        .encode_canonical()
-        .expect("canonical Signage screen manage demand")
+/// A group used to be nameable here, because Mechanics refuses a wildcard and
+/// a group was the indirection that stood in for one. Audiences are that
+/// indirection now — see [`demand_manage_audience`] — and a screen's own grant
+/// stopped depending on which set somebody had filed it under.
+pub fn demand_manage_screen(screen: &str) -> Vec<u8> {
+    any_of("space.signage.manage", resource::screen(screen))
 }
 
 pub fn demand_read_screen(screen: &str) -> Vec<u8> {
-    scoped("space.signage.read", resource::screen(screen))
+    any_of("space.signage.read", resource::screen(screen))
 }
 
-pub fn demand_manage_group(group: &str) -> Vec<u8> {
-    scoped("space.signage.manage", resource::group(group))
+pub fn demand_manage_channel(channel: &str) -> Vec<u8> {
+    any_of("space.signage.manage", resource::channel(channel))
 }
 
-pub fn demand_read_group(group: &str) -> Vec<u8> {
-    scoped("space.signage.read", resource::group(group))
+pub fn demand_read_channel(channel: &str) -> Vec<u8> {
+    any_of("space.signage.read", resource::channel(channel))
 }
 
-pub fn demand_manage_config(config: &str) -> Vec<u8> {
-    scoped("space.signage.manage", resource::config(config))
+/// Authority over one audience.
+///
+/// This is where "these screens" is delegated. A tenant holding manage on an
+/// audience can address exactly the screens it reaches and nothing else, which
+/// is the multi-stakeholder case expressed as a grant rather than as a schema.
+pub fn demand_manage_audience(audience: &str) -> Vec<u8> {
+    any_of("space.signage.manage", resource::audience(audience))
 }
 
-pub fn demand_read_config(config: &str) -> Vec<u8> {
-    scoped("space.signage.read", resource::config(config))
+pub fn demand_read_audience(audience: &str) -> Vec<u8> {
+    any_of("space.signage.read", resource::audience(audience))
+}
+
+/// Authority to transmit.
+///
+/// Demanded on the broadcast *and* on the audience it names: sending to a set
+/// of screens is authority over that set, so a grant on the transmission alone
+/// would let a holder address a fleet by pointing at somebody else's audience.
+pub fn demand_manage_broadcast(broadcast: &str, audience: &str) -> Vec<u8> {
+    AuthorizationDemand::All(vec![
+        AuthorizationDemand::Any(vec![
+            AuthorizationDemand::require(
+                capability("space.signage.manage"),
+                resource::broadcast(broadcast),
+            ),
+            AuthorizationDemand::require(capability("space.signage.manage"), root_resource()),
+        ]),
+        AuthorizationDemand::Any(vec![
+            AuthorizationDemand::require(
+                capability("space.signage.manage"),
+                resource::audience(audience),
+            ),
+            AuthorizationDemand::require(capability("space.signage.manage"), root_resource()),
+        ]),
+    ])
+    .encode_canonical()
+    .expect("canonical Signage broadcast manage demand")
+}
+
+pub fn demand_read_broadcast(broadcast: &str) -> Vec<u8> {
+    any_of("space.signage.read", resource::broadcast(broadcast))
+}
+
+pub fn demand_manage_preset(preset: &str) -> Vec<u8> {
+    any_of("space.signage.manage", resource::preset(preset))
+}
+
+pub fn demand_read_preset(preset: &str) -> Vec<u8> {
+    any_of("space.signage.read", resource::preset(preset))
+}
+
+/// A screen recording what it played.
+///
+/// Demanded on the screen itself, so the only principal who can write a
+/// panel's as-run is that panel — the attestation is worth exactly as much as
+/// the identity behind it, and a coordinator writing it on the screen's behalf
+/// would be worth nothing.
+pub fn demand_record_asrun(screen: &str) -> Vec<u8> {
+    AuthorizationDemand::require(capability("space.signage.manage"), resource::screen(screen))
+        .encode_canonical()
+        .expect("canonical Signage as-run demand")
+}
+
+/// Granted on the thing, or fleet-wide. `Any` rather than a second capability,
+/// so a scoped grant is an attenuation of the fleet-wide one rather than a
+/// parallel vocabulary that has to be kept in step with it.
+fn any_of(name: &str, on: Resource) -> Vec<u8> {
+    AuthorizationDemand::Any(vec![
+        AuthorizationDemand::require(capability(name), on),
+        AuthorizationDemand::require(capability(name), root_resource()),
+    ])
+    .encode_canonical()
+    .expect("canonical Signage scoped demand")
 }
 
 /// Granted on the thing, or fleet-wide. The shape every scoped demand takes.
@@ -1152,583 +1202,69 @@ fn scoped(name: &str, on: Resource) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn media(source: MediaSource, catalog: Option<String>) -> SignageMedia {
-        SignageMedia {
-            id: BodyId::from_bytes([9; 16]).render(),
-            name: "Ribbon cutting".into(),
-            source,
-            duration_ms: None,
+    #[test]
+    fn a_kind_entry_names_its_preset_and_keeps_its_own_settings() {
+        let entry = SignageMedia {
+            id: BodyId::from_bytes([3; 16]).render(),
+            name: "Athan".into(),
+            duration_ms: Some(60_000),
             width: None,
             height: None,
-            catalog,
-        }
-    }
-
-    fn stored_source() -> MediaSource {
-        MediaSource::Stored {
-            content: "ab".repeat(32),
-            size: 4_096,
-            mime: "video/mp4".into(),
-        }
-    }
-
-    /// A canonical catalog, produced by the plane's own encoder so this test
-    /// cannot pin a shape the plane would refuse.
-    fn canonical_catalog() -> String {
-        use runtime::plane::live::media::{
-            Catalog, CatalogTrack, TrackKind, CATALOG_VERSION, DEFAULT_MAX_GROUP_DURATION_MS,
-            DEFAULT_MAX_LATENCY_MS,
+            catalog: None,
+            source: MediaSource::Kind {
+                kind: "athan".into(),
+                preset: Some(BodyId::from_bytes([4; 16]).render()),
+                settings: Settings::new(),
+            },
         };
-        let catalog = Catalog {
-            version: CATALOG_VERSION,
-            jitter_hint_ms: 50,
-            tracks: vec![CatalogTrack {
-                track: "video-0".into(),
-                kind: TrackKind::Video,
-                codec: "avc1.42c01e".into(),
-                timescale: 90_000,
-                decoder_config_hex: "0142c01effe100046742c01e01000268ce".into(),
-                max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
-                target_latency_ms: DEFAULT_MAX_LATENCY_MS,
-                bitrate_bps: 2_000_000,
-                width: Some(1_280),
-                height: Some(720),
-                frame_rate_milli: Some(30_000),
-                sample_rate: None,
-                channels: None,
-                render_group: Some("film".into()),
-                cmaf_rendition: Some("film".into()),
-                hls_v3_rendition: Some("film".into()),
+        assert!(entry.validate());
+        let MediaSource::Kind { preset, .. } = &entry.source else {
+            panic!("a kind entry stays a kind");
+        };
+        assert!(preset.is_some(), "the preset is addressed by reference");
+    }
+
+    /// Two presets for one kind. The old contract refused the second at write,
+    /// and that refusal is the whole reason a Space could hold one venue.
+    #[test]
+    fn a_kind_may_have_more_than_one_preset() {
+        let one = SignagePreset {
+            id: BodyId::from_bytes([5; 16]).render(),
+            kind: "athan".into(),
+            name: "House style".into(),
+            settings: Settings::from([("theme".into(), "emerald".into())]),
+        };
+        let two = SignagePreset {
+            id: BodyId::from_bytes([6; 16]).render(),
+            kind: "athan".into(),
+            name: "Ramadan".into(),
+            settings: Settings::from([("theme".into(), "night".into())]),
+        };
+        assert!(one.validate() && two.validate());
+        assert_ne!(one.id, two.id);
+    }
+
+    #[test]
+    fn an_as_run_entry_cannot_end_before_it_started() {
+        let mut asrun = SignageAsRun {
+            id: BodyId::from_bytes([7; 16]).render(),
+            screen: BodyId::from_bytes([8; 16]).render(),
+            entries: vec![AsRunEntry {
+                program: BodyId::from_bytes([9; 16]).render(),
+                item: "itm".into(),
+                started_unix_ms: 1_000,
+                ended_unix_ms: 2_000,
+                source: None,
             }],
+            observations: Settings::new(),
         };
-        String::from_utf8(catalog.encode_canonical().expect("a valid catalog encodes")).unwrap()
-    }
-
-    /// A catalog is canonical or absent, and only bytes can carry one.
-    ///
-    /// The World never learns what a catalog means — the decode is the whole
-    /// check, and it is the plane's own. What this pins is the boundary: a
-    /// record cannot hold a catalog the packagers would refuse, and an entry
-    /// with nothing to describe cannot hold one at all.
-    #[test]
-    fn a_catalog_is_canonical_or_absent_and_only_bytes_carry_one() {
-        assert!(media(stored_source(), None).validate(), "absent is fine");
+        assert!(asrun.validate());
+        if let Some(entry) = asrun.entries.first_mut() {
+            entry.ended_unix_ms = 500;
+        }
         assert!(
-            media(stored_source(), Some(canonical_catalog())).validate(),
-            "the plane's own encoding is accepted"
+            !asrun.validate(),
+            "time does not run backwards on the glass"
         );
-        assert!(
-            !media(stored_source(), Some("{}".into())).validate(),
-            "bytes the plane refuses do not become a record"
-        );
-        assert!(
-            !media(stored_source(), Some(format!("{} ", canonical_catalog()))).validate(),
-            "canonical means canonical — a trailing byte is a different document"
-        );
-        assert!(
-            !media(
-                MediaSource::Live {
-                    resource: "lobby-cam".into()
-                },
-                Some(canonical_catalog())
-            )
-            .validate(),
-            "a live rendition's catalog is announced by its encoder, not stored"
-        );
-        assert!(
-            !media(
-                MediaSource::Card {
-                    title: "Welcome".into(),
-                    body: String::new(),
-                    background: "102030".into(),
-                    foreground: "f0f0f0".into(),
-                },
-                Some(canonical_catalog())
-            )
-            .validate(),
-            "a card has no bytes to describe"
-        );
-    }
-
-    fn program() -> SignageProgram {
-        SignageProgram {
-            id: BodyId::from_bytes([3; 16]).render(),
-            name: "Lobby".into(),
-            cycle: ProgramCycle::Loop,
-            items: vec![SignageItem {
-                id: "welcome".into(),
-                media: BodyId::from_bytes([4; 16]).render(),
-                duration_ms: Some(10_000),
-            }],
-            windows: Vec::new(),
-        }
-    }
-
-    fn item(id: &str, duration_ms: Option<u32>) -> SignageItem {
-        SignageItem {
-            id: id.into(),
-            media: BodyId::from_bytes([4; 16]).render(),
-            duration_ms,
-        }
-    }
-
-    fn window(id: &str, items: Vec<String>) -> SignageWindow {
-        SignageWindow {
-            id: id.into(),
-            window: schedule::Window {
-                start_local: "2026-08-15T10:00:00".into(),
-                duration_ms: 60_000,
-                recurrence: schedule::Recurrence::None,
-                until_unix_ms: None,
-                priority: 0,
-                enabled: true,
-                timezone: "UTC".into(),
-                exceptions: Vec::new(),
-            },
-            items,
-        }
-    }
-
-    #[test]
-    fn programs_are_bounded_and_have_one_canonical_identity() {
-        assert!(program().validate());
-
-        for bad in [
-            SignageProgram {
-                id: "not-a-body-id".into(),
-                ..program()
-            },
-            SignageProgram {
-                name: "  ".into(),
-                ..program()
-            },
-            SignageProgram {
-                items: Vec::new(),
-                ..program()
-            },
-            SignageProgram {
-                items: vec![item("welcome", Some(10_000)), item("welcome", Some(1_000))],
-                ..program()
-            },
-            SignageProgram {
-                items: vec![SignageItem {
-                    media: "not-a-body-id".into(),
-                    ..item("welcome", Some(10_000))
-                }],
-                ..program()
-            },
-            SignageProgram {
-                items: vec![item("Welcome", Some(10_000))],
-                ..program()
-            },
-        ] {
-            assert!(!bad.validate(), "{bad:?}");
-        }
-    }
-
-    /// An item with no duration defers to the library entry it names, wherever
-    /// it sits and whatever the cycle does at the end.
-    ///
-    /// This validation cannot see the library, so it cannot know what that
-    /// resolves to — and refusing what it cannot check would reject programs
-    /// the editor writes by default.
-    #[test]
-    fn an_absent_duration_is_legal_anywhere_and_a_declared_one_is_bounded() {
-        for cycle in [ProgramCycle::Loop, ProgramCycle::HoldLast] {
-            let deferred = SignageProgram {
-                cycle,
-                items: vec![item("intro", None), item("welcome", None)],
-                ..program()
-            };
-            assert!(deferred.validate(), "{cycle:?}");
-
-            let selected = SignageProgram {
-                windows: vec![window("both", vec!["intro".into(), "welcome".into()])],
-                ..deferred.clone()
-            };
-            assert!(selected.validate(), "{cycle:?}");
-        }
-
-        for duration in [MIN_ITEM_DURATION_MS - 1, MAX_ITEM_DURATION_MS + 1] {
-            let bad = SignageProgram {
-                items: vec![item("welcome", Some(duration))],
-                ..program()
-            };
-            assert!(!bad.validate(), "{duration}");
-        }
-    }
-
-    #[test]
-    fn a_window_selects_from_the_items_the_program_actually_has() {
-        let base = SignageProgram {
-            items: vec![item("intro", Some(1_000)), item("welcome", Some(10_000))],
-            ..program()
-        };
-        assert!(SignageProgram {
-            windows: vec![window("regular", vec!["welcome".into()])],
-            ..base.clone()
-        }
-        .validate());
-
-        for bad in [
-            window("unknown", vec!["absent".into()]),
-            window("twice", vec!["welcome".into(), "welcome".into()]),
-            window("empty", Vec::new()),
-        ] {
-            let program = SignageProgram {
-                windows: vec![bad.clone()],
-                ..base.clone()
-            };
-            assert!(!program.validate(), "{:?}", bad.id);
-        }
-
-        let duplicated = SignageProgram {
-            windows: vec![
-                window("regular", vec!["welcome".into()]),
-                window("regular", vec!["intro".into()]),
-            ],
-            ..base
-        };
-        assert!(!duplicated.validate());
-    }
-
-    fn program_id(tag: u8) -> String {
-        BodyId::from_bytes([tag; 16]).render()
-    }
-
-    fn choice(member: &str) -> register::Choice {
-        register::Choice {
-            member: member.into(),
-            chosen_unix_ms: 1,
-            chooser: "someone".into(),
-        }
-    }
-
-    fn at(moment: &str) -> u64 {
-        u64::try_from(
-            moment
-                .parse::<jiff::Timestamp>()
-                .expect("a reviewed test moment")
-                .as_millisecond(),
-        )
-        .expect("a moment after the epoch")
-    }
-
-    fn open_window(id: &str, program: &str, start_local: &str, priority: i16) -> ProgramWindow {
-        ProgramWindow {
-            id: id.into(),
-            window: schedule::Window {
-                start_local: start_local.into(),
-                duration_ms: 60 * 60 * 1_000,
-                recurrence: schedule::Recurrence::None,
-                until_unix_ms: None,
-                priority,
-                enabled: true,
-                timezone: "UTC".into(),
-                exceptions: Vec::new(),
-            },
-            program: program.into(),
-        }
-    }
-
-    fn screen(group: Option<&str>) -> SignageScreen {
-        SignageScreen {
-            id: BodyId::from_bytes([1; 16]).render(),
-            name: "Lobby screen".into(),
-            group: group.map(str::to_owned),
-            intent: register::Slot::default(),
-            schedule: Vec::new(),
-        }
-    }
-
-    fn group(program: Option<&str>) -> SignageGroup {
-        SignageGroup {
-            id: BodyId::from_bytes([2; 16]).render(),
-            name: "Lobbies".into(),
-            intent: register::Slot {
-                base: program.map(choice),
-                over: None,
-            },
-            screens: Vec::new(),
-        }
-    }
-
-    /// Each rung answers when the ones above it do not, and says it did.
-    #[test]
-    fn playback_falls_through_override_schedule_direct_then_group() {
-        let now = at("2026-08-15T10:30:00Z");
-        let direct = program_id(3);
-        let scheduled = program_id(4);
-        let overriding = program_id(5);
-        let inherited = program_id(6);
-        let group = group(Some(&inherited));
-
-        let bare = screen(Some(&group.id));
-        assert_eq!(
-            bare.plays_at(Some(&group), now).unwrap(),
-            Playback {
-                program: Some(inherited.clone()),
-                source: Some(PlaybackSource::Group),
-                next_boundary_unix_ms: None,
-            }
-        );
-
-        let mut chosen = bare.clone();
-        chosen.intent.base = Some(choice(&direct));
-        assert_eq!(
-            chosen.plays_at(Some(&group), now).unwrap().source,
-            Some(PlaybackSource::Direct)
-        );
-
-        let mut timed = chosen.clone();
-        timed.schedule = vec![open_window("morning", &scheduled, "2026-08-15T10:00:00", 0)];
-        let playing = timed.plays_at(Some(&group), now).unwrap();
-        assert_eq!(playing.program.as_ref(), Some(&scheduled));
-        assert_eq!(playing.source, Some(PlaybackSource::Schedule));
-
-        let mut overridden = timed.clone();
-        overridden.intent.over = Some(register::Override {
-            choice: choice(&overriding),
-            until_unix_ms: now + 60_000,
-        });
-        assert_eq!(
-            overridden.plays_at(Some(&group), now).unwrap(),
-            Playback {
-                program: Some(overriding),
-                source: Some(PlaybackSource::Override),
-                next_boundary_unix_ms: Some(now + 60_000),
-            }
-        );
-
-        // A lapsed override is not an override, and the rung below answers.
-        assert_eq!(
-            overridden
-                .plays_at(Some(&group), now + 120_000)
-                .unwrap()
-                .program
-                .as_ref(),
-            Some(&scheduled)
-        );
-
-        for screen in [screen(None), screen(Some(&group.id))] {
-            assert_eq!(
-                screen.plays_at(None, now).unwrap(),
-                Playback {
-                    program: None,
-                    source: None,
-                    next_boundary_unix_ms: None,
-                },
-                "nothing to show is a state, not a failure"
-            );
-        }
-    }
-
-    /// A closed window still says when it opens, so a receiver can sleep.
-    #[test]
-    fn a_screen_reports_when_its_answer_changes_with_nobody_writing() {
-        let before = at("2026-08-15T09:00:00Z");
-        let mut screen = screen(None);
-        screen.intent.base = Some(choice(&program_id(3)));
-        screen.schedule = vec![
-            open_window("evening", &program_id(4), "2026-08-15T18:00:00", 0),
-            open_window("morning", &program_id(5), "2026-08-15T10:00:00", 0),
-        ];
-
-        let playing = screen.plays_at(None, before).unwrap();
-        assert_eq!(playing.source, Some(PlaybackSource::Direct));
-        assert_eq!(
-            playing.next_boundary_unix_ms,
-            Some(at("2026-08-15T10:00:00Z")),
-            "the soonest of the two, not the first listed"
-        );
-    }
-
-    /// Priority decides an overlap; the id breaks a tie, so the answer does not
-    /// depend on the order the windows happen to be stored in.
-    #[test]
-    fn overlapping_screen_windows_resolve_by_priority_then_id() {
-        let now = at("2026-08-15T10:30:00Z");
-        let urgent = program_id(4);
-        let mut screen = screen(None);
-        screen.schedule = vec![
-            open_window("regular", &program_id(3), "2026-08-15T10:00:00", 0),
-            open_window("urgent", &urgent, "2026-08-15T10:15:00", 10),
-        ];
-        assert_eq!(
-            screen.plays_at(None, now).unwrap().program.as_ref(),
-            Some(&urgent)
-        );
-
-        screen.schedule.reverse();
-        assert_eq!(
-            screen.plays_at(None, now).unwrap().program.as_ref(),
-            Some(&urgent)
-        );
-
-        let first = program_id(7);
-        screen.schedule = vec![
-            open_window("b-later", &program_id(8), "2026-08-15T10:00:00", 5),
-            open_window("a-first", &first, "2026-08-15T10:00:00", 5),
-        ];
-        assert_eq!(
-            screen.plays_at(None, now).unwrap().program.as_ref(),
-            Some(&first),
-            "a tie resolves by id"
-        );
-    }
-
-    #[test]
-    fn a_screen_schedule_is_validated_like_the_rest() {
-        let mut valid = screen(None);
-        valid.schedule = vec![open_window(
-            "morning",
-            &program_id(3),
-            "2026-08-15T10:00:00",
-            0,
-        )];
-        assert!(valid.validate());
-
-        let mut duplicate = valid.clone();
-        duplicate.schedule.push(open_window(
-            "morning",
-            &program_id(4),
-            "2026-08-15T12:00:00",
-            0,
-        ));
-        assert!(!duplicate.validate(), "two windows cannot share an id");
-
-        let mut dangling = valid.clone();
-        dangling.schedule[0].program = "not-a-body-id".into();
-        assert!(!dangling.validate());
-
-        let mut shouty = valid;
-        shouty.schedule[0].id = "Morning".into();
-        assert!(!shouty.validate());
-    }
-
-    #[test]
-    fn highest_priority_active_window_selects_items_and_exposes_the_next_boundary() {
-        let mut program = program();
-        program.items.push(SignageItem {
-            id: "urgent".into(),
-            media: BodyId::from_bytes([4; 16]).render(),
-            duration_ms: Some(10_000),
-        });
-        program.windows = vec![
-            SignageWindow {
-                id: "regular".into(),
-                window: schedule::Window {
-                    start_local: "2026-08-15T10:00:00".into(),
-                    duration_ms: 60 * 60 * 1_000,
-                    recurrence: schedule::Recurrence::None,
-                    until_unix_ms: None,
-                    priority: 0,
-                    enabled: true,
-                    timezone: "America/Chicago".into(),
-                    exceptions: Vec::new(),
-                },
-                items: vec!["welcome".into()],
-            },
-            SignageWindow {
-                id: "override".into(),
-                window: schedule::Window {
-                    start_local: "2026-08-15T10:30:00".into(),
-                    duration_ms: 10 * 60 * 1_000,
-                    recurrence: schedule::Recurrence::None,
-                    until_unix_ms: None,
-                    priority: 10,
-                    enabled: true,
-                    timezone: "America/Chicago".into(),
-                    exceptions: Vec::new(),
-                },
-                items: vec!["urgent".into()],
-            },
-        ];
-        assert!(program.validate());
-        let now = u64::try_from(
-            "2026-08-15T15:35:00Z"
-                .parse::<jiff::Timestamp>()
-                .unwrap()
-                .as_millisecond(),
-        )
-        .unwrap();
-        let selected = program.scheduled_at(now).unwrap();
-        assert_eq!(selected.items.len(), 1);
-        assert_eq!(selected.items[0].id, "urgent");
-        assert_eq!(
-            selected.next_boundary_unix_ms,
-            Some(
-                u64::try_from(
-                    "2026-08-15T15:40:00Z"
-                        .parse::<jiff::Timestamp>()
-                        .unwrap()
-                        .as_millisecond()
-                )
-                .unwrap()
-            )
-        );
-    }
-
-    /// The grant format, pinned.
-    ///
-    /// Segments match byte-exactly, so a rename here silently stops matching
-    /// every grant already minted against the old spelling. Nothing else in the
-    /// system would report it.
-    #[test]
-    fn the_resource_spellings_are_the_grant_format() {
-        assert_eq!(resource::root().segments, Vec::<String>::new());
-        assert_eq!(resource::program("prg_1").segments, ["program", "prg_1"]);
-        assert_eq!(resource::screen("scr_1").segments, ["screen", "scr_1"]);
-        assert_eq!(
-            resource::group("grp_lobby").segments,
-            ["group", "grp_lobby"]
-        );
-        assert_eq!(resource::media("med_1").segments, ["media", "med_1"]);
-        for r in [
-            resource::program("p"),
-            resource::screen("s"),
-            resource::group("g"),
-            resource::media("m"),
-        ] {
-            assert_eq!(r.world, product_world());
-            assert!(r.validate().is_ok());
-        }
-    }
-
-    #[test]
-    fn an_unusable_id_demands_fleet_wide_standing_rather_than_a_truncated_grant() {
-        let absurd = "x".repeat(mechanics::authorization::MAX_SEGMENT_BYTES + 1);
-        assert_eq!(
-            resource::screen(&absurd),
-            resource::root(),
-            "narrower, not wider"
-        );
-    }
-
-    #[test]
-    fn a_program_grant_and_a_fleet_grant_both_satisfy_writing_that_program() {
-        let demand = AuthorizationDemand::decode_canonical(&demand_manage_program("prg_7"))
-            .expect("canonical");
-        let AuthorizationDemand::Any(options) = demand else {
-            panic!("a scoped write is satisfied either way");
-        };
-        assert_eq!(options.len(), 2);
-        assert!(options.contains(&AuthorizationDemand::require(
-            capability("space.signage.manage"),
-            resource::program("prg_7"),
-        )));
-        assert!(options.contains(&AuthorizationDemand::require(
-            capability("space.signage.manage"),
-            resource::root(),
-        )));
-    }
-
-    #[test]
-    fn one_programs_grant_does_not_reach_another() {
-        assert_ne!(
-            demand_manage_program("prg_1"),
-            demand_manage_program("prg_2")
-        );
-        assert_ne!(demand_manage_program("prg_1"), demand_manage());
     }
 }

@@ -6,7 +6,7 @@ interface BroadcastListSearch {
 }
 
 function BroadcastListRoute() {
-  document.title = 'Broadcasts | AD2SP';
+  document.title = 'Programs | Signage';
   return <BroadcastListPage />;
 }
 

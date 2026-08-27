@@ -1,7 +1,12 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { RouterProvider, createRouter } from '@tanstack/react-router';
+import { LiveProvider } from './ds/live';
 import { routeTree } from './routeTree.gen';
+import './ds/tokens.css';
+import './ds/language.css';
+import './ds/overlay.css';
+import './ds/page.css';
 import './app/globals.css';
 
 const router = createRouter({ routeTree });
@@ -14,6 +19,10 @@ declare module '@tanstack/react-router' {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    {/* One clock and one doorbell for the whole app: a hundred rows each
+        holding an interval is a hundred clocks disagreeing by a frame. */}
+    <LiveProvider>
+      <RouterProvider router={router} />
+    </LiveProvider>
   </React.StrictMode>,
 );
