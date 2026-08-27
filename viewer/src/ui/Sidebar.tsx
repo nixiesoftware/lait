@@ -27,7 +27,6 @@ import {
 } from "../core/registry";
 import type { SavedView } from "../core/savedViews";
 import type { ProjectDto, SpaceRow, TeamDto } from "../types";
-import { when } from "./time";
 import { ungrouped } from "../core/teams";
 import { catalogColor } from "./colors";
 import { ProjectIcon } from "./icons";
@@ -477,15 +476,10 @@ function SpaceSwitcher({
                   }
                   label={space.name || space.seen?.name || space.space}
                   // An agent replica is a different *identity* on the same data,
-                  // which is the only thing worth saying twice. A Space named
-                  // from a past reading says when it was read: the name is
-                  // what this device last saw, and the row must not pretend
-                  // it is looking now.
+                  // which is the only thing worth saying twice.
                   {...(space.identity.kind === "agent"
                     ? { description: space.identity.name }
-                    : !space.name && space.seen
-                      ? { description: `Last seen ${when(space.seen.observed_at)}` }
-                      : {})}
+                    : {})}
                   endContent={<StatusDot status={space.status} />}
                 />
               ))}

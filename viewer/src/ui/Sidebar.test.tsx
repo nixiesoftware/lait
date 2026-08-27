@@ -354,7 +354,7 @@ describe("a space this device has not opened since its daemon started", () => {
     expect(host.textContent).not.toContain("ws_4GGTOVHSB6KOK9FKFB7AAM21FF");
   });
 
-  it("says when the name was read, and says nothing of the sort for a live one", () => {
+  it("lists it by that name in the switcher, and a live row by its live name", () => {
     const seen: SpaceRow = {
       ...space,
       id: "seen-hash",
@@ -410,9 +410,8 @@ describe("a space this device has not opened since its daemon started", () => {
       switcher?.focus();
       switcher?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     });
-    const rows = items().map((item) => item.textContent ?? "");
-    expect(rows.some((text) => text.includes("Kas") && text.includes("Last seen 2h ago"))).toBe(true);
-    expect(rows.filter((text) => text.includes("Last seen"))).toHaveLength(1);
+    const rows = items().map((item) => (item.textContent ?? "").trim());
+    expect(rows).toContain("Kas");
     expect(rows.some((text) => text.includes("Test space") && !text.includes("Old name"))).toBe(true);
     expect(rows.join(" ")).not.toContain("ws_4GGTOVHSB6KOK9FKFB7AAM21FF");
   });

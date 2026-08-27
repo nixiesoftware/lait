@@ -20,14 +20,7 @@ export function when(ts: number): string {
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   if (days < 30) return `${days}d ago`;
-  // Past a month the date stands alone, and a date from another year says
-  // which -- "Jan 5" for a reading taken two years ago reads as this year's.
-  const date = tsToDate(ts);
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    ...(date.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
-  });
+  return tsToDate(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 /** Keys are 64 hex chars; nobody reads more than the head of one. */
