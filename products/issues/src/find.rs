@@ -3272,6 +3272,52 @@ mod tests {
         }
     }
 
+    /// A membership relation still fits the shape its extractor declares.
+    ///
+    /// `ExtractionShape` is committed into corpus identity and Runtime
+    /// reserves build memory against it BEFORE invoking the extractor, so a
+    /// node that outgrows it is not a slow build -- it is a build that does
+    /// not happen, and a World with no active implementation answers
+    /// "unavailable" to everything.
+    ///
+    /// The relation shape was sized at 22 for a node the comment counts as 21,
+    /// which left exactly one posting spare. `edge::MEMBER` spends it. This
+    /// test exists so the next field or edge added here fails at a line that
+    /// names the number rather than as an unavailable World.
+    #[test]
+    fn a_membership_relation_fits_its_declared_extraction_shape() {
+        let shape = extraction_shape(&source(
+            crate::records::ISSUE_RELATION_SCHEMA,
+            crate::records::SCHEMA_VERSION,
+        ));
+        // The richest membership node: a kind that posts the reverse
+        // coordinate, inside a project, and now carrying the member edge.
+        let node = relation("assignee", ISSUE, "act_someone", Some(PROJECT)).unwrap();
+        // Runtime's own accounting: two postings a field plus its terms, one
+        // row for the node, and one row per edge target.
+        let postings: usize = node
+            .fields
+            .iter()
+            .map(|field| 2 + field.terms.len())
+            .sum::<usize>()
+            + 1
+            + node
+                .edges
+                .iter()
+                .map(|edge| edge.targets.len())
+                .sum::<usize>();
+        assert!(
+            postings as u32 <= shape.postings_per_node,
+            "a membership relation posts {postings}, shape allows {}",
+            shape.postings_per_node
+        );
+        assert!(
+            postings as u64 <= shape.postings_per_body,
+            "a membership relation posts {postings}, body allows {}",
+            shape.postings_per_body
+        );
+    }
+
     /// The declaration names the edge the extractor posts.
     ///
     /// A posted edge the schema does not declare is invisible to a Walk, which
