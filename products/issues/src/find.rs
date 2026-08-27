@@ -32,7 +32,12 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use crate::{contract, ids::ProjectId, records::CanonicalRecord as _};
 
 pub const ENTITY_SCHEMA: &str = "issues_entity";
-pub const ENTITY_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 when memberships gained an edge of their own. The publication
+/// coordinate already distinguishes the two by extractor digest, so nothing
+/// depends on this number -- but one version meaning two different schemas
+/// across builds is exactly the kind of quiet ambiguity this file spends its
+/// bytes avoiding.
+pub const ENTITY_SCHEMA_VERSION: u32 = 2;
 pub const READ_GATE: &str = "read";
 pub const WORD_ANALYZER: &str = "word";
 pub const WORD_ANALYZER_CONFIGURATION: &[u8] =
@@ -139,6 +144,22 @@ pub mod field {
 pub mod edge {
     pub const SOURCE: &str = "source";
     pub const TARGET: &str = "target";
+    /// Membership only: this relation is one of the sets its source belongs
+    /// to, and it points at that source.
+    ///
+    /// [`SOURCE`] cannot answer that question. Every relation carries it --
+    /// including `issue_transition`, which `stage_issue_move` writes on every
+    /// board move and which is immutable and never pruned. So a traversal
+    /// inbound along `SOURCE` reaches an Issue's whole board history, and that
+    /// history only grows: after roughly two hundred and fifty moves of a
+    /// single Issue such a walk exceeded its bound and Find refused, which
+    /// made that project's list and board permanently un-renderable.
+    ///
+    /// This edge exists so the question a row actually asks -- "what sets is
+    /// this in" -- has an answer bounded by what the write path caps, rather
+    /// than by how often somebody has dragged a card. It is posted for exactly
+    /// [`super::MEMBERSHIP_KINDS`] and nothing else.
+    pub const MEMBER: &str = "member";
 }
 
 fn schema_id(value: &str) -> SchemaId {
@@ -159,14 +180,14 @@ pub fn field_ref(name: &str) -> FieldRef {
     }
 }
 
-fn edge_ref(name: &str) -> EdgeRef {
+pub(crate) fn edge_ref(name: &str) -> EdgeRef {
     EdgeRef {
         schema: entity_schema_ref(),
         name: schema_id(name),
     }
 }
 
-fn gate_ref() -> GateRef {
+pub(crate) fn gate_ref() -> GateRef {
     GateRef {
         schema: entity_schema_ref(),
         name: schema_id(READ_GATE),
@@ -320,7 +341,7 @@ fn schemas_with_sources(sources: Vec<SourceRef>) -> Vec<Schema> {
             analyzer: analyzed.then(|| analyzer.clone()),
         })
         .collect(),
-        edges: [edge::SOURCE, edge::TARGET]
+        edges: [edge::SOURCE, edge::TARGET, edge::MEMBER]
             .into_iter()
             .map(|name| Edge {
                 reference: edge_ref(name),
@@ -1100,22 +1121,34 @@ fn relation_with_identity(
             composite_key(["relation", project]),
         ));
     }
+    let mut edges = vec![
+        ExtractedEdge {
+            reference: edge_ref(edge::SOURCE),
+            gate: gate_ref(),
+            targets: vec![node_key(source.as_bytes())?],
+        },
+        ExtractedEdge {
+            reference: edge_ref(edge::TARGET),
+            gate: gate_ref(),
+            targets: vec![node_key(target.as_bytes())?],
+        },
+    ];
+    // The same target as SOURCE, under a name that means something narrower.
+    // A reader asking "what sets is this Issue in" walks this one and reaches
+    // exactly the kinds the write path caps -- never a transition, however
+    // many times the card has been moved.
+    if MEMBERSHIP_KINDS.contains(&relation_kind) {
+        edges.push(ExtractedEdge {
+            reference: edge_ref(edge::MEMBER),
+            gate: gate_ref(),
+            targets: vec![node_key(source.as_bytes())?],
+        });
+    }
     Ok(ExtractedNode {
         key: node_key(&stable)?,
         gate: Some(gate_ref()),
         fields,
-        edges: vec![
-            ExtractedEdge {
-                reference: edge_ref(edge::SOURCE),
-                gate: gate_ref(),
-                targets: vec![node_key(source.as_bytes())?],
-            },
-            ExtractedEdge {
-                reference: edge_ref(edge::TARGET),
-                gate: gate_ref(),
-                targets: vec![node_key(target.as_bytes())?],
-            },
-        ],
+        edges,
         features: Vec::new(),
     })
 }
@@ -3190,6 +3223,72 @@ mod tests {
             .sources
             .iter()
             .any(|source| { source.name.as_str() == crate::records::GOVERNANCE_REVISION_SCHEMA }));
+    }
+
+    /// The membership edge is posted for memberships and for nothing else.
+    ///
+    /// This is the whole safety property of `edge::MEMBER`, asserted at the
+    /// one place it is decided. `edge::SOURCE` is carried by every relation
+    /// kind including `issue_transition`, which `stage_issue_move` writes on
+    /// every board move and never prunes -- so a traversal that reached
+    /// memberships through SOURCE inherited an Issue's entire board history
+    /// and eventually refused, taking its project's list and board with it.
+    ///
+    /// The integration guard (300 real moves) proves the consequence. This
+    /// proves the cause, in milliseconds, at the line that would break it.
+    #[test]
+    fn only_a_membership_carries_the_member_edge() {
+        let member = edge_ref(edge::MEMBER);
+        let source = edge_ref(edge::SOURCE);
+
+        for kind in MEMBERSHIP_KINDS {
+            let node = relation(kind, ISSUE, "who", Some(PROJECT)).unwrap();
+            assert!(
+                node.edges.iter().any(|e| e.reference == member),
+                "{kind} is a membership and must carry the member edge"
+            );
+        }
+
+        // A transition is the reason this edge exists. So are the link kinds
+        // and the hierarchy: none of them is a set an Issue belongs to, and
+        // none of them is capped by the write path the way memberships are.
+        for kind in [
+            "issue_transition",
+            "parent",
+            "blocks",
+            "relates",
+            "duplicates",
+        ] {
+            let node = relation(kind, ISSUE, "other", Some(PROJECT)).unwrap();
+            assert!(
+                node.edges.iter().any(|e| e.reference == source),
+                "{kind} still carries the source edge"
+            );
+            assert!(
+                !node.edges.iter().any(|e| e.reference == member),
+                "{kind} must NOT carry the member edge -- a walk over it would \
+                 inherit however much history an Issue has accumulated"
+            );
+        }
+    }
+
+    /// The declaration names the edge the extractor posts.
+    ///
+    /// A posted edge the schema does not declare is invisible to a Walk, which
+    /// fails as an empty answer rather than as an error -- every row would
+    /// simply come back with no memberships at all.
+    #[test]
+    fn the_schema_declares_the_member_edge() {
+        let schemas = schemas();
+        let schema = schemas.first().unwrap();
+        assert!(
+            schema
+                .edges
+                .iter()
+                .any(|declared| declared.reference == edge_ref(edge::MEMBER)),
+            "the member edge must be declared, not merely posted"
+        );
+        assert!(schema.validate().is_ok());
     }
 
     #[test]

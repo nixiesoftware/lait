@@ -5237,6 +5237,161 @@ fn apply_page_aliases(
     Ok(())
 }
 
+/// Issues whose memberships one Walk resolves.
+///
+/// Sixteen, and the binding ceiling is `paths_retained`, not the projection.
+/// Find's policy allows 100,000 nodes visited and 8 MiB projected but only
+/// 10,000 paths retained and 10,000 candidates per branch, so the arithmetic
+/// that matters is `chunk x MAX_MEMBERSHIPS_PER_ISSUE <= 10,000` -- which caps
+/// the chunk at 25. Sixteen leaves room rather than sitting on the edge.
+///
+/// The previous attempt at this declared against `projected_bytes` alone and
+/// was wrong twice over: it walked `edge::SOURCE`, which reaches every
+/// relation including the board history, and it under-declared
+/// `nodes_visited`, which Find charges TWICE per emitted node -- once for the
+/// incoming posting during the walk, once again when `Pack` reads the node
+/// back. Both are accounted for below.
+const MEMBERSHIP_WALK_CHUNK: usize = 16;
+
+/// The memberships one Issue may hold, from the caps the write path enforces.
+///
+/// Derived rather than written down, because a bound that restates a constant
+/// is a bound that stops agreeing with it. The three singletons are milestone,
+/// cycle and baseline -- `IssueRelationRecord::identity` omits the target for
+/// exactly those, so an Issue holds at most one of each.
+const MAX_MEMBERSHIPS_PER_ISSUE: u64 = (contract::MAX_ISSUE_ASSIGNEES
+    + contract::MAX_ISSUE_FOLLOWERS
+    + contract::MAX_ISSUE_LABELS
+    + 3) as u64;
+
+/// Every page row's memberships, in one traversal per chunk.
+///
+/// A membership relation carries `edge::MEMBER` to the Issue it is about, so a
+/// page's memberships are the nodes one inbound hop away along that edge. It
+/// is deliberately not `edge::SOURCE`: that one is carried by every relation
+/// kind, `issue_transition` included, and an Issue's transitions accumulate
+/// forever as its card is dragged. `edge::MEMBER` is posted for
+/// `MEMBERSHIP_KINDS` and nothing else, so what this reaches is bounded by
+/// what the write path caps rather than by how much the board has been used.
+///
+/// This replaces three exact seeks per row. What it cannot do is ask for only
+/// the three kinds a row draws -- `Keep` predicates conjoin and Find has no set
+/// test -- so followers, cycle and baseline come back too and are discarded.
+/// That waste is now bounded and small; it was the unbounded version that made
+/// the traversal a hazard, not the waste itself.
+fn page_memberships(
+    ctx: &Context<'_>,
+    docs: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<(String, String)>>, Rejection> {
+    use runtime::find as find_api;
+    let mut out: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    if docs.is_empty() {
+        return Ok(out);
+    }
+    if docs.len() > MEMBERSHIP_WALK_CHUNK {
+        for chunk in docs.chunks(MEMBERSHIP_WALK_CHUNK) {
+            for (doc, found) in page_memberships(ctx, chunk)? {
+                out.entry(doc).or_default().extend(found);
+            }
+        }
+        return Ok(out);
+    }
+    let count = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+    let reachable = count.saturating_mul(MAX_MEMBERSHIPS_PER_ISSUE);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: reachable.saturating_mul(8),
+        edges_visited: reachable,
+        paths_retained: reachable,
+        candidates_per_branch: reachable,
+        // Charged once per incoming posting in the walk and once more when
+        // `Pack` reads each emitted node back, plus one per seed.
+        nodes_visited: reachable.saturating_mul(2).saturating_add(count),
+        score_evaluations: reachable,
+        // A kind and two ids. Half a kilobyte a row is generous for that.
+        projected_bytes: reachable.saturating_mul(512),
+        packed_tokens: reachable.saturating_mul(64),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let walk = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::RELATION_KIND,
+        crate::find::field::SOURCE_ID,
+        crate::find::field::TARGET_ID,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(
+                        docs.iter()
+                            .map(|doc| find_api::NodeId::new(doc.as_bytes().to_vec()))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|_| Rejection::InvalidRequest)?,
+                    )),
+                    bound,
+                },
+                find_api::Step {
+                    id: walk,
+                    input: vec![seek],
+                    op: find_api::Op::Walk(find_api::Walk {
+                        edges: vec![crate::find::edge_ref(crate::find::edge::MEMBER)],
+                        // The edge points membership -> Issue, so the Issues
+                        // are where it lands and the memberships are the catch.
+                        direction: find_api::Direction::In,
+                        min_hops: 1,
+                        max_hops: 1,
+                        unique: find_api::Unique::Walk,
+                        order: find_api::WalkOrder::Breadth,
+                        emit: find_api::Emit::Nodes,
+                        gate: crate::find::gate_ref(),
+                    }),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![walk],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: u32::try_from(reachable).unwrap_or(find_api::MAX_PAGE_SIZE),
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    // No continuation guard here on purpose. A Query carrying a Walk is not a
+    // linear plan, so Find hard-codes its next position to none and overflow
+    // arrives as a refusal rather than as a short answer -- the runtime will
+    // not hand back a truncated page for this shape. A guard on `next_cursor`
+    // would read as the safety and be dead code.
+    for row in answer.rows() {
+        let (Some(kind), Some(source), Some(target)) = (
+            result_text(row, crate::find::field::RELATION_KIND),
+            result_text(row, crate::find::field::SOURCE_ID),
+            result_text(row, crate::find::field::TARGET_ID),
+        ) else {
+            return Err(Rejection::StateCorrupt);
+        };
+        out.entry(source).or_default().push((kind, target));
+    }
+    Ok(out)
+}
+
 /// Put the relation-held facts a list row shows onto one row.
 ///
 /// `issue_page_row` builds from one Find row, which carries the Issue's own
@@ -5254,31 +5409,77 @@ fn enrich_issue_page(
     rows: &mut [crate::dto::Row],
     me: Option<&ActorId>,
 ) -> Result<(), Rejection> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut docs = rows
+        .iter()
+        .map(|row| row.doc_id.to_string())
+        .collect::<Vec<_>>();
+    docs.sort();
+    docs.dedup();
+    let memberships = page_memberships(ctx, &docs)?;
     for row in rows.iter_mut() {
-        let doc = row.doc_id.to_string();
-        row.assignees =
-            issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?
-                .into_iter()
-                .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
-                .collect::<Result<Vec<_>, _>>()?;
+        // Sets, because the seeks this replaced answered from `BTreeSet`s: a
+        // row's assignees were sorted and deduplicated, and taking whatever
+        // order the index returned would silently reorder every facepile.
+        let mut assignees = std::collections::BTreeSet::new();
+        let mut labels = std::collections::BTreeSet::new();
+        // Singleton, and provably so: `IssueRelationRecord::identity` omits
+        // the target for `milestone`, `cycle` and `baseline`, so one Issue
+        // holds exactly one Body -- and therefore one node -- per kind.
+        let mut milestone = None;
+        for (kind, target) in memberships
+            .get(&row.doc_id.to_string())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            match kind.as_str() {
+                "assignee" => {
+                    assignees.insert(target.clone());
+                }
+                "label" => {
+                    labels.insert(target.clone());
+                }
+                "milestone" => milestone = Some(target.clone()),
+                // follower, cycle and baseline ride the same edge and are not
+                // drawn on a row. Bounded by the write caps, so the cost of
+                // carrying them is small and known.
+                _ => {}
+            }
+        }
+        // The seeks refused a set larger than its cap rather than truncating
+        // it. Keep refusing: a row that quietly showed the first hundred and
+        // twenty-eight of more is wrong without saying so.
+        if assignees.len() > contract::MAX_ISSUE_ASSIGNEES
+            || labels.len() > contract::MAX_ISSUE_LABELS
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        row.assignees = assignees
+            .iter()
+            .map(|target| ActorId::parse(target).ok_or(Rejection::StateCorrupt))
+            .collect::<Result<Vec<_>, _>>()?;
         row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
         // A row carries label NAMES, so an id that has no registry entry renders
         // as itself rather than disappearing -- the same rule the assembled view
         // applies.
         let mut names = Vec::new();
-        for label in issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)? {
-            crate::record_store::apply_label(ctx, catalog, &label)?;
+        for label in &labels {
+            crate::record_store::apply_label(ctx, catalog, label)?;
             names.push(
                 catalog
                     .labels
-                    .get(&label)
+                    .get(label)
                     .map_or_else(|| label.clone(), |meta| meta.name.clone()),
             );
         }
         row.label_names = names;
-        row.milestone = crate::record_store::read_issue_relation(ctx, &doc, "milestone", "")?
-            .filter(|record| record.present)
-            .map(|record| record.target);
+        // `extract_issue_relation` posts no node for a cleared relation, so
+        // absence here is the same fact the `present` flag used to carry -- and
+        // it now comes from the pinned publication like the rest of the row,
+        // rather than from a live Body read beside it.
+        row.milestone = milestone;
         row.enrichment_complete = true;
     }
     Ok(())
