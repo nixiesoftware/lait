@@ -5237,6 +5237,365 @@ fn apply_page_aliases(
     Ok(())
 }
 
+/// Facet branches one query may carry, and matches one branch may hold.
+///
+/// These are the two numbers that keep a faceted query inside Find's ceilings,
+/// and they are chosen together. `Merge` demands `Flow::Ranked` inputs, and
+/// `Rank` reads every candidate in its branch -- so unlike a linear seek, a
+/// merged query materialises each branch WHOLE rather than streaming a page out
+/// of it. Its cost is the size of what matches, not the size of what is asked
+/// for.
+///
+/// `nodes_visited` is charged once per candidate ranked and once more when
+/// `Pack` reads a survivor back, so the binding arithmetic is
+/// `branches x matches x 2 <= 100_000`. Twelve and four thousand sit just
+/// inside it, and leave `paths_retained` and `candidates_per_branch` (10_000
+/// each) with room.
+///
+/// A thousand rather than more, because `projected_bytes` binds before any of
+/// the work dimensions do: a title may be `MAX_TITLE_BYTES` (4 KiB), so eight
+/// KiB a row against the 8 MiB ceiling is a thousand rows and no more. It is
+/// the same number as the product's own `MAX_PAGE_SIZE`, which is the right
+/// coincidence -- a filtered answer that will not fit one page is one the
+/// caller should narrow.
+///
+/// The cliff is deliberate: a facet matching more than that is REFUSED, not
+/// truncated. A filter that quietly dropped matches past a limit would be the
+/// "3 of 100" defect wearing a server-side coat.
+const MAX_FACET_BRANCHES: usize = 12;
+const MAX_FACET_MATCHES: u64 = 1_000;
+
+/// One facet axis, as the seek that answers it.
+enum FacetSeek {
+    /// An exact field on the Issue node itself.
+    Direct {
+        field: &'static str,
+        value: runtime::find::Atom,
+    },
+    /// A membership posting, which answers with RELATION nodes and therefore
+    /// needs one hop along `edge::MEMBER` to become the Issues it is about.
+    /// That is the same edge row enrichment walks inbound; here it is walked
+    /// outbound, relation to Issue.
+    Membership { kind: &'static str, target: String },
+}
+
+/// Turn the facets into seeks, one per value.
+fn facet_seeks(
+    project: Option<&str>,
+    facets: &contract::IssueFacets,
+) -> Result<Vec<Vec<FacetSeek>>, Rejection> {
+    use runtime::find as find_api;
+    let mut axes: Vec<Vec<FacetSeek>> = Vec::new();
+    if !facets.statuses.is_empty() {
+        axes.push(
+            facets
+                .statuses
+                .iter()
+                .map(|state| match project {
+                    // Scoped by project the posting is one exact tuple; without
+                    // a project it is the bare state across the Space, which is
+                    // what the caller asked for.
+                    Some(project) => FacetSeek::Direct {
+                        field: crate::find::field::KIND_PROJECT_STATE,
+                        value: find_api::Atom::Bytes(crate::find::composite_key([
+                            "issue", project, state,
+                        ])),
+                    },
+                    None => FacetSeek::Direct {
+                        field: crate::find::field::STATE,
+                        value: find_api::Atom::Text(state.clone()),
+                    },
+                })
+                .collect(),
+        );
+    }
+    if !facets.priorities.is_empty() {
+        axes.push(
+            facets
+                .priorities
+                .iter()
+                .map(|priority| FacetSeek::Direct {
+                    field: crate::find::field::PRIORITY,
+                    value: find_api::Atom::Text(priority.clone()),
+                })
+                .collect(),
+        );
+    }
+    for (kind, values) in [
+        ("label", &facets.labels),
+        ("assignee", &facets.assignees),
+        ("milestone", &facets.milestones),
+    ] {
+        if values.is_empty() {
+            continue;
+        }
+        axes.push(
+            values
+                .iter()
+                .map(|target| FacetSeek::Membership {
+                    kind,
+                    target: target.clone(),
+                })
+                .collect(),
+        );
+    }
+    let branches = axes.iter().map(Vec::len).sum::<usize>();
+    if branches > MAX_FACET_BRANCHES {
+        return Err(Rejection::LimitExceeded);
+    }
+    Ok(axes)
+}
+
+/// The work one faceted query declares, for `branches` ranked inputs.
+///
+/// Lifted out of the planner so it can be checked against the ceiling it has
+/// to fit inside. The first version of this claimed 16 KiB a row against an
+/// 8 MiB projection and every faceted query was refused as `InvalidRequest` --
+/// a failure that names the request and not the number in it. A test now
+/// proves the declaration fits before anybody has to read that error.
+fn facet_bound(branches: u64) -> runtime::find::Bound {
+    let reach = branches.saturating_mul(MAX_FACET_MATCHES);
+    runtime::find::Bound {
+        decoded_bodies: 1,
+        postings_read: reach.saturating_mul(4),
+        edges_visited: reach,
+        // Ranked once per branch candidate, read again by Pack for survivors.
+        nodes_visited: reach.saturating_mul(2),
+        paths_retained: MAX_FACET_MATCHES,
+        candidates_per_branch: MAX_FACET_MATCHES,
+        score_evaluations: reach.saturating_mul(2),
+        // A title may be MAX_TITLE_BYTES; eight KiB a row is the ceiling
+        // divided by MAX_FACET_MATCHES, which is what sets that constant.
+        projected_bytes: MAX_FACET_MATCHES.saturating_mul(8 * 1_024),
+        packed_tokens: MAX_FACET_MATCHES.saturating_mul(4_096),
+        wall_millis: 5_000,
+    }
+}
+
+/// One faceted page: the whole filtered set, or a refusal.
+///
+/// A Query carrying `Merge` is not a linear plan, so Find hands back no
+/// continuation for it. That sounds like a limitation and is the property this
+/// wanted: a faceted answer is COMPLETE or it is refused, never a partial page
+/// that a caller might count. `exact_total` is then the row count itself rather
+/// than a posting estimate, and "3 of 12" is finally a true sentence.
+///
+/// The unfaceted path is untouched and still streams through `find_kind_page`
+/// with a real cursor. Only a filter pays merge's price, and only a filter
+/// needs merge's exactness.
+fn find_faceted_issue_page(
+    ctx: &Context<'_>,
+    project: Option<&str>,
+    axes: &[Vec<FacetSeek>],
+    all: bool,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let branches = u64::try_from(axes.iter().map(Vec::len).sum::<usize>())
+        .map_err(|_| Rejection::LimitExceeded)?
+        .saturating_add(1);
+    let bound = facet_bound(branches);
+    let mut steps: Vec<find_api::Step> = Vec::new();
+    let mut next_id = 1u32;
+    let mut alloc = || -> Result<find_api::StepId, Rejection> {
+        let id = find_api::StepId::new(next_id).ok_or(Rejection::StateCorrupt)?;
+        next_id = next_id.saturating_add(1);
+        Ok(id)
+    };
+    let position = crate::find::field_ref(crate::find::field::KIND_PROJECT_POSITION);
+    let rank_by_position = || {
+        find_api::Op::Rank(find_api::Rank {
+            by: vec![find_api::RankBy::Field(position.clone())],
+        })
+    };
+
+    // The base: every live Issue, scoped to the project when there is one.
+    let base_seek = alloc()?;
+    steps.push(find_api::Step {
+        id: base_seek,
+        input: Vec::new(),
+        op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+            field: crate::find::field_ref(if project.is_some() {
+                crate::find::field::KIND_PROJECT
+            } else {
+                crate::find::field::KIND
+            }),
+            test: find_api::Test::Equal,
+            value: project.map_or_else(
+                || find_api::Atom::Text("issue".into()),
+                |project| find_api::Atom::Bytes(crate::find::composite_key(["issue", project])),
+            ),
+        })),
+        bound,
+    });
+    let base_ranked = alloc()?;
+    steps.push(find_api::Step {
+        id: base_ranked,
+        input: vec![base_seek],
+        op: rank_by_position(),
+        bound,
+    });
+
+    let mut axis_outputs = vec![base_ranked];
+    for axis in axes {
+        let mut ranked = Vec::new();
+        for facet in axis {
+            let seek_id = alloc()?;
+            let (field, value) = match facet {
+                FacetSeek::Direct { field, value } => (*field, value.clone()),
+                FacetSeek::Membership { kind, target } => (
+                    crate::find::field::RELATION_TARGET_KIND,
+                    find_api::Atom::Bytes(crate::find::composite_key([kind, target.as_str()])),
+                ),
+            };
+            steps.push(find_api::Step {
+                id: seek_id,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(field),
+                    test: find_api::Test::Equal,
+                    value,
+                })),
+                bound,
+            });
+            // A membership posting answers with relation nodes. One hop
+            // outbound along `edge::MEMBER` turns them into the Issues they are
+            // about -- the same edge row enrichment walks inbound, and for the
+            // same reason: it reaches memberships and never board history.
+            let issues = match facet {
+                FacetSeek::Direct { .. } => seek_id,
+                FacetSeek::Membership { .. } => {
+                    let hop = alloc()?;
+                    steps.push(find_api::Step {
+                        id: hop,
+                        input: vec![seek_id],
+                        op: find_api::Op::Walk(find_api::Walk {
+                            edges: vec![crate::find::edge_ref(crate::find::edge::MEMBER)],
+                            direction: find_api::Direction::Out,
+                            min_hops: 1,
+                            max_hops: 1,
+                            unique: find_api::Unique::Walk,
+                            order: find_api::WalkOrder::Breadth,
+                            emit: find_api::Emit::Nodes,
+                            gate: crate::find::gate_ref(),
+                        }),
+                        bound,
+                    });
+                    hop
+                }
+            };
+            // Merge takes ranked branches only; Seek and Walk both answer with
+            // plain nodes, so each branch is ranked before it can be combined.
+            let ranked_id = alloc()?;
+            steps.push(find_api::Step {
+                id: ranked_id,
+                input: vec![issues],
+                op: rank_by_position(),
+                bound,
+            });
+            ranked.push(ranked_id);
+        }
+        // Within one axis the values union: two labels means either.
+        let axis_out = if ranked.len() == 1 {
+            ranked[0]
+        } else {
+            let union = alloc()?;
+            steps.push(find_api::Step {
+                id: union,
+                input: ranked,
+                op: find_api::Op::Merge(find_api::Merge {
+                    method: find_api::MergeMethod::Union,
+                }),
+                bound,
+            });
+            union
+        };
+        axis_outputs.push(axis_out);
+    }
+
+    // Across axes they intersect: a status and a label means both.
+    let combined = if axis_outputs.len() == 1 {
+        axis_outputs[0]
+    } else {
+        let intersect = alloc()?;
+        steps.push(find_api::Step {
+            id: intersect,
+            input: axis_outputs,
+            op: find_api::Op::Merge(find_api::Merge {
+                method: find_api::MergeMethod::Intersection,
+            }),
+            bound,
+        });
+        intersect
+    };
+
+    let mut predicates = vec![find_api::Predicate {
+        field: crate::find::field_ref(crate::find::field::CONFLICTED),
+        test: find_api::Test::Equal,
+        value: find_api::Atom::Bool(false),
+    }];
+    if !all {
+        predicates.push(find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::TOMBSTONE),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Bool(false),
+        });
+    }
+    let keep = alloc()?;
+    steps.push(find_api::Step {
+        id: keep,
+        input: vec![combined],
+        op: find_api::Op::Keep(find_api::Keep { predicates }),
+        bound,
+    });
+    // Merge sorts by its own score and then by node key, which is doc-id order
+    // and not the order anybody dragged these into. Put the board's own
+    // ordering back before packing.
+    let ordered = alloc()?;
+    steps.push(find_api::Step {
+        id: ordered,
+        input: vec![keep],
+        op: rank_by_position(),
+        bound,
+    });
+    let mut fields = [
+        crate::find::field::TITLE,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::PRIORITY,
+        crate::find::field::TOMBSTONE,
+        crate::find::field::DUE_AT,
+        crate::find::field::ESTIMATE,
+        crate::find::field::ID,
+        crate::find::field::KIND,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    let pack = alloc()?;
+    steps.push(find_api::Step {
+        id: pack,
+        input: vec![ordered],
+        op: find_api::Op::Pack(find_api::Pack { fields }),
+        bound,
+    });
+    if steps.len() > find_api::MAX_QUERY_STEPS {
+        return Err(Rejection::LimitExceeded);
+    }
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps,
+        output: pack,
+        bound,
+        page_size: u32::try_from(MAX_FACET_MATCHES).unwrap_or(find_api::MAX_PAGE_SIZE),
+        cursor: None,
+    })
+    .map_err(find_rejection)
+}
+
 /// Issues whose memberships one Walk resolves.
 ///
 /// Sixteen, and the binding ceiling is `paths_retained`, not the projection.
@@ -12141,8 +12500,61 @@ impl World for IssuesWorld {
                 mine,
                 all,
                 me,
+                mut facets,
                 page,
             } => {
+                // The singular arguments are one spelling of the plural ones.
+                // Fold rather than branch: two code paths answering the same
+                // question is how they come to disagree about it.
+                for (axis, value) in [
+                    (&mut facets.labels, &label),
+                    (&mut facets.statuses, &status),
+                    (&mut facets.milestones, &milestone),
+                    (&mut facets.assignees, &mine),
+                ] {
+                    if let Some(value) = value {
+                        axis.push(value.clone());
+                    }
+                }
+                facets
+                    .canonicalize()
+                    .map_err(|()| Rejection::InvalidRequest)?;
+                if !facets.is_empty() {
+                    let axes = facet_seeks(project.as_deref(), &facets)?;
+                    let answer = find_faceted_issue_page(ctx, project.as_deref(), &axes, all)?;
+                    let mut catalog = CatalogState::default();
+                    let mut loaded_workflows = std::collections::BTreeSet::new();
+                    let mut rows = Vec::new();
+                    for result in answer.rows() {
+                        let row = issue_page_row(result)?;
+                        let project_id = row.project_id.as_str();
+                        if !all {
+                            if loaded_workflows.insert(project_id.to_string()) {
+                                apply_project_workflow(ctx, &mut catalog, project_id)?;
+                            }
+                            if issue_status_category(&catalog, project_id, &row.status)?
+                                == StatusCategory::Done
+                            {
+                                continue;
+                            }
+                        }
+                        rows.push(row);
+                    }
+                    let me_actor = me.as_deref().and_then(ActorId::parse);
+                    apply_page_aliases(ctx, &mut catalog, &mut rows)?;
+                    enrich_issue_page(ctx, &mut catalog, &mut rows, me_actor.as_ref())?;
+                    // The merged answer is the WHOLE filtered set -- Find hands
+                    // back no continuation for a non-linear plan, so there is no
+                    // partial page to miscount. This total is the count itself,
+                    // and it is exact.
+                    let exact = u64::try_from(rows.len()).ok();
+                    let mut page_out = page_from_answer(&answer, rows);
+                    page_out.exact_total = exact;
+                    page_out.next_cursor = None;
+                    return Ok(projection(
+                        serde_json::to_vec(&page_out).expect("faceted rows page json"),
+                    ));
+                }
                 // A relation filter asks the reverse membership question --
                 // "which issues carry this label" -- so it is seeked on the
                 // reverse coordinate rather than post-filtered out of a page
@@ -13237,6 +13649,67 @@ mod check_demand_tests {
             .collect::<Vec<_>>();
         assert!(encoded.contains(&verification));
         assert!(encoded.contains(&transition));
+    }
+}
+
+#[cfg(test)]
+mod facet_bound_tests {
+    use super::*;
+
+    /// The declaration fits the ceiling it will be measured against.
+    ///
+    /// Find refuses on the DECLARATION, before it evaluates anything, and the
+    /// refusal is `Invalid` -- which reaches a caller as `InvalidRequest` and
+    /// names the request rather than the dimension that overflowed. The first
+    /// version of `facet_bound` claimed 16 KiB a row against an 8 MiB
+    /// projection and every faceted query in the product failed that way.
+    ///
+    /// Checked against the World's own declared schema bound rather than a
+    /// copy of the numbers, so tightening the schema tightens this too.
+    #[test]
+    fn a_faceted_declaration_fits_the_schema_it_runs_under() {
+        let schemas = crate::find::preferred_schemas();
+        let ceiling = schemas.first().expect("the entity schema").bound;
+        for branches in 1..=(MAX_FACET_BRANCHES as u64 + 1) {
+            let bound = facet_bound(branches);
+            for (name, claimed, allowed) in [
+                (
+                    "decoded_bodies",
+                    bound.decoded_bodies,
+                    ceiling.decoded_bodies,
+                ),
+                ("postings_read", bound.postings_read, ceiling.postings_read),
+                ("edges_visited", bound.edges_visited, ceiling.edges_visited),
+                ("nodes_visited", bound.nodes_visited, ceiling.nodes_visited),
+                (
+                    "paths_retained",
+                    bound.paths_retained,
+                    ceiling.paths_retained,
+                ),
+                (
+                    "candidates_per_branch",
+                    bound.candidates_per_branch,
+                    ceiling.candidates_per_branch,
+                ),
+                (
+                    "score_evaluations",
+                    bound.score_evaluations,
+                    ceiling.score_evaluations,
+                ),
+                (
+                    "projected_bytes",
+                    bound.projected_bytes,
+                    ceiling.projected_bytes,
+                ),
+                ("packed_tokens", bound.packed_tokens, ceiling.packed_tokens),
+                ("wall_millis", bound.wall_millis, ceiling.wall_millis),
+            ] {
+                assert!(
+                    claimed <= allowed,
+                    "{branches} branches claim {claimed} {name}, ceiling is {allowed}"
+                );
+            }
+        }
     }
 }
 

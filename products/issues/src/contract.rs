@@ -1976,6 +1976,106 @@ impl IssueIntent {
     }
 }
 
+/// Facet values one axis may carry in a single query.
+///
+/// Each value costs a Seek and a Rank step, and `find::MAX_STEP_INPUTS` caps
+/// one Merge at 32 branches, so this is the point past which a filter stops
+/// being one bounded query. Sixteen is well inside that and far past what a
+/// person ticks by hand.
+pub const MAX_FACET_VALUES: usize = 16;
+
+/// The facets a work view filters by, each a set.
+///
+/// Empty means "no constraint on this axis", never "match nothing" -- the same
+/// rule the viewer's `EMPTY_FILTER` states, kept identical here so the two
+/// cannot drift into disagreeing about what an unset filter means.
+///
+/// Within one facet the values union: two statuses means either. Across facets
+/// they intersect: a status and a label means both. That is what a person means
+/// by ticking boxes, and Find expresses it directly -- `Merge(Union)` over a
+/// facet's seeks, `Merge(Intersection)` across them -- so it stays ONE query
+/// with one exact total rather than a fan-out the caller reassembles and counts.
+///
+/// This exists because a client cannot filter correctly on its own. It holds a
+/// page, not the project, so a predicate it applies itself lands on whatever
+/// happened to be loaded -- which is how a filter comes to report "3 of 100"
+/// about a project holding five hundred Issues. The engine is on the same
+/// machine as the person reading it; there is no reason for the answer to be a
+/// partial one.
+///
+/// **The No-milestone bucket is deliberately absent.** "Issues nobody has
+/// scoped yet" is the absence of a relation, Find has neither negation nor set
+/// difference, and absence cannot be posted: an Issue that never carried a
+/// milestone has no milestone Body for an extractor to read. Posting it where a
+/// Body happens to exist would find only Issues whose milestone was set and
+/// then cleared, which is a wrong answer wearing a right one's clothes. Until
+/// the write path guarantees the Body, that bucket is answered incompletely and
+/// must SAY so rather than be quietly narrowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueFacets {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priorities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<String>,
+    /// Resolved `mls_` ids only. The empty string is not accepted here; see the
+    /// type's note on the No-milestone bucket.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<String>,
+}
+
+impl IssueFacets {
+    pub fn is_empty(&self) -> bool {
+        self.axes().all(|axis| axis.is_empty())
+    }
+
+    fn axes(&self) -> impl Iterator<Item = &Vec<String>> {
+        [
+            &self.labels,
+            &self.statuses,
+            &self.priorities,
+            &self.assignees,
+            &self.milestones,
+        ]
+        .into_iter()
+    }
+
+    /// Sort and deduplicate every axis, and refuse an empty or oversized one.
+    ///
+    /// The query this describes is a step DAG whose shape IS the facet values,
+    /// so two spellings of one selection would be two different queries with
+    /// two different cursors for the same answer. Canonicalising means a cursor
+    /// survives a caller reordering its checkboxes.
+    pub fn canonicalize(&mut self) -> Result<(), ()> {
+        for axis in [
+            &mut self.labels,
+            &mut self.statuses,
+            &mut self.priorities,
+            &mut self.assignees,
+            &mut self.milestones,
+        ] {
+            axis.sort();
+            axis.dedup();
+            // An empty value is not a selection. `""` in particular is how the
+            // No-milestone bucket would try to arrive; refuse it at the door
+            // rather than let it seek a posting nothing writes.
+            if axis.iter().any(String::is_empty) || axis.len() > MAX_FACET_VALUES {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Seeks this describes, before intersection.
+    pub fn seek_count(&self) -> usize {
+        self.axes().map(Vec::len).sum()
+    }
+}
+
 pub const DEFAULT_PAGE_SIZE: u32 = 100;
 pub const MAX_PAGE_SIZE: u32 = 1_000;
 
@@ -2220,6 +2320,14 @@ pub enum IssueQuery {
         mine: Option<String>,
         all: bool,
         me: Option<String>,
+        /// Multi-valued facets. The singular fields above are the agent and CLI
+        /// spelling and fold into this at the top of the handler, so an old
+        /// payload keeps meaning what it meant. They are kept rather than
+        /// replaced because `issues_list` is a published tool surface, and
+        /// widening a tool argument from a string to an array breaks every
+        /// caller that already passes a string.
+        #[serde(default, skip_serializing_if = "IssueFacets::is_empty")]
+        facets: IssueFacets,
         page: PageRequest,
     },
     Board {

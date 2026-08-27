@@ -949,6 +949,135 @@ fn an_observation_never_governs_and_never_becomes_a_link() {
     assert_eq!(trail.items.len(), before.items.len());
 }
 
+/// A filter is answered where the whole set is, and it counts truthfully.
+///
+/// The viewer used to filter status, priority, assignee and milestone in the
+/// browser, over the rows it happened to have loaded -- 100 by default. So on a
+/// five-hundred-Issue project "priority: urgent" showed the urgent Issues among
+/// the first hundred, and the "N of M" beside it counted the same partial set.
+/// Both numbers were wrong and neither said so.
+///
+/// Facets move that question to the engine, which is on the same machine and
+/// holds the whole project. Within an axis the values union, across axes they
+/// intersect, and because a Query carrying `Merge` gets no continuation from
+/// Find, the answer is the COMPLETE filtered set -- so `exact_total` is a count
+/// of rows rather than an estimate of postings.
+#[test]
+fn a_faceted_list_answers_over_the_whole_project_and_counts_exactly() {
+    let root = temp_root("faceted-list");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _alias) = seed_space(&mut driver);
+    // seed_space's Issue is `high` and assigned; these two are `none` and not.
+    let plain = create_board_issue(&mut driver, &project, "Plain".into());
+    let _other = create_board_issue(&mut driver, &project, "Other".into());
+
+    let label_id = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::Label {
+            doc: doc.clone(),
+            add: vec![],
+            new_labels: vec![contract::NewLabel {
+                id: label_id.clone(),
+                name: "bug".into(),
+                color: "red".into(),
+            }],
+            remove: vec![],
+            device: my_device().as_str().to_string(),
+            ts,
+        })
+        .unwrap();
+
+    let ask = |driver: &mut Driver, facets: contract::IssueFacets| -> contract::Page<Row> {
+        driver.query(&IssueQuery::List {
+            project: Some(project.clone()),
+            label: None,
+            status: None,
+            milestone: None,
+            mine: None,
+            all: false,
+            me: Some(my_actor().as_str().to_string()),
+            facets,
+            page: first_page(),
+        })
+    };
+    let titles = |page: &contract::Page<Row>| {
+        page.items
+            .iter()
+            .map(|row| row.title.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // One axis, one value.
+    let high = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["high".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(titles(&high), vec!["First issue".to_string()]);
+    assert_eq!(
+        high.exact_total,
+        Some(1),
+        "the total is the filtered count, not the project's"
+    );
+
+    // A membership axis reaches Issues through the member edge.
+    let bugs = ask(
+        &mut driver,
+        contract::IssueFacets {
+            labels: vec![label_id.clone()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(titles(&bugs), vec!["First issue".to_string()]);
+    assert_eq!(bugs.exact_total, Some(1));
+
+    // Within an axis, values union.
+    let either = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["high".into(), "none".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(either.items.len(), 3, "two priorities means either");
+    assert_eq!(either.exact_total, Some(3));
+
+    // Across axes, they intersect.
+    let both = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["high".into()],
+            labels: vec![label_id.clone()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(titles(&both), vec!["First issue".to_string()]);
+
+    // An intersection that nothing satisfies is an exact zero, not an absence.
+    let neither = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["none".into()],
+            labels: vec![label_id],
+            ..Default::default()
+        },
+    );
+    assert!(neither.items.is_empty());
+    assert_eq!(
+        neither.exact_total,
+        Some(0),
+        "nothing matched is a measured zero"
+    );
+
+    // A faceted answer is whole, so there is nothing to continue.
+    assert!(high.next_cursor.is_none());
+    let _ = plain;
+}
+
 /// A card that has been dragged a lot is still a card.
 ///
 /// `stage_issue_move` writes an `issue_transition` record on every move --
@@ -1003,6 +1132,7 @@ fn a_heavily_moved_issue_does_not_break_its_own_list() {
         mine: None,
         all: false,
         me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(rows.items.len(), 2, "the list still draws after 300 moves");
@@ -1071,6 +1201,7 @@ fn a_collection_row_carries_its_labels_and_assignees() {
         mine: None,
         all: false,
         me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     let carried = rows
@@ -1119,6 +1250,7 @@ fn a_collection_row_carries_the_reference_a_person_reads() {
         mine: None,
         all: false,
         me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     let row = rows.items.first().expect("the seeded issue");
@@ -1196,6 +1328,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(rows.items.len(), 2);
@@ -1262,6 +1395,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(rows.items.len(), 1);
@@ -1406,6 +1540,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert!(rows.items.iter().all(|r| r.title != "Second issue"));
@@ -1417,6 +1552,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: true,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert!(all_rows
@@ -1565,6 +1701,7 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(
@@ -1580,6 +1717,7 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert!(rows.items.is_empty(), "the rival id was never applied");
@@ -1860,6 +1998,7 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         mine: None,
         all: true,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     let row = rows

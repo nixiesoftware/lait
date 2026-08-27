@@ -1913,6 +1913,10 @@ impl<'a> IssueRouter<'a> {
                     mine: filter.mine.then(|| facts.actor.clone()),
                     all: filter.all,
                     me: Some(facts.actor.clone()),
+                    // The agent and CLI surface stays singular. Its arguments
+                    // fold into the facets in the handler, so this route keeps
+                    // meaning exactly what it meant.
+                    facets: issues::contract::IssueFacets::default(),
                     page: page.clone(),
                 };
                 let page: issues::contract::Page<Row> =
