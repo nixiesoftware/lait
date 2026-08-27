@@ -5,14 +5,9 @@ import {
   AdminLayoutProvider,
   useAdminLayout,
 } from '@/context/AdminLayoutContext';
-import {
-  BroadcastGradientProvider,
-  useBroadcastGradient,
-} from '@/context/BroadcastGradientContext';
 
 function AdminLayoutContent() {
   const { hideSidebar } = useAdminLayout();
-  useBroadcastGradient();
   const location = useLocation();
   const isEditorRoute =
     location.pathname?.startsWith('/broadcast-list/broadcast/') ?? false;
@@ -37,9 +32,7 @@ function AdminLayoutContent() {
 function AdminLayout() {
   return (
     <AdminLayoutProvider>
-      <BroadcastGradientProvider>
-        <AdminLayoutContent />
-      </BroadcastGradientProvider>
+      <AdminLayoutContent />
     </AdminLayoutProvider>
   );
 }

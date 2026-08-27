@@ -1,8 +1,6 @@
 import { createRootRoute, Outlet } from '@tanstack/react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
-import { SidebarProvider } from '@/context/SidebarContext';
-import { ThemeProvider } from '@/context/ThemeContext';
 import { ToastProvider } from '@/ds';
 import { useState } from 'react';
 
@@ -23,13 +21,9 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <ToastProvider>
-          <SidebarProvider>
-            <Outlet />
-          </SidebarProvider>
-        </ToastProvider>
-      </ThemeProvider>
+      <ToastProvider>
+        <Outlet />
+      </ToastProvider>
       <ReactQueryDevtools initialIsOpen={false} />
     </QueryClientProvider>
   );

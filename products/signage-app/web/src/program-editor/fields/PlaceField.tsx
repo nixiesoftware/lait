@@ -13,7 +13,7 @@
 
 import { useState } from "react";
 import { MapPin, Search } from "lucide-react";
-import { CityPicker, type CitySelection } from "@/components/integrations/CityPicker";
+import { CityPicker, type CitySelection } from "./CityPicker";
 import type { PlaceField as PlaceFieldSpec } from "../kinds/types";
 import { Row, type Surface } from "./FieldControl";
 

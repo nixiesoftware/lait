@@ -26,7 +26,7 @@ import {
   type SourceCategory,
   sourceCategory,
   sourceLabel,
-} from "@/components/content";
+} from "@/utils/content/library";
 import { Thumb } from "@/program-editor/Thumb";
 import { formatDuration } from "@/program-editor/model";
 import { useCreateBroadcast } from "@/utils/navigation/hooks";

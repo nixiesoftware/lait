@@ -7,7 +7,6 @@ import './ds/tokens.css';
 import './ds/language.css';
 import './ds/overlay.css';
 import './ds/page.css';
-import './app/globals.css';
 
 const router = createRouter({ routeTree });
 
