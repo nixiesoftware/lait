@@ -285,6 +285,31 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     assert_eq!((milestones[0].done, milestones[0].total), (0, 1));
     assert_eq!(milestones[0].description, "", "a new milestone has no body");
 
+    // The row says so too. `enrich_issue_page` reads an Issue's milestone off
+    // one inbound Walk rather than the keyed relation read it replaced, and
+    // nothing else in the suite looks at `Row::milestone` -- so a traversal
+    // that dropped the singleton kinds would show up only here.
+    let IssueResponse::List { page } = ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::List {
+            project: Some("eng".into()),
+            filter: issues_app::Filter::default(),
+            page: issues::contract::PageRequest::default(),
+        },
+    ) else {
+        panic!("expected List");
+    };
+    let carried = page
+        .items
+        .iter()
+        .find(|row| row.title == "carry a milestone")
+        .expect("the milestoned issue");
+    assert_eq!(
+        carried.milestone.as_deref(),
+        Some(milestones[0].id.as_str())
+    );
+
     // The body is an independent field: writing it leaves the name and date
     // alone, and an absent `description` on a later edit leaves the body alone.
     ok(

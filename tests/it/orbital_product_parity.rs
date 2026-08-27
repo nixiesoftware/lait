@@ -949,6 +949,198 @@ fn an_observation_never_governs_and_never_becomes_a_link() {
     assert_eq!(trail.items.len(), before.items.len());
 }
 
+/// A card that has been dragged a lot is still a card.
+///
+/// `stage_issue_move` writes an `issue_transition` record on every move --
+/// including a rank-only reposition inside one column -- and those records are
+/// immutable and never pruned. `extract_issue_transition` posts each one as a
+/// relation node carrying `edge::SOURCE` to the Issue, which is the same edge
+/// every membership rides.
+///
+/// So anything that reaches an Issue's memberships by traversing that edge
+/// sweeps its entire board history too, and the history only grows. A page-wide
+/// inbound Walk was written here and did exactly that: after roughly two
+/// hundred moves of a SINGLE issue the traversal exceeded its declared bound
+/// and Find refused, which `?` propagated out of the query arm -- so the whole
+/// list and the whole board became permanently un-renderable for that project,
+/// with no way back.
+///
+/// Three hundred moves takes about a minute and is the cheapest possible guard
+/// against re-introducing it. If this test starts failing with
+/// `LimitExceeded`, something is walking `edge::SOURCE` again.
+#[test]
+fn a_heavily_moved_issue_does_not_break_its_own_list() {
+    let root = temp_root("moved-issue");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _alias) = seed_space(&mut driver);
+    let other = create_board_issue(&mut driver, &project, "Neighbour".into());
+
+    for round in 0..300 {
+        let ts = driver.ts();
+        let pos = if round % 2 == 0 {
+            Pos::Before { doc: other.clone() }
+        } else {
+            Pos::After { doc: other.clone() }
+        };
+        driver
+            .submit(&IssueIntent::IssueMove {
+                doc: doc.clone(),
+                project: None,
+                pos: Some(pos),
+                device: my_device().as_str().to_string(),
+                ts,
+            })
+            .unwrap();
+    }
+
+    // Both collection surfaces, because both enrich and both would fail.
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
+        project: Some(project.clone()),
+        label: None,
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    assert_eq!(rows.items.len(), 2, "the list still draws after 300 moves");
+    let moved = rows
+        .items
+        .iter()
+        .find(|row| row.doc_id.as_str() == doc)
+        .expect("the moved issue");
+    assert_eq!(moved.assignees, vec![my_actor()]);
+    assert!(moved.enrichment_complete);
+
+    let board: BoardPage = driver.query(&IssueQuery::Board {
+        project,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    assert_eq!(board.rows.items.len(), 2, "the board still draws too");
+}
+
+/// The memberships a row draws come back from one traversal.
+///
+/// Milestone is pinned in `product_features` rather than here: this harness
+/// drives `IssueIntent::MilestoneSet` directly and that intent answers
+/// `StateCorrupt` from it, which is a gap in the harness and not in the read
+/// path these assertions cover.
+///
+/// `enrich_issue_page` replaced three exact seeks per row with a single
+/// inbound Walk, and nothing pinned what those seeks produced: no test in this
+/// file read `label_names` or `milestone` off a Row at all, so a Walk that
+/// returned nothing for either would have passed the whole suite.
+///
+/// The bare Issue is half the test. A Walk emits deduplicated endpoints and
+/// loses which start each came from -- the relations are re-attributed by
+/// their own `SOURCE_ID` -- so a mistake there hands every row the same
+/// memberships, which only a row that should have none can catch.
+#[test]
+fn a_collection_row_carries_its_labels_and_assignees() {
+    let root = temp_root("collection-memberships");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _alias) = seed_space(&mut driver);
+    let bare = create_board_issue(&mut driver, &project, "Bare".into());
+
+    let label_id = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::Label {
+            doc: doc.clone(),
+            add: vec![],
+            new_labels: vec![contract::NewLabel {
+                id: label_id,
+                name: "bug".into(),
+                color: "red".into(),
+            }],
+            remove: vec![],
+            device: my_device().as_str().to_string(),
+            ts,
+        })
+        .unwrap();
+
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
+        project: Some(project),
+        label: None,
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    let carried = rows
+        .items
+        .iter()
+        .find(|row| row.doc_id.as_str() == doc)
+        .expect("the seeded issue");
+    // A row carries label NAMES, never ids.
+    assert_eq!(carried.label_names, vec!["bug".to_string()]);
+    assert_eq!(carried.assignees, vec![my_actor()]);
+    assert!(carried.enrichment_complete);
+
+    let untouched = rows
+        .items
+        .iter()
+        .find(|row| row.doc_id.as_str() == bare)
+        .expect("the bare issue");
+    assert!(untouched.label_names.is_empty());
+    assert_eq!(untouched.milestone, None);
+    assert!(untouched.assignees.is_empty());
+    assert!(untouched.enrichment_complete);
+}
+
+/// A row in a collection says the same thing the Issue's own page says.
+///
+/// It did not. `issue_page_row` left `key_alias` absent and `reff` a bare
+/// 26-character doc id, and nothing downstream filled either in -- so a list
+/// and a board both drew `iss_02CHGHRS442UPH0SM62KRP894N` where `View` drew
+/// `ENG-1`. Two spellings of one Issue, and the one a person was shown was
+/// neither typeable nor the canonical short handle.
+///
+/// The board carried a second half of the same defect: it never enriched at
+/// all, so a card knew nothing about who it was assigned to.
+#[test]
+fn a_collection_row_carries_the_reference_a_person_reads() {
+    let root = temp_root("collection-reference");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, alias) = seed_space(&mut driver);
+
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
+        project: Some(project.clone()),
+        label: None,
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    let row = rows.items.first().expect("the seeded issue");
+    assert_eq!(row.key_alias.as_deref(), Some(alias.as_str()));
+    // `reff` stays whole on purpose -- it is what resolves, and a fixed-width
+    // prefix of a time-ordered ULID is ambiguous between Issues minted close
+    // together. The alias is the half a person reads.
+    assert_eq!(row.reff, doc);
+
+    let board: BoardPage = driver.query(&IssueQuery::Board {
+        project,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    let card = board.rows.items.first().expect("the seeded issue");
+    assert_eq!(card.key_alias.as_deref(), Some(alias.as_str()));
+    assert_eq!(card.reff, doc);
+    // The membership the board never asked for.
+    assert_eq!(card.assignees, vec![my_actor()]);
+    assert_eq!(card.assignee_summary, "you");
+}
+
 #[test]
 fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     let root = temp_root("surface");

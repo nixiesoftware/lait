@@ -3882,10 +3882,64 @@ fn activity_page_row(
     })
 }
 
+/// One page of inbox entries, with the per-row lookups hoisted out of the row.
+///
+/// This was three storage round trips and a digest per entry. `inbox_page_row`
+/// called `unique_find_row` for the Issue, `issue_coordinate_for` for the
+/// placement and alias -- itself an identity seek, a placement probe, a
+/// transition-head query, a Body read and a re-hash of those bytes -- and
+/// `unique_find_row` again for the project. A fifty-row inbox spent about four
+/// hundred operations to draw fifty lines.
+///
+/// None of it needed to be per row. Titles and projects come from one batched
+/// `Seek::Ids`, alias ordinals from another, and a page holds a handful of
+/// distinct projects however many entries it has. What remains per row is the
+/// activity Body read, which is irreducible: the entry *is* that record.
+///
+/// The one row that still takes the old path is an Issue the batch could not
+/// resolve -- an unconverged placement, which `find_issue_rows_by_ids`
+/// deliberately excludes. Falling back rather than skipping keeps the old
+/// behaviour exactly: such an entry refuses the page instead of vanishing from
+/// it, which is the difference between a reader knowing something is wrong and
+/// a reader being quietly shown less than there is.
+fn inbox_page_rows(
+    ctx: &Context<'_>,
+    rows: &[&runtime::find::ResultRow],
+    recipient: &ActorId,
+) -> Result<Vec<crate::dto::InboxEntry>, Rejection> {
+    let mut docs = rows
+        .iter()
+        .filter_map(|row| result_text(row, crate::find::field::SOURCE_ID))
+        .collect::<Vec<_>>();
+    docs.sort();
+    docs.dedup();
+    let issues = find_issue_rows_by_ids(ctx, docs.clone())?;
+    let ordinals = page_alias_ordinals(ctx, &docs)?;
+    let mut catalog = CatalogState::default();
+    let mut asked = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(inbox_page_row(
+            ctx,
+            row,
+            recipient,
+            &issues,
+            &ordinals,
+            &mut catalog,
+            &mut asked,
+        )?);
+    }
+    Ok(out)
+}
+
 fn inbox_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
     recipient: &ActorId,
+    issues: &std::collections::BTreeMap<String, crate::dto::Row>,
+    ordinals: &std::collections::BTreeMap<String, u64>,
+    catalog: &mut CatalogState,
+    asked: &mut std::collections::BTreeSet<String>,
 ) -> Result<crate::dto::InboxEntry, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
     let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
@@ -3904,26 +3958,37 @@ fn inbox_page_row(
     {
         return Err(Rejection::StateCorrupt);
     }
-    let issue = unique_find_row(ctx, crate::find::field::ID, &doc, "issue", None)?
-        .ok_or(Rejection::StateCorrupt)?;
-    let title = result_text(&issue, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?;
-    let coordinate =
-        crate::record_store::issue_coordinate_for(ctx, &doc)?.ok_or(Rejection::StateCorrupt)?;
-    let project = unique_find_row(
-        ctx,
-        crate::find::field::ID,
-        &coordinate.placement.project,
-        "project",
-        None,
-    )?
-    .ok_or(Rejection::StateCorrupt)?;
-    let project_key =
-        result_text(&project, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?;
-    let reff = coordinate
-        .identity
-        .alias
-        .render(&project_key)
-        .map_err(|_| Rejection::StateCorrupt)?;
+    let (title, reff) = match (issues.get(&doc), ordinals.get(&doc)) {
+        (Some(issue), Some(&ordinal)) => {
+            let key = inbox_project_key(ctx, catalog, asked, issue.project_id.as_str())?;
+            // `render_short`, matching the Issue's own page and its rows. The
+            // full form names the disambiguator, which resolves an ambiguous
+            // reference and is not what a person reads a list by -- and an
+            // inbox line beside a list saying `ENG-12` must not say
+            // `ENG-12-9f3a1c…` about the same Issue.
+            let reff = crate::records::IssueAliasCoordinate::for_issue(ordinal, &issue.doc_id)
+                .and_then(|alias| alias.render_short(&key))
+                .map_err(|_| Rejection::StateCorrupt)?;
+            (issue.title.clone(), reff)
+        }
+        // The batch could not name it. Resolve this one the long way so the
+        // page refuses for the same reasons it always did.
+        _ => {
+            let issue = unique_find_row(ctx, crate::find::field::ID, &doc, "issue", None)?
+                .ok_or(Rejection::StateCorrupt)?;
+            let title =
+                result_text(&issue, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?;
+            let coordinate = crate::record_store::issue_coordinate_for(ctx, &doc)?
+                .ok_or(Rejection::StateCorrupt)?;
+            let key = inbox_project_key(ctx, catalog, asked, &coordinate.placement.project)?;
+            let reff = coordinate
+                .identity
+                .alias
+                .render_short(&key)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            (title, reff)
+        }
+    };
     Ok(crate::dto::InboxEntry {
         ts: record.event.t,
         kind,
@@ -3934,6 +3999,23 @@ fn inbox_page_row(
         actor: Some(record.event.a),
         actor_nick: None,
     })
+}
+
+/// One project's KEY, read once per page rather than once per entry.
+fn inbox_project_key(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    asked: &mut std::collections::BTreeSet<String>,
+    project: &str,
+) -> Result<String, Rejection> {
+    if asked.insert(project.to_string()) {
+        crate::record_store::apply_project(ctx, catalog, project)?;
+    }
+    catalog
+        .projects
+        .get(project)
+        .map(|meta| meta.key.clone())
+        .ok_or(Rejection::StateCorrupt)
 }
 
 fn immutable_record_bytes(
@@ -4977,6 +5059,184 @@ fn project_issue_counts(
     )))
 }
 
+/// Every page row's alias ordinal, in one query.
+///
+/// The ordinal is already indexed. `extract_issue_identity` posts
+/// `ALIAS_ORDINAL` on a node whose id is `issue-identity:<doc>`, so a whole
+/// page of them is one `Seek::Ids` over ids this function can spell without
+/// reading anything first.
+///
+/// The alternative was `aliases_for_issue` per row, which is what the single
+/// Issue paths call. That reaches `issue_coordinate_for`: an exact record
+/// seek, a placement probe, a transition-head query, a Body read, a re-hash
+/// of those bytes to verify the key, and a meta lookup -- five storage
+/// operations and a digest, per row, to end up using one field. This packs
+/// that field directly.
+///
+/// An Issue with no identity record is simply absent from the answer. That is
+/// the v3 store before its migration, and the correct degradation is the one
+/// `canonical_for` already performs: no `key_alias`, and a short `reff` a
+/// person can still type.
+fn page_alias_ordinals(
+    ctx: &Context<'_>,
+    docs: &[String],
+) -> Result<std::collections::BTreeMap<String, u64>, Rejection> {
+    use runtime::find as find_api;
+    let mut out = std::collections::BTreeMap::new();
+    if docs.is_empty() {
+        return Ok(out);
+    }
+    if docs.len() > ID_RESOLUTION_CHUNK {
+        for chunk in docs.chunks(ID_RESOLUTION_CHUNK) {
+            out.extend(page_alias_ordinals(ctx, chunk)?);
+        }
+        return Ok(out);
+    }
+    let count = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: count.saturating_mul(16),
+        edges_visited: 1,
+        nodes_visited: count.saturating_mul(2),
+        paths_retained: 1,
+        candidates_per_branch: count.saturating_mul(2),
+        score_evaluations: 1,
+        // An ordinal and the id it belongs to. Nothing here is text somebody
+        // wrote, so this claims a kilobyte a row rather than the sixteen
+        // `find_issue_rows_by_ids` needs for one carrying a title -- and the
+        // declared budget is what Find refuses on, before it evaluates.
+        projected_bytes: count.saturating_mul(1_024),
+        packed_tokens: count.saturating_mul(64),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    // Pack takes a canonical set; see `find_issue_rows_by_ids` for what an
+    // unsorted literal costs.
+    let mut fields = [
+        crate::find::field::SOURCE_ID,
+        crate::find::field::ALIAS_ORDINAL,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(
+                        docs.iter()
+                            .map(|doc| {
+                                find_api::NodeId::new(format!("issue-identity:{doc}").into_bytes())
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|_| Rejection::InvalidRequest)?,
+                    )),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: u32::try_from(docs.len()).map_err(|_| Rejection::LimitExceeded)?,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    for row in answer.rows() {
+        let (Some(doc), Some(ordinal)) = (
+            result_text(row, crate::find::field::SOURCE_ID),
+            result_u64(row, crate::find::field::ALIAS_ORDINAL),
+        ) else {
+            return Err(Rejection::StateCorrupt);
+        };
+        out.insert(doc, ordinal);
+    }
+    Ok(out)
+}
+
+/// Give a page of rows the reference a person reads and types.
+///
+/// `issue_page_row` leaves `key_alias` absent and `reff` a bare 26-character
+/// doc id, and nothing downstream filled either in -- so every list and board
+/// row said `iss_02CHGHRS442UPH0SM62KRP894N` where the Issue's own detail page
+/// said `ENG-12`. The two spellings of one Issue were both wrong at once: the
+/// long one is not a reference somebody can use, and it is not even the
+/// canonical short handle `canonical_for` renders.
+///
+/// `render_short` rather than `render`, matching `aliases_for_issue`: the
+/// disambiguator is what settles an ambiguous lookup, not what a row shows.
+fn apply_page_aliases(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    rows: &mut [crate::dto::Row],
+) -> Result<(), Rejection> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut docs = rows
+        .iter()
+        .map(|row| row.doc_id.to_string())
+        .collect::<Vec<_>>();
+    docs.sort();
+    docs.dedup();
+    let ordinals = page_alias_ordinals(ctx, &docs)?;
+    let mut asked = std::collections::BTreeSet::new();
+    for row in rows.iter_mut() {
+        let doc = row.doc_id.to_string();
+        // `reff` is deliberately left whole.
+        //
+        // It reads like the other half of this fix -- `views::canonical_for`
+        // renders `iss_02CHGHR`, so why not here. Because that function does
+        // not render a fixed width: it takes the shortest prefix at or above
+        // `CANONICAL_MIN` that is *unshared with its neighbours*, and the
+        // neighbours are the whole catalog, which a page does not hold.
+        //
+        // A fixed seven would be ambiguous constantly. `mint_ulid` puts a
+        // 48-bit millisecond timestamp in the high bits, and seven characters
+        // reach only the top 32 of them -- so two Issues created within about
+        // sixty-five seconds of each other share that prefix. The resolver
+        // refuses an ambiguous short reference rather than guessing, so the
+        // rows would have looked tidier and stopped opening.
+        //
+        // `key_alias` is what a person reads; `reff` is what resolves. Making
+        // the second one prettier at the cost of the first one working is the
+        // trade this deliberately does not make.
+        let project = row.project_id.as_str();
+        // Asked once per project, not once per row, and tracked separately
+        // from the catalog because a *tombstoned* project is removed from it
+        // rather than stored -- so `contains_key` stays false however many
+        // times it is loaded, and a page of rows from a deleted project would
+        // read its Body once each.
+        if asked.insert(project.to_string()) && !catalog.projects.contains_key(project) {
+            crate::record_store::apply_project(ctx, catalog, project)?;
+        }
+        let (Some(&ordinal), Some(meta)) = (ordinals.get(&doc), catalog.projects.get(project))
+        else {
+            continue;
+        };
+        let Some(alias) = crate::records::IssueAliasCoordinate::for_issue(ordinal, &row.doc_id)
+            .ok()
+            .and_then(|alias| alias.render_short(&meta.key).ok())
+        else {
+            continue;
+        };
+        row.key_alias = Some(alias);
+    }
+    Ok(())
+}
+
 /// Put the relation-held facts a list row shows onto one row.
 ///
 /// `issue_page_row` builds from one Find row, which carries the Issue's own
@@ -4988,36 +5248,39 @@ fn project_issue_counts(
 /// Three bounded exact seeks per row, on the membership posting that exists
 /// for exactly this. They are index lookups returning a handful of rows each,
 /// not scans, and the page that calls this is already bounded.
-fn enrich_issue_row(
+fn enrich_issue_page(
     ctx: &Context<'_>,
     catalog: &mut CatalogState,
-    row: &mut crate::dto::Row,
+    rows: &mut [crate::dto::Row],
     me: Option<&ActorId>,
 ) -> Result<(), Rejection> {
-    let doc = row.doc_id.to_string();
-    row.assignees = issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?
-        .into_iter()
-        .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
-        .collect::<Result<Vec<_>, _>>()?;
-    row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
-    // A row carries label NAMES, so an id that has no registry entry renders
-    // as itself rather than disappearing -- the same rule the assembled view
-    // applies.
-    let mut names = Vec::new();
-    for label in issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)? {
-        crate::record_store::apply_label(ctx, catalog, &label)?;
-        names.push(
-            catalog
-                .labels
-                .get(&label)
-                .map_or_else(|| label.clone(), |meta| meta.name.clone()),
-        );
+    for row in rows.iter_mut() {
+        let doc = row.doc_id.to_string();
+        row.assignees =
+            issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?
+                .into_iter()
+                .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
+                .collect::<Result<Vec<_>, _>>()?;
+        row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
+        // A row carries label NAMES, so an id that has no registry entry renders
+        // as itself rather than disappearing -- the same rule the assembled view
+        // applies.
+        let mut names = Vec::new();
+        for label in issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)? {
+            crate::record_store::apply_label(ctx, catalog, &label)?;
+            names.push(
+                catalog
+                    .labels
+                    .get(&label)
+                    .map_or_else(|| label.clone(), |meta| meta.name.clone()),
+            );
+        }
+        row.label_names = names;
+        row.milestone = crate::record_store::read_issue_relation(ctx, &doc, "milestone", "")?
+            .filter(|record| record.present)
+            .map(|record| record.target);
+        row.enrichment_complete = true;
     }
-    row.label_names = names;
-    row.milestone = crate::record_store::read_issue_relation(ctx, &doc, "milestone", "")?
-        .filter(|record| record.present)
-        .map(|record| record.target);
-    row.enrichment_complete = true;
     Ok(())
 }
 
@@ -11782,6 +12045,8 @@ impl World for IssuesWorld {
                     }
                 };
                 let mut catalog = CatalogState::default();
+                let mut loaded_projects = std::collections::BTreeSet::new();
+                let mut loaded_workflows = std::collections::BTreeSet::new();
                 let mut rows = Vec::new();
                 for row in candidates {
                     let project_id = row.project_id.as_str();
@@ -11810,18 +12075,29 @@ impl World for IssuesWorld {
                             continue;
                         }
                     }
-                    if project.is_none() {
+                    // Both of these were per ROW, and neither memoises itself:
+                    // `apply_project` re-reads the project Body on every call,
+                    // and `apply_project_workflow` re-runs `workflow_projection`
+                    // before deduplicating into the catalog it was already in.
+                    // A hundred-row cross-project list therefore did a hundred
+                    // project reads and a hundred workflow resolutions to learn
+                    // the same handful of facts. A page holds few distinct
+                    // projects; ask once each.
+                    if project.is_none() && loaded_projects.insert(project_id.to_string()) {
                         crate::record_store::apply_project(ctx, &mut catalog, project_id)?;
-                        if catalog
+                    }
+                    if project.is_none()
+                        && catalog
                             .projects
                             .get(project_id)
                             .is_some_and(|meta| meta.archived)
-                        {
-                            continue;
-                        }
+                    {
+                        continue;
                     }
                     if !all {
-                        apply_project_workflow(ctx, &mut catalog, project_id)?;
+                        if loaded_workflows.insert(project_id.to_string()) {
+                            apply_project_workflow(ctx, &mut catalog, project_id)?;
+                        }
                         if issue_status_category(&catalog, project_id, &row.status)?
                             == StatusCategory::Done
                         {
@@ -11831,9 +12107,8 @@ impl World for IssuesWorld {
                     rows.push(row);
                 }
                 let me_actor = me.as_deref().and_then(ActorId::parse);
-                for row in &mut rows {
-                    enrich_issue_row(ctx, &mut catalog, row, me_actor.as_ref())?;
-                }
+                apply_page_aliases(ctx, &mut catalog, &mut rows)?;
+                enrich_issue_page(ctx, &mut catalog, &mut rows, me_actor.as_ref())?;
                 let mut page = page_from_answer(&answer, rows);
                 if !all || project.is_none() || lead.is_some() {
                     // Post-filtered totals are not the source posting total.
@@ -11871,14 +12146,20 @@ impl World for IssuesWorld {
                         })
                     })
                     .collect::<Result<Vec<_>, Rejection>>()?;
-                let rows = find_board_page(ctx, &project, &workflow, &page)?;
+                let mut rows = find_board_page(ctx, &project, &workflow, &page)?;
+                // The board never enriched at all -- not the alias, and not
+                // the memberships the list has been enriching since
+                // `enrich_issue_page` landed. A card with no assignee is the
+                // same defect as a list row with none, one surface over.
+                apply_page_aliases(ctx, &mut catalog, &mut rows.items)?;
+                let me_actor = me.as_deref().and_then(ActorId::parse);
+                enrich_issue_page(ctx, &mut catalog, &mut rows.items, me_actor.as_ref())?;
                 let view = crate::dto::BoardPage {
                     schema_version: VIEW_SCHEMA_VERSION,
                     project: project_view,
                     workflow,
                     rows,
                 };
-                let _ = me;
                 Ok(projection(
                     serde_json::to_vec(&view).expect("board page json"),
                 ))
@@ -11992,15 +12273,15 @@ impl World for IssuesWorld {
                     .map(crate::find::field_ref)
                     .collect(),
                 )?;
-                let items = answer
+                let visible = answer
                     .rows()
                     .iter()
                     .filter(|row| {
                         exclude_device.as_deref()
                             != result_text(row, crate::find::field::DEVICE).as_deref()
                     })
-                    .map(|row| inbox_page_row(ctx, row, &actor))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Vec<_>>();
+                let items = inbox_page_rows(ctx, &visible, &actor)?;
                 let page = contract::Page {
                     publication: answer.coordinates().world_publication(),
                     items,

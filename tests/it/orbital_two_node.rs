@@ -357,6 +357,51 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         "the joiner's comment never surfaced in the founder's inbox projection"
     );
 
+    // The entry names its Issue the way every other surface does.
+    //
+    // `reff` and `title` were derived per row from `issue_coordinate_for` plus
+    // two `unique_find_row`s, and nothing asserted either -- the inbox tests
+    // read `kind` and `detail` and stopped. That let the inbox render
+    // `ENG-12-9f3a1c…` (the disambiguated form) while the Issue's own page and
+    // its list rows said `ENG-12`, for as long as anyone cared to look.
+    //
+    // The shape rather than a literal: this test does not fix the ordinal, and
+    // the point is the FORM -- project key, dash, number, and no hex tail.
+    let entries = match issue_req(
+        &client,
+        &founder_home,
+        issues_app::IssuesRequest::Inbox {
+            watermark: 0,
+            page: issues::contract::PageRequest::default(),
+            publication: None,
+        },
+    ) {
+        IssueResponse::Inbox { page, .. } => page.items,
+        other => panic!("expected Inbox, got {other:?}"),
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.kind == "comment" && e.detail == "joined over the socket")
+        .expect("the comment entry");
+    let (key, ordinal) = entry
+        .reff
+        .split_once('-')
+        .unwrap_or_else(|| panic!("inbox reff is not KEY-n: {}", entry.reff));
+    assert!(
+        !key.is_empty() && key.chars().all(|c| c.is_ascii_uppercase()),
+        "inbox reff should lead with the project KEY, got {}",
+        entry.reff
+    );
+    assert!(
+        ordinal.chars().all(|c| c.is_ascii_digit()),
+        "inbox reff should be the short form with no disambiguator, got {}",
+        entry.reff
+    );
+    assert!(
+        !entry.title.is_empty(),
+        "an inbox entry names its Issue's title"
+    );
+
     // Teardown.
     let _ = req(&client, &joiner_home, Request::Stop);
     let _ = req(&client, &founder_home, Request::Stop);
