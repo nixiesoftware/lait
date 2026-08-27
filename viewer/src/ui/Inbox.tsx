@@ -295,7 +295,6 @@ export function Inbox({
         <EmptyState
           art="inbox"
           title="You’re all caught up"
-          body="New mentions, assignments, and replies will collect here."
         />
       ) : visible.length === 0 && !nextCursor ? (
         <EmptyState kind="filtered-empty" art="filtered" title="No notifications match" />

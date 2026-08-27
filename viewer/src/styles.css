@@ -479,27 +479,22 @@
   color-scheme: dark;
 }
 
-/* The illustrations are authored once on transparent canvases. Their graphite
-   ink needs a small lift on dark paper; light mode reads the original pixels.
-   The three line-heaviest metaphors need a little more so their silhouettes do
-   not disappear while the violet stipple remains restrained. */
+/* The illustrations are inked for light paper like Linear's references. On
+   dark paper the same raster is reversed and quieted: white faces disappear
+   into the surface while graphite linework becomes a muted silver contour. */
 .empty-state-art {
-  filter: brightness(1.28) saturate(1.04);
-}
-.empty-state-art:is(
-  [data-empty-state-art="issues"],
-  [data-empty-state-art="filtered"],
-  [data-empty-state-art="unavailable"]
-) {
-  filter: brightness(1.72) saturate(1.08);
+  filter: invert(1) grayscale(1) brightness(1.65);
+  opacity: 0.88;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) .empty-state-art {
     filter: none;
+    opacity: 1;
   }
 }
 :root[data-theme="light"] .empty-state-art {
   filter: none;
+  opacity: 1;
 }
 
 /* Compact is the issue tracker's default. Comfortable is deliberately a root

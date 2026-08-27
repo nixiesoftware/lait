@@ -393,7 +393,7 @@ function Register({
         kind="empty"
         art="specs"
         title="No specs yet"
-        body="Capture goals, requirements, designs, and decisions beside the work they guide."
+        body="Capture requirements and decisions beside the work."
         action={
           !readOnly && project ? (
             <Button

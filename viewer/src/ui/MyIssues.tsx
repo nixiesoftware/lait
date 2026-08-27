@@ -133,7 +133,7 @@ export function MyIssues({
         <EmptyState
           art="issues"
           title="No issues assigned to you"
-          body={nextCursor ? "No assignments are present on this page." : "Work assigned to you across every project will collect here."}
+          body={nextCursor ? "No assignments are present on this page." : undefined}
         />
         {nextCursor && publication && (
           <Button

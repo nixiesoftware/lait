@@ -92,6 +92,7 @@ export function ApplicationState({
   // point: how much a surface spends should track how much the person still has
   // to be told.
   const quiet = kind === "filtered-empty";
+  const descriptive = !quiet && body !== undefined;
   return (
     <div
       className={cn("flex flex-1 items-center justify-center", quiet ? "p-6" : "p-8", className)}
@@ -100,14 +101,20 @@ export function ApplicationState({
       aria-live={kind === "loading" || kind === "progress" ? "polite" : undefined}
       aria-busy={kind === "loading" || kind === "progress" ? true : undefined}
     >
-      <div className="flex max-w-md flex-col items-center text-center">
+      <div
+        className={cn(
+          "flex flex-col",
+          descriptive ? "max-w-[18rem] items-start text-left" : "max-w-xs items-center text-center",
+        )}
+      >
         {art ? (
           <img
             aria-hidden
             alt=""
             className={cn(
               "empty-state-art pointer-events-none max-w-full select-none object-contain",
-              quiet ? "mb-3 h-28 w-44" : "mb-5 h-40 w-60",
+              quiet ? "mb-2 h-20 w-28" : "mb-3 h-24 w-32",
+              descriptive && "-ml-5 self-start",
             )}
             data-empty-state-art={art}
             draggable={false}
@@ -127,10 +134,10 @@ export function ApplicationState({
         {quiet ? (
           <h2 className="text-dim text-sm">{title}</h2>
         ) : (
-          <h2 className="text-base font-semibold">{title}</h2>
+          <h2 className="text-sm font-semibold">{title}</h2>
         )}
-        {body && !quiet && <p className="text-dim mt-1 max-w-sm text-sm leading-5">{body}</p>}
-        {action && <div className={quiet ? "mt-3" : "mt-4"}>{action}</div>}
+        {body && !quiet && <p className="text-dim mt-1 max-w-[18rem] text-xs leading-4">{body}</p>}
+        {action && <div className="mt-3">{action}</div>}
       </div>
     </div>
   );

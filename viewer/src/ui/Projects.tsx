@@ -82,7 +82,7 @@ export function Projects({
         kind="empty"
         art="projects"
         title="Projects"
-        body="Group related issues around one clear outcome, then move the work from idea to done."
+        body="Group issues around one clear outcome."
       />
     );
   }

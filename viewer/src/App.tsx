@@ -2802,7 +2802,7 @@ export function App() {
             <EmptyState
               art="projects"
               title="Projects"
-              body="Group related issues around one clear outcome, then move the work from idea to done."
+              body="Group issues around one clear outcome."
               action={
                 <Button
                   onClick={() => api.createProject()}
