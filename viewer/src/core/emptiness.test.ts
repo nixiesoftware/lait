@@ -11,10 +11,22 @@ describe("why a work area has no rows", () => {
    */
   it("is a first run when the Space has answered and holds no project", () => {
     expect(
-      emptinessOf({ hasRows: false, board: "error", projects: "ready", projectCount: 0 }),
-    ).toBe("failed");
-    expect(
       emptinessOf({ hasRows: false, board: "cold", projects: "ready", projectCount: 0 }),
+    ).toBe("no-projects");
+  });
+
+  /**
+   * The ordering, which is the whole fix and which I got backwards once.
+   *
+   * With no project there is nothing to ask a board about, so the board request
+   * fails — and that failure is *caused by* the emptiness. Reading it first
+   * answers "failed" for every new Space, which is what left "the local
+   * projection could not be loaded" on screen over a World that had loaded
+   * perfectly and was simply new.
+   */
+  it("is a first run even though the board read failed, because that is why it failed", () => {
+    expect(
+      emptinessOf({ hasRows: false, board: "error", projects: "ready", projectCount: 0 }),
     ).toBe("no-projects");
   });
 

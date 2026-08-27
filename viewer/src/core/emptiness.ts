@@ -37,15 +37,22 @@ export function emptinessOf(input: {
   projectCount: number;
 }): Emptiness {
   if (input.hasRows) return "none";
-  // A failure is worth saying even when the Space is also empty: it is the only
-  // one of the three anybody can act on, and the only one where retrying is not
-  // a lie.
+  // A Space with no projects is asked first, and the order is the whole point.
+  //
+  // There is no board to ask for without a project, so the board request fails
+  // — "no project chosen and no single default". That failure is *caused by*
+  // the emptiness, so a check that reads it first answers "failed" every time
+  // and the first-run case below is unreachable. I shipped exactly that, with a
+  // test asserting it, and the screen went on saying a World had failed to load
+  // when it had loaded perfectly and was simply new.
+  //
+  // Read from a project list that has actually answered: an empty list that has
+  // not loaded says nothing at all, and concluding a first run from it is the
+  // same defect one layer down.
+  if (input.projects === "ready" && input.projectCount === 0) return "no-projects";
+  // Then failures, which are the only one of the remaining cases anybody can
+  // act on, and the only one where offering a retry is not a lie.
   if (input.board === "error") return "failed";
   if (input.projects === "error") return "failed";
-  // A Space with no projects has no board to ask for, and asking anyway answers
-  // with a teaching error about choosing one. That is a first run, not a fault
-  // — and it must be read from a project list that has actually *answered*,
-  // because an empty list that has not loaded says nothing at all.
-  if (input.projects === "ready" && input.projectCount === 0) return "no-projects";
   return "loading";
 }
