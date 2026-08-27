@@ -170,7 +170,7 @@ export default function BroadcastHub() {
           </p>
           {stopped.map((broadcast) => (
             <div className="ds-row-between" key={broadcast.id}>
-              <span style={{ fontSize: "var(--ds-text-sm)" }}>{broadcast.name}</span>
+              <span style={{ fontSize: "var(--ds-fs-small)" }}>{broadcast.name}</span>
               <button
                 type="button"
                 className="ds-btn ds-btn-quiet"

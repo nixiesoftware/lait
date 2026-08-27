@@ -267,7 +267,7 @@ function ChannelName({
     <span style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
       <input
         className="ds-title-input"
-        style={{ fontSize: "var(--ds-text-lg)" }}
+        style={{ fontSize: "var(--ds-fs-heading)" }}
         value={name.value}
         aria-label="Channel name"
         onChange={(event) => name.set(event.target.value)}

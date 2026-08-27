@@ -13,7 +13,7 @@
 .pe-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -21,24 +21,20 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  color: var(--ds-muted);
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
 }
 
 .pe-field-label small {
-  font-weight: 500;
-  font-size: 11px;
-  opacity: 0.75;
+  font-weight: var(--ds-weight-regular);
+  font-size: var(--ds-fs-label);
+  opacity: 0.8;
 }
 
 .pe-field.is-desktop {
-  gap: 5px;
-}
-
-.pe-field.is-desktop .pe-field-label {
-  font-size: 11px;
+  gap: 6px;
 }
 
 .pe-field.is-mobile .ds-input {
@@ -53,39 +49,39 @@
   gap: 12px;
 }
 
-.pe-field.is-bad .ds-input {
-  border-color: var(--ds-danger, #e2686c);
-}
-
 .pe-field-error {
-  font-size: 12px;
-  color: var(--ds-danger, #e2686c);
+  font-size: var(--ds-fs-label);
+  color: var(--ds-alarm);
 }
 
+/* A switch is a pill with a pressed knob; on, the pill is the action. */
 .pe-switch {
   appearance: none;
   border: 0;
   flex: 0 0 auto;
   width: 44px;
   height: 26px;
-  border-radius: 999px;
-  background: var(--ds-line);
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
   padding: 3px;
   cursor: pointer;
-  transition: background 140ms ease;
+  transition: background var(--ds-dur-fast) var(--ds-ease);
 }
 
 .pe-switch span {
   display: block;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
-  background: var(--ds-ink);
-  transition: transform 140ms ease;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
+  transition: transform var(--ds-dur-fast) var(--ds-ease);
 }
 
 .pe-switch.is-on {
-  background: var(--ds-accent, #6f8f7a);
+  background: var(--ds-accent);
+  box-shadow: var(--ds-material-accent);
 }
 
 .pe-switch.is-on span {
@@ -104,7 +100,7 @@
 }
 
 .pe-unit {
-  font-size: 12px;
+  font-size: var(--ds-fs-label);
   color: var(--ds-muted);
 }
 
@@ -116,18 +112,19 @@
 
 .pe-swatch {
   appearance: none;
-  border: 1px solid var(--ds-line);
-  border-radius: 10px;
+  border: 0;
+  border-radius: var(--ds-r-md);
   height: 46px;
   font: inherit;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   text-transform: capitalize;
   cursor: pointer;
+  box-shadow: var(--ds-material-card);
 }
 
 .pe-swatch.is-on {
-  outline: 2px solid var(--ds-ink);
+  outline: 2px solid var(--ds-accent);
   outline-offset: 2px;
 }
 
@@ -139,9 +136,9 @@
 
 .pe-matrix-head,
 .pe-matrix-row {
-  font-size: 11px;
-  font-weight: 650;
-  color: var(--ds-muted);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  color: var(--ds-faint);
 }
 
 /* Both doors fit on one line, or the manual one reads as the fallback. */
@@ -156,7 +153,7 @@
   justify-content: center;
   gap: 6px;
   padding-inline: 8px;
-  font-size: 12px;
+  font-size: var(--ds-fs-label);
   white-space: nowrap;
 }
 
@@ -167,46 +164,38 @@
 }
 
 .pe-place-search {
-  padding: 10px;
-  border: 1px solid var(--ds-line);
-  border-radius: 10px;
+  padding: 12px;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-sunken);
 }
 
-/*
- * The one thing worth saying out loud on both surfaces.
- *
- * A wash of the accent is not available for this: `--ds-accent` is a hot
- * orange-red, so a tinted fill read as a failure — louder than `--ds-danger`,
- * which is a paler salmon. The note is carried by a rule down its edge instead,
- * which marks it without claiming something has gone wrong.
- */
+/* The one thing worth saying out loud on both surfaces: a note, carried by a
+   rule of the action colour down its edge, which marks it without claiming
+   something has gone wrong. */
 .pe-scope {
   display: flex;
   flex-direction: column;
   gap: 3px;
   margin: 0;
-  padding: 9px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--ds-line);
-  border-left: 3px solid var(--ds-accent);
-  background: var(--ds-surface-sunken, rgb(255 255 255 / 0.04));
-  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: var(--ds-r-sm);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 3px 0 0 var(--ds-accent);
+  font-size: var(--ds-fs-label);
   line-height: 1.45;
   color: var(--ds-muted);
 }
 
 .pe-scope strong {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
   color: var(--ds-ink);
 }
 
 .pe-scope.is-compact {
   border-radius: 0;
-  border: 0;
-  border-left: 3px solid var(--ds-accent);
 }
 
 /* ── Desktop ───────────────────────────────────────────────────────────── */
@@ -225,9 +214,10 @@
 .pe-source-rail {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 10px 6px;
-  border-right: 1px solid var(--ds-line);
+  gap: 4px;
+  padding: 10px 8px;
+  background: var(--ds-surface);
+  border-right: 1px solid var(--ds-rule);
 }
 
 .pe-source-tab {
@@ -240,28 +230,35 @@
   align-items: center;
   gap: 5px;
   padding: 10px 4px;
-  border-radius: 10px;
+  border-radius: var(--ds-r-md);
   font: inherit;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 0.6875rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
   cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
 }
 
 .pe-source-tab:hover {
-  background: var(--ds-surface);
+  background: var(--ds-hover);
   color: var(--ds-ink);
 }
 
 .pe-source-tab.is-on {
-  background: var(--ds-surface);
+  background: var(--ds-surface-sunken);
   color: var(--ds-ink);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
 }
 
 .pe-source-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--ds-line);
+  background: var(--ds-surface);
+  border-right: 1px solid var(--ds-rule);
 }
 
 .pe-source-panel > header {
@@ -269,8 +266,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 12px 12px 8px;
-  font-size: 13px;
+  padding: 14px 12px 8px;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
 }
 
 .pe-source-panel > *:not(header) {
@@ -300,7 +298,7 @@
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  border-top: 1px solid var(--ds-line);
+  background: var(--ds-surface-sunken);
 }
 
 .pe-transport > :last-child {
@@ -312,12 +310,12 @@
   flex-direction: column;
   min-height: 0;
   overflow: auto;
-  border-left: 1px solid var(--ds-line);
+  border-left: 1px solid var(--ds-rule);
   background: var(--ds-surface);
 }
 
 .pe-insp-section {
-  border-bottom: 1px solid var(--ds-line);
+  border-bottom: 1px solid var(--ds-rule);
 }
 
 .pe-insp-head {
@@ -329,12 +327,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   font: inherit;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-body);
+  text-transform: none;
   cursor: pointer;
 }
 
@@ -344,7 +342,8 @@
 }
 
 .pe-insp-chevron {
-  transition: transform 140ms ease;
+  color: var(--ds-faint);
+  transition: transform var(--ds-dur-fast) var(--ds-ease);
 }
 
 .pe-insp-section.is-open .pe-insp-chevron {
@@ -355,45 +354,42 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 0 14px 16px;
+  padding: 0 16px 18px;
 }
 
 .pe-insp-subject {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/*
- * A screen is 16:9, so the panel preview is too — a fixed pixel height let the
- * list outgrow the box, which squeezed the header to nothing and sliced the
- * last prayer in half. The point of this box is seeing the whole card.
- */
+/* A screen is 16:9, so the panel preview is too. It is a screen: dark. */
 .pe-insp-preview {
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid var(--ds-line);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-panel-screen);
+  box-shadow: var(--ds-material-card);
 }
 
 .pe-insp-group {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--ds-line);
+  padding-top: 10px;
+  border-top: 1px solid var(--ds-rule);
 }
 
 .pe-insp-group h4 {
   margin: 0;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ds-muted);
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
 }
 
 .pe-insp-actions {
@@ -417,7 +413,6 @@
   display: flex;
   gap: 10px;
   padding: 6px 12px;
-  border-top: 0;
 }
 
 .pe-actionbar {
@@ -427,7 +422,7 @@
   overflow-x: auto;
   scrollbar-width: none;
   padding: 8px 10px max(10px, env(safe-area-inset-bottom));
-  border-top: 1px solid var(--ds-line);
+  border-top: 1px solid var(--ds-rule);
   background: var(--ds-surface);
 }
 
@@ -439,7 +434,7 @@
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-ink);
+  color: var(--ds-muted);
   flex: 0 0 auto;
   min-width: 64px;
   display: flex;
@@ -447,21 +442,24 @@
   align-items: center;
   gap: 5px;
   padding: 8px 6px;
-  border-radius: 10px;
+  border-radius: var(--ds-r-md);
   font: inherit;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 0.6875rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
   cursor: pointer;
 }
 
-.pe-action.is-danger {
-  color: var(--ds-danger, #e2686c);
+.pe-action:hover {
+  color: var(--ds-ink);
 }
 
-/*
- * The sheet rises over the timeline and stops short of the stage: the reason
- * to configure from here is watching the card change while you type.
- */
+.pe-action.is-danger {
+  color: var(--ds-alarm);
+}
+
+/* The sheet rises over the timeline and stops short of the stage: the reason
+   to configure from here is watching the card change while you type. */
 .pe-sheet {
   position: absolute;
   inset: auto 0 0 0;
@@ -470,10 +468,9 @@
   flex-direction: column;
   min-height: 0;
   z-index: 5;
-  border-top: 1px solid var(--ds-line);
-  border-radius: 16px 16px 0 0;
+  border-radius: var(--ds-r-xl) var(--ds-r-xl) 0 0;
   background: var(--ds-surface);
-  box-shadow: 0 -18px 40px rgb(0 0 0 / 0.45);
+  box-shadow: var(--ds-material-lift);
   padding-bottom: var(--vv-keyboard, 0px);
 }
 
@@ -486,56 +483,59 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 12px 8px;
+  padding: 16px 14px 8px;
 }
 
 .pe-sheet-head strong {
   flex: 1;
-  font-size: 15px;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
 }
 
 .pe-sheet-grip {
   position: absolute;
-  top: 6px;
+  top: 7px;
   left: 50%;
   transform: translateX(-50%);
   width: 36px;
   height: 4px;
-  border-radius: 999px;
-  background: var(--ds-line);
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-rule-strong);
 }
 
 .pe-sheet-tabs {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   overflow-x: auto;
   scrollbar-width: none;
-  padding: 4px 12px 10px;
-  border-bottom: 1px solid var(--ds-line);
+  padding: 4px 14px 12px;
+  border-bottom: 1px solid var(--ds-rule);
 }
 
 .pe-sheet-tabs::-webkit-scrollbar {
   display: none;
 }
 
+/* A tab is a chip: resting in its well, or lifted out of it. */
 .pe-sheet-tab {
   appearance: none;
-  border: 1px solid transparent;
-  background: transparent;
+  border: 0;
+  background: var(--ds-surface-sunken);
   color: var(--ds-muted);
   flex: 0 0 auto;
-  padding: 7px 12px;
-  border-radius: 999px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--ds-r-pill);
   font: inherit;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
   cursor: pointer;
 }
 
 .pe-sheet-tab.is-on {
-  background: var(--ds-paper);
-  border-color: var(--ds-line);
+  background: var(--ds-surface);
   color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
 }
 
 .pe-sheet-body {
@@ -554,7 +554,7 @@
   gap: 8px;
   justify-content: flex-end;
   padding: 10px 14px max(12px, env(safe-area-inset-bottom));
-  border-top: 1px solid var(--ds-line);
+  border-top: 1px solid var(--ds-rule);
 }
 
 /* ── The kind preview, at three sizes ──────────────────────────────────── */
@@ -565,21 +565,21 @@
   display: grid;
   place-items: center;
   padding: 4px;
-  font-size: 11px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   text-align: center;
 }
 
 .pe-athan.is-panel {
   height: 100%;
   padding: 8px 10px;
-  font-size: 11px;
+  font-size: var(--ds-fs-label);
   line-height: 1.25;
 }
 
 .pe-athan.is-panel header {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: var(--ds-fs-label);
   margin-bottom: 4px;
 }
 
@@ -588,7 +588,7 @@
 }
 
 .pe-athan.is-panel li {
-  font-size: 11px;
+  font-size: var(--ds-fs-label);
 }
 
 .pe-athan.is-empty {
@@ -598,18 +598,13 @@
   justify-content: center;
   gap: 4px;
   height: 100%;
-  color: var(--ds-muted);
-  font-size: 13px;
+  color: rgb(var(--ds-panel-screen-ink) / 0.6);
+  font-size: var(--ds-fs-small);
   text-align: center;
 }
 
 /* ── Header ────────────────────────────────────────────────────────────── */
 
-/*
- * The rebuild renamed the title input and grouped the history buttons, and
- * neither name had a rule — so the title sat at its intrinsic width and undo
- * stacked on top of redo in a block container.
- */
 .pe-title {
   flex: 1;
   min-width: 0;
@@ -618,8 +613,9 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  font-weight: 600;
-  font-size: 17px;
+  font-weight: var(--ds-weight-medium);
+  font-size: var(--ds-fs-heading);
+  letter-spacing: var(--ds-track-heading);
   padding: var(--ds-space-2) var(--ds-space-1);
 }
 
@@ -643,10 +639,3 @@
 .pe-field.is-mobile .pe-stepper .ds-input {
   max-width: 9rem;
 }
-
-/*
- * The stage takes what the transport and the strip leave. A ceiling here
- * looks tidier in a tall window and leaves a band of dead ground under the
- * timeline in every other one, so the strip stays anchored to the bottom
- * instead.
- */

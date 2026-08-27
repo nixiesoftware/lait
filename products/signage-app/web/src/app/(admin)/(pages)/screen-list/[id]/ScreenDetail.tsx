@@ -161,7 +161,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
             Right now
             {interrupted && <OnAir label="INTERRUPTED" tone="alarm" />}
           </h3>
-          <p style={{ margin: 0, fontSize: "var(--ds-text-md)", lineHeight: 1.5 }}>
+          <p style={{ margin: 0, fontSize: "var(--ds-fs-body)", lineHeight: 1.5 }}>
             {playback ? explain(playback, showingName) : "Unknown"}
           </p>
           {playback?.showing.showing === "unaddressed" && !screen.tuned && (
@@ -420,7 +420,7 @@ function AsRunList({ screenId }: { screenId: string }) {
       </p>
       {entries.map((entry, index) => (
         <div className="ds-row-between" key={`${entry.item}-${index}`}>
-          <span style={{ fontSize: "var(--ds-text-sm)" }}>{entry.item}</span>
+          <span style={{ fontSize: "var(--ds-fs-small)" }}>{entry.item}</span>
           <Ago at={entry.ended_unix_ms} />
         </div>
       ))}

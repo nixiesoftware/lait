@@ -1,14 +1,26 @@
+/*
+ * The editor, in daylight.
+ *
+ * The desk goes to paper: the bar, the source rail and the inspector are
+ * surface, the filmstrip sits in a well, and each clip is a small pressed
+ * object. The stage stays a screen — dark in every room — and the kinds a
+ * program can carry keep their own night inside it, because they are what the
+ * panel shows, not chrome.
+ */
+
 .pe {
   position: fixed;
   inset: 0;
   z-index: 100000;
   display: flex;
   flex-direction: column;
+  color-scheme: light;
   background: var(--ds-paper);
   color: var(--ds-ink);
-  font-family: var(--ds-font);
-  font-size: 16px;
+  font-family: var(--ds-sans);
+  font-size: var(--ds-fs-body);
   line-height: 1.3;
+  letter-spacing: var(--ds-track-body);
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -33,10 +45,11 @@
   display: flex;
   align-items: center;
   gap: var(--ds-space-2);
-  min-height: 52px;
+  min-height: 56px;
   padding: var(--ds-space-2) var(--ds-space-3);
   padding-top: max(8px, env(safe-area-inset-top));
-  border-bottom: 1px solid var(--ds-line);
+  background: var(--ds-surface);
+  border-bottom: 1px solid var(--ds-rule);
 }
 
 .pe.is-narrow .pe-discard {
@@ -51,8 +64,9 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  font-weight: 600;
-  font-size: 17px;
+  font-weight: var(--ds-weight-medium);
+  font-size: var(--ds-fs-heading);
+  letter-spacing: var(--ds-track-heading);
   padding: var(--ds-space-2) var(--ds-space-1);
 }
 
@@ -79,34 +93,39 @@
   min-height: 0;
   display: grid;
   place-items: center;
-  padding: var(--ds-space-3) var(--ds-space-4);
+  padding: var(--ds-space-4) var(--ds-space-5);
   overflow: clip;
 }
 
+/* The media's own colour, washed across the field behind the screen. */
 .pe-bleed {
   position: absolute;
   inset: -12%;
   pointer-events: none;
   transform: scale(1.08);
-  filter: blur(36px) brightness(0.55) saturate(1.15);
-  opacity: 0.55;
+  filter: blur(40px) saturate(1.1);
+  opacity: 0.28;
   transition:
-    background-color var(--ds-duration-md) var(--ds-ease-out),
-    opacity var(--ds-duration-md) var(--ds-ease-out);
+    background-color var(--ds-dur-medium) var(--ds-ease),
+    opacity var(--ds-dur-medium) var(--ds-ease);
 }
 
+/* The screen. A lit panel on a wall. */
 .pe-frame {
   width: 100%;
   max-width: 920px;
   aspect-ratio: 16 / 9;
   max-height: 100%;
-  background: #0b0c10;
-  border-radius: 12px;
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  border-radius: var(--ds-r-md);
   overflow: hidden;
   display: grid;
   place-items: center;
   position: relative;
-  box-shadow: var(--ds-shadow-frame);
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    var(--ds-material-lift);
 }
 
 .pe-trim-flag {
@@ -118,16 +137,19 @@
   gap: 8px;
   align-items: baseline;
   padding: 6px 12px;
-  border-radius: 999px;
-  background: #111318e6;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-chrome);
   color: var(--ds-ink);
-  font-size: 13px;
+  box-shadow: var(--ds-material-float);
+  backdrop-filter: var(--ds-chrome-blur);
+  -webkit-backdrop-filter: var(--ds-chrome-blur);
+  font-size: var(--ds-fs-small);
   z-index: 2;
   pointer-events: none;
 }
 
 .pe-trim-flag b {
-  font-weight: 650;
+  font-weight: var(--ds-weight-medium);
 }
 
 .pe-trim-flag span {
@@ -156,6 +178,8 @@
 .pe-card h1 {
   margin: 0;
   font-size: clamp(22px, 4vw, 42px);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
 }
 
 .pe-card p {
@@ -163,6 +187,7 @@
   opacity: 0.8;
 }
 
+/* Athan is what the screen shows. Its colours are the kind's, not ours. */
 .pe-athan {
   width: 100%;
   height: 100%;
@@ -180,13 +205,13 @@
   gap: 12px;
   margin-bottom: 6%;
   font-size: clamp(16px, 3vw, 28px);
-  font-weight: 650;
+  font-weight: var(--ds-weight-medium);
 }
 
 .pe-athan header span {
   color: #b4a082;
   font-size: 0.7em;
-  font-weight: 500;
+  font-weight: var(--ds-weight-regular);
 }
 
 .pe-athan ol {
@@ -205,7 +230,7 @@
 }
 
 .pe-athan li.is-next {
-  font-weight: 650;
+  font-weight: var(--ds-weight-medium);
 }
 
 .pe-athan-times {
@@ -228,19 +253,21 @@
 .pe-placeholder {
   text-align: center;
   padding: var(--ds-space-5);
-  color: var(--ds-muted);
+  color: rgb(var(--ds-panel-screen-ink) / 0.6);
 }
 
 .pe-placeholder strong {
   display: block;
-  color: var(--ds-ink);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  font-weight: var(--ds-weight-medium);
   margin-bottom: 6px;
 }
 
+/* ── The dock: transport and the filmstrip, in a well ──────────────────── */
+
 .pe-dock {
   flex: 0 0 auto;
-  background: var(--ds-surface);
-  border-top: 1px solid var(--ds-line);
+  background: var(--ds-surface-sunken);
   padding-bottom: max(12px, env(safe-area-inset-bottom), var(--vv-keyboard, 0px));
 }
 
@@ -249,22 +276,22 @@
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  padding: 4px 12px 2px;
+  padding: 6px 12px 2px;
   min-height: 48px;
 }
 
 .pe-rail-time {
   justify-self: start;
   font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 550;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
   white-space: nowrap;
   min-width: 0;
 }
 
 .pe-rail-time span {
   color: var(--ds-muted);
-  font-weight: 400;
+  font-weight: var(--ds-weight-regular);
 }
 
 .pe-rail-play {
@@ -285,8 +312,8 @@
 }
 
 .pe-rail-name {
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
   max-width: 14vw;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -300,11 +327,14 @@
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-ink);
-  border-radius: var(--ds-radius-sm);
+  color: var(--ds-muted);
+  border-radius: var(--ds-r-pill);
   display: grid;
   place-items: center;
   padding: 0;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease);
 }
 
 .pe-skip,
@@ -315,16 +345,24 @@
   flex-shrink: 0;
 }
 
+/* Play is the act, so play is the one filled control in the dock. */
 .pe-play {
   width: 44px;
   height: 44px;
   flex-shrink: 0;
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
 }
 
-.pe-play:hover:not(:disabled),
+.pe-play:hover:not(:disabled) {
+  color: var(--ds-ink);
+}
+
 .pe-skip:hover:not(:disabled),
 .pe-tool:hover {
-  background: var(--ds-lift);
+  background: var(--ds-hover);
+  color: var(--ds-ink);
 }
 
 .pe-play:disabled,
@@ -333,11 +371,11 @@
 }
 
 .pe-remove {
-  color: var(--ds-danger);
+  color: var(--ds-alarm);
 }
 
 .pe-remove:hover {
-  background: color-mix(in srgb, var(--ds-danger) 16%, transparent);
+  background: var(--ds-alarm-soft);
 }
 
 .pe-duration {
@@ -345,18 +383,15 @@
   align-items: center;
   gap: 6px;
   height: 32px;
-  padding: 0 10px;
-  border-radius: var(--ds-radius-sm);
-  background: var(--ds-lift);
+  padding: 0 12px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
   color: inherit;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
   font-variant-numeric: tabular-nums;
-  transition: background var(--ds-duration-sm) var(--ds-ease-out);
-}
-
-.pe-duration:hover {
-  background: var(--ds-lift-strong);
 }
 
 .pe-duration button {
@@ -398,14 +433,15 @@
   position: absolute;
   top: 4px;
   transform: translateX(-50%);
-  font-size: 10px;
+  font-size: 0.625rem;
   line-height: 1;
-  color: var(--ds-muted);
-  border-left: 1px solid var(--ds-faint);
+  color: var(--ds-faint);
+  border-left: 1px solid var(--ds-rule-strong);
   padding-left: 4px;
   height: 22px;
   pointer-events: none;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .pe-scroll {
@@ -428,19 +464,21 @@
   position: absolute;
   top: 8px;
   height: 88px;
-  border-radius: var(--ds-radius-lg);
+  border-radius: var(--ds-r-md);
   overflow: visible;
 }
 
+/* A clip is a small object in the well. Selected is ringed in the action. */
 .pe-clip {
   position: relative;
   width: 100%;
   height: 100%;
-  border: 1px solid var(--ds-line);
+  border: 0;
   padding: 0;
   border-radius: inherit;
-  background: var(--ds-surface-sunken);
-  color: inherit;
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  box-shadow: var(--ds-material-card);
   overflow: clip;
   isolation: isolate;
   touch-action: none;
@@ -448,7 +486,7 @@
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
-  transition: border-color var(--ds-duration-sm) var(--ds-ease-out);
+  transition: box-shadow var(--ds-dur-fast) var(--ds-ease);
 }
 
 .pe-clip-fill {
@@ -460,15 +498,18 @@
 }
 
 .pe-clip.is-selected {
-  border-color: var(--ds-ink);
+  box-shadow:
+    var(--ds-material-card),
+    0 0 0 2px var(--ds-paper),
+    0 0 0 4px var(--ds-accent);
   z-index: 1;
 }
 
 .pe-clip.is-moving,
 .pe-clip.is-lifting {
   cursor: grabbing;
-  opacity: 0.94;
-  box-shadow: 0 14px 32px #00000088;
+  opacity: 0.96;
+  box-shadow: var(--ds-material-lift);
   z-index: 4;
 }
 
@@ -486,15 +527,15 @@
 .pe-thumb-empty {
   display: grid;
   place-items: center;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   padding: var(--ds-space-2);
   text-align: center;
 }
 
 .pe-thumb-empty {
-  background: var(--ds-surface-sunken);
-  color: var(--ds-muted);
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.55);
 }
 
 .pe-clip-ghost {
@@ -502,7 +543,7 @@
   top: 0;
   left: 0;
   bottom: 0;
-  border: 1px dashed color-mix(in srgb, var(--ds-ink) 40%, transparent);
+  border: 1px dashed var(--ds-rule-strong);
   border-radius: inherit;
   pointer-events: none;
   z-index: 0;
@@ -521,11 +562,12 @@
   gap: 8px;
   text-align: left;
   pointer-events: none;
-  background: linear-gradient(to top, #111318e6, transparent);
+  background: linear-gradient(to top, rgb(0 0 0 / 0.72), transparent);
 }
 
 .pe-clip-body strong {
-  font-size: 12px;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -533,8 +575,8 @@
 }
 
 .pe-clip-body span {
-  font-size: 12px;
-  color: var(--ds-muted);
+  font-size: var(--ds-fs-label);
+  color: rgb(var(--ds-panel-screen-ink) / 0.7);
   font-variant-numeric: tabular-nums;
 }
 
@@ -565,11 +607,14 @@
   width: 4px;
   height: 32px;
   margin: 0 auto;
-  border-radius: 2px;
-  background: var(--ds-ink);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ds-paper) 55%, transparent);
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface);
+  box-shadow:
+    0 0 0 1px rgb(var(--ds-ink-rgb) / 0.2),
+    0 1px 3px rgb(var(--ds-ink-rgb) / 0.3);
 }
 
+/* The playhead is the act of scrubbing, so it is blue. */
 .pe-playhead {
   position: absolute;
   top: 0;
@@ -578,7 +623,6 @@
   background: var(--ds-accent);
   pointer-events: none;
   z-index: 3;
-  box-shadow: 0 0 8px color-mix(in srgb, var(--ds-accent) 70%, transparent);
 }
 
 .pe-playhead::before {
@@ -589,8 +633,9 @@
   transform: translateX(-50%);
   width: 10px;
   height: 10px;
-  border-radius: 50%;
+  border-radius: var(--ds-r-round);
   background: var(--ds-accent);
+  box-shadow: 0 0 0 2px var(--ds-surface-sunken);
 }
 
 .pe-gap {
@@ -600,9 +645,9 @@
   height: 88px;
   z-index: 2;
   pointer-events: none;
-  border-radius: var(--ds-radius-lg);
+  border-radius: var(--ds-r-md);
   border: 1px dashed var(--ds-accent);
-  background: color-mix(in srgb, var(--ds-accent) 18%, transparent);
+  background: var(--ds-accent-soft);
 }
 
 .pe-add {
@@ -613,29 +658,28 @@
   width: 80px;
   height: 88px;
   margin: 0;
-  border-radius: var(--ds-radius-lg);
-  background: var(--ds-surface-sunken);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
   color: var(--ds-muted);
   display: grid;
   place-items: center;
   padding: 0;
+  cursor: pointer;
   transition:
-    background var(--ds-duration-sm) var(--ds-ease-out),
-    color var(--ds-duration-sm) var(--ds-ease-out),
-    transform var(--ds-duration-sm) var(--ds-ease-out);
+    color var(--ds-dur-fast) var(--ds-ease),
+    transform var(--ds-dur-fast) var(--ds-ease);
 }
 
 @media (hover: hover) {
   .pe-add:hover {
-    background: var(--ds-lift-strong);
     color: var(--ds-ink);
     transform: translateY(-1px);
   }
 }
 
 .pe-add[data-popup-open] {
-  background: var(--ds-lift-strong);
-  color: var(--ds-ink);
+  color: var(--ds-accent);
 }
 
 .pe-hint,
@@ -688,7 +732,7 @@
 
 .pe-rail.is-narrow .pe-rail-time {
   grid-area: time;
-  font-size: 12px;
+  font-size: var(--ds-fs-label);
   align-self: center;
 }
 
