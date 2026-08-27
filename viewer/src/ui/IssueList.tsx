@@ -176,7 +176,15 @@ export function IssueList({
       {/* `@container`: the row's trailing cluster adapts to the width of this
           pane (which halves when the detail opens), not the viewport. */}
       <div className="@container min-h-0 flex-1 overflow-y-auto">
-        {!deletedMode && groups.map((group) => (
+        {/* The scaffold survives an emptied group but not an empty project.
+            A status that exists is a column that exists — that rule is right,
+            and it is why `Group` keeps a zero-count status while dropping a
+            zero-count derived group. It stops making sense at zero: four
+            columns all reading `0`, stacked above an empty state that says the
+            same thing in words, is the page telling you nothing four times and
+            then once more. Linear drops the whole scaffold here and shows only
+            the empty state. */}
+        {!deletedMode && total > 0 && groups.map((group) => (
           <Group
             key={group.key}
             group={group}

@@ -2860,7 +2860,12 @@ export function App() {
               railOpen ? "w-rail translate-x-0 opacity-100" : "w-0 translate-x-2 opacity-0",
             )}
           >
-            <div className="w-rail py-3 pr-3">
+            {/* `pt-1`, not `pt-3`: the rail's card and the list's first group header
+                sit side by side and have to start on the same line. The header
+                brings its own `mt-1` and the rail was padding to 3, so the two
+                columns began 8px apart — each spacing decision defensible on its
+                own, and visibly wrong together. */}
+            <div className="w-rail pt-1 pr-3 pb-3">
               <ProjectRail
                 spaceId={current}
                 project={activeProject}
