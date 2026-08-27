@@ -22,7 +22,11 @@ import {
   standingLabel,
   targetLabel,
   transitions,
+  baselineCards,
+  specCards,
+  type BaselineCard,
   type LinkDelta,
+  type SpecCard,
   type SpecStanding,
   type SpecTransition,
 } from "../core/specs";
@@ -49,8 +53,6 @@ import {
 } from "../projectStore";
 import type {
   AssignmentDto,
-  BaselineSummary,
-  BaselineView,
   MemberDto,
   PlanData,
   Row,
@@ -125,11 +127,8 @@ const SPEC_ROW_LAYOUT = cn("group/row flex items-center gap-2 py-2", SPEC_LIST_I
  *  so the index and title keep the same geometry whether or not it is showing. */
 const SPEC_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
 
-const renderedSpecs = (summaries: readonly SpecSummary[]): SpecView[] =>
-  summaries.flatMap((summary) => summary.view ? [summary.view] : []);
-
-const renderedBaselines = (summaries: readonly BaselineSummary[]): BaselineView[] =>
-  summaries.flatMap((summary) => summary.view ? [summary.view] : []);
+const renderedSpecs = specCards;
+const renderedBaselines = baselineCards;
 
 /** Standing is joined from the same exact page rather than copied into every
  * immutable relation fact. Missing summaries leave a fact historical/inert. */
@@ -482,10 +481,15 @@ function SpecRow({
 }) {
   const label = spec.conflicted
     ? { text: "conflicted", tone: "warn" as const }
-    : spec.view
-      ? standingLabel(standing(spec.view))
+    : spec.head
+      ? standingLabel(standing({
+          heads: spec.heads,
+          issued: spec.issued,
+          revision: spec.head.revision,
+          state: spec.head.state,
+        }))
       : null;
-  const title = spec.view?.title ?? spec.spec;
+  const title = spec.head?.title ?? spec.spec;
   return (
     <li
       className={cn(
@@ -576,7 +580,7 @@ function SpecRow({
           of these did I touch last. Right-aligned and quiet — it is how you find
           a row, not something you read. */}
       <span className="text-mute w-14 shrink-0 text-right text-2xs tabular-nums">
-        {spec.view ? when(spec.view.body.ts) : ""}
+        {spec.head ? when(spec.head.ts) : ""}
       </span>
     </li>
   );
@@ -860,10 +864,10 @@ function Relations({
   onCommit,
 }: {
   view: SpecView;
-  everySpec: SpecView[];
+  everySpec: SpecCard[];
   /** What a relation may name, resolved by the reader — one subscription for
    *  the two blocks that offer them rather than one each. */
-  baselines: BaselineView[];
+  baselines: BaselineCard[];
   rows: Row[];
   references: SpecReference[];
   readOnly: boolean;
@@ -927,7 +931,7 @@ function Relations({
         ? (entry.link.target.kind === "spec"
             ? titles.get(entry.link.target.spec)?.title
             : openBaselineId !== null
-              ? baselines.find((candidate) => candidate.baseline === openBaselineId)?.body.name
+              ? baselines.find((candidate) => candidate.baseline === openBaselineId)?.name
               : undefined) ?? targetLabel(entry.link.target)
         : (entry.from?.title ?? entry.title ?? entry.source ?? "");
     const coordinate =
@@ -1116,8 +1120,8 @@ function RelationComposer({
   onCancel,
 }: {
   self: string;
-  everySpec: SpecView[];
-  baselines: BaselineView[];
+  everySpec: SpecCard[];
+  baselines: BaselineCard[];
   rows: Row[];
   /** What the sentence opens with — the difference between the document
    *  asserting something and somebody noticing it. */
@@ -1152,7 +1156,7 @@ function RelationComposer({
       : kind === "baseline"
         ? baselines.map((candidate) => ({
             id: candidate.baseline,
-            label: candidate.body.name,
+            label: candidate.name,
             kicker: "Baseline",
             hint: short(pinned(candidate)),
           }))
@@ -1290,8 +1294,8 @@ function Observations({
   view: SpecView;
   observations: SpecObservation[];
   members: MemberDto[];
-  everySpec: SpecView[];
-  baselines: BaselineView[];
+  everySpec: SpecCard[];
+  baselines: BaselineCard[];
   rows: Row[];
   readOnly: boolean;
   grants: AssignmentDto[];
@@ -1410,7 +1414,7 @@ function Observations({
  *  rows additionally carry who asserted it, since that is not on the link. */
 interface LinkEntry {
   link: SpecLink;
-  from: SpecView | null;
+  from: SpecCard | null;
   title?: string;
   source?: string;
   revision?: string;

@@ -1,5 +1,6 @@
 import type {
   AssignmentDto,
+  BaselineSummary,
   PacketConflict,
   PacketSource,
   SpecBody,
@@ -10,6 +11,7 @@ import type {
   SpecRel,
   SpecRevision,
   SpecState,
+  SpecSummary,
   SpecTarget,
   SpecView,
 } from "../types";
@@ -154,7 +156,9 @@ export interface SpecStanding {
   head: SpecState;
 }
 
-export function standing(spec: SpecView): SpecStanding {
+export function standing(
+  spec: Pick<SpecView, "heads" | "issued" | "revision" | "state">,
+): SpecStanding {
   const conflict = spec.heads.length > 1 ? "heads" : spec.issued.length > 1 ? "issued" : null;
   const issued = spec.issued.length === 1 ? spec.issued[0]! : null;
   return {
@@ -188,6 +192,81 @@ export function standingLabel(
   if (state.head === "withdrawn") return { text: "Withdrawn", tone: "quiet" };
   if (state.head === "review") return { text: "In review", tone: "quiet" };
   return null;
+}
+
+// ---- register cards ---------------------------------------------------------
+
+/**
+ * A document as a register or picker knows it: the summary's standing joined
+ * with its one head. Everything a surface needs to name, sort and offer a
+ * document, and nothing that requires reading it -- text, links and members
+ * arrive when a reader opens one.
+ */
+export interface SpecCard {
+  spec: string;
+  project: string;
+  kind: SpecKind;
+  title: string;
+  state: SpecState;
+  revision: string;
+  heads: string[];
+  issued: string[];
+  ts: number;
+}
+
+export interface BaselineCard {
+  baseline: string;
+  project: string;
+  name: string;
+  state: SpecState;
+  revision: string;
+  heads: string[];
+  issued: string[];
+  ts: number;
+}
+
+/**
+ * The rows that can be drawn as documents.
+ *
+ * A conflicted row -- concurrent heads, or concurrent issued revisions -- is
+ * not one: no revision of it is authoritative, so it is not offered where a
+ * document is being chosen to link to, pin or observe. Nor is a row whose head
+ * the corpus has not posted yet. The register still lists both, from the
+ * summary, and draws the title when there is one.
+ */
+export function specCards(summaries: readonly SpecSummary[]): SpecCard[] {
+  return summaries.flatMap((summary) =>
+    summary.head && !summary.conflicted
+      ? [{
+          spec: summary.spec,
+          project: summary.project,
+          kind: summary.kind,
+          title: summary.head.title,
+          state: summary.head.state,
+          revision: summary.head.revision,
+          heads: summary.heads,
+          issued: summary.issued,
+          ts: summary.head.ts,
+        }]
+      : [],
+  );
+}
+
+export function baselineCards(summaries: readonly BaselineSummary[]): BaselineCard[] {
+  return summaries.flatMap((summary) =>
+    summary.head && !summary.conflicted
+      ? [{
+          baseline: summary.baseline,
+          project: summary.project,
+          name: summary.head.name,
+          state: summary.head.state,
+          revision: summary.head.revision,
+          heads: summary.heads,
+          issued: summary.issued,
+          ts: summary.head.ts,
+        }]
+      : [],
+  );
 }
 
 // ---- authority --------------------------------------------------------------

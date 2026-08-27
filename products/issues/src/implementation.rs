@@ -610,7 +610,7 @@ mod package_descriptor_tests {
         let preferred = IssuesWorld::implementation_descriptor();
         assert_eq!(
             data_encoding::HEXLOWER.encode(preferred.id().unwrap().as_ref()),
-            "7c4e47bbdbfa8479cd7486451d2412651b29488b586ed1d768fe9f4c398d9eb5"
+            "57d034261c84c80cf5173f0a44798c572f1d7577dd4ab2afb81e663cc114ae5e"
         );
 
         // The runner's manifest and the served descriptor are two declarations
@@ -3661,7 +3661,7 @@ fn spec_summary_row(row: &runtime::find::ResultRow) -> Result<crate::spec::SpecS
             .ok_or(Rejection::StateCorrupt)?,
         heads,
         issued,
-        view: None,
+        head: None,
     })
 }
 
@@ -3677,7 +3677,73 @@ fn baseline_summary_row(
             .ok_or(Rejection::StateCorrupt)?,
         heads,
         issued,
-        view: None,
+        head: None,
+    })
+}
+
+/// The corpus row of one exact revision, if it can be read and belongs to
+/// the document that claims it.
+///
+/// Hydration degrades per row and never refuses the page. A register is the
+/// page; a row that cannot be read -- a head the corpus has not posted yet, a
+/// seek that hit its bound, a heads set naming a revision this document does
+/// not own -- is drawn as a row with no head, which the register lists by id.
+/// The old assembly had the same posture, and the alternative is one bad
+/// revision id in one replicated heads set taking every reader's register
+/// down. `None` is an absence, never a default.
+fn head_row(
+    ctx: &Context<'_>,
+    kind: &str,
+    source: &str,
+    revision: &str,
+) -> Option<runtime::find::ResultRow> {
+    let row = unique_find_row(ctx, crate::find::field::ID, revision, kind, None)
+        .ok()
+        .flatten()?;
+    (result_text(&row, crate::find::field::SOURCE_ID).as_deref() == Some(source)).then_some(row)
+}
+
+/// A register row's head, from the corpus row its revision posts.
+///
+/// The register used to assemble every row through `spec_state`: the heads
+/// Body, a seek per revision, a Body read and a decode each, to show a title
+/// and a state the revision's own row already carries packed. One bounded seek
+/// on the head's id is the whole read now. Only a row with exactly one head is
+/// hydrated: two heads is concurrent intent, and choosing one would invent a
+/// current title.
+fn spec_head(
+    ctx: &Context<'_>,
+    summary: &crate::spec::SpecSummary,
+) -> Option<crate::spec::SpecHead> {
+    let [revision] = summary.heads.as_slice() else {
+        return None;
+    };
+    let row = head_row(ctx, summary.kind.as_str(), &summary.spec, revision)?;
+    Some(crate::spec::SpecHead {
+        revision: revision.clone(),
+        title: result_text(&row, crate::find::field::TITLE)?,
+        state: crate::spec::State::parse(&result_text(&row, crate::find::field::STATE)?)?,
+        author: result_text(&row, crate::find::field::AUTHOR)?,
+        ts: result_u64(&row, crate::find::field::CREATED_AT)?,
+    })
+}
+
+/// A Baseline register row's head. Same read as [`spec_head`]; a Baseline
+/// revision posts its name as the row's title.
+fn baseline_head(
+    ctx: &Context<'_>,
+    summary: &crate::spec::BaselineSummary,
+) -> Option<crate::spec::BaselineHead> {
+    let [revision] = summary.heads.as_slice() else {
+        return None;
+    };
+    let row = head_row(ctx, "baseline_revision", &summary.baseline, revision)?;
+    Some(crate::spec::BaselineHead {
+        revision: revision.clone(),
+        name: result_text(&row, crate::find::field::TITLE)?,
+        state: crate::spec::State::parse(&result_text(&row, crate::find::field::STATE)?)?,
+        author: result_text(&row, crate::find::field::AUTHOR)?,
+        ts: result_u64(&row, crate::find::field::CREATED_AT)?,
     })
 }
 
@@ -6028,32 +6094,79 @@ fn issue_write_state(
     Ok((catalog, issue))
 }
 
-fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
+/// A Spec's heads Body, if it exists and names this Spec.
+fn spec_heads(ctx: &Context<'_>, spec: &str) -> Option<runtime::world::CollaborativeBody> {
     let spec_id = crate::ids::SpecId::parse(spec)?;
     let heads = ctx
         .read_collaborative(&crate::records::spec_heads_key(&spec_id))
         .ok()??;
-    if heads
+    heads
         .registers
         .get(crate::records::roots::IDENTITY)
-        .is_none_or(|identity| identity.as_slice() != spec.as_bytes())
-    {
+        .is_some_and(|identity| identity.as_slice() == spec.as_bytes())
+        .then_some(heads)
+}
+
+/// The kind a Spec was created as, from its heads Body.
+///
+/// A revision is posted to the corpus under its Spec's kind
+/// (`find::extract_spec_revision`), and the kind is invariant across a
+/// Spec's revisions: `SpecRevise` clones the head's body and `SpecResolve`
+/// refuses a body whose kind differs from the first revision's. The heads
+/// Body records it beside the head sets, so it names the exact seek. This
+/// replaced a hunt across a hand-written kind list that had stopped
+/// agreeing with `Kind::ALL` -- six kinds could be created and never read.
+fn spec_kind(heads: &runtime::world::CollaborativeBody) -> Option<crate::spec::Kind> {
+    heads
+        .registers
+        .get(crate::records::roots::KIND)
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(crate::spec::Kind::parse)
+}
+
+/// One exact revision of a Spec, whether or not it is still a head or issued.
+///
+/// A revision is immutable and stays readable after a successor supersedes
+/// it; a Baseline pins one, and an incorporation names one, precisely so that
+/// later drafting cannot move what governs. So this reads by id rather than
+/// through the head sets, and answers `None` only for a revision this replica
+/// has not received or one that does not belong to `spec`.
+fn spec_revision_at(
+    ctx: &Context<'_>,
+    spec: &str,
+    kind: crate::spec::Kind,
+    revision: &str,
+) -> Option<crate::spec::Revision> {
+    let row =
+        unique_find_row(ctx, crate::find::field::ID, revision, kind.as_str(), None).ok()??;
+    if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(spec) {
         return None;
     }
-    let decode_set = |path: &str| -> Option<Vec<String>> {
-        let mut values = heads
-            .sets
-            .get(path)
-            .into_iter()
-            .flatten()
-            .map(|value| String::from_utf8(value.clone()).ok())
-            .collect::<Option<Vec<_>>>()?;
-        values.sort();
-        values.dedup();
-        Some(values)
-    };
-    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
-    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
+    let bytes = ctx.read_body(&row.source).ok()??;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+    let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
+    let found = record.revision;
+    (found.revision == revision && found.body.spec == spec && found.body.kind == kind)
+        .then_some(found)
+}
+
+fn decode_head_set(heads: &runtime::world::CollaborativeBody, path: &str) -> Option<Vec<String>> {
+    let mut values = heads
+        .sets
+        .get(path)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).ok())
+        .collect::<Option<Vec<_>>>()?;
+    values.sort();
+    values.dedup();
+    Some(values)
+}
+
+fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
+    let heads = spec_heads(ctx, spec)?;
+    let explicit_heads = decode_head_set(&heads, crate::records::roots::HEADS)?;
+    let explicit_issued = decode_head_set(&heads, crate::records::roots::ISSUED_HEADS)?;
     if explicit_heads.is_empty() {
         return None;
     }
@@ -6064,31 +6177,10 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
         .collect::<Vec<_>>();
     wanted.sort();
     wanted.dedup();
+    let kind = spec_kind(&heads)?;
     let mut revisions = Vec::with_capacity(wanted.len());
     for revision in wanted {
-        let mut matching = None;
-        for kind in ["requirement", "design", "proof", "runbook", "plan"] {
-            let row = match unique_find_row(ctx, crate::find::field::ID, &revision, kind, None) {
-                Ok(row) => row,
-                Err(_) => return None,
-            };
-            let Some(row) = row else { continue };
-            if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(spec)
-                || matching.replace(row).is_some()
-            {
-                return None;
-            }
-        }
-        let Some(row) = matching else {
-            return None;
-        };
-        let bytes = ctx.read_body(&row.source).ok()??;
-        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
-        let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
-        if record.revision.revision != revision || record.revision.body.spec != spec {
-            return None;
-        }
-        revisions.push(record.revision);
+        revisions.push(spec_revision_at(ctx, spec, kind, &revision)?);
     }
     revisions.sort_by(|left, right| left.revision.cmp(&right.revision));
     Some(crate::spec::Spec {
@@ -6099,32 +6191,49 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
     })
 }
 
-fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
+/// A Baseline's heads Body, if it exists and names this Baseline.
+fn baseline_heads(ctx: &Context<'_>, baseline: &str) -> Option<runtime::world::CollaborativeBody> {
     let baseline_id = crate::ids::BaselineId::parse(baseline)?;
     let heads = ctx
         .read_collaborative(&crate::records::baseline_heads_key(&baseline_id))
         .ok()??;
-    if heads
+    heads
         .registers
         .get(crate::records::roots::IDENTITY)
-        .is_none_or(|identity| identity.as_slice() != baseline.as_bytes())
-    {
+        .is_some_and(|identity| identity.as_slice() == baseline.as_bytes())
+        .then_some(heads)
+}
+
+/// One exact revision of a Baseline, by id. Same reasoning as
+/// [`spec_revision_at`]: an Issue binds to an exact revision, and the binding
+/// must survive the Baseline being revised.
+fn baseline_revision_at(
+    ctx: &Context<'_>,
+    baseline: &str,
+    revision: &str,
+) -> Option<crate::spec::BaselineRevision> {
+    let row = unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        revision,
+        "baseline_revision",
+        None,
+    )
+    .ok()??;
+    if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(baseline) {
         return None;
     }
-    let decode_set = |path: &str| -> Option<Vec<String>> {
-        let mut values = heads
-            .sets
-            .get(path)
-            .into_iter()
-            .flatten()
-            .map(|value| String::from_utf8(value.clone()).ok())
-            .collect::<Option<Vec<_>>>()?;
-        values.sort();
-        values.dedup();
-        Some(values)
-    };
-    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
-    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
+    let bytes = ctx.read_body(&row.source).ok()??;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+    let record = crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
+    let found = record.revision;
+    (found.revision == revision && found.body.baseline == baseline).then_some(found)
+}
+
+fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
+    let heads = baseline_heads(ctx, baseline)?;
+    let explicit_heads = decode_head_set(&heads, crate::records::roots::HEADS)?;
+    let explicit_issued = decode_head_set(&heads, crate::records::roots::ISSUED_HEADS)?;
     if explicit_heads.is_empty() {
         return None;
     }
@@ -6137,25 +6246,7 @@ fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Base
     wanted.dedup();
     let mut revisions = Vec::with_capacity(wanted.len());
     for revision in wanted {
-        let row = unique_find_row(
-            ctx,
-            crate::find::field::ID,
-            &revision,
-            "baseline_revision",
-            None,
-        )
-        .ok()??;
-        if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(baseline) {
-            return None;
-        }
-        let bytes = ctx.read_body(&row.source).ok()??;
-        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
-        let record =
-            crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
-        if record.revision.revision != revision || record.revision.body.baseline != baseline {
-            return None;
-        }
-        revisions.push(record.revision);
+        revisions.push(baseline_revision_at(ctx, baseline, &revision)?);
     }
     revisions.sort_by(|left, right| left.revision.cmp(&right.revision));
     Some(crate::spec::Baseline {
@@ -7007,6 +7098,96 @@ fn validate_plan(
     Ok(())
 }
 
+/// How much history a Packet will read to find what governs one Issue.
+///
+/// Every link a revision asserts is a `spec_reference` relation keyed by its
+/// target, so a seek on the Issue finds every revision that has *ever*
+/// governed it -- a set that grows with revisions of governing Specs, not
+/// with the Space. Paged and capped rather than read whole: past the cap the
+/// Packet is refused, never quietly short.
+const PACKET_REFERENCE_PAGE: u32 = 128;
+const PACKET_REFERENCE_PAGES: u32 = 32;
+
+/// The Spec a revision id belongs to, from the revision's own corpus row.
+fn revision_owner(ctx: &Context<'_>, revision: &str) -> Result<Option<String>, Rejection> {
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::ID,
+        runtime::find::Atom::Text(revision.into()),
+        &contract::PageRequest {
+            limit: 1,
+            cursor: None,
+        },
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+            test: runtime::find::Test::Equal,
+            value: runtime::find::Atom::Text("spec_revision".into()),
+        }],
+        vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
+    )?;
+    Ok(answer
+        .rows()
+        .first()
+        .and_then(|row| result_text(row, crate::find::field::SOURCE_ID)))
+}
+
+/// The Specs that may govern `doc` directly: every Spec one of whose
+/// revisions asserts `governs` on it.
+///
+/// This is what `all_specs` stood in for. Which of them govern *now* is the
+/// issued revision's question, and `spec_state` answers it per candidate --
+/// a set bounded by what has ever named this Issue rather than by the Space.
+fn governing_candidates(ctx: &Context<'_>, doc: &str) -> Result<BTreeSet<String>, Rejection> {
+    let mut revisions = BTreeSet::new();
+    let mut request = contract::PageRequest {
+        limit: PACKET_REFERENCE_PAGE,
+        cursor: None,
+    };
+    let mut pages = 0u32;
+    loop {
+        // The composite posting, not the bare target: `TARGET_ID` is shared by
+        // every comment, reaction and child that names the Issue, and Find
+        // charges every posting it scans before a Keep can drop it. A busy
+        // Issue would have its Packet refused for being busy.
+        let answer = find_field_page(
+            ctx,
+            crate::find::field::RELATION_TARGET_KIND,
+            runtime::find::Atom::Bytes(crate::find::composite_key([
+                crate::spec::Rel::Governs.as_str(),
+                doc,
+            ])),
+            &request,
+            vec![runtime::find::Predicate {
+                field: crate::find::field_ref(crate::find::field::ENTITY_KEY),
+                test: runtime::find::Test::Equal,
+                value: runtime::find::Atom::Text("spec_reference".into()),
+            }],
+            vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
+        )?;
+        revisions.extend(
+            answer
+                .rows()
+                .iter()
+                .filter_map(|row| result_text(row, crate::find::field::SOURCE_ID)),
+        );
+        let Some(cursor) = page_from_answer(&answer, Vec::<()>::new()).next_cursor else {
+            break;
+        };
+        pages += 1;
+        if pages >= PACKET_REFERENCE_PAGES {
+            return Err(Rejection::LimitExceeded);
+        }
+        request.cursor = Some(cursor);
+    }
+    let mut specs = BTreeSet::new();
+    for revision in revisions {
+        if let Some(spec) = revision_owner(ctx, &revision)? {
+            specs.insert(spec);
+        }
+    }
+    Ok(specs)
+}
+
 fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection> {
     let mut issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
     // A Packet is built around the issue's baseline binding, which is one of
@@ -7014,15 +7195,20 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
     // it back, but by scanning every record that names this doc; this needs
     // one bounded read of one singleton relation.
     enrich_issue_relations(ctx, &mut issue, doc)?;
-    let specs = all_specs(ctx);
     let mut exact: BTreeMap<
         (String, String),
-        (&crate::spec::Revision, crate::spec::PacketSource, bool),
+        (crate::spec::Revision, crate::spec::PacketSource, bool),
     > = BTreeMap::new();
     let mut conflicts = Vec::new();
+    let governs = |revision: &crate::spec::Revision| {
+        revision.body.links.iter().any(|link| {
+            link.rel == crate::spec::Rel::Governs
+                && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
+        })
+    };
 
     if let Some(binding) = &issue.baseline {
-        let Some(baseline) = baseline_state(ctx, &binding.baseline) else {
+        if baseline_heads(ctx, &binding.baseline).is_none() {
             conflicts.push(crate::spec::PacketConflict::MissingBaseline {
                 baseline: binding.baseline.clone(),
             });
@@ -7035,8 +7221,11 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                 record: vec![],
                 conflicts,
             });
-        };
-        let Some(revision) = baseline.revision(&binding.revision) else {
+        }
+        // The exact pinned revision, whether or not the Baseline has moved on
+        // since: the pin is the agreement, and a successor draft or issuance
+        // does not unmake it.
+        let Some(revision) = baseline_revision_at(ctx, &binding.baseline, &binding.revision) else {
             conflicts.push(crate::spec::PacketConflict::MissingBaselineRevision {
                 baseline: binding.baseline.clone(),
                 revision: binding.revision.clone(),
@@ -7058,19 +7247,14 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
             });
         }
         for member in &revision.body.members {
-            let Some(spec) = specs.iter().find(|candidate| {
-                candidate
-                    .revisions
-                    .first()
-                    .is_some_and(|revision| revision.body.spec == member.spec)
-            }) else {
+            let Some(kind) = spec_heads(ctx, &member.spec).as_ref().and_then(spec_kind) else {
                 conflicts.push(crate::spec::PacketConflict::MissingSpec {
                     spec: member.spec.clone(),
                 });
                 continue;
             };
             let canonical = canonical_spec_revision(ctx, &member.spec, &member.revision)?;
-            let Some(revision) = spec.revision(&canonical) else {
+            let Some(revision) = spec_revision_at(ctx, &member.spec, kind, &canonical) else {
                 conflicts.push(crate::spec::PacketConflict::MissingSpecRevision {
                     spec: member.spec.clone(),
                     revision: member.revision.clone(),
@@ -7092,31 +7276,22 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
 
     // Issued Specs may supplement one Issue directly. Concurrent controlling
     // revisions remain a visible conflict; no timestamp winner is selected.
-    for spec in &specs {
-        match spec.issued() {
+    for spec in governing_candidates(ctx, doc)? {
+        let Some(state) = spec_state(ctx, &spec) else {
+            continue;
+        };
+        match state.issued() {
             crate::spec::Issued::One(revision) => {
-                if revision.body.links.iter().any(|link| {
-                    link.rel == crate::spec::Rel::Governs
-                        && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
-                }) {
+                if governs(revision) {
                     exact.insert(
-                        (revision.body.spec.clone(), revision.revision.clone()),
-                        (revision, crate::spec::PacketSource::Direct, false),
+                        (spec.clone(), revision.revision.clone()),
+                        (revision.clone(), crate::spec::PacketSource::Direct, false),
                     );
                 }
             }
             crate::spec::Issued::Conflict(revisions) => {
-                if revisions.iter().any(|revision| {
-                    revision.body.links.iter().any(|link| {
-                        link.rel == crate::spec::Rel::Governs
-                            && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
-                    })
-                }) {
-                    let id = revisions
-                        .first()
-                        .map(|revision| revision.body.spec.clone())
-                        .unwrap_or_else(|| "unknown".into());
-                    conflicts.push(crate::spec::PacketConflict::IssuedSpecConflict { spec: id });
+                if revisions.iter().any(|revision| governs(revision)) {
+                    conflicts.push(crate::spec::PacketConflict::IssuedSpecConflict { spec });
                 }
             }
             crate::spec::Issued::None => {}
@@ -7125,43 +7300,55 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
 
     // Incorporation, unlike reference, pulls the exact target into the
     // governing set. Traverse to a fixed point over exact revisions.
+    let mut missing = BTreeSet::new();
     loop {
         let mut added = false;
-        let snapshot: Vec<_> = exact.values().map(|(revision, _, _)| *revision).collect();
-        for revision in snapshot {
-            for link in &revision.body.links {
+        let snapshot = exact
+            .values()
+            .map(|(revision, _, _)| {
+                (
+                    revision.body.spec.clone(),
+                    revision.revision.clone(),
+                    revision.body.links.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (from_spec, from_revision, links) in snapshot {
+            for link in links {
                 if link.rel != crate::spec::Rel::Incorporates {
                     continue;
                 }
                 let crate::spec::Target::Spec {
                     spec,
                     revision: target_revision,
-                } = &link.target
+                } = link.target
                 else {
                     continue;
                 };
-                let canonical = canonical_spec_revision(ctx, spec, target_revision)?;
+                let canonical = canonical_spec_revision(ctx, &spec, &target_revision)?;
                 if exact.contains_key(&(spec.clone(), canonical.clone())) {
                     continue;
                 }
-                let Some(target) = specs
-                    .iter()
-                    .find_map(|candidate| candidate.revision(&canonical))
-                    .filter(|candidate| candidate.body.spec == *spec)
-                else {
-                    conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
-                        spec: spec.clone(),
-                        revision: target_revision.clone(),
-                    });
+                let target = spec_heads(ctx, &spec)
+                    .as_ref()
+                    .and_then(spec_kind)
+                    .and_then(|kind| spec_revision_at(ctx, &spec, kind, &canonical));
+                let Some(target) = target else {
+                    if missing.insert((spec.clone(), target_revision.clone())) {
+                        conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
+                            spec,
+                            revision: target_revision,
+                        });
+                    }
                     continue;
                 };
                 exact.insert(
-                    (spec.clone(), canonical),
+                    (spec, canonical),
                     (
                         target,
                         crate::spec::PacketSource::Incorporated {
-                            spec: revision.body.spec.clone(),
-                            revision: revision.revision.clone(),
+                            spec: from_spec.clone(),
+                            revision: from_revision.clone(),
                         },
                         true,
                     ),
@@ -7179,19 +7366,20 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
     let mut proof = Vec::new();
     let mut record = Vec::new();
     for (_, (revision, source, incorporated)) in exact {
+        let kind = revision.body.kind;
         let item = crate::spec::PacketSpec {
-            spec: revision.body.spec.clone(),
-            revision: revision.revision.clone(),
-            kind: revision.body.kind,
-            title: revision.body.title.clone(),
+            spec: revision.body.spec,
+            revision: revision.revision,
+            kind,
+            title: revision.body.title,
             state: revision.body.state,
             source,
-            links: revision.body.links.clone(),
+            links: revision.body.links,
         };
-        if incorporated || revision.body.kind.governs() {
+        if incorporated || kind.governs() {
             governing.push(item);
         } else {
-            match revision.body.kind {
+            match kind {
                 crate::spec::Kind::Goal | crate::spec::Kind::Plan | crate::spec::Kind::Guide => {
                     guidance.push(item)
                 }
@@ -8962,7 +9150,7 @@ impl World for IssuesWorld {
         runtime::world::Descriptor {
             id: self.id.clone(),
             implementation_version: runtime::world::Version(match self.package {
-                IssuesPackage::Preferred => 5,
+                IssuesPackage::Preferred => 6,
                 IssuesPackage::Migrator => Self::MIGRATOR_IMPLEMENTATION_VERSION,
             }),
             schemas: self.schemas.clone(),
@@ -13141,11 +13329,7 @@ impl World for IssuesWorld {
                     .map(spec_summary_row)
                     .collect::<Result<Vec<_>, _>>()?;
                 for item in &mut items {
-                    if !item.conflicted {
-                        item.view = spec_state(ctx, &item.spec)
-                            .and_then(|spec| spec_view(&spec))
-                            .map(Box::new);
-                    }
+                    item.head = spec_head(ctx, item);
                 }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items)).expect("specs page json"),
@@ -13316,11 +13500,7 @@ impl World for IssuesWorld {
                     .map(baseline_summary_row)
                     .collect::<Result<Vec<_>, _>>()?;
                 for item in &mut items {
-                    if !item.conflicted {
-                        item.view = baseline_state(ctx, &item.baseline)
-                            .and_then(|baseline| baseline_view(&baseline))
-                            .map(Box::new);
-                    }
+                    item.head = baseline_head(ctx, item);
                 }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))

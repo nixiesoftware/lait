@@ -37,7 +37,7 @@ pub const ENTITY_SCHEMA: &str = "issues_entity";
 /// depends on this number -- but one version meaning two different schemas
 /// across builds is exactly the kind of quiet ambiguity this file spends its
 /// bytes avoiding.
-pub const ENTITY_SCHEMA_VERSION: u32 = 2;
+pub const ENTITY_SCHEMA_VERSION: u32 = 3;
 pub const READ_GATE: &str = "read";
 pub const WORD_ANALYZER: &str = "word";
 pub const WORD_ANALYZER_CONFIGURATION: &[u8] =
@@ -1058,8 +1058,8 @@ fn relation_identity(kind: &str, source: &str, target: &str) -> [u8; 32] {
 
 /// Relation kinds whose *reverse* direction is a question the product asks:
 /// "which issues carry this label", "how many issues target this milestone",
-/// "what is assigned to me". These, and only these, also post
-/// [`field::RELATION_TARGET_KIND`].
+/// "what is assigned to me". These -- and a Spec's reference verbs, for "what
+/// governs this Issue" -- also post [`field::RELATION_TARGET_KIND`].
 ///
 /// It is exactly the frozen kind set of
 /// [`crate::records::IssueRelationRecord`], because an issue is the only
@@ -1104,7 +1104,13 @@ fn relation_with_identity(
             composite_key([relation_kind, source]),
         ),
     ];
-    if MEMBERSHIP_KINDS.contains(&relation_kind) {
+    // A Spec's reference verbs post the reverse posting too: "what governs
+    // this Issue" is the Packet's question, and "what verifies this
+    // Requirement" is the register's. Seeking the bare target instead would
+    // scan every comment, reaction and child that names the Issue before a
+    // Keep could drop them, and Find charges the scan.
+    if MEMBERSHIP_KINDS.contains(&relation_kind) || crate::spec::Rel::parse(relation_kind).is_some()
+    {
         fields.push(bytes(
             field::RELATION_TARGET_KIND,
             composite_key([relation_kind, target]),

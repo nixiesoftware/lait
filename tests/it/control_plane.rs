@@ -494,6 +494,31 @@ fn doorbell_names_the_dirty_project_and_doc() {
             planes(&ring).any(|p| p.plane == "specs"),
             "a spec write must ring its own plane, got {ring:?}"
         );
+        // And only its own plane, scoped to its project. A Spec revision is
+        // posted under its kind, and until the translation named the kinds it
+        // fell through to "something changed that I cannot name" -- which
+        // rang all fifteen planes, unscoped, on every Spec edit. The register
+        // that was meant to be the only thing refreshed was one of fifteen.
+        assert!(
+            planes(&ring).all(|p| p.plane == "specs"),
+            "a spec write rings no plane but its own, got {ring:?}"
+        );
+        let scopes = planes(&ring)
+            .map(|p| p.scope.as_ref().map(|scope| scope.id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            scopes.len() == 1 && !scopes.contains(&None),
+            "a spec write names its one project, got {ring:?}"
+        );
+        // And it moves no Issue: a project whose Spec changed is not a
+        // project whose Issues did, and saying so refetched every board.
+        assert!(
+            ring.invalidations
+                .iter()
+                .filter(|entry| entry.world.as_str() == issues::contract::product_world())
+                .all(|entry| entry.dirty.is_empty()),
+            "a spec write dirties no Issue, got {ring:?}"
+        );
         // Auxiliary immutable/head Bodies are deliberately not projected as
         // public rows. Their presence may conservatively fan out the bounded
         // plane vocabulary, but the required semantic plane must never be

@@ -343,6 +343,10 @@ export interface SpecView {
   spec: string; project: string; kind: SpecKind; title: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: SpecBody;
 }
+/** The one head of a register row, as its corpus row states it. */
+export interface SpecHead {
+  revision: string; title: string; state: SpecState; author: string; ts: number;
+}
 export interface SpecSummary {
   spec: string;
   project: string;
@@ -350,7 +354,8 @@ export interface SpecSummary {
   heads: string[];
   issued: string[];
   conflicted: boolean;
-  view?: SpecView | null;
+  /** Present only with exactly one head; absent until the corpus posts it. */
+  head?: SpecHead | null;
 }
 export interface BaselineBody {
   baseline: string; project: string; name: string; state: SpecState;
@@ -360,13 +365,16 @@ export interface BaselineView {
   baseline: string; project: string; name: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: BaselineBody;
 }
+export interface BaselineHead {
+  revision: string; name: string; state: SpecState; author: string; ts: number;
+}
 export interface BaselineSummary {
   baseline: string;
   project: string;
   heads: string[];
   issued: string[];
   conflicted: boolean;
-  view?: BaselineView | null;
+  head?: BaselineHead | null;
 }
 
 export type GeometryRole = "constraint" | "containment" | "equivalence" | "association";

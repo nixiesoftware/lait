@@ -84,7 +84,7 @@ import {
   type ProjectDto,
   type WorkflowState,
 } from "../types";
-import { conflictPhrase, sourcePhrase } from "../core/specs";
+import { baselineCards, conflictPhrase, sourcePhrase } from "../core/specs";
 import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { avatarColor, catalogColor } from "./colors";
@@ -1209,8 +1209,7 @@ function SpecPacket({
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [binding, setBinding] = useState(false);
-  const baselines = (useProjectBaselines(spaceId, projectId).data ?? [])
-    .flatMap((summary) => summary.view ? [summary.view] : []);
+  const baselines = baselineCards(useProjectBaselines(spaceId, projectId).data ?? []);
 
   useEffect(() => {
     let alive = true;
@@ -1269,7 +1268,7 @@ function SpecPacket({
             className="text-mute text-2xs"
             title={`${packet.baseline.baseline}@${packet.baseline.revision}`}
           >
-            {baselines.find((row) => row.baseline === packet.baseline!.baseline)?.body.name ??
+            {baselines.find((row) => row.baseline === packet.baseline!.baseline)?.name ??
               packet.baseline.baseline}{" "}
             · {short(packet.baseline.revision)}
           </code>
@@ -1290,7 +1289,7 @@ function SpecPacket({
             {issuedBaselines.map((candidate) => (
               <DropdownMenuItem
                 key={candidate.baseline}
-                label={candidate.body.name}
+                label={candidate.name}
                 // The same stamp the Spec lifecycle uses for `issued` — these
                 // candidates are exactly the issued baselines, so the glyph is
                 // already spoken for.

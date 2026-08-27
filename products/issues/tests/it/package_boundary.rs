@@ -90,13 +90,26 @@ fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
     // had meant resolving every member, which is what put a ceiling on
     // collections that never needed one.
     //
+    // Moved again by `edge::MEMBER` -- a membership edge of its own, so a
+    // row's memberships are bounded by what the write path caps rather than
+    // by how often a card was dragged -- which is the move that taught the
+    // implementation_version to travel with the id (`implementation.rs`,
+    // `the_preferred_implementation_is_pinned_to_the_version_that_names_it`).
+    // This pin was not updated then; it is now.
+    //
+    // And once more: `relation_target_kind` is posted for a Spec's reference
+    // verbs as well as the membership kinds, so "what governs this Issue" is
+    // one exact posting rather than a scan of every comment and reaction
+    // that names the Issue. ENTITY_SCHEMA_VERSION 3, implementation_version
+    // 6, both declarations together.
+    //
     // Spaces on the previous implementation take the ordinary World-upgrade
     // path, exactly as they did then. What must NOT happen is this constant
     // being refreshed to whatever the build now prints: that turns the pin
     // into a mirror and the gate stops meaning anything.
     assert_eq!(
         id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "f342ffcb0cc4b1fe8cc272c1f8de1830b56b15395af96b6d819818026faa1199",
+        "57d034261c84c80cf5173f0a44798c572f1d7577dd4ab2afb81e663cc114ae5e",
         "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
     );
 }

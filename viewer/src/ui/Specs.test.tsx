@@ -99,7 +99,15 @@ describe("Specs", () => {
               heads: view.heads,
               issued: view.issued,
               conflicted: view.heads.length !== 1,
-              view: view.heads.length === 1 ? view : null,
+              head: view.heads.length === 1
+                ? {
+                    revision: view.revision,
+                    title: view.title,
+                    state: view.state,
+                    author: view.body.author,
+                    ts: view.body.ts,
+                  }
+                : null,
             })),
           },
         });

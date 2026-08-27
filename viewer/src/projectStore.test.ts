@@ -6,6 +6,7 @@ import type {
   BoardView,
   Page,
   Response,
+  SpecSummary,
   Row,
   SpaceDoorbell,
   SpecLink,
@@ -611,6 +612,49 @@ describe("ProjectViewerStore", () => {
 
     expect(store.resources.read(key).data).toHaveLength(2);
     unsubscribe();
+  });
+
+  it("refetches a project's Spec register only for that project's Spec writes", async () => {
+    let specs: SpecSummary[] = [
+      { spec: "spc_1", project: "prj_1", kind: "requirement", heads: ["r1"], issued: [], conflicted: false },
+    ];
+    const rpc = vi.fn(async (_space: string, request: { cmd: string; project?: string | null }) => {
+      if (request.cmd === "spec_list") return { kind: "specs", page: page(specs) } as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureSpecs("local", "ONE");
+    await store.ensureSpecs("local", null);
+    const mine = projectKeys.specs("local", "ONE");
+    const everywhere = projectKeys.specs("local", null);
+    const stop = [mine, everywhere].map((key) => store.resources.subscribe(key, () => undefined));
+    const lists = () => rpc.mock.calls.filter((call) => call[1].cmd === "spec_list").length;
+    const ring = (id: string | null) => store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      invalidations: [{
+        world: "com.lait.issues", dirty: [],
+        planes: [{ plane: "specs", scope: id ? { kind: "project", id, label: null } : null }],
+      }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+
+    // Another project's Spec: the whole-Space register refetches, ONE's does not.
+    let before = lists();
+    await ring("prj_2");
+    expect(lists() - before).toBe(1);
+
+    // ONE's own Spec: both.
+    specs = [...specs, { spec: "spc_2", project: "prj_1", kind: "guide", heads: ["r2"], issued: [], conflicted: false }];
+    before = lists();
+    await ring("prj_1");
+    expect(lists() - before).toBe(2);
+    expect(store.resources.read(mine).data).toHaveLength(2);
+
+    // A ring that names no project reaches every register.
+    before = lists();
+    await ring(null);
+    expect(lists() - before).toBe(2);
+    for (const unsubscribe of stop) unsubscribe();
   });
 
   it("ignores an identical invalidation owned by another World", async () => {

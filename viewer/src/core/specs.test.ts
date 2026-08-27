@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyLinkDelta,
   authorityPhrase,
+  baselineCards,
   commonAncestor,
   conflictPhrase,
   diffBodies,
@@ -10,6 +11,7 @@ import {
   emptyDelta,
   groupByKind,
   holds,
+  specCards,
   incomingFor,
   linkDelta,
   linkPhrase,
@@ -371,5 +373,32 @@ describe("register grouping", () => {
       spec({ spec: "c", kind: "requirement" }),
     ]);
     expect(groups.map((group) => group.kind)).toEqual(["goal", "requirement", "record"]);
+  });
+});
+
+describe("register cards", () => {
+  const head = { revision: "r1", title: "Login is race-free", state: "draft" as const, author: "a", ts: 7 };
+  const row = {
+    spec: "spc_1", project: "prj_1", kind: "requirement" as const,
+    heads: ["r1"], issued: ["r0"], conflicted: false, head,
+  };
+
+  it("joins a summary with its one head", () => {
+    expect(specCards([row])).toEqual([{
+      spec: "spc_1", project: "prj_1", kind: "requirement", title: "Login is race-free",
+      state: "draft", revision: "r1", heads: ["r1"], issued: ["r0"], ts: 7,
+    }]);
+  });
+
+  it("offers neither a row without a head nor a conflicted one", () => {
+    // No head: the corpus has not posted it yet, or the heads are concurrent.
+    expect(specCards([{ ...row, head: null }])).toEqual([]);
+    expect(specCards([{ ...row, heads: ["r1", "r2"], head: null }])).toEqual([]);
+    // One head but concurrent issued revisions: nothing of it is authoritative.
+    expect(specCards([{ ...row, issued: ["r0", "r0b"], conflicted: true }])).toEqual([]);
+    expect(baselineCards([{
+      baseline: "bsl_1", project: "prj_1", heads: ["b1"], issued: ["b0", "b0b"], conflicted: true,
+      head: { revision: "b1", name: "E0", state: "draft", author: "a", ts: 1 },
+    }])).toEqual([]);
   });
 });

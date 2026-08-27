@@ -277,6 +277,19 @@ export const projectKeys = {
 };
 
 /**
+ * The `specs` plane, narrowed to one project once its `prj_` id is known.
+ *
+ * Every Spec resource is keyed by a project KEY (or `null` for the whole
+ * Space), and the ring names a project by id -- which only arrives with the
+ * data. So each loader declares its derivation as a thunk that reads the id
+ * back out of what it loaded, and takes the plane whole until then. A
+ * whole-Space resource takes it whole always: a relation crosses projects
+ * freely, and the reader that joins them must see every project's writes.
+ */
+const specsPlane = (id: string | null | undefined): CatalogDependency =>
+  id ? { plane: "specs", scopeId: id } : "specs";
+
+/**
  * The catalog planes *this product* projects. Closed on purpose: the wire type
  * is a World-declared `string`, so a plane the engine does not emit can no
  * longer fail to compile there — it fails here instead, beside the loaders that
@@ -1155,11 +1168,11 @@ export class ProjectViewerStore {
       if (result.kind !== "specs") throw new Error("Expected specs response");
       return this.pageItems(key, result.page);
       // Specs and Baselines are Bodies of their own rather than a region of the
-      // catalog, so their plane is digested from Body version stamps. Coarse in
-      // one direction only — space-wide rather than per-project — because naming
-      // the project would mean reading every Spec on every doorbell, and the
-      // cost of that outweighs one register refetch in a quiet project.
-    }, { catalog: ["specs"] }, force);
+      // catalog. The ring names the project a Spec write landed in, and the
+      // register learns its own project's id from its first row.
+    }, () => ({
+      catalog: [specsPlane(project ? this.resources.read<SpecSummary[]>(key).data?.[0]?.project : null)],
+    }), force);
   }
 
   ensureSpec(space: string, spec: string, force = false): Promise<SpecView> {
@@ -1170,7 +1183,9 @@ export class ProjectViewerStore {
       // Same plane as the register above — and the reader needs its own resource
       // rather than picking its row out of the list: a deep link opens on a Spec
       // before any register has loaded.
-    }, { catalog: ["specs"] }, force);
+    }, () => ({
+      catalog: [specsPlane(this.resources.read<SpecView>(projectKeys.spec(space, spec)).data?.project)],
+    }), force);
   }
 
   /**
@@ -1345,7 +1360,9 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "spec_history", spec, page: firstPage() });
       if (result.kind !== "spec_revisions") throw new Error("Expected spec revisions response");
       return this.pageItems(key, result.page);
-    }, { catalog: ["specs"] }, force);
+    }, () => ({
+      catalog: [specsPlane(this.resources.read<SpecRevision[]>(key).data?.[0]?.body.project)],
+    }), force);
   }
 
   ensureBaselines(space: string, project: string | null, force = false): Promise<BaselineSummary[]> {
@@ -1354,7 +1371,9 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "baseline_list", project, page: firstPage() });
       if (result.kind !== "baselines") throw new Error("Expected baselines response");
       return this.pageItems(key, result.page);
-    }, { catalog: ["specs"] }, force);
+    }, () => ({
+      catalog: [specsPlane(project ? this.resources.read<BaselineSummary[]>(key).data?.[0]?.project : null)],
+    }), force);
   }
 
   ensureBaseline(space: string, baseline: string, force = false): Promise<BaselineView> {
@@ -1362,7 +1381,11 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "baseline_show", baseline });
       if (result.kind !== "baseline") throw new Error("Expected baseline response");
       return result;
-    }, { catalog: ["specs"] }, force);
+    }, () => ({
+      catalog: [specsPlane(
+        this.resources.read<BaselineView>(projectKeys.baseline(space, baseline)).data?.project,
+      )],
+    }), force);
   }
 
   ensureBaselineHistory(
@@ -1377,7 +1400,9 @@ export class ProjectViewerStore {
         throw new Error("Expected baseline revisions response");
       }
       return this.pageItems(key, result.page);
-    }, { catalog: ["specs"] }, force);
+    }, () => ({
+      catalog: [specsPlane(this.resources.read<BaselineRevisionDto[]>(key).data?.[0]?.body.project)],
+    }), force);
   }
 
   async createBaseline(
@@ -1482,7 +1507,11 @@ export class ProjectViewerStore {
         throw new Error("Expected spec observations response");
       }
       return this.pageItems(key, result.page);
-    }, { catalog: ["specs"] }, force);
+    }, () => ({
+      catalog: [specsPlane(
+        project ? this.resources.read<SpecObservationRecord[]>(key).data?.[0]?.project : null,
+      )],
+    }), force);
   }
 
   /**
