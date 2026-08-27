@@ -36,7 +36,7 @@ const AppSidebar: React.FC = () => {
   return (
     <aside className="ds-nav">
       <Link to="/" className="ds-nav-logo" aria-label="Home">
-        <img src="/images/logo/logo-icon-dark.svg" alt="" width={28} height={28} />
+        <img src="/images/logo/logo-icon.svg" alt="" width={28} height={28} />
       </Link>
       <nav>
         <ul className="ds-nav-list">

@@ -1,0 +1,94 @@
+/*
+ * The Signage layer.
+ *
+ * `tokens.css` is CommunityKit's, byte for byte, so the two products cannot
+ * drift on a value. Everything an application needs that a marketing site
+ * never did lives here: the two meanings the site has no colour for, control
+ * heights, the lift of an overlay, and the names the existing sheets still
+ * speak while they are restyled.
+ *
+ * Four meanings, four hues, one job each.
+ *
+ *   accent   — the action. The one forward act on a surface, and the sweep of
+ *              a change taking.
+ *   positive — now. On air, a live value, a screen that is showing.
+ *   alarm    — reach. An act that touches screens. Never without a stated
+ *              blast radius beside it.
+ *   miss     — who a broadcast does not reach, and a screen never heard from.
+ *              Deliberately not an error colour; missing somebody may well be
+ *              intended.
+ *
+ * Light, and only light. A display panel is dark in every room — that is
+ * `--ds-panel-screen`, and it is the one dark object on every page.
+ */
+
+:root {
+  color-scheme: light;
+
+  --ds-alarm: #d8472e;
+  --ds-alarm-hover: #c23c25;
+  --ds-alarm-ink: #ffffff;
+  --ds-alarm-soft: rgb(216 71 46 / 0.12);
+  --ds-alarm-rim: rgb(255 170 150 / 0.55);
+  --ds-miss: #b8862b;
+  --ds-miss-soft: rgb(184 134 43 / 0.14);
+
+  /* A filled alarm control: the accent recipe, lit by its own colour. */
+  --ds-material-alarm:
+    inset 0 1px 1px var(--ds-alarm-rim),
+    inset 0 -4px 20px -4px rgb(var(--ds-ink-rgb) / 0.2),
+    0 3px 6px -1px rgb(var(--ds-ink-rgb) / 0.1);
+
+  /* A hover is a whisper of ink on whatever it sits on. */
+  --ds-hover: rgb(var(--ds-ink-rgb) / 0.05);
+  --ds-hover-strong: rgb(var(--ds-ink-rgb) / 0.08);
+  --ds-scrim: rgb(var(--ds-ink-rgb) / 0.24);
+
+  --ds-control: 40px;
+  --ds-control-lg: 48px;
+
+  --ds-space-1: 4px;
+  --ds-space-2: 8px;
+  --ds-space-3: 12px;
+  --ds-space-4: 16px;
+  --ds-space-5: 24px;
+  --ds-space-6: 36px;
+
+  --ds-z-overlay: 100002;
+  --ds-z-scrim: 100001;
+
+  /* ── Names the existing sheets still speak ─────────────────────────────
+     Each resolves to the token it means in the new language, so a sheet that
+     has not been restyled yet renders in the right colours rather than none.
+     A restyle removes the reference; when nothing speaks a name, it goes. */
+  --ds-live: var(--ds-positive);
+  --ds-live-dim: var(--ds-positive-soft);
+  --ds-commit: var(--ds-accent);
+  --ds-danger: var(--ds-alarm);
+  --ds-line: var(--ds-rule);
+  --ds-line-strong: var(--ds-rule-strong);
+  --ds-lift: var(--ds-hover);
+  --ds-lift-strong: var(--ds-hover-strong);
+  --ds-radius-sm: var(--ds-r-sm);
+  --ds-radius-md: var(--ds-r-md);
+  --ds-radius-lg: var(--ds-r-lg);
+  --ds-radius-xl: var(--ds-r-xl);
+  --ds-text-xs: var(--ds-fs-label);
+  --ds-text-sm: var(--ds-fs-small);
+  --ds-text-md: var(--ds-fs-body);
+  --ds-text-lg: var(--ds-fs-heading);
+  --ds-text-xl: var(--ds-fs-title);
+  --ds-font: var(--ds-sans);
+  --ds-duration-sm: var(--ds-dur-fast);
+  --ds-duration-md: var(--ds-dur-medium);
+  --ds-duration-commit: 520ms;
+  --ds-ease-out: var(--ds-ease);
+  --ds-shadow-overlay: var(--ds-material-lift);
+  --ds-shadow-frame: var(--ds-material-lift);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ds-duration-commit: 0ms;
+  }
+}

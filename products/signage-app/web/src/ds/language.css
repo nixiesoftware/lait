@@ -2,6 +2,9 @@
  * The vocabulary the four rules need. Everything here is either a way of
  * saying "that took", a way of saying "this is moving on its own", or a way of
  * saying "here is who this reaches — and who it misses".
+ *
+ * Four meanings, four hues. Blue is the action, and a change taking is the
+ * action taking. Green is now. Alarm is reach. Ochre is the miss.
  */
 
 /* ── Commit ───────────────────────────────────────────────────────────────
@@ -15,7 +18,7 @@
 .ds-field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 7px;
   min-width: 0;
   position: relative;
 }
@@ -27,64 +30,64 @@
   min-height: 16px;
 }
 
-.ds-field-label {
-  font-size: var(--ds-text-xs);
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  color: var(--ds-paper-muted);
+.ds-field-label,
+.ds-field > span:first-child {
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
 }
 
 .ds-field-hint {
-  font-size: var(--ds-text-xs);
-  color: var(--ds-paper-faint);
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
   line-height: 1.45;
 }
 
-.ds-field.is-refused .ds-input {
-  border-color: var(--ds-danger);
-}
-
+/* A label is a quiet sentence, not a specimen tag. */
 .ds-commit {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ds-paper-faint);
+  gap: 6px;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
 }
 
 .ds-commit.is-refused {
-  color: var(--ds-danger);
-  text-transform: none;
-  letter-spacing: 0;
-  font-size: var(--ds-text-xs);
-  font-weight: 500;
+  color: var(--ds-alarm);
+  font-weight: var(--ds-weight-regular);
 }
 
 .ds-commit.is-refused button {
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-paper);
+  color: var(--ds-ink);
   font: inherit;
   text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
   padding: 0;
 }
 
 .ds-commit-sweep {
+  position: relative;
   display: block;
   width: 22px;
   height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--ds-commit),
-    transparent
-  );
-  animation: ds-sweep var(--ds-duration-commit) var(--ds-ease-out) infinite;
+  overflow: hidden;
+}
+
+.ds-commit-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--ds-accent), transparent);
+  animation: ds-sweep var(--ds-duration-commit) var(--ds-ease) infinite;
 }
 
 @keyframes ds-sweep {
@@ -103,43 +106,42 @@
 
 /* ── Alive ────────────────────────────────────────────────────────────────
  *
- * The accent means *now*. It is never on something a person presses, so a
- * glance can tell what is moving from what is waiting to be operated.
+ * Green means *now*. It is never on something a person presses, so a glance
+ * can tell what is moving from what is waiting to be operated.
  */
 
 .ds-onair {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: 0.1em;
-  background: color-mix(in srgb, var(--ds-live) 16%, transparent);
-  color: var(--ds-live);
-  border: 1px solid color-mix(in srgb, var(--ds-live) 34%, transparent);
+  padding: 4px 11px 4px 9px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-positive-soft);
+  color: var(--ds-positive);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .ds-onair.is-alarm {
-  background: color-mix(in srgb, var(--ds-alarm) 18%, transparent);
+  background: var(--ds-alarm-soft);
   color: var(--ds-alarm);
-  border-color: color-mix(in srgb, var(--ds-alarm) 40%, transparent);
 }
 
 .ds-onair em {
   font-style: normal;
-  font-family: var(--ds-mono);
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
   opacity: 0.85;
 }
 
 .ds-onair-dot,
 .ds-livevalue-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--ds-r-round);
   background: currentColor;
   animation: ds-breathe 2.4s ease-in-out infinite;
 }
@@ -158,7 +160,7 @@
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  color: var(--ds-live);
+  color: var(--ds-positive);
   font-variant-numeric: tabular-nums;
 }
 
@@ -167,13 +169,14 @@
 }
 
 .ds-ago {
-  font-size: var(--ds-text-xs);
-  color: var(--ds-paper-faint);
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .ds-ago.is-now {
-  color: var(--ds-live);
+  color: var(--ds-positive);
 }
 
 .ds-ago.is-never {
@@ -183,10 +186,10 @@
 /* Whop's move: the nav carries live state, so nobody has to navigate to
    discover that something is interrupting their fleet. */
 .ds-nav-live {
-  margin-left: auto;
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  flex: 0 0 auto;
+  border-radius: var(--ds-r-round);
   background: var(--ds-alarm);
   animation: ds-breathe 2.4s ease-in-out infinite;
 }
@@ -196,8 +199,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--ds-text-xs);
   color: var(--ds-miss);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
 }
 
 /* ── Reach ────────────────────────────────────────────────────────────────
@@ -210,102 +214,91 @@
 
 .ds-reach {
   display: grid;
-  gap: 10px;
-  padding: 14px;
-  border-radius: var(--ds-radius-lg);
-  border: 1px solid var(--ds-line);
-  background: var(--ds-ink);
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-reach-count {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: var(--ds-text-lg);
-  font-weight: 650;
+  font-size: 1.375rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
 }
 
 .ds-reach-count small {
-  font-size: var(--ds-text-sm);
-  font-weight: 500;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-regular);
+  letter-spacing: var(--ds-track-body);
+  color: var(--ds-muted);
 }
 
 .ds-reach-bar {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--ds-ink-3);
+  height: 8px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
   overflow: hidden;
 }
 
 .ds-reach-bar span {
   display: block;
   height: 100%;
-  background: var(--ds-live);
-  transition: width var(--ds-duration-md) var(--ds-ease-out);
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-positive);
+  transition: width var(--ds-dur-slow) var(--ds-ease-enter);
 }
 
 .ds-reach-names {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
 }
 
 .ds-reach-miss {
   display: grid;
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid var(--ds-line);
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ds-rule);
 }
 
 .ds-reach-miss > strong {
-  font-size: var(--ds-text-xs);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--ds-miss);
-}
-
-.ds-tag.is-miss {
-  color: var(--ds-miss);
-  border-color: color-mix(in srgb, var(--ds-miss) 34%, transparent);
-}
-
-.ds-tag.is-reached {
-  color: var(--ds-paper);
-  border-color: var(--ds-line-strong);
-}
-
-/* Partiful's move: a facet says how big it is before you choose it. */
-.ds-chip em {
-  font-style: normal;
-  margin-left: 5px;
-  opacity: 0.6;
-  font-variant-numeric: tabular-nums;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
 }
 
 /* ── Surfaces ─────────────────────────────────────────────────────────── */
 
+/* A panel is a white card resting on the field. Its heading is a label. */
 .ds-panel {
   display: flex;
   flex-direction: column;
   gap: var(--ds-space-3);
-  padding: var(--ds-space-4);
-  border: 1px solid var(--ds-line);
-  border-radius: var(--ds-radius-lg);
-  background: var(--ds-ink-2);
+  padding: 18px 20px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-panel > h3 {
   margin: 0;
-  font-size: var(--ds-text-xs);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ds-paper-muted);
   display: flex;
   align-items: center;
   gap: 8px;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
 }
 
 .ds-stack {
@@ -327,24 +320,23 @@
   gap: var(--ds-space-3);
 }
 
-/* A screen, a channel, a broadcast — one row shape, live state on the left. */
+/* A screen, a channel, a broadcast — one row shape, live state on the left.
+   On air is the one row that keeps an edge, because that edge is information. */
 .ds-unit {
   display: flex;
   align-items: center;
   gap: var(--ds-space-3);
-  padding: var(--ds-space-3);
-  border: 1px solid var(--ds-line);
-  border-radius: var(--ds-radius-md);
-  background: var(--ds-ink-2);
-  transition: border-color var(--ds-duration-sm) var(--ds-ease-out);
-}
-
-.ds-unit:hover {
-  border-color: var(--ds-line-strong);
+  padding: 12px 14px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+  transition: box-shadow var(--ds-dur-fast) var(--ds-ease);
 }
 
 .ds-unit.is-onair {
-  border-color: color-mix(in srgb, var(--ds-alarm) 46%, transparent);
+  box-shadow:
+    var(--ds-material-card),
+    inset 3px 0 0 var(--ds-alarm);
 }
 
 .ds-unit-copy {
@@ -356,13 +348,13 @@
 }
 
 .ds-unit-copy > strong {
-  font-size: var(--ds-text-md);
-  font-weight: 600;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-unit-copy > span {
-  font-size: var(--ds-text-sm);
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
 }
 
 .ds-unit-hit {
@@ -389,8 +381,9 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: var(--ds-text-xl);
-  font-weight: 650;
+  font-size: var(--ds-fs-title);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
   padding: 4px 2px;
 }
 

@@ -24,7 +24,7 @@
   font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.02em;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
 }
 
 .pe-field-label small {
@@ -80,7 +80,7 @@
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: var(--ds-paper);
+  background: var(--ds-ink);
   transition: transform 140ms ease;
 }
 
@@ -105,7 +105,7 @@
 
 .pe-unit {
   font-size: 12px;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
 }
 
 .pe-swatches {
@@ -127,7 +127,7 @@
 }
 
 .pe-swatch.is-on {
-  outline: 2px solid var(--ds-paper);
+  outline: 2px solid var(--ds-ink);
   outline-offset: 2px;
 }
 
@@ -141,7 +141,7 @@
 .pe-matrix-row {
   font-size: 11px;
   font-weight: 650;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
 }
 
 /* Both doors fit on one line, or the manual one reads as the fallback. */
@@ -189,10 +189,10 @@
   border-radius: 8px;
   border: 1px solid var(--ds-line);
   border-left: 3px solid var(--ds-accent);
-  background: var(--ds-ink-3, rgb(255 255 255 / 0.04));
+  background: var(--ds-surface-sunken, rgb(255 255 255 / 0.04));
   font-size: 12px;
   line-height: 1.45;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
 }
 
 .pe-scope strong {
@@ -200,7 +200,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--ds-paper);
+  color: var(--ds-ink);
 }
 
 .pe-scope.is-compact {
@@ -234,7 +234,7 @@
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -248,13 +248,13 @@
 }
 
 .pe-source-tab:hover {
-  background: var(--ds-ink-2);
-  color: var(--ds-paper);
+  background: var(--ds-surface);
+  color: var(--ds-ink);
 }
 
 .pe-source-tab.is-on {
-  background: var(--ds-ink-2);
-  color: var(--ds-paper);
+  background: var(--ds-surface);
+  color: var(--ds-ink);
 }
 
 .pe-source-panel {
@@ -313,7 +313,7 @@
   min-height: 0;
   overflow: auto;
   border-left: 1px solid var(--ds-line);
-  background: var(--ds-ink-2);
+  background: var(--ds-surface);
 }
 
 .pe-insp-section {
@@ -324,7 +324,7 @@
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-paper);
+  color: var(--ds-ink);
   width: 100%;
   display: flex;
   align-items: center;
@@ -393,7 +393,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
 }
 
 .pe-insp-actions {
@@ -428,7 +428,7 @@
   scrollbar-width: none;
   padding: 8px 10px max(10px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--ds-line);
-  background: var(--ds-ink-2);
+  background: var(--ds-surface);
 }
 
 .pe-actionbar::-webkit-scrollbar {
@@ -439,7 +439,7 @@
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-paper);
+  color: var(--ds-ink);
   flex: 0 0 auto;
   min-width: 64px;
   display: flex;
@@ -472,7 +472,7 @@
   z-index: 5;
   border-top: 1px solid var(--ds-line);
   border-radius: 16px 16px 0 0;
-  background: var(--ds-ink-2);
+  background: var(--ds-surface);
   box-shadow: 0 -18px 40px rgb(0 0 0 / 0.45);
   padding-bottom: var(--vv-keyboard, 0px);
 }
@@ -522,7 +522,7 @@
   appearance: none;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
   flex: 0 0 auto;
   padding: 7px 12px;
   border-radius: 999px;
@@ -533,9 +533,9 @@
 }
 
 .pe-sheet-tab.is-on {
-  background: var(--ds-ink);
+  background: var(--ds-paper);
   border-color: var(--ds-line);
-  color: var(--ds-paper);
+  color: var(--ds-ink);
 }
 
 .pe-sheet-body {
@@ -598,7 +598,7 @@
   justify-content: center;
   gap: 4px;
   height: 100%;
-  color: var(--ds-paper-muted);
+  color: var(--ds-muted);
   font-size: 13px;
   text-align: center;
 }

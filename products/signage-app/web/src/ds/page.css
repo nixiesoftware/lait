@@ -1,3 +1,12 @@
+/*
+ * The shell and the page furniture.
+ *
+ * One quiet field. Content sits on white cards; wells are cut into them.
+ * The rail floats off the field the way the site's header floats — same
+ * chrome, same blur, turned upright. Sections are separated by space; the only
+ * hairlines are between rows that share a card.
+ */
+
 .ds-haptic-host,
 .pe-haptic-host {
   position: fixed;
@@ -11,32 +20,24 @@
   pointer-events: none;
 }
 
-.ds-btn-danger {
-  background: color-mix(in srgb, var(--ds-danger) 22%, var(--ds-ink-3));
-  color: var(--ds-danger);
-  font-weight: 650;
-}
-
-.ds-btn-danger:hover {
-  background: color-mix(in srgb, var(--ds-danger) 32%, var(--ds-ink-3));
-}
+/* ── Shell ─────────────────────────────────────────────────────────────── */
 
 .ds-shell {
   position: relative;
   height: 100dvh;
   overflow: hidden;
   display: flex;
-  color-scheme: dark;
-  background: var(--ds-ink);
-  color: var(--ds-paper);
-  font-family: var(--ds-font);
-  -webkit-tap-highlight-color: transparent;
+  color-scheme: light;
+  background: var(--ds-paper);
+  color: var(--ds-ink);
+  font-family: var(--ds-sans);
 }
 
 .ds-shell * {
   box-sizing: border-box;
 }
 
+/* The rail: a floating pill, held above the page. */
 .ds-nav {
   display: none;
   position: relative;
@@ -44,9 +45,15 @@
   flex-direction: column;
   align-items: center;
   width: 72px;
-  padding: 20px 8px;
-  gap: 8px;
+  margin: var(--ds-header-gap) 0 var(--ds-header-gap) var(--ds-header-gap);
+  padding: 14px 8px;
+  gap: 6px;
   flex-shrink: 0;
+  border-radius: var(--ds-r-xl);
+  background: var(--ds-chrome);
+  box-shadow: var(--ds-material-float);
+  backdrop-filter: var(--ds-chrome-blur);
+  -webkit-backdrop-filter: var(--ds-chrome-blur);
 }
 
 @media (min-width: 640px) {
@@ -60,12 +67,12 @@
   place-items: center;
   width: 40px;
   height: 40px;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .ds-nav-logo img {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
 }
 
 .ds-nav-list {
@@ -74,38 +81,57 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
 }
 
 .ds-nav-item {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   padding: 8px 4px;
-  border-radius: var(--ds-radius-md);
-  color: var(--ds-paper-muted);
+  border-radius: var(--ds-r-md);
+  color: var(--ds-chrome-muted);
   text-decoration: none;
-  font-size: 10px;
-  font-weight: 650;
+  font-size: 0.6875rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
 }
 
 .ds-nav-item svg {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
+}
+
+.ds-nav-item .ds-nav-live {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  margin: 0;
 }
 
 .ds-nav-item.is-on {
-  color: var(--ds-paper);
-  background: var(--ds-lift);
+  color: var(--ds-ink);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
 }
 
 @media (hover: hover) {
-  .ds-nav-item:hover {
-    background: var(--ds-lift);
-    color: var(--ds-paper);
+  .ds-nav-item:not(.is-on):hover {
+    background: var(--ds-hover);
+    color: var(--ds-ink);
   }
+}
+
+.ds-nav .ds-detached {
+  margin-top: auto;
+  padding-top: 8px;
 }
 
 .ds-main {
@@ -129,18 +155,22 @@
   overflow: hidden;
 }
 
+/* The dock: the rail, lying down, for a phone. */
 .ds-dock {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: var(--ds-header-gap);
+  right: var(--ds-header-gap);
+  bottom: max(var(--ds-header-gap), env(safe-area-inset-bottom));
   z-index: 50;
   display: flex;
   align-items: stretch;
-  height: calc(56px + env(safe-area-inset-bottom));
-  padding-bottom: env(safe-area-inset-bottom);
-  background: var(--ds-ink-2);
-  border-top: 1px solid var(--ds-line);
+  height: 60px;
+  padding: 4px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-chrome);
+  box-shadow: var(--ds-material-float);
+  backdrop-filter: var(--ds-chrome-blur);
+  -webkit-backdrop-filter: var(--ds-chrome-blur);
 }
 
 @media (min-width: 640px) {
@@ -156,32 +186,38 @@
   align-items: center;
   justify-content: center;
   gap: 2px;
-  color: var(--ds-paper-muted);
+  border-radius: var(--ds-r-pill);
+  color: var(--ds-chrome-muted);
   text-decoration: none;
-  font-size: 10px;
-  font-weight: 650;
+  font-size: 0.625rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
 }
 
 .ds-dock-item svg {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
 }
 
 .ds-dock-item.is-on {
-  color: var(--ds-paper);
+  color: var(--ds-ink);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
 }
+
+/* ── Page ──────────────────────────────────────────────────────────────── */
 
 .ds-page {
   width: 100%;
   max-width: 1280px;
   margin: 0 auto;
   padding: var(--ds-space-4);
-  padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
 }
 
 @media (min-width: 640px) {
   .ds-page {
-    padding: var(--ds-space-5);
+    padding: calc(var(--ds-header-gap) + 8px) var(--ds-space-5) var(--ds-space-6);
   }
 }
 
@@ -196,12 +232,13 @@
 
 .ds-page-title {
   margin: 0;
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  font-size: var(--ds-fs-title);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
+  line-height: var(--ds-lh-title);
 }
 
 .ds-page-mark {
@@ -209,15 +246,16 @@
   place-items: center;
   width: 36px;
   height: 36px;
-  border-radius: var(--ds-radius-md);
-  background: var(--ds-lift);
-  color: var(--ds-paper);
+  border-radius: var(--ds-r-round);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+  color: var(--ds-muted);
   flex-shrink: 0;
 }
 
 .ds-page-mark svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 
 .ds-page-actions {
@@ -236,21 +274,28 @@
 }
 
 .ds-toolbar .ds-search {
-  flex: 1 1 180px;
+  flex: 1 1 200px;
   min-width: 0;
-  max-width: 360px;
+  max-width: 380px;
 }
 
+/* The selection bar is a floating pill: it is held above the list it acts on. */
 .ds-select-bar {
+  position: sticky;
+  top: 8px;
+  z-index: 3;
   display: flex;
   align-items: center;
   gap: var(--ds-space-2);
   margin-bottom: var(--ds-space-4);
-  padding: 6px 8px;
-  border-radius: var(--ds-radius-lg);
-  background: var(--ds-ink-2);
-  border: 1px solid var(--ds-line);
-  font-weight: 650;
+  padding: 6px 8px 6px 6px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-chrome);
+  box-shadow: var(--ds-material-float);
+  backdrop-filter: var(--ds-chrome-blur);
+  -webkit-backdrop-filter: var(--ds-chrome-blur);
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-select-bar .ds-page-actions {
@@ -259,9 +304,10 @@
 
 .ds-view-toggle {
   display: none;
-  background: var(--ds-ink-3);
-  border-radius: var(--ds-radius-sm);
-  padding: 2px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
 }
 
 @media (min-width: 720px) {
@@ -270,8 +316,9 @@
   }
 }
 
-.ds-view-toggle .ds-icon.is-on {
-  background: var(--ds-lift-strong);
+.ds-view-toggle .ds-icon {
+  width: 34px;
+  height: 34px;
 }
 
 .ds-catalog {
@@ -282,16 +329,26 @@
 
 @media (min-width: 720px) {
   .ds-catalog {
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(188px, 1fr));
+    gap: var(--ds-space-4);
   }
 }
 
+/* Rows share one card and are divided by the faintest possible hairline. */
 .ds-rows {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  padding: 0 18px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
 }
 
+.ds-rows > * + * {
+  border-top: 1px solid var(--ds-rule);
+}
+
+/* Nothing here yet is a state, in a well, in a sentence. */
 .ds-empty-card {
   display: flex;
   flex-direction: column;
@@ -300,17 +357,20 @@
   gap: var(--ds-space-3);
   min-height: 220px;
   padding: var(--ds-space-5);
-  border: 1px dashed var(--ds-line);
-  border-radius: var(--ds-radius-xl);
-  color: var(--ds-paper-muted);
+  border-radius: var(--ds-r-xl);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
   text-align: center;
 }
 
 .ds-empty-card p {
   margin: 0;
-  font-weight: 650;
-  color: var(--ds-paper);
+  color: var(--ds-ink);
+  font-weight: var(--ds-weight-medium);
+  text-wrap: balance;
 }
+
+/* ── Tiles and rows ────────────────────────────────────────────────────── */
 
 .ds-tile {
   position: relative;
@@ -318,7 +378,7 @@
 }
 
 .ds-tile.is-on {
-  outline: 2px solid var(--ds-paper);
+  outline: 2px solid var(--ds-accent);
   outline-offset: 2px;
 }
 
@@ -344,9 +404,9 @@
 
 .ds-tile-meta {
   display: block;
-  padding: 0 8px 8px;
-  font-size: 11px;
-  color: var(--ds-paper-muted);
+  padding: 0 10px 10px;
+  font-size: var(--ds-fs-label);
+  color: var(--ds-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -356,6 +416,7 @@
   padding-bottom: 2px;
 }
 
+/* The selection box: a small pressed object on top of the media. */
 .ds-check {
   appearance: none;
   position: absolute;
@@ -364,34 +425,37 @@
   z-index: 3;
   width: 22px;
   height: 22px;
-  border-radius: 6px;
-  border: 1.5px solid color-mix(in srgb, var(--ds-paper) 55%, transparent);
-  background: #00000055;
-  color: var(--ds-ink);
+  border-radius: var(--ds-r-round);
+  border: 0;
+  background: rgb(255 255 255 / 0.85);
+  box-shadow: var(--ds-material-control);
+  color: var(--ds-accent-ink);
   padding: 0;
   cursor: pointer;
+  transition: background var(--ds-dur-fast) var(--ds-ease);
 }
 
 .ds-check.is-on {
-  background: var(--ds-paper);
-  border-color: var(--ds-paper);
+  background: var(--ds-accent);
+  box-shadow: var(--ds-material-accent);
 }
 
 .ds-check.is-on::after {
   content: "";
   display: block;
-  width: 10px;
-  height: 6px;
-  margin: 5px auto 0;
-  border-left: 2px solid var(--ds-ink);
-  border-bottom: 2px solid var(--ds-ink);
+  width: 9px;
+  height: 5px;
+  margin: 6px auto 0;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
   transform: rotate(-45deg);
 }
 
 .ds-check-inline {
   position: static;
   flex-shrink: 0;
-  background: var(--ds-ink-4);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
 }
 
 .ds-tile-more {
@@ -402,10 +466,11 @@
 }
 
 .ds-tile-more .ds-icon {
-  width: 36px;
-  height: 36px;
-  background: #00000055;
-  color: var(--ds-paper);
+  width: 34px;
+  height: 34px;
+  background: rgb(255 255 255 / 0.85);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
 }
 
 .ds-row {
@@ -413,11 +478,12 @@
 }
 
 .ds-row.is-on {
-  outline: 1px solid var(--ds-paper);
+  outline: 2px solid var(--ds-accent);
+  outline-offset: -2px;
 }
 
 .ds-row.is-danger {
-  color: var(--ds-danger);
+  color: var(--ds-alarm);
 }
 
 .ds-row-hit {
@@ -435,8 +501,8 @@
 
 .ds-row-copy strong {
   display: block;
-  font-size: 14px;
-  font-weight: 650;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-row-media {
@@ -446,7 +512,7 @@
   flex-shrink: 0;
   border-radius: 6px;
   overflow: clip;
-  background: var(--ds-ink-4);
+  background: var(--ds-panel-screen);
 }
 
 .ds-row-media .pe-thumb,
@@ -458,6 +524,7 @@
   object-fit: cover;
 }
 
+/* A thumbnail is what a screen would show, so it sits on a screen. */
 .ds-thumb,
 .pe-thumb {
   position: absolute;
@@ -473,49 +540,18 @@
 .pe-thumb-empty {
   display: grid;
   place-items: center;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   padding: var(--ds-space-2);
   text-align: center;
 }
 
 .pe-thumb-empty {
-  background: var(--ds-ink-4);
-  color: var(--ds-paper-muted);
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.55);
 }
 
-.ds-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--ds-paper-muted);
-}
-
-.ds-field > span {
-  font-weight: 650;
-}
-
-.ds-input,
-.ds-select,
-select.ds-input {
-  appearance: none;
-  border: 1px solid var(--ds-line);
-  background: var(--ds-ink-3);
-  color: var(--ds-paper);
-  font: inherit;
-  font-size: 16px;
-  height: 40px;
-  padding: 0 10px;
-  border-radius: var(--ds-radius-sm);
-  width: 100%;
-}
-
-.ds-input:focus,
-.ds-select:focus,
-.ds-search:focus {
-  outline: 1px solid var(--ds-paper-muted);
-}
+/* ── Prompts and inspectors keep the field rhythm ──────────────────────── */
 
 .ds-prompt .ds-field,
 .ds-dialog .ds-field {
@@ -533,26 +569,11 @@ select.ds-input {
   margin-bottom: var(--ds-space-3);
 }
 
-.ds-inspector input:not([type="checkbox"]):not([type="radio"]),
-.ds-inspector select,
 .ds-inspector textarea {
-  appearance: none;
-  border: 1px solid var(--ds-line);
-  background: var(--ds-ink-3);
-  color: var(--ds-paper);
-  font: inherit;
-  font-size: 16px;
-  height: 40px;
-  padding: 0 10px;
-  border-radius: var(--ds-radius-sm);
-  width: 100%;
-}
-
-.ds-inspector textarea {
-  height: auto;
-  padding: 10px;
   min-height: 80px;
 }
+
+/* ── Hero: a screen and what it is called ──────────────────────────────── */
 
 .ds-hero {
   display: flex;
@@ -572,15 +593,15 @@ select.ds-input {
 
 .ds-hero-copy h2 {
   margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-size: var(--ds-fs-heading);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
 }
 
 .ds-hero-copy p {
   margin: 6px 0 0;
-  font-size: 13px;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
 }
 
 @media (max-width: 639px) {
@@ -588,16 +609,14 @@ select.ds-input {
     width: 96px;
     height: 60px;
   }
-
-  .ds-hero-copy h2 {
-    font-size: 18px;
-  }
 }
 
+/* ── Sets: a card of settings rows ─────────────────────────────────────── */
+
 .ds-set {
-  background: var(--ds-ink-2);
-  border: 1px solid var(--ds-line);
-  border-radius: 14px;
+  background: var(--ds-surface);
+  border-radius: var(--ds-r-lg);
+  box-shadow: var(--ds-material-card);
   overflow: hidden;
   margin-bottom: 16px;
 }
@@ -607,19 +626,19 @@ select.ds-input {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px 16px 12px;
+  padding: 18px 20px 12px;
 }
 
 .ds-set-head h2 {
   margin: 0;
-  font-size: 15px;
-  font-weight: 650;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-set-head p {
   margin: 4px 0 0;
-  font-size: 13px;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
 }
 
 .ds-set-row {
@@ -627,8 +646,8 @@ select.ds-input {
   grid-template-columns: minmax(108px, 200px) minmax(0, 1fr);
   gap: 12px 16px;
   align-items: center;
-  padding: 12px 16px;
-  border-top: 1px solid var(--ds-line);
+  padding: 12px 20px;
+  border-top: 1px solid var(--ds-rule);
 }
 
 .ds-set-row .ds-page-actions {
@@ -641,8 +660,8 @@ select.ds-input {
 }
 
 .ds-set-row > span:first-child {
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
 }
 
 @media (max-width: 639px) {
@@ -661,22 +680,22 @@ select.ds-input {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
-  padding: 12px 16px;
-  border-top: 1px solid var(--ds-line);
+  padding: 12px 20px;
+  border-top: 1px solid var(--ds-rule);
 }
 
 .ds-event strong {
   display: block;
-  font-size: 14px;
-  font-weight: 650;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-event em {
   display: block;
   margin-top: 3px;
   font-style: normal;
-  font-size: 13px;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
 }
 
 .ds-event.is-off {
@@ -684,18 +703,18 @@ select.ds-input {
 }
 
 .ds-section {
-  background: var(--ds-ink-2);
-  border: 1px solid var(--ds-line);
-  border-radius: var(--ds-radius-lg);
-  padding: var(--ds-space-4);
+  background: var(--ds-surface);
+  border-radius: var(--ds-r-lg);
+  box-shadow: var(--ds-material-card);
+  padding: 18px 20px;
   margin-bottom: var(--ds-space-4);
 }
 
 .ds-section h2,
 .ds-section h3 {
   margin: 0 0 var(--ds-space-3);
-  font-size: 16px;
-  font-weight: 650;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-fields {
@@ -710,48 +729,65 @@ select.ds-input {
   }
 }
 
+/* ── Table ─────────────────────────────────────────────────────────────── */
+
 .ds-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--ds-fs-small);
 }
 
 .ds-table th {
   text-align: left;
-  font-size: 11px;
-  font-weight: 650;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  color: var(--ds-faint);
   padding: 8px 10px 8px 0;
-  border-bottom: 1px solid var(--ds-line);
+  border-bottom: 1px solid var(--ds-rule-strong);
 }
 
 .ds-table td {
   padding: 10px 10px 10px 0;
-  border-bottom: 1px solid var(--ds-line);
+  border-bottom: 1px solid var(--ds-rule);
   vertical-align: middle;
+  color: var(--ds-muted);
+}
+
+.ds-table td strong {
+  color: var(--ds-ink);
+  font-weight: var(--ds-weight-medium);
+}
+
+.ds-table tr:last-child td {
+  border-bottom: 0;
 }
 
 .ds-badge {
   display: inline-flex;
   align-items: center;
   height: 22px;
-  padding: 0 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 650;
-  background: var(--ds-lift);
-  color: var(--ds-paper-muted);
+  padding: 0 9px;
+  border-radius: var(--ds-r-pill);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  white-space: nowrap;
 }
 
 .ds-badge.is-on {
-  background: var(--ds-paper);
-  color: var(--ds-ink);
+  background: var(--ds-positive-soft);
+  color: var(--ds-positive);
 }
 
 .ds-badge.is-warn {
-  background: color-mix(in srgb, #fbbf24 24%, var(--ds-ink-3));
-  color: #fde68a;
+  background: var(--ds-miss-soft);
+  color: var(--ds-miss);
 }
+
+/* ── Find ──────────────────────────────────────────────────────────────── */
 
 .ds-find {
   position: relative;
@@ -762,16 +798,16 @@ select.ds-input {
 
 .ds-find-icon {
   position: absolute;
-  left: 10px;
+  left: 14px;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--ds-paper-muted);
+  color: var(--ds-faint);
   pointer-events: none;
 }
 
 .ds-find .ds-search {
-  padding-left: 32px;
-  padding-right: 32px;
+  padding-left: 38px;
+  padding-right: 40px;
 }
 
 .ds-find-clear {
@@ -789,19 +825,19 @@ select.ds-input {
   z-index: 40;
   max-height: 360px;
   overflow: auto;
-  background: var(--ds-ink-2);
-  border: 1px solid var(--ds-line);
-  border-radius: var(--ds-radius-lg);
-  box-shadow: var(--ds-shadow-overlay);
+  padding: 6px;
+  background: var(--ds-surface);
+  border-radius: var(--ds-r-lg);
+  box-shadow: var(--ds-material-lift);
 }
 
 .ds-find-group {
   padding: 8px 10px 4px;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  color: var(--ds-faint);
 }
 
 .ds-find-hit {
@@ -815,14 +851,17 @@ select.ds-input {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
+  border-radius: var(--ds-r-sm);
   text-align: left;
   cursor: pointer;
 }
 
 .ds-find-hit.is-on,
 .ds-find-hit:hover {
-  background: var(--ds-lift);
+  background: var(--ds-hover);
 }
+
+/* ── Apps: what a program can carry that is not a file ─────────────────── */
 
 .ds-app-list {
   display: flex;
@@ -832,11 +871,12 @@ select.ds-input {
 
 .ds-app {
   appearance: none;
-  border: 1px solid var(--ds-line);
-  background: var(--ds-ink-2);
+  border: 0;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
   color: inherit;
   text-align: left;
-  border-radius: 14px;
+  border-radius: var(--ds-r-lg);
   padding: 14px 16px;
   cursor: pointer;
   display: grid;
@@ -845,36 +885,38 @@ select.ds-input {
   column-gap: 14px;
   width: 100%;
   font: inherit;
-  transition: background var(--ds-duration-sm) var(--ds-ease-out);
+  transition: background var(--ds-dur-fast) var(--ds-ease);
 }
 
 @media (hover: hover) {
   .ds-app:hover {
-    background: color-mix(in srgb, var(--ds-ink-2) 80%, var(--ds-paper) 6%);
+    background: color-mix(in srgb, var(--ds-surface) 94%, var(--ds-ink));
   }
 }
 
+/* An app's mark is the one place a third colour is allowed: it is the app's,
+   not the interface's, and it sits inside a soft well of its own hue. */
 .ds-app-mark {
   width: 44px;
   height: 44px;
-  border-radius: 11px;
+  border-radius: var(--ds-r-md);
   display: grid;
   place-items: center;
 }
 
 .ds-app-mark.is-athan {
-  background: #3a2712;
-  color: #f3c07a;
+  background: rgb(184 134 43 / 0.14);
+  color: #8a6420;
 }
 
 .ds-app-mark.is-youtube {
-  background: #3a1418;
-  color: #ff7a7a;
+  background: rgb(216 71 46 / 0.12);
+  color: #b8321c;
 }
 
 .ds-app-mark.is-web {
-  background: #142438;
-  color: #7eb6ff;
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
 }
 
 .ds-app-copy {
@@ -883,17 +925,17 @@ select.ds-input {
 
 .ds-app-copy h3 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
   line-height: 1.2;
 }
 
 .ds-app-copy p {
   margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.35;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  line-height: 1.4;
+  color: var(--ds-muted);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -901,16 +943,12 @@ select.ds-input {
 }
 
 .ds-app-go {
-  font-size: 13px;
-  font-weight: 650;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  color: var(--ds-accent);
   white-space: nowrap;
   justify-self: end;
   padding-left: 8px;
-}
-
-.ds-app:hover .ds-app-go {
-  color: var(--ds-paper);
 }
 
 .ds-app-setup.ds-sheet {
@@ -927,27 +965,29 @@ select.ds-input {
   }
 }
 
+/* The live preview of an app is a screen; it keeps the app's own night. */
 .ds-athan-live {
   height: 148px;
   overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid var(--ds-line);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-panel-screen);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-athan-live .pe-athan,
 .ds-athan-live .pe-placeholder {
   height: 100%;
   padding: 10px 14px;
-  font-size: 13px;
+  font-size: var(--ds-fs-small);
 }
 
 .ds-athan-live .pe-athan header {
-  font-size: 15px;
+  font-size: var(--ds-fs-body);
   margin-bottom: 8px;
 }
 
 .ds-athan-live .pe-athan li {
-  font-size: 13px;
+  font-size: var(--ds-fs-small);
 }
 
 .ds-athan-block {
@@ -959,11 +999,11 @@ select.ds-input {
 
 .ds-athan-block h3 {
   margin: 8px 0 0;
-  font-size: 13px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  color: var(--ds-faint);
 }
 
 .ds-athan-grid {
@@ -971,9 +1011,9 @@ select.ds-input {
   grid-template-columns: minmax(4.5rem, 0.8fr) 1fr 1fr;
   gap: 8px 10px;
   align-items: center;
-  font-size: 12px;
-  color: var(--ds-paper-muted);
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-athan-pair {
@@ -990,27 +1030,30 @@ select.ds-input {
 
 .ds-theme-tile {
   appearance: none;
-  border: 1px solid var(--ds-line);
-  border-radius: 10px;
+  border: 0;
+  border-radius: var(--ds-r-md);
   height: 48px;
   font: inherit;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   text-transform: capitalize;
   cursor: pointer;
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-theme-tile.is-on {
-  outline: 2px solid var(--ds-paper);
+  outline: 2px solid var(--ds-accent);
   outline-offset: 2px;
 }
 
-.ds-check {
+/* A labelled checkbox row. Not the selection box above, which is `.ds-check`
+   on a tile; the two shared a name and relied on load order. */
+.ds-check-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 14px;
-  color: var(--ds-paper);
+  font-size: var(--ds-fs-small);
+  color: var(--ds-ink);
 }
 
 .ds-app-setup .ds-sheet-body {
@@ -1020,13 +1063,14 @@ select.ds-input {
 .ds-app-setup .ds-app-mark {
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: var(--ds-r-sm);
 }
 
 .ds-app-setup .ds-inspector-actions {
   justify-content: flex-end;
 }
 
+/* A preview stands in for a screen when there is no picture of one. */
 .ds-preview {
   position: absolute;
   inset: 0;
@@ -1035,44 +1079,47 @@ select.ds-input {
   justify-content: flex-end;
   padding: 10px;
   background:
-    linear-gradient(180deg, #ffffff08, transparent 40%),
-    var(--ds-ink-4);
-  color: var(--ds-paper);
+    linear-gradient(180deg, rgb(255 255 255 / 0.06), transparent 40%),
+    var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
 }
 
 .ds-preview strong {
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-preview span {
-  font-size: 11px;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-label);
+  color: rgb(var(--ds-panel-screen-ink) / 0.6);
 }
+
+/* ── Gallery: the image is the cell ────────────────────────────────────── */
 
 .ds-gallery {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 3px;
+  gap: 4px;
 }
 
 @media (min-width: 720px) {
   .ds-gallery {
     grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-    gap: 6px;
+    gap: 8px;
   }
 }
 
 .ds-shot {
   position: relative;
-  border-radius: 4px;
+  border-radius: var(--ds-r-sm);
   overflow: hidden;
-  background: var(--ds-ink-4);
+  background: var(--ds-panel-screen);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-shot.is-on {
-  outline: 2px solid var(--ds-paper);
-  outline-offset: 1px;
+  outline: 2px solid var(--ds-accent);
+  outline-offset: 2px;
 }
 
 .ds-shot-hit {
@@ -1093,7 +1140,7 @@ select.ds-input {
   display: block;
   aspect-ratio: 1;
   overflow: clip;
-  background: var(--ds-ink-4);
+  background: var(--ds-panel-screen);
 }
 
 .ds-shot-media .pe-thumb,
@@ -1111,11 +1158,12 @@ select.ds-input {
   top: 50%;
   z-index: 2;
   transform: translate(-50%, -50%);
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: #00000088;
-  color: var(--ds-paper);
+  width: 30px;
+  height: 30px;
+  border-radius: var(--ds-r-round);
+  background: rgb(255 255 255 / 0.9);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
   display: grid;
   place-items: center;
   pointer-events: none;
@@ -1131,8 +1179,9 @@ select.ds-input {
   align-items: flex-end;
   justify-content: space-between;
   gap: 6px;
-  padding: 22px 6px 6px;
-  background: linear-gradient(180deg, transparent, #000000bb);
+  padding: 22px 8px 7px;
+  background: linear-gradient(180deg, transparent, rgb(0 0 0 / 0.72));
+  color: #fff;
   pointer-events: none;
 }
 
@@ -1141,40 +1190,47 @@ select.ds-input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
 }
 
 .ds-shot-badge {
   flex-shrink: 0;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--ds-paper-muted);
+  font-size: 0.625rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  color: rgb(255 255 255 / 0.7);
 }
+
+/* ── Playlists: a collage, a title, a count ────────────────────────────── */
 
 .ds-pl-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  padding: 0 14px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-pl {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
-  border-radius: var(--ds-radius-md);
-  background: var(--ds-ink-2);
+  padding: 10px 0;
   min-height: 72px;
+  border-top: 1px solid var(--ds-rule);
 }
 
-.ds-pl:hover {
-  background: color-mix(in srgb, var(--ds-ink-2) 80%, var(--ds-paper) 6%);
+.ds-pl:first-child {
+  border-top: 0;
 }
 
 .ds-pl.is-on {
-  background: var(--ds-lift-strong);
+  outline: 2px solid var(--ds-accent);
+  outline-offset: -2px;
+  border-radius: var(--ds-r-md);
 }
 
 .ds-cover {
@@ -1184,9 +1240,10 @@ select.ds-input {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  border-radius: 6px;
+  border-radius: var(--ds-r-sm);
   overflow: hidden;
-  background: var(--ds-ink-4);
+  background: var(--ds-panel-screen);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-cover.is-1 {
@@ -1222,7 +1279,7 @@ select.ds-input {
 
 @media (min-width: 720px) {
   .ds-pl-grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
   }
 }
 
@@ -1238,44 +1295,53 @@ select.ds-input {
   width: 100%;
   height: auto;
   aspect-ratio: 1;
+  border-radius: var(--ds-r-md);
 }
 
 .ds-pl-tile .ds-row-copy strong {
-  font-size: 13px;
+  font-size: var(--ds-fs-small);
 }
+
+/* ── Devices: a monitor, then the facts ────────────────────────────────── */
 
 .ds-devices {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  padding: 0 16px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
 }
 
 .ds-device {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 12px 14px;
-  background: var(--ds-ink-2);
-  border: 1px solid var(--ds-line);
-  border-radius: var(--ds-radius-lg);
+  padding: 12px 0;
+  border-top: 1px solid var(--ds-rule);
+  transition: background var(--ds-dur-fast) var(--ds-ease);
 }
 
-.ds-device:hover {
-  background: color-mix(in srgb, var(--ds-ink-2) 80%, var(--ds-paper) 6%);
+.ds-device:first-child {
+  border-top: 0;
 }
 
+/* A bezel is a screen. Dark in every room, lit from above like a panel on a
+   wall, and carrying whatever the panel is showing. */
 .ds-bezel {
   width: 92px;
   height: 58px;
   flex-shrink: 0;
   border-radius: 7px;
-  background: #07080c;
-  border: 2px solid var(--ds-ink-4);
-  box-shadow: 0 6px 0 var(--ds-ink-4);
+  background: var(--ds-panel-screen);
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    0 1px 2px -0.5px rgb(var(--ds-ink-rgb) / 0.3),
+    0 6px 14px -8px rgb(var(--ds-ink-rgb) / 0.35);
   overflow: hidden;
   display: grid;
   place-items: center;
-  color: var(--ds-paper-muted);
+  color: rgb(var(--ds-panel-screen-ink) / 0.6);
   position: relative;
 }
 
@@ -1286,22 +1352,21 @@ select.ds-input {
   flex-direction: column;
   justify-content: flex-end;
   padding: 8px;
-  background:
-    linear-gradient(180deg, #ffffff08, transparent 42%),
-    var(--ds-ink-3);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.05), transparent 42%);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
 }
 
 .ds-bezel-copy em {
   font-style: normal;
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ds-paper-muted);
+  font-size: 0.5625rem;
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  color: rgb(var(--ds-panel-screen-ink) / 0.55);
 }
 
 .ds-bezel-copy strong {
-  font-size: 11px;
-  font-weight: 650;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1314,27 +1379,7 @@ select.ds-input {
   }
 }
 
-/* ── The fleet, its facts, and what reaches it ────────────────────────────── */
-
-.ds-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  border: 1px solid var(--ds-line);
-  border-radius: 12px;
-  background: var(--ds-ink-2);
-  margin-bottom: 12px;
-}
-
-.ds-panel h3 {
-  margin: 0;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ds-paper-muted);
-}
+/* ── The fleet, its facts, and what reaches it ─────────────────────────── */
 
 .ds-detail-bar {
   display: flex;
@@ -1351,8 +1396,9 @@ select.ds-input {
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 20px;
-  font-weight: 650;
+  font-size: var(--ds-fs-heading);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
   padding: 6px 4px;
 }
 
@@ -1362,7 +1408,7 @@ select.ds-input {
 
 .ds-showing {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--ds-fs-body);
   line-height: 1.45;
 }
 
@@ -1378,26 +1424,34 @@ select.ds-input {
   gap: 6px;
 }
 
+/* A label the operator gave a screen: a chip with its own remove. */
 .ds-label {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 6px 4px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--ds-line);
-  font-size: 12px;
-  font-weight: 600;
+  gap: 4px;
+  padding: 4px 6px 4px 11px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
 }
 
 .ds-label button {
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ds-paper-muted);
+  color: var(--ds-faint);
   display: grid;
   place-items: center;
   cursor: pointer;
   padding: 2px;
+  border-radius: var(--ds-r-round);
+}
+
+.ds-label button:hover {
+  color: var(--ds-ink);
+  background: var(--ds-hover);
 }
 
 .ds-label-add {
@@ -1410,7 +1464,7 @@ select.ds-input {
   align-items: center;
   gap: 12px;
   padding: 10px 0;
-  border-top: 1px solid var(--ds-line);
+  border-top: 1px solid var(--ds-rule);
 }
 
 .ds-broadcast.is-quiet {
@@ -1426,10 +1480,11 @@ select.ds-input {
 }
 
 .ds-broadcast-copy span {
-  font-size: 12px;
-  color: var(--ds-paper-muted);
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
 }
 
+/* The composer is a sheet with real height, held above everything. */
 .ds-composer {
   position: fixed;
   inset: auto 0 0 0;
@@ -1439,11 +1494,19 @@ select.ds-input {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px 18px max(18px, env(safe-area-inset-bottom));
-  border-top: 1px solid var(--ds-line);
-  border-radius: 16px 16px 0 0;
-  background: var(--ds-ink-2);
-  box-shadow: 0 -20px 44px rgb(0 0 0 / 0.5);
+  padding: 18px 20px max(20px, env(safe-area-inset-bottom));
+  border-radius: var(--ds-r-xl) var(--ds-r-xl) 0 0;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-lift);
+}
+
+@media (min-width: 720px) {
+  .ds-composer {
+    inset: auto auto 24px 50%;
+    transform: translateX(-50%);
+    width: min(560px, calc(100vw - 48px));
+    border-radius: var(--ds-r-xl);
+  }
 }
 
 .ds-composer > header,
@@ -1455,44 +1518,11 @@ select.ds-input {
 
 .ds-composer > header strong {
   flex: 1;
-  font-size: 16px;
+  font-size: var(--ds-fs-heading);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
 }
 
 .ds-composer > footer {
   justify-content: flex-end;
-}
-
-/*
- * The blast radius. Loud on purpose: an audience whose reach you learn about
- * afterwards is the dangerous kind, and the emergency case reaches everything.
- */
-.ds-reach {
-  display: flex;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--ds-line);
-  border-left: 3px solid var(--ds-accent);
-  background: var(--ds-ink-3, rgb(255 255 255 / 0.04));
-}
-
-.ds-reach > div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.ds-reach strong {
-  font-size: 14px;
-}
-
-.ds-reach span {
-  font-size: 12px;
-  color: var(--ds-paper-muted);
-}
-
-.ds-reach small {
-  font-size: 11px;
-  opacity: 0.7;
 }

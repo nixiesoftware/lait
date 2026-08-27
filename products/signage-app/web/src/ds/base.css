@@ -1,0 +1,104 @@
+/*
+ * The ground.
+ *
+ * The old shell painted its own night; the page underneath was never styled.
+ * On paper the page is the ground, so the page says so.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  height: 100%;
+  overflow: hidden;
+  background: var(--ds-paper);
+  color: var(--ds-ink);
+  font-family: var(--ds-sans);
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-regular);
+  line-height: var(--ds-lh-body);
+  letter-spacing: var(--ds-track-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#root {
+  height: 100%;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+/* Rounded is the default state of every object in this system. Squaring
+   something is a deliberate act and has to be written down. */
+button,
+input,
+textarea,
+select {
+  border-radius: var(--ds-r-sm);
+}
+
+:is(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--ds-focus);
+  outline-offset: 2px;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--ds-sans);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
+  line-height: var(--ds-lh-heading);
+  text-wrap: balance;
+}
+
+img,
+svg,
+video {
+  max-width: 100%;
+}
+
+::selection {
+  background: var(--ds-accent-soft);
+  color: var(--ds-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

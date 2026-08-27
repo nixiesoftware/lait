@@ -116,7 +116,7 @@ export default function BroadcastHub() {
       <PageHeader title="Broadcasts" icon={<Radio size={20} />}>
         <button
           type="button"
-          className="ds-btn ds-btn-alarm"
+          className="ds-btn ds-btn-solid"
           onClick={() => setComposing(true)}
         >
           <Plus size={16} />
