@@ -68,7 +68,21 @@ export function mergeBoards(
       }
     }
   }
-  return { schema_version: boards[0]!.schema_version, project, columns };
+  // A roll-up is measured only if every part of it was. One unmeasured board
+  // makes the sum unmeasured rather than a smaller number wearing a total's
+  // clothes -- the same rule `membership_counts` applies to a milestone's
+  // progress, for the same reason. Likewise a merge is complete only when all
+  // of its inputs are.
+  const measured = boards.every((board) => board.total !== null);
+  return {
+    schema_version: boards[0]!.schema_version,
+    project,
+    columns,
+    total: measured
+      ? boards.reduce((sum, board) => sum + (board.total ?? 0), 0)
+      : null,
+    complete: boards.every((board) => board.complete),
+  };
 }
 
 /**

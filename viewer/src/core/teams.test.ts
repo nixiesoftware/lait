@@ -44,6 +44,8 @@ const board = (rows: Row[], states = STATES): BoardView => ({
   schema_version: 1,
   project: project("X"),
   columns: states.map((state) => ({ state, rows: rows.filter((r) => r.status === state.id) })),
+  total: rows.length,
+  complete: true,
 });
 
 describe("which projects a team owns", () => {

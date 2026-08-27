@@ -659,8 +659,12 @@ export function App() {
       0,
     ) ?? 0;
   const resultCount = liveCount(shown);
-  const totalCount = liveCount(board);
-  const notice = filterNotice(totalCount, resultCount);
+  const loadedCount = liveCount(board);
+  // The engine's count, not ours. `board.total` is what it measured against the
+  // whole posting; `loadedCount` is merely what we hold. Handing both over is
+  // what lets the notice say "and 400 more not loaded" instead of pretending
+  // the page was the project.
+  const notice = filterNotice(loadedCount, resultCount, board?.total ?? null);
 
   // Motion follows what is *visible*, in the order it is visible: on the list,
   // j/k walks the display *groups*; on the board — which always lays out by
@@ -2412,7 +2416,8 @@ export function App() {
                   onOpenChange={setFilterOpen}
                   focusToken={focusToken}
                   resultCount={resultCount}
-                  totalCount={totalCount}
+                  totalCount={loadedCount}
+                  measuredCount={board?.total ?? null}
                   onChange={setFilter}
                 />
               )}
@@ -2831,7 +2836,17 @@ export function App() {
           {projectShell && issueMode && notice.show && (
             <p className="text-mute flex shrink-0 items-center justify-center gap-2 py-2 text-sm">
               <span>
-                {notice.hidden} issue{notice.hidden === 1 ? "" : "s"} hidden by filters
+                {/* Two sentences for two facts. "Hidden by filters" is ours to
+                    explain; "not loaded" is the page's edge, and a person can
+                    scroll for it. Saying only the first over a partial page was
+                    the lie this notice used to tell. */}
+                {notice.hidden > 0 && (
+                  <>{notice.hidden} issue{notice.hidden === 1 ? "" : "s"} hidden by filters</>
+                )}
+                {notice.hidden > 0 && (notice.unloaded ?? 0) > 0 && " · "}
+                {(notice.unloaded ?? 0) > 0 && (
+                  <>{notice.unloaded} more not loaded</>
+                )}
               </span>
               <Button
                 onClick={() => api.clearFilter()}

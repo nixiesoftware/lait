@@ -53,6 +53,8 @@ const board: BoardView & { kind: "board" } = {
     state: { id: "todo", name: "Todo", category: "backlog", color: "gray" },
     rows: [row],
   }],
+  total: 1,
+  complete: true,
 };
 
 const boardResponse = (view: BoardView): Response => ({

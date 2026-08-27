@@ -64,6 +64,7 @@ export function FilterMenu({
   focusToken,
   resultCount,
   totalCount,
+  measuredCount = null,
   onChange,
 }: {
   filter: FilterState;
@@ -78,7 +79,14 @@ export function FilterMenu({
   /** Bumped by the `/` command; opens and focuses without owning the binding. */
   focusToken: number;
   resultCount: number;
+  /** Rows the client holds -- what the filter was applied to. */
   totalCount: number;
+  /**
+   * Rows the engine counted, or `null` when it declined to. When this exceeds
+   * `totalCount` the filter ran over a page, not the project, and "N of M"
+   * has to say which M it means. Unmeasured is absent, never zero.
+   */
+  measuredCount?: number | null;
   onChange: (f: FilterState) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
@@ -247,7 +255,13 @@ export function FilterMenu({
               {active && (
                 <div className="border-line flex items-center gap-2 border-t px-3 py-2">
                   <span className="text-mute text-2xs tabular-nums" aria-live="polite">
-                    {resultCount} of {totalCount} · AND across facets
+                    {/* "3 of 100" over a 500-Issue project was true of the page
+                        and false of the project. Say which one this is. */}
+                    {resultCount} of {totalCount}
+                    {measuredCount !== null && measuredCount > totalCount
+                      ? ` loaded (${measuredCount} in project)`
+                      : ""}
+                    {" "}· AND across facets
                   </span>
                   <button
                     className="text-dim hover:text-fg ml-auto text-xs"

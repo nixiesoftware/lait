@@ -162,6 +162,11 @@ export function boardView(page: BoardPage): BoardView {
       state,
       rows: page.rows.items.filter((row) => row.status === state.id),
     })),
+    // Carried, not recomputed. The engine counted this against the whole
+    // posting; counting the rows in hand would answer a different question and
+    // call it the same one.
+    total: page.rows.exact_total ?? null,
+    complete: page.rows.next_cursor == null,
   };
 }
 
@@ -186,6 +191,11 @@ function appendBoardPage(current: BoardView, incoming: BoardView): BoardView {
         (row) => row.doc_id,
       ),
     })),
+    // The newer page's answer wins: it was counted against the same posting
+    // and is the more recent measurement. An unmeasured continuation makes the
+    // whole thing unmeasured rather than leaving a stale number standing.
+    total: incoming.total,
+    complete: incoming.complete,
   };
 }
 

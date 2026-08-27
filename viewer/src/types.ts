@@ -161,6 +161,23 @@ export interface BoardView {
   schema_version: number;
   project: ProjectDto;
   columns: BoardColumn[];
+  /**
+   * How many rows match, as the engine counted them — not how many are loaded.
+   *
+   * `null` is *unmeasured*, never zero. The engine returns `exact_total: None`
+   * when a page was post-filtered after its source posting was counted, and a
+   * client that read that absence as a number would be inventing one. This is
+   * the same distinction `Row.enrichment_complete` draws one level down.
+   *
+   * It existed on the wire all along and `boardView` dropped it, so every
+   * surface counted the rows it happened to hold and called that the total.
+   * That is how a filter came to report "3 of 100" about a project holding
+   * five hundred Issues.
+   */
+  total: number | null;
+  /** Whether every matching row is loaded. False while a continuation remains,
+   *  which is what makes a count over these rows a count of a page. */
+  complete: boolean;
 }
 
 /** One bounded board page; clients group rows through the pinned workflow. */
