@@ -876,15 +876,10 @@ async fn index(
             app.cookie,
             app.guard.token()
         );
-        let launched = format!(
-            "{}=1; Path=/; HttpOnly; SameSite=Strict",
-            client_cookie(&app.cookie)
-        );
-        // Appended, not inserted: two `Set-Cookie` headers with the same name
-        // in an array would have the second replace the first, and the browser
-        // would arrive holding the marker with no session to go with it.
+        // One cookie now. There used to be a second marking the browser as
+        // client-launched, read by nothing but the overlay, and it went with it.
         let mut cookies = axum::http::HeaderMap::new();
-        for value in [session, launched] {
+        for value in [session] {
             match axum::http::HeaderValue::from_str(&value) {
                 Ok(value) => {
                     cookies.append(header::SET_COOKIE, value);
@@ -907,7 +902,7 @@ async fn index(
         let cookie = format!("{}={token}; Path=/; HttpOnly; SameSite=Strict", app.cookie);
         return ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response();
     }
-    shell::index(launched_by_client(&app, &headers), &app.head)
+    shell::index(&app.head)
 }
 
 /// Any non-`/api` path: an asset from the selected World release, or its SPA entry.
@@ -916,7 +911,7 @@ async fn static_asset(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    shell::asset(uri.path(), launched_by_client(&app, &headers), &app.head)
+    shell::asset(uri.path(), &app.head)
 }
 
 /// What a client asks for when it wants to open a World.
@@ -970,28 +965,6 @@ async fn mint_launch(State(app): State<Arc<App>>, Json(request): Json<LaunchRequ
                 .into_response()
         }
     }
-}
-
-/// The cookie that says "the client sent this browser here".
-///
-/// Derived from the session cookie's name so it is scoped to the same run and
-/// the same port, and two heads on one machine cannot read each other's.
-fn client_cookie(session: &str) -> String {
-    format!("{session}_client")
-}
-
-/// Whether this request belongs to a browser the client launched.
-///
-/// The overlay is *client context*. A head a person opened themselves has none
-/// to draw, and an overlay offering a route back to a client that is not there
-/// is a control that cannot work — worse than absent, because it looks like a
-/// feature.
-fn launched_by_client(app: &App, headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| auth::cookie_value(value, &client_cookie(&app.cookie)))
-        .is_some_and(|value| value == "1")
 }
 
 fn now_ms() -> u64 {
@@ -1597,9 +1570,13 @@ mod tests {
             cookies.iter().any(|cookie| cookie.contains("run-token")),
             "the launch did not hand over a session: {cookies:?}"
         );
-        assert!(
-            cookies.iter().any(|cookie| cookie.contains("_client=1")),
-            "the launch did not mark this browser as one the client sent: {cookies:?}"
+        // The launch used to set a second cookie marking this browser as one the
+        // client sent. Nothing but the overlay ever read it, and the overlay is
+        // gone, so the session is the only thing a launch hands over now.
+        assert_eq!(
+            cookies.len(),
+            1,
+            "a launch hands over a session and nothing else: {cookies:?}"
         );
 
         // Replay from history, which is exactly where a launch URL ends up.
