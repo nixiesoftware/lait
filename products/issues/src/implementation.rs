@@ -13455,6 +13455,14 @@ impl World for IssuesWorld {
                     .collect(),
                 )?;
                 let mut catalog = CatalogState::default();
+                // One project's facts, asked once per page rather than once per
+                // initiative that names it. Both calls below were per (initiative
+                // x project) with no memo: `apply_project` re-reads the Body every
+                // time, and `project_issue_counts` re-resolves the workflow and
+                // seeks a count per state. A project in three initiatives was
+                // read three times and counted three times to say one thing.
+                let mut counted: std::collections::BTreeMap<String, Option<(u32, u32)>> =
+                    std::collections::BTreeMap::new();
                 let mut items = Vec::with_capacity(answer.rows().len());
                 for row in answer.rows() {
                     let mut item = initiative_page_row(row)?;
@@ -13466,11 +13474,15 @@ impl World for IssuesWorld {
                     let mut done = 0u32;
                     let mut measured = true;
                     for project in &members {
-                        crate::record_store::apply_project(ctx, &mut catalog, project)?;
+                        if !counted.contains_key(project) {
+                            crate::record_store::apply_project(ctx, &mut catalog, project)?;
+                            let counts = project_issue_counts(ctx, &mut catalog, project)?;
+                            counted.insert(project.clone(), counts);
+                        }
                         if let Some(meta) = catalog.projects.get(project) {
                             item.projects.push(meta.key.clone());
                         }
-                        match project_issue_counts(ctx, &mut catalog, project)? {
+                        match counted.get(project).copied().flatten() {
                             Some((project_total, project_done)) => {
                                 total = total.saturating_add(project_total);
                                 done = done.saturating_add(project_done);
