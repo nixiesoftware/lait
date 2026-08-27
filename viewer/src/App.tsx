@@ -2772,6 +2772,7 @@ export function App() {
               mutators={issueMutators}
               readOnly={readOnly}
               filtered={isActive(filter)}
+              onClearFilter={() => api.clearFilter()}
               hasMore={display.deleted
                 ? deletedCursor !== null
                 : needsServer(filter)

@@ -152,9 +152,9 @@ export function Members({
         </div>
         <section>
           {members.length === 0 ? (
-            <EmptyState art="people" title="No verified members" body="People and agents with verified access will appear here." />
+            <EmptyState art="people" title="Members" body="People and agents with verified access to this space appear here." />
           ) : shownMembers.length === 0 ? (
-            <EmptyState kind="filtered-empty" art="filtered" title={`Nothing matches “${query}”`} className="min-h-56" />
+            <EmptyState kind="filtered-empty" art="filtered" title={`Nothing matches “${query}”`} />
           ) : <ul className="border-line divide-line divide-y rounded-surface border">
             {shownMembers.map((m) => (
               <li key={m.key} className="flex items-center gap-3 p-3">

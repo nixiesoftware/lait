@@ -167,10 +167,9 @@ function TeamList({
       {teams.length === 0 ? (
         <EmptyState
           art="people"
-          title="No teams yet"
-          body="Create a durable area of ownership for related projects and members."
+          title="Teams"
+          body="A durable area of ownership, holding the projects and members that belong together."
           action={!readOnly ? <Button label="Create team" variant="primary" size="sm" onClick={onNew} /> : undefined}
-          className="min-h-80"
         />
       ) : (
         <div className="overflow-hidden">

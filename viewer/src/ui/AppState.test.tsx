@@ -38,9 +38,10 @@ describe("application state vocabulary", () => {
   it("distinguishes filtered empty from ordinary empty", () => {
     render(<ApplicationState kind="filtered-empty" art="filtered" title="No matching issues" />);
     expect(host!.querySelector('[data-application-state="filtered-empty"]')).toBeTruthy();
-    const art = host!.querySelector<HTMLImageElement>('[data-empty-state-art="filtered"]');
-    expect(art?.getAttribute("alt")).toBe("");
+    const art = host!.querySelector('[data-empty-state-art="filtered"]');
+    expect(art?.tagName.toLowerCase()).toBe("canvas");
     expect(art?.getAttribute("aria-hidden")).toBe("true");
+    expect(art?.getAttribute("role")).toBe("presentation");
   });
 
   it("uses an alert only for an error state", () => {

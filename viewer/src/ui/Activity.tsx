@@ -196,7 +196,6 @@ export function Activity({
         <EmptyState
           art="activity"
           title={projectName ? `No activity in ${projectName}` : "No activity yet"}
-          body={projectName ? "Changes to this project will build a local timeline here." : "Changes made in this session will build a timeline here."}
         />
         {nextCursor && publication && (
           <Button

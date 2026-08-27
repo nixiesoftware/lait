@@ -19,16 +19,9 @@ import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
 import { Button, Popover, Skeleton } from "@astryxdesign/core";
 import { cn } from "./primitives";
 
-import activityArt from "../assets/empty-states/activity.png";
-import archiveArt from "../assets/empty-states/archive.png";
-import filteredArt from "../assets/empty-states/filtered.png";
-import inboxArt from "../assets/empty-states/inbox.png";
-import issuesArt from "../assets/empty-states/issues.png";
-import peopleArt from "../assets/empty-states/people.png";
-import projectsArt from "../assets/empty-states/projects.png";
-import spaceArt from "../assets/empty-states/space.png";
-import specsArt from "../assets/empty-states/specs.png";
-import unavailableArt from "../assets/empty-states/unavailable.png";
+import { EmptyArt, type EmptyStateArt } from "./emptyArt";
+
+export type { EmptyStateArt };
 
 export type ApplicationStateKind =
   | "loading"
@@ -39,31 +32,6 @@ export type ApplicationStateKind =
   | "retry"
   | "progress"
   | "success";
-
-export type EmptyStateArt =
-  | "activity"
-  | "archive"
-  | "filtered"
-  | "inbox"
-  | "issues"
-  | "people"
-  | "projects"
-  | "space"
-  | "specs"
-  | "unavailable";
-
-const EMPTY_STATE_ART: Record<EmptyStateArt, string> = {
-  activity: activityArt,
-  archive: archiveArt,
-  filtered: filteredArt,
-  inbox: inboxArt,
-  issues: issuesArt,
-  people: peopleArt,
-  projects: projectsArt,
-  space: spaceArt,
-  specs: specsArt,
-  unavailable: unavailableArt,
-};
 
 export function ApplicationState({
   kind,
@@ -82,21 +50,40 @@ export function ApplicationState({
   action?: React.ReactNode;
   className?: string;
 }) {
-  // A filter matching nothing is not a first run, and should not cost what one
-  // costs. Somebody who has filtered a list knows what the list holds and what
-  // an issue is; the only thing they do not know is that this filter matched
-  // none of them, and the only thing they want is out. So it is a line and an
-  // escape — no heading weight, no prose restating the button underneath it.
+  // Two tiers, and which one a state gets is not a matter of taste.
   //
-  // The states that teach keep their full shape. That difference is the whole
-  // point: how much a surface spends should track how much the person still has
-  // to be told.
-  const quiet = kind === "filtered-empty";
-  const descriptive = !quiet && body !== undefined;
+  // TEACHING — a feature this person has not used yet. The drawing, the
+  // feature's own name, one sentence saying what it is for, and the action that
+  // starts it: a left-aligned block with the art hung off its leading edge.
+  // Linear's Projects and Customer requests states are this shape exactly, and
+  // the title there is the noun ("Projects"), never the negation ("No projects
+  // yet") — the negation reports a fact you can already see, and spends the one
+  // line that could have told you something.
+  //
+  // QUIET — the absence is unremarkable, or it is the good news. The drawing
+  // and one line, centred, at no heading weight: Linear's Inbox, Drafts and My
+  // issues are this, because somebody looking at an empty inbox has nothing
+  // left to learn and a heading over it is a ceremony for nothing.
+  //
+  // The tier follows from `body`, so it cannot be set independently of whether
+  // there is anything to say. A filter matching nothing is quiet whatever it
+  // passes: it is not a first run, the person knows what the list holds, and
+  // the only thing they want is out.
+  //
+  // Everything that is not an empty state — unavailable, error, retry, loading
+  // — stays centred at heading weight. Those are not teaching moments and must
+  // not borrow the shape of one.
+  const teaching = kind === "empty" && body !== undefined;
+  const quiet = (kind === "empty" || kind === "filtered-empty") && !teaching;
   return (
     <div
-      className={cn("flex flex-1 items-center justify-center", quiet ? "p-6" : "p-8", className)}
+      className={cn(
+        "flex flex-1 items-center justify-center",
+        quiet ? "min-h-52 p-6" : "min-h-64 p-8",
+        className,
+      )}
       data-application-state={kind}
+      data-empty-tier={teaching ? "teaching" : quiet ? "quiet" : undefined}
       role={kind === "error" || kind === "retry" ? "alert" : "status"}
       aria-live={kind === "loading" || kind === "progress" ? "polite" : undefined}
       aria-busy={kind === "loading" || kind === "progress" ? true : undefined}
@@ -104,21 +91,21 @@ export function ApplicationState({
       <div
         className={cn(
           "flex flex-col",
-          descriptive ? "max-w-[18rem] items-start text-left" : "max-w-xs items-center text-center",
+          teaching ? "max-w-[18rem] items-start text-left" : "max-w-xs items-center text-center",
         )}
       >
         {art ? (
-          <img
-            aria-hidden
-            alt=""
+          // The screen is a fixed size and deliberately not scalable: a
+          // halftone that resizes is no longer a halftone, it is a resampled
+          // picture of one. A state that must not shout quiets the whole plate
+          // rather than re-rendering it at another ruling.
+          <EmptyArt
+            art={art}
             className={cn(
-              "empty-state-art pointer-events-none max-w-full select-none object-contain",
-              quiet ? "mb-2 h-24 w-36" : "mb-3 h-32 w-44",
-              descriptive && "-ml-7 self-start",
+              "text-dim pointer-events-none shrink-0 select-none",
+              quiet ? "mb-2 opacity-80" : "mb-3",
+              teaching && "-ml-8 self-start",
             )}
-            data-empty-state-art={art}
-            draggable={false}
-            src={EMPTY_STATE_ART[art]}
           />
         ) : (
           <span

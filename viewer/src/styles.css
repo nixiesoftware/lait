@@ -479,24 +479,6 @@
   color-scheme: dark;
 }
 
-/* The illustrations are inked for light paper like Linear's references. On
-   dark paper the same raster is reversed and quieted: white faces disappear
-   into the surface while graphite linework becomes a muted silver contour. */
-.empty-state-art {
-  filter: invert(1) grayscale(1) brightness(1.65);
-  opacity: 0.88;
-}
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) .empty-state-art {
-    filter: none;
-    opacity: 1;
-  }
-}
-:root[data-theme="light"] .empty-state-art {
-  filter: none;
-  opacity: 1;
-}
-
 /* Compact is the issue tracker's default. Comfortable is deliberately a root
    scale, not a handful of taller list rows: cards, toolbars, menus, controls and
    type must keep the same rhythm when the user asks for more breathing room. */

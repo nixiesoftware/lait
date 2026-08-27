@@ -392,7 +392,7 @@ function Register({
       <ApplicationState
         kind="empty"
         art="specs"
-        title="No specs yet"
+        title="Specs"
         body="Capture requirements and decisions beside the work."
         action={
           !readOnly && project ? (

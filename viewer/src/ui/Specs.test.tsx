@@ -220,7 +220,7 @@ describe("Specs", () => {
   it("offers creation from an empty register", async () => {
     const onCompose = vi.fn();
     const el = await render({ onCompose }, []);
-    expect(el.textContent).toContain("No specs yet");
+    expect(el.textContent).toContain("Capture requirements and decisions beside the work.");
     const button = [...el.querySelectorAll("button")].find((b) => b.textContent?.includes("New spec"));
     await act(async () => button?.click());
     expect(onCompose).toHaveBeenCalledWith("any");

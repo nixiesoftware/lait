@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarPlus, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { CalendarPlus, ChevronRight, FilterX, Plus, Trash2 } from "lucide-react";
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
@@ -75,6 +75,7 @@ export function IssueList({
   mutators,
   readOnly,
   filtered,
+  onClearFilter,
   hasMore = false,
   loadingMore = false,
   onLoadMore = () => undefined,
@@ -104,6 +105,9 @@ export function IssueList({
   mutators: IssueMutators;
   readOnly: boolean;
   filtered: boolean;
+  /** Reset that filter. A list emptied by a leftover filter is a dead end
+   *  without it — the same trap the board already answers. */
+  onClearFilter: () => void;
   /** A publication-pinned continuation exists beyond the rows rendered here. */
   hasMore?: boolean;
   loadingMore?: boolean;
@@ -241,16 +245,27 @@ export function IssueList({
           <ApplicationState
             kind={deletedMode ? "empty" : filtered ? "filtered-empty" : "empty"}
             art={deletedMode ? "archive" : filtered ? "filtered" : "issues"}
-            title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "No issues yet"}
-            body={deletedMode || filtered ? undefined : "Create the first issue in this project."}
-            action={!deletedMode && !filtered && !readOnly && states[0] ? <Button
-                                                                            onClick={() => onCreate(states[0]!.id)}
-                                                                            icon={<Plus className="size-icon-sm" />}
-                                                                            label="New issue"
-                                                                            variant="primary"
-                                                                            size="sm"
-                                                                          /> : undefined}
-            className="min-h-60"
+            title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "Issues"}
+            body={deletedMode || filtered ? undefined : "One unit of work, from the first note to done."}
+            action={
+              filtered ? (
+                <Button
+                  onClick={onClearFilter}
+                  icon={<FilterX className="size-icon-sm" />}
+                  label="Clear filter"
+                  variant="ghost"
+                  size="sm"
+                />
+              ) : !deletedMode && !readOnly && states[0] ? (
+                <Button
+                  onClick={() => onCreate(states[0]!.id)}
+                  icon={<Plus className="size-icon-sm" />}
+                  label="New issue"
+                  variant="primary"
+                  size="sm"
+                />
+              ) : undefined
+            }
           />
         )}
       </div>

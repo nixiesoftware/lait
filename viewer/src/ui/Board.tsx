@@ -120,11 +120,10 @@ export function Board({
             icon={hasMore ? undefined : <FilterX className="size-icon-sm" />}
             label={hasMore ? (loadingMore ? "Loading…" : "Load more") : "Clear filter"}
             isDisabled={loadingMore}
-            variant="primary"
+            variant="ghost"
             size="sm"
           />
         }
-        className="min-h-60"
       />
     );
   }
