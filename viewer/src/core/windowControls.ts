@@ -37,16 +37,21 @@ export type WindowControls = {
   /** Height of the band the controls sit in, from the top of the page. */
   top: number;
   /**
-   * Width to keep clear at the leading edge of that band.
+   * Width to keep clear at the **leading** edge of that band.
    *
-   * Part of the host's declaration and validated with the rest of it, but this
-   * shell spends no CSS on it: it clears the whole band with `top`, so nothing
-   * it draws is ever beside the controls. A surface that *does* draw inside the
-   * band — a World putting tabs or a title up there — needs this, and reaches
-   * it through [`declaredControls`]. Publishing it as a custom property nobody
-   * reads would be a claim the stylesheet does not keep.
+   * Where macOS puts close/minimise/zoom. Nonzero there, zero on a platform
+   * that puts them at the other end.
    */
   leading: number;
+  /**
+   * Width to keep clear at the **trailing** edge of that band.
+   *
+   * Where Windows puts minimise/maximise/close. The mirror of `leading`, and
+   * the reason neither is called `left`: the shell insets the start and the end
+   * of the band and never has to know which platform it is on. A host that
+   * declares only `leading` is saying there is nothing at the other end.
+   */
+  trailing: number;
 };
 
 /** The largest inset we will take on a host's word, in CSS pixels. */
@@ -65,18 +70,25 @@ export function declaredControls(scope: unknown = globalThis): WindowControls | 
   const declared = (scope as { __LAIT_WINDOW_CONTROLS__?: unknown } | null | undefined)
     ?.__LAIT_WINDOW_CONTROLS__;
   if (typeof declared !== "object" || declared === null) return null;
-  const { top, leading } = declared as { top?: unknown; leading?: unknown };
+  const { top, leading, trailing } = declared as {
+    top?: unknown;
+    leading?: unknown;
+    trailing?: unknown;
+  };
   const inset = (value: unknown) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= CEILING
       ? value
       : null;
   const t = inset(top);
   const l = inset(leading);
-  if (t === null || l === null) return null;
+  // Absent means none at that end — an older host that never heard of it is
+  // saying the same thing a macOS host says, and both are true.
+  const r = trailing === undefined ? 0 : inset(trailing);
+  if (t === null || l === null || r === null) return null;
   // A declaration of zero is a host saying its controls are not over the page,
   // which is what no declaration already means. Keep one representation of it.
-  if (t === 0 && l === 0) return null;
-  return { top: t, leading: l };
+  if (t === 0 && l === 0 && r === 0) return null;
+  return { top: t, leading: l, trailing: r };
 }
 
 /** The host's signal that it has rewritten the global. */
@@ -103,19 +115,26 @@ export function trackWindowControls(
 }
 
 /**
- * Publish the band's height as a custom property, so the shell can spend it in
- * CSS and every surface that does not care keeps reading a `0px` it never has
- * to branch on.
+ * Publish the band as custom properties, so the shell can spend it in CSS and
+ * every surface that does not care keeps reading a `0px` it never has to branch
+ * on.
  *
- * Only `top`. The shell clears the entire band, so nothing it draws is beside
- * the controls and `leading` has nothing to inset — and a custom property no
- * stylesheet reads is a value that drifts out of true without anything failing.
- * It stays available on the declaration itself for a surface that draws in the
- * band and therefore has a use for it.
+ * All three now. The shell used to clear the whole band with `top` and draw
+ * nothing in it, which left an empty strip above the work area's header — the
+ * app starting a band's height below the top of its own window. The header
+ * rises into the band instead, so it needs to know how much of each end the
+ * controls have taken.
+ *
+ * `leading` and `trailing` rather than left and right: the shell insets the
+ * start and the end and never has to know which platform it is on. macOS fills
+ * the first, Windows the second, and a stylesheet written against logical edges
+ * is correct on both without a branch.
  */
 export function applyWindowControls(
   root: { style: { setProperty(name: string, value: string): void } },
   controls: WindowControls | null,
 ): void {
   root.style.setProperty("--window-controls-top", `${controls?.top ?? 0}px`);
+  root.style.setProperty("--window-controls-leading", `${controls?.leading ?? 0}px`);
+  root.style.setProperty("--window-controls-trailing", `${controls?.trailing ?? 0}px`);
 }

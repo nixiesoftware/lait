@@ -17,10 +17,7 @@ function element() {
 
 describe("declaredControls", () => {
   it("reads what the host declared", () => {
-    expect(declaredControls({ __LAIT_WINDOW_CONTROLS__: { top: 28, leading: 78 } })).toEqual({
-      top: 28,
-      leading: 78,
-    });
+    expect(declaredControls({ __LAIT_WINDOW_CONTROLS__: { top: 28, leading: 78 } })).toEqual({ top: 28, leading: 78, trailing: 0 });
   });
 
   it("is absent in a browser tab, where nothing declares anything", () => {
@@ -49,39 +46,82 @@ describe("declaredControls", () => {
 });
 
 describe("applyWindowControls", () => {
-  it("publishes the declaration as pixels", () => {
+  it("publishes every edge of the band as pixels", () => {
     const root = element();
-    applyWindowControls(root, { top: 28, leading: 78 });
-    expect(root.written).toEqual({ "--window-controls-top": "28px" });
-  });
-
-  // The shell clears the whole band, so nothing it draws is ever beside the
-  // controls and there is nothing for `leading` to inset. It stayed on the
-  // declaration — a World drawing *in* the band needs it — but a custom
-  // property no stylesheet reads drifts out of true without anything failing,
-  // so this pins that it is not published rather than merely unused today.
-  it("spends only the band's height, because nothing draws inside the band", () => {
-    const root = element();
-    applyWindowControls(root, { top: 28, leading: 78 });
-    expect(Object.keys(root.written)).not.toContain("--window-controls-leading");
-    // Still readable by whoever does have a use for it.
-    expect(declaredControls({ __LAIT_WINDOW_CONTROLS__: { top: 28, leading: 78 } })).toEqual({
-      top: 28,
-      leading: 78,
+    applyWindowControls(root, { top: 28, leading: 78, trailing: 0 });
+    expect(root.written).toEqual({
+      "--window-controls-top": "28px",
+      "--window-controls-leading": "78px",
+      "--window-controls-trailing": "0px",
     });
   });
 
-  // Not "leaves them unset": every surface reads these, so the absence has to
-  // arrive as a length rather than as an empty custom property that turns
-  // `padding-top` into a parse error.
-  it("writes zeroes when there is no declaration", () => {
+  /**
+   * The header draws *inside* the band now, so both ends have to be spendable.
+   * macOS fills the leading end and Windows the trailing one, and a stylesheet
+   * written against logical edges is correct on both without a branch — which
+   * is why neither is called left or right.
+   */
+  it("publishes the trailing inset a platform with controls at that end needs", () => {
+    const root = element();
+    applyWindowControls(root, { top: 32, leading: 0, trailing: 138 });
+    expect(root.written["--window-controls-leading"]).toBe("0px");
+    expect(root.written["--window-controls-trailing"]).toBe("138px");
+  });
+
+  it("publishes zeroes when there is no declaration, so nothing has to branch", () => {
     const root = element();
     applyWindowControls(root, null);
-    expect(root.written).toEqual({ "--window-controls-top": "0px" });
+    expect(root.written).toEqual({
+      "--window-controls-top": "0px",
+      "--window-controls-leading": "0px",
+      "--window-controls-trailing": "0px",
+    });
   });
 });
 
-/** A fake window that carries the global and the one event the host rings. */
+describe("trackWindowControls", () => {
+  it("applies what is declared before anything is restated", () => {
+    const root = element();
+    trackWindowControls(root, scope({ top: 28, leading: 78 }));
+    expect(root.written["--window-controls-top"]).toBe("28px");
+    expect(root.written["--window-controls-leading"]).toBe("78px");
+  });
+
+  // Full screen: the controls leave the page, and a shell still holding room
+  // for them wears a band of nothing along its top edge.
+  it("gives the room back when the host says the controls are gone", () => {
+    const root = element();
+    const host = scope({ top: 28, leading: 78 });
+    trackWindowControls(root, host);
+    host.restate(null);
+    expect(root.written).toEqual({
+      "--window-controls-top": "0px",
+      "--window-controls-leading": "0px",
+      "--window-controls-trailing": "0px",
+    });
+  });
+
+  it("takes the room back again on the way out of full screen", () => {
+    const root = element();
+    const host = scope(null);
+    trackWindowControls(root, host);
+    expect(root.written["--window-controls-top"]).toBe("0px");
+    host.restate({ top: 28, leading: 78 });
+    expect(root.written["--window-controls-top"]).toBe("28px");
+    expect(root.written["--window-controls-leading"]).toBe("78px");
+  });
+
+  it("stops listening when told to", () => {
+    const root = element();
+    const host = scope({ top: 28, leading: 78 });
+    trackWindowControls(root, host)();
+    expect(host.listening).toBe(0);
+    host.restate(null);
+    expect(root.written["--window-controls-top"]).toBe("28px");
+  });
+});
+
 function scope(controls: unknown) {
   const listeners: Array<() => void> = [];
   return {
@@ -101,39 +141,3 @@ function scope(controls: unknown) {
     },
   };
 }
-
-describe("trackWindowControls", () => {
-  it("applies what is declared before anything is restated", () => {
-    const root = element();
-    trackWindowControls(root, scope({ top: 28, leading: 78 }));
-    expect(root.written["--window-controls-top"]).toBe("28px");
-  });
-
-  // Full screen: the controls leave the page, and a shell still holding room
-  // for them wears a band of nothing along its top edge.
-  it("gives the room back when the host says the controls are gone", () => {
-    const root = element();
-    const host = scope({ top: 28, leading: 78 });
-    trackWindowControls(root, host);
-    host.restate(null);
-    expect(root.written).toEqual({ "--window-controls-top": "0px" });
-  });
-
-  it("takes the room back again on the way out of full screen", () => {
-    const root = element();
-    const host = scope(null);
-    trackWindowControls(root, host);
-    expect(root.written["--window-controls-top"]).toBe("0px");
-    host.restate({ top: 28, leading: 78 });
-    expect(root.written["--window-controls-top"]).toBe("28px");
-  });
-
-  it("stops listening when told to", () => {
-    const root = element();
-    const host = scope({ top: 28, leading: 78 });
-    trackWindowControls(root, host)();
-    expect(host.listening).toBe(0);
-    host.restate(null);
-    expect(root.written["--window-controls-top"]).toBe("28px");
-  });
-});

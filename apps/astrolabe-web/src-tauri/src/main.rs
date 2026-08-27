@@ -1561,12 +1561,21 @@ async fn summon_world_settings(
     Ok(())
 }
 
-/// Where the controls land once the title bar is transparent, in CSS pixels
-/// from the page's top-left corner. macOS keeps the buttons at a fixed offset
-/// inside a 28pt bar and never tells the document about either, so the host
-/// states the fact it owns and the World decides what to keep clear of.
+/// Where the controls land once the title bar is transparent, in CSS pixels.
+///
+/// macOS keeps the buttons at a fixed offset inside a 28pt bar and never tells
+/// the document about either, so the host states the fact it owns and the World
+/// decides what to keep clear of.
+///
+/// Stated as `leading` and `trailing` rather than left and right, and both are
+/// said even though one is zero. macOS fills the leading end; a platform that
+/// puts its controls at the other one — Windows — fills the trailing end
+/// instead, and a page written against logical edges is correct on both without
+/// asking which it is running on. Saying the zero is what makes that true: a
+/// field the host omits is a field the page has to invent a default for.
 #[cfg(target_os = "macos")]
-const WINDOW_CONTROLS_INIT: &str = "window.__LAIT_WINDOW_CONTROLS__ = { top: 28, leading: 78 };";
+const WINDOW_CONTROLS_INIT: &str =
+    "window.__LAIT_WINDOW_CONTROLS__ = { top: 28, leading: 78, trailing: 0 };";
 
 /// The same fact, restated when it stops being true.
 ///
@@ -1580,7 +1589,7 @@ const WINDOW_CONTROLS_INIT: &str = "window.__LAIT_WINDOW_CONTROLS__ = { top: 28,
 #[cfg(target_os = "macos")]
 fn restate_controls(overlapping: bool) -> String {
     let controls = if overlapping {
-        "{ top: 28, leading: 78 }"
+        "{ top: 28, leading: 78, trailing: 0 }"
     } else {
         "null"
     };

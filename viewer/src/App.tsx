@@ -2288,14 +2288,40 @@ export function App() {
         // The same inset the rail carries, for the same reason and on the same
         // element: with the rail hidden — a narrow window, or Settings — this
         // column is what the window's controls are sitting on.
-        className={`flex min-w-0 flex-col pt-[var(--window-controls-top)]${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
+        // No standing top inset. Clearing the whole band left the work area
+        // starting a band's height below the top of its own window — an empty
+        // strip above the header, which is the seam the overlay title bar was
+        // given up to remove. The header rises into the band instead and clears
+        // the controls itself, at whichever end they are.
+        //
+        // Settings is the exception: it hides the header and draws its own
+        // shell, so there is nothing to rise and the band has to be cleared the
+        // old way or the controls sit on its content.
+        className={`flex min-w-0 flex-col${view === "settings" ? " pt-[var(--window-controls-top)]" : ""}${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
       >
         {/* One header for every view, mounted once and never swapped. Opening an
             issue extends the trail and hands the actions slot to the issue; it
             does not build a second bar with its own inset, its own controls and
             its own idea of where the title sits. Only Settings stands outside —
             it hides the sidebar, so it draws its own shell entirely. */}
-        <div className={view === "settings" ? "hidden" : "shrink-0"}>
+        <div
+          className={view === "settings" ? "hidden" : "shrink-0"}
+          // The controls sit *in* this bar now, so it keeps its own end clear.
+          //
+          // Trailing always: this column is the trailing-most one there is, so
+          // where a platform puts its controls at that end — Windows — they are
+          // over this bar whatever else is on screen.
+          //
+          // Leading only when the rail is gone. With the rail drawing, it is
+          // the leading column and the controls are over *it*; insetting here
+          // as well would push the trail sideways to clear something that is
+          // not there. `railHidden` covers both ways it goes: collapsed by
+          // hand, and hidden by CSS under the drawer breakpoint.
+          style={{
+            paddingInlineEnd: "var(--window-controls-trailing)",
+            paddingInlineStart: railHidden ? "var(--window-controls-leading)" : undefined,
+          }}
+        >
           <SurfaceHeader
             // No standing leading control — the bar's first ink is the thing
             // you are looking at, and a permanent toggle was window furniture
