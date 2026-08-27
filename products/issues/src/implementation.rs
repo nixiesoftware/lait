@@ -584,6 +584,57 @@ mod package_descriptor_tests {
         }));
     }
 
+    /// The preferred implementation is pinned, and both places that declare
+    /// its version agree.
+    ///
+    /// Authority compares the `(implementation id, implementation_version)`
+    /// pair, and the id is a digest over the descriptor -- which includes
+    /// `find_schemas`. So changing a Find schema changes the implementation
+    /// WITHOUT changing the version that names it, and a Space that already
+    /// activated the old pair refuses the new one. Activation is idempotent by
+    /// World id, so nothing re-activates it: the World answers "unavailable" to
+    /// every call, forever, with no log line naming why.
+    ///
+    /// That is not hypothetical. Adding `edge::MEMBER` did exactly this to a
+    /// registered local World, and the only route back was removing it from the
+    /// Library and adding it again under a fresh handle. The migrator's id was
+    /// pinned and caught nothing, because the migrator is not what changed.
+    ///
+    /// **If this fails, you changed the implementation.** Bump
+    /// `implementation_version` in BOTH declarations -- the descriptor below
+    /// and `products/issues-runner/world.json.template` -- and update this pin.
+    /// Shipping a changed implementation under an unchanged version is what
+    /// strands an activated Space.
+    #[test]
+    fn the_preferred_implementation_is_pinned_to_the_version_that_names_it() {
+        let preferred = IssuesWorld::implementation_descriptor();
+        assert_eq!(
+            data_encoding::HEXLOWER.encode(preferred.id().unwrap().as_ref()),
+            "7c4e47bbdbfa8479cd7486451d2412651b29488b586ed1d768fe9f4c398d9eb5"
+        );
+
+        // The runner's manifest and the served descriptor are two declarations
+        // of one number. A Space reads the manifest; authority compares the
+        // descriptor. They must not drift.
+        let template = include_str!("../../issues-runner/world.json.template");
+        let declared: serde_json::Value = serde_json::from_str(
+            &template
+                .replace("${VERSION}", "0.0.0")
+                .replace("${EXE}", ""),
+        )
+        .expect("world.json.template is JSON");
+        assert_eq!(
+            declared["implementation_version"].as_u64(),
+            Some(u64::from(
+                IssuesWorld::preferred()
+                    .descriptor()
+                    .implementation_version
+                    .0
+            )),
+            "world.json.template and the served descriptor disagree about the version"
+        );
+    }
+
     #[test]
     fn migrator_has_a_distinct_identity_and_the_historical_decoders() {
         // The identity is the historical one: the exact id the live pre-v4
@@ -8911,7 +8962,7 @@ impl World for IssuesWorld {
         runtime::world::Descriptor {
             id: self.id.clone(),
             implementation_version: runtime::world::Version(match self.package {
-                IssuesPackage::Preferred => 4,
+                IssuesPackage::Preferred => 5,
                 IssuesPackage::Migrator => Self::MIGRATOR_IMPLEMENTATION_VERSION,
             }),
             schemas: self.schemas.clone(),

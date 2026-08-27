@@ -5,7 +5,7 @@
   "mount": "issues",
   "name": "Issues",
   "tagline": "Plans, issues, and the Specs that govern them",
-  "implementation_version": 4,
+  "implementation_version": 5,
   "mark": "art/mark.png",
   "hero": "art/hero.png",
   "accent": 5009141,
