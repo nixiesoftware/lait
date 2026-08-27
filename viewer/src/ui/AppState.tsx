@@ -113,8 +113,8 @@ export function ApplicationState({
             alt=""
             className={cn(
               "empty-state-art pointer-events-none max-w-full select-none object-contain",
-              quiet ? "mb-2 h-20 w-28" : "mb-3 h-24 w-32",
-              descriptive && "-ml-5 self-start",
+              quiet ? "mb-2 h-24 w-36" : "mb-3 h-32 w-44",
+              descriptive && "-ml-7 self-start",
             )}
             data-empty-state-art={art}
             draggable={false}
