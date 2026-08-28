@@ -50,7 +50,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use super::{
     AuthorizationRefusal, DisplayCoordinator, DisplayPairingService, DisplayTlsIdentity,
-    LiveMediaPacket, LiveTransport,
+    LiveMediaPacket, LiveTransport, RendezvousRefused,
 };
 
 #[derive(Clone)]
@@ -265,6 +265,12 @@ async fn pairing_start(State(state): State<DisplayHttpState>, body: Bytes) -> Re
     };
     match state.pairing.start(request, now()) {
         Ok(response) => json(StatusCode::OK, &response),
+        // A code the coordinator does not hold is a credential that failed,
+        // not a request it could not read: the television should say "that
+        // code is not one to enter here", not "something is wrong with me".
+        Err(error) if error.is::<RendezvousRefused>() => {
+            public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::AuthenticationFailed)
+        }
         Err(_) => public_refusal(StatusCode::BAD_REQUEST, ApiRefusalCode::InvalidRequest),
     }
 }

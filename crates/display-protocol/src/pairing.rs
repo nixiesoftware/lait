@@ -325,6 +325,78 @@ const CONFIRMATION_WORDS: [&str; 32] = [
     "spruce", "violet", "willow", "zephyr",
 ];
 
+/// The symbols a rendezvous code is drawn from: Crockford's base32.
+///
+/// Chosen for a person reading a code off one screen and entering it on a
+/// television with a remote. No `I`, `L`, `O` or `U`, so nothing looks like a
+/// digit or reads as a word; what someone types as `O` or `l` is normalised
+/// to the digit it resembles rather than refused.
+pub const RENDEZVOUS_CODE_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// How many symbols a rendezvous code has: forty bits, against a code that
+/// lives minutes and is spent by its first use.
+pub const RENDEZVOUS_CODE_CHARS: usize = 8;
+
+/// The code as a person entered it, reduced to the eight symbols it names.
+///
+/// Case, spaces and the grouping hyphen are the operator's; the confusable
+/// letters fold onto the digits they resemble. Anything else is a code that
+/// was not read correctly, and is refused rather than guessed at.
+pub fn normalize_rendezvous_code(entered: &str) -> Result<String, Refusal> {
+    let mut code = String::with_capacity(RENDEZVOUS_CODE_CHARS);
+    for character in entered.chars() {
+        let symbol = match character {
+            ' ' | '-' | '_' | '.' => continue,
+            'o' | 'O' => '0',
+            'i' | 'I' | 'l' | 'L' => '1',
+            other => other.to_ascii_uppercase(),
+        };
+        let byte =
+            u8::try_from(symbol).map_err(|_| Refusal::InvalidIdentifier("rendezvous code"))?;
+        if !RENDEZVOUS_CODE_ALPHABET.contains(&byte) {
+            return Err(Refusal::InvalidIdentifier("rendezvous code"));
+        }
+        code.push(symbol);
+    }
+    if code.len() != RENDEZVOUS_CODE_CHARS {
+        return Err(Refusal::InvalidIdentifier("rendezvous code"));
+    }
+    Ok(code)
+}
+
+/// The code grouped for reading: `XXXX-XXXX`.
+pub fn group_rendezvous_code(code: &str) -> Result<String, Refusal> {
+    let code = normalize_rendezvous_code(code)?;
+    let mut grouped = String::with_capacity(RENDEZVOUS_CODE_CHARS + 1);
+    for (index, symbol) in code.chars().enumerate() {
+        if index == RENDEZVOUS_CODE_CHARS / 2 {
+            grouped.push('-');
+        }
+        grouped.push(symbol);
+    }
+    Ok(grouped)
+}
+
+/// The rendezvous id a code names on the wire.
+///
+/// The wire carries a 32-hex identifier, which nobody should have to type;
+/// the code is what a person carries between screens. Deriving one from the
+/// other keeps the wire shape every receiver already accepts, and keeps the
+/// coordinator's table keyed by something that is not the secret itself. It
+/// is a transcript digest like the phrase, and for the same reason: its
+/// meaning must not depend on any platform's string handling.
+pub fn rendezvous_from_code(entered: &str) -> Result<RendezvousId, Refusal> {
+    let code = normalize_rendezvous_code(entered)?;
+    let mut transcript = Transcript::new(b"astrolabe-display/rendezvous/v1")?;
+    transcript.u32(PROTOCOL_MAJOR)?;
+    transcript.text(&code)?;
+    let digest = Sha256::digest(transcript.finish());
+    let leading = digest
+        .get(..16)
+        .ok_or(Refusal::InvalidShape("rendezvous digest"))?;
+    RendezvousId::parse(encode_hex(leading))
+}
+
 pub fn confirmation_phrase(
     profile: &CoordinatorProfile,
     pairing: &DisplayPairingId,

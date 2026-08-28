@@ -993,13 +993,17 @@ impl Daemon {
         device_seed: &[u8; 32],
         profile: mechanics::kinship::ProfileId,
     ) -> Result<Self> {
+        let settings = crate::config::Settings::load(Some(home));
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
             clients,
             device_seed,
             profile,
-            crate::config::Settings::load(Some(home)).display_port(),
+            settings.display_port(),
+            // The label the route is published under, when one is: the site a
+            // television is told beside its code.
+            settings.route_publication().map(|(label, _)| label),
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),

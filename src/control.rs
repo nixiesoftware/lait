@@ -386,6 +386,12 @@ pub struct DisplayCoordinatorView {
     /// an alarm about a coordinator nobody has examined.
     #[serde(default)]
     pub identifier_custody: Option<DisplayIdentifierCustodyView>,
+    /// Codes minted for televisions to enter, not yet spent or expired.
+    ///
+    /// Additive and optional, per `docs/COMPATIBILITY.md`: an older daemon
+    /// mints none and reports none, which is the same fact as an empty list.
+    #[serde(default)]
+    pub pending_rendezvous: Vec<DisplayRendezvousView>,
 }
 
 /// One rendered surface, for a member screen to present.
@@ -563,6 +569,51 @@ pub struct DisplayAssignmentSyncSetting {
     pub static_delay_ms: i32,
 }
 
+/// What a rendezvous pins its television to once it has enrolled: the facts
+/// an assignment takes, without the device — which does not exist yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayRendezvousAssignmentSetting {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    #[schemars(with = "serde_json::Value")]
+    pub input: serde_json::Value,
+    pub theme: DisplayThemeSetting,
+    pub stale_after_ms: u32,
+    pub on_stale: DisplayStaleActionSetting,
+    #[serde(default)]
+    pub sync: Option<DisplayAssignmentSyncSetting>,
+    #[serde(default)]
+    pub expires_at_unix_ms: Option<u64>,
+}
+
+/// A code minted for a television to enter, as the controller sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayRendezvousView {
+    /// The rendezvous the code names on the wire.
+    pub rendezvous: String,
+    /// The code itself, grouped for reading: `XXXX-XXXX`.
+    pub code: String,
+    /// The site label a television resolves this coordinator by, when the
+    /// identity publishes one. `None` for a coordinator reachable only where
+    /// its bootstrap was copied.
+    pub site: Option<String>,
+    /// The name the receiver will enrol under.
+    pub label: String,
+    /// What the receiver is pinned to on enrollment, if anything. The
+    /// package input stays on the daemon, as it does for an assignment.
+    pub assignment: Option<DisplayRendezvousAssignmentView>,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayRendezvousAssignmentView {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -575,6 +626,24 @@ pub enum Request {
     },
     DisplayPairingReject {
         pairing: String,
+    },
+    /// Mint a code a television enters to enrol without the two-screen
+    /// ceremony. The controller that mints it is the one that would have
+    /// compared six words; handing the television a secret from that
+    /// controller is the same trust decision, made once and in advance. A
+    /// code is spent by the first pairing that names it and dies on its own
+    /// in minutes.
+    ///
+    /// With an `assignment`, the receiver is pinned to it the moment it
+    /// enrols — "connect this screen to the lobby loop" as one act.
+    DisplayRendezvousMint {
+        label: String,
+        #[serde(default)]
+        assignment: Option<DisplayRendezvousAssignmentSetting>,
+    },
+    /// Withdraw a code before anything enters it.
+    DisplayRendezvousRevoke {
+        rendezvous: String,
     },
     /// Commit an exact package display pin for one enrolled receiver. The
     /// daemon derives Space, implementation and contract digests from its
@@ -1782,6 +1851,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::DisplayStatus
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
+        | Request::DisplayRendezvousMint { .. }
+        | Request::DisplayRendezvousRevoke { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
@@ -1878,6 +1949,21 @@ pub fn representative_requests() -> Vec<Request> {
             label: s(),
         },
         Request::DisplayPairingReject { pairing: s() },
+        Request::DisplayRendezvousMint {
+            label: s(),
+            assignment: Some(DisplayRendezvousAssignmentSetting {
+                orbit: s(),
+                world: s(),
+                surface: s(),
+                input: serde_json::Value::Null,
+                theme: DisplayThemeSetting::Dark,
+                stale_after_ms: 0,
+                on_stale: DisplayStaleActionSetting::Blank,
+                sync: None,
+                expires_at_unix_ms: None,
+            }),
+        },
+        Request::DisplayRendezvousRevoke { rendezvous: s() },
         Request::DisplayAssignmentPut {
             device: s(),
             orbit: s(),
@@ -2317,6 +2403,8 @@ pub enum Response {
     Display(Box<DisplayCoordinatorView>),
     /// One rendered surface for a member screen to present.
     DisplayPresentation(Box<DisplayPresentationView>),
+    /// A code just minted for a television to enter.
+    DisplayRendezvous(Box<DisplayRendezvousView>),
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,

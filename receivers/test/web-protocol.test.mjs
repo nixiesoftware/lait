@@ -8,7 +8,10 @@ import {
   bytesToHex,
   canonicalProgramRevision,
   confirmationPhrase,
+  groupRendezvousCode,
+  normalizeRendezvousCode,
   ProtocolError,
+  rendezvousFromCode,
   requestTranscript,
   validateProgram,
   verifyProgram,
@@ -167,6 +170,20 @@ test("web adapters reproduce the human confirmation phrase", async () => {
     await confirmationPhrase(phrase.profile, phrase.pairing, phrase.receiver_nonce),
     phrase.words,
   );
+});
+
+test("web adapters read a rendezvous code the way Rust does, and name the same rendezvous", async () => {
+  const code = fixture.rendezvous_code;
+  assert.equal(normalizeRendezvousCode(code.entered), code.normalized);
+  assert.equal(groupRendezvousCode(code.entered), code.grouped);
+  assert.equal(await rendezvousFromCode(code.entered), code.rendezvous);
+  for (const bad of ["7K3Q011", "7K3Q01111", "7K3Q-0U11", "", null]) {
+    assert.throws(
+      () => normalizeRendezvousCode(bad),
+      (error) => error instanceof ProtocolError && error.code === "invalid_identifier",
+      `${JSON.stringify(bad)} is not a code`,
+    );
+  }
 });
 
 test("unknown receiver-facing fields fail closed", async () => {
