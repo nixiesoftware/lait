@@ -54,7 +54,8 @@ export function ApplicationState({
   //
   // TEACHING — a feature this person has not used yet. The drawing, the
   // feature's own name, one sentence saying what it is for, and the action that
-  // starts it: a left-aligned block with the art hung off its leading edge.
+  // starts it: a left-aligned block, the drawing on the same leading edge as
+  // every line under it.
   // Linear's Projects and Customer requests states are this shape exactly, and
   // the title there is the noun ("Projects"), never the negation ("No projects
   // yet") — the negation reports a fact you can already see, and spends the one
@@ -95,23 +96,25 @@ export function ApplicationState({
         )}
       >
         {art ? (
-          // The screen is a fixed size and deliberately not scalable: a
-          // halftone that resizes is no longer a halftone, it is a resampled
-          // picture of one. A state that must not shout quiets the whole plate
-          // rather than re-rendering it at another ruling.
+          // The plate is drawn at one ruling and never resized: a halftone that
+          // resizes is no longer a halftone, it is a resampled picture of one.
+          // So a quieter state gets the same plate — the tier is carried by the
+          // words and the block's own air, not by a second treatment of the art.
+          //
+          // One margin, one alignment, in both tiers. The `-ml-8` that used to
+          // hang the teaching plate off the leading edge was cancelling the
+          // blank the old full-lattice canvas padded the drawing with; that
+          // blank varied by 15px across the ten fields, so the correction was
+          // right for none of them. `EmptyArt` now sizes itself to its ink, and
+          // the leading edge is the leading edge.
           <EmptyArt
             art={art}
-            className={cn(
-              "text-dim pointer-events-none shrink-0 select-none",
-              quiet ? "mb-2 opacity-80" : "mb-3",
-              teaching && "-ml-8 self-start",
-            )}
+            className="text-dim pointer-events-none mb-3 shrink-0 select-none"
           />
         ) : (
           <span
             className={cn(
-              "text-mute",
-              quiet ? "mb-2" : "mb-3",
+              "text-mute mb-3",
               (kind === "error" || kind === "retry") && "text-danger",
             )}
           >

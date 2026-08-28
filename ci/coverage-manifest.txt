@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2678
-pr-platform    2180
-nightly        2707
+pr             2682
+pr-platform    2183
+nightly        2711
 mutants        106
 
 [gates]
@@ -717,6 +717,9 @@ lait orbits::catalog::tests::global_identity_sees_own_stores_and_agents_with_ide
 lait orbits::catalog::tests::nested_agent_binding_keeps_owner_name_and_case
 lait orbits::catalog::tests::path_comparison_handles_platform_spelling_without_prefix_confusion
 lait orbits::catalog::tests::self_contained_identity_sees_only_itself
+lait orbits::observed::tests::a_record_is_written_beside_a_store_and_never_in_its_place
+lait orbits::observed::tests::a_written_observation_reads_back
+lait orbits::observed::tests::anything_that_is_not_a_reading_is_no_reading
 lait orbits::router::tests::a_finished_doorbell_pump_does_not_mean_a_dead_placement
 lait orbits::router::tests::a_host_that_cannot_be_reached_is_declared_dead
 lait orbits::router::tests::a_placement_whose_doorbell_stream_ended_is_reused_not_rebuilt
@@ -1385,6 +1388,7 @@ lait::it mixed_root_guard::any_product_cache_must_register_with_a_mixed_root_pro
 lait::it mixed_root_guard::every_registered_cache_names_a_real_test
 lait::it mixed_root_guard::the_detector_has_teeth
 lait::it orbit_registry::a_listed_row_carries_no_contents
+lait::it orbit_registry::an_unopened_space_is_listed_by_what_this_device_last_saw
 lait::it orbit_registry::serving_a_space_records_the_open
 lait::it orbital_admission::a_contributor_invite_installs_the_expansion_atomically
 lait::it orbital_admission::a_non_delegating_issuer_cannot_escalate

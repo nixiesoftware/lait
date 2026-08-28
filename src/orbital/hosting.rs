@@ -239,6 +239,9 @@ pub struct StationHost {
     /// live `Subscribe` connection selects on this, so teardown is prompt and
     /// bounded instead of waiting out a poll interval per subscriber.
     stop_tx: tokio::sync::watch::Sender<bool>,
+    /// The name this process last wrote beside the store, so a commit that
+    /// touched the Catalog without renaming the Space writes nothing.
+    observed_name: std::sync::Mutex<Option<String>>,
     /// The one enriched-doorbell fan-out.
     ///
     /// Subscribers read this rather than each opening their own Observation
@@ -835,6 +838,7 @@ impl StationHost {
             shutdown: Arc::new(tokio::sync::Notify::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             stop_tx: tokio::sync::watch::channel(false).0,
+            observed_name: std::sync::Mutex::new(None),
             observations: ObservationHub::new(),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(tokio::time::Instant::now()),
@@ -3691,6 +3695,7 @@ impl StationHost {
         if let Err(error) = crate::orbits::touch(&space) {
             tracing::warn!(%error, "Orbit registry open-time update failed");
         }
+        self.observe_name(0, 0);
         let idle_window = idle_window_from_env();
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
         let mut connections = tokio::task::JoinSet::new();
@@ -3745,6 +3750,9 @@ impl StationHost {
                 }
             }
         }
+        // A last ask before the store closes, for a Station that docked too
+        // late for the first one: the next daemon lists this Space by name.
+        self.observe_name(0, 0);
         // Wake and join every task retaining the host before the runner tries
         // to consume it and return the Station to Orbit.
         self.begin_stop();
@@ -3796,6 +3804,43 @@ impl StationHost {
     /// This Space's on-disk store directory (the watchdog's liveness probe).
     fn store_dir(&self) -> PathBuf {
         orbital_store_root(&self.home).join(self.station.space_id().as_str())
+    }
+
+    /// Record what this device sees the Space named, beside its store.
+    ///
+    /// Read the way `Status` reads it -- from the docked World -- so an
+    /// undocked Station records nothing rather than a blank. Asked when the
+    /// Station starts serving, on every commit that touched the Space's own
+    /// Catalog, and once more as it stops -- and written only when the name
+    /// differs from the last one this process wrote, so the stop-time ask
+    /// writes exactly when no earlier ask could read a name. The record is
+    /// what a passive lister shows for an Orbit nobody has opened since the
+    /// daemon started (`crate::orbits::observed`).
+    fn observe_name(&self, epoch: u64, sequence: u64) {
+        let Some((_, _, name, _)) = self.counts() else {
+            return;
+        };
+        // Held across the write, so two askers cannot leave the file holding
+        // the older name; recorded only once the write landed, so a failed
+        // write is asked again next time.
+        let mut last = self
+            .observed_name
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let observed = crate::orbits::observed::Observed {
+            format: crate::orbits::observed::FORMAT,
+            name: name.clone(),
+            observed_at: mechanics::wallclock::now_secs(),
+            epoch,
+            sequence,
+        };
+        match crate::orbits::observed::write(&self.store_dir(), &observed) {
+            Ok(()) => *last = Some(name),
+            Err(error) => tracing::warn!(%error, "observed name write failed"),
+        }
     }
 
     /// Whether the idle window has elapsed with nothing to keep us alive: a
@@ -4195,7 +4240,16 @@ impl StationHost {
                         // Send even with no receivers: an `Err` here means only
                         // that nobody is listening right now, which is not a
                         // reason to stop translating or to tear the pump down.
-                        let _ = daemon.observations.fanout.send(daemon.frame_for(&record));
+                        let frame = daemon.frame_for(&record);
+                        // The Space's own Catalog moved -- its name may have.
+                        if frame.reset
+                            || frame.invalidations.iter().any(|entry| {
+                                entry.planes.iter().any(|plane| plane.plane == "space")
+                            })
+                        {
+                            daemon.observe_name(record.epoch.as_u64(), record.sequence);
+                        }
+                        let _ = daemon.observations.fanout.send(frame);
                     }
                 }
             }

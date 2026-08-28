@@ -778,7 +778,7 @@ export function App() {
     const row = spacesRef.current.find((space) => space.id === id);
     if (!row) return;
     const confirmed = await ask.confirm({
-      title: `Forget ${row.name || row.space}?`,
+      title: `Forget ${row.name || row.seen?.name || row.space}?`,
       body: `This removes the space from the list on this device. The encrypted store at ${row.path} is left exactly as it is, and no other device is affected.`,
       confirmText: "Forget",
       danger: true,
@@ -803,7 +803,7 @@ export function App() {
       // written by founding and entering, so re-opening a store does not
       // re-register it. Promising a remedy this app does not have is worse than
       // saying nothing.
-      body: `${gone.map((space) => space.name || space.space).join(", ")} — ${
+      body: `${gone.map((space) => space.name || space.seen?.name || space.space).join(", ")} — ${
         gone.length === 1 ? "the store this row names is" : "the store each row names is"
       } already gone from this machine. Removing ${
         gone.length === 1 ? "it" : "them"
@@ -2659,6 +2659,7 @@ export function App() {
               spaceId={current}
               project={activeProject}
               members={members}
+              teams={teams}
               readOnly={readOnly}
               onError={setError}
             />
@@ -2884,8 +2885,6 @@ export function App() {
               <ProjectRail
                 spaceId={current}
                 project={activeProject}
-                members={members}
-                teams={teams}
                 counts={projectCounts}
                 readOnly={readOnly}
                 activeMilestone={filter.milestone}

@@ -37,6 +37,16 @@ pub enum Unnamed {
     NotDocked,
 }
 
+/// What this device last saw the Space named, and when.
+///
+/// Beside `name`, never in it: `name` is a live reading and this is a past
+/// one, and a surface that draws this says so by drawing the time.
+#[derive(Debug, Clone, Serialize)]
+pub struct Seen {
+    pub name: String,
+    pub observed_at: u64,
+}
+
 /// One row of the browser's Orbit picker.
 #[derive(Debug, Clone, Serialize)]
 pub struct SpaceRow {
@@ -55,6 +65,12 @@ pub struct SpaceRow {
     /// Set when `name` is `None`. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unnamed: Option<Unnamed>,
+    /// The name the Station holding this store last recorded, with the time
+    /// (`crate::orbits::observed`). Present whenever a record exists; the
+    /// answer to "which of my Spaces is this" for an Orbit not opened since
+    /// the daemon started, which `unnamed` can only classify.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seen: Option<Seen>,
     pub path: String,
     pub origin: String,
     pub last_opened: u64,
@@ -116,11 +132,24 @@ pub async fn list(directory: &Catalog, daemon: &Client) -> Vec<SpaceRow> {
                 Ok(name) => (Some(name), None),
                 Err(why) => (None, Some(why)),
             };
+            // A Station's home is the registered store path -- the `.lait`
+            // directory that holds one Space's orbital root -- not this head's
+            // identity home, so the record is read from where the Station
+            // wrote it.
+            let seen = crate::orbits::observed::read(
+                &crate::orbital::orbital_store_root(Path::new(&binding.entry.path))
+                    .join(&binding.entry.space),
+            )
+            .map(|observed| Seen {
+                name: observed.name,
+                observed_at: observed.observed_at,
+            });
             SpaceRow {
                 id: LocalOrbitId::for_store(Path::new(&binding.entry.path)),
                 space: binding.entry.space.clone(),
                 name,
                 unnamed,
+                seen,
                 path: binding.entry.path.clone(),
                 origin: binding.entry.origin.to_string(),
                 last_opened: binding.entry.last_opened,

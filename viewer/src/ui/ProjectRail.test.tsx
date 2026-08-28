@@ -77,8 +77,6 @@ describe("ProjectRail", () => {
               <ProjectRail
                 spaceId="local"
                 project={project}
-                members={[]}
-          teams={[]}
                 counts={{ backlog: 2, active: 1, done: 4, total: 7 }}
                 readOnly={false}
                 activeMilestone={activeMilestone}
