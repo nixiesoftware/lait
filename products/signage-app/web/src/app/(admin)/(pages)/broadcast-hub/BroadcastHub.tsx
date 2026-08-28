@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Megaphone, Plus, Radio, X } from "lucide-react";
 import {
+  Ago,
   Confirm,
   DayTrack,
   Empty,
@@ -132,12 +133,13 @@ export default function BroadcastHub({ screen: addressed }: { screen?: string } 
 
       <PageStatus loading={loading} error={error ?? ""} />
 
-      {!loading && broadcasts.length === 0 && (
+      {!loading && live.length === 0 && (
         <Empty title="Nothing is being broadcast">
           <p className="ds-hint">
             Every screen is showing the channel it is tuned to. A broadcast
             interrupts that for whoever it reaches, and stops on its own.
           </p>
+          {screens.length > 0 && <Footprint size="sm" screens={screens} />}
         </Empty>
       )}
 
@@ -188,7 +190,10 @@ export default function BroadcastHub({ screen: addressed }: { screen?: string } 
           </p>
           {stopped.map((broadcast) => (
             <div className="ds-row-between" key={broadcast.id}>
-              <span style={{ fontSize: "var(--ds-fs-small)" }}>{broadcast.name}</span>
+              <span style={{ fontSize: "var(--ds-fs-small)" }}>
+                {broadcast.name} · {describe(broadcast.action)} · stopped{" "}
+                <Ago at={broadcast.cancelled_at_unix_ms} />
+              </span>
               <button
                 type="button"
                 className="ds-btn ds-btn-quiet"

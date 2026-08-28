@@ -22,8 +22,10 @@ export function Footprint({
   className,
 }: {
   screens: SignageScreen[];
-  /** Ids the rule reaches. Everything else is the miss. */
-  reached: Set<string>;
+  /** Ids the rule reaches. Everything else is the miss. Absent means no rule
+   *  is being asked about: the fleet is drawn as it is, nothing lit, nothing
+   *  missed. */
+  reached?: Set<string>;
   onOpen?: (screen: SignageScreen) => void;
   size?: "xs" | "sm";
   className?: string;
@@ -32,17 +34,17 @@ export function Footprint({
   return (
     <div className={`ds-footprint is-${size}${className ? ` ${className}` : ""}`}>
       {screens.map((screen) => {
-        const hit = reached.has(screen.id);
+        const hit = reached ? reached.has(screen.id) : null;
         return (
           <button
             type="button"
             key={screen.id}
             className="ds-footprint-cell"
-            data-reached={hit || undefined}
-            data-missed={!hit || undefined}
+            data-reached={hit === true || undefined}
+            data-missed={hit === false || undefined}
             {...litProps(held, held?.kind === "screen" && held.id === screen.id)}
             title={screen.name}
-            aria-label={`${screen.name}: ${hit ? "reached" : "not reached"}`}
+            aria-label={hit == null ? screen.name : `${screen.name}: ${hit ? "reached" : "not reached"}`}
             onClick={onOpen ? () => onOpen(screen) : undefined}
             disabled={!onOpen}
           >
