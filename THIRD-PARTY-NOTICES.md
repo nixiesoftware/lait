@@ -129,7 +129,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | cc | 1.2.63 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cc-rs> |
 | cfg-if | 1.0.4 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cfg-if> |
 | cfg_aliases | 0.2.1 | `MIT` | <https://github.com/katharostech/cfg_aliases> |
-| chacha20 | 0.10.0 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/stream-ciphers> |
+| chacha20 | 0.10.2 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/stream-ciphers> |
 | chacha20 | 0.9.1 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/stream-ciphers> |
 | chacha20poly1305 | 0.10.1 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/AEADs/tree/master/chacha20poly1305> |
 | chinese-number | 0.7.8 | `MIT` | <https://github.com/magiclen/chinese-number> |
