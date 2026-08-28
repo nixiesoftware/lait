@@ -126,40 +126,6 @@ jobs:
         run: npm test
         working-directory: apps/astrolabe-web
 
-  # The Signage client. It had no job at all until now, which is how a client
-  # that did not typecheck could sit in the tree: `cargo check --workspace`
-  # cannot see TypeScript, and nothing else was looking. `resolve.ts` is the
-  # reason the test step matters — it is a second implementation of the
-  # resolution ladder that `fleet.rs` owns, and a twin nobody tests is a twin
-  # that drifts.
-  signage-web:
-    name: signage-web (client)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: products/signage-app/web/package-lock.json
-
-      - name: Install
-        run: npm ci
-        working-directory: products/signage-app/web
-
-      - name: Typecheck
-        run: npm run check
-        working-directory: products/signage-app/web
-
-      - name: Lint
-        run: npm run lint
-        working-directory: products/signage-app/web
-
-      - name: Test
-        run: npm test
-        working-directory: products/signage-app/web
-
   # The client's Rust host, which `cargo check --workspace` cannot reach: it is
   # deliberately outside the workspace so that the main build does not require
   # a webview toolchain. That exclusion is the reason it needs a job of its own
@@ -297,6 +263,17 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+        working-directory: products/signage-app/web
+
+      - name: Lint
+        run: npm run lint
+        working-directory: products/signage-app/web
+
+      # `resolve.ts` is the reason this step matters — it is a second
+      # implementation of the resolution ladder that `fleet.rs` owns, and a
+      # twin nobody tests is a twin that drifts.
+      - name: Test
+        run: npm test
         working-directory: products/signage-app/web
 
       - name: Build
