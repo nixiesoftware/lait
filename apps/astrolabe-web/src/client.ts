@@ -126,7 +126,12 @@ export interface DisplayReceiver { device: string; label: string; platform: stri
 export interface DisplayAssignment { assignment: string; device: string; orbit: string; space: string; program: string; world: string; surface: string; controller: string; theme: DisplayTheme; syncGroup: string | null; syncMode: DisplaySyncMode | null; staticDelayMs: number; expiresAtUnixMs: number | null; revokedAtUnixMs: number | null; }
 export interface DisplayPairing { pairing: string; confirmationPhrase: string[]; certificateSha256: string; platform: string; build: string; createdAtUnixMs: number; expiresAtUnixMs: number; }
 export interface IdentifierCustody { slots: string[]; portable: boolean; }
-export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
+export interface DisplayRendezvousAssignment { orbit: string; world: string; surface: string; }
+/** A code minted for a television to enter: the site it resolves the coordinator by, then the code. */
+export interface DisplayRendezvous { rendezvous: string; code: string; site: string | null; label: string; assignment: DisplayRendezvousAssignment | null; createdAtUnixMs: number; expiresAtUnixMs: number; }
+export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; pendingRendezvous: DisplayRendezvous[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
+/** What a code pins its television to once it connects: an assignment without the device. */
+export interface DisplayAssignmentRequest { orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
 
 /**
@@ -299,7 +304,8 @@ export type ClientAction =
   | { type: "bookAccept"; suggestion: string } | { type: "bookDismiss"; suggestion: string }
   | { type: "installMcp"; client: string; scope: string | null; name: string; agent: string | null; noAgent: boolean; project: string; world: string | null; preview: boolean }
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
-  | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
+  | { type: "displayRendezvousMint"; label: string; assignment: DisplayAssignmentRequest | null } | { type: "displayRendezvousRevoke"; rendezvous: string }
+  | ({ type: "displayAssignmentPut"; device: string } & DisplayAssignmentRequest)
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
   | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
@@ -345,6 +351,8 @@ export const actionKey = {
   installMcp: (preview: boolean) => preview ? "mcp.preview" : "mcp.install",
   displayPairingApprove: (pairing: string) => `display.pairing.approve:${pairing}`,
   displayPairingReject: (pairing: string) => `display.pairing.reject:${pairing}`,
+  displayRendezvousMint: "display.rendezvous.mint",
+  displayRendezvousRevoke: (rendezvous: string) => `display.rendezvous.revoke:${rendezvous}`,
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
@@ -405,6 +413,8 @@ export function keyFor(action: ClientAction): string {
     case "installMcp": return actionKey.installMcp(action.preview);
     case "displayPairingApprove": return actionKey.displayPairingApprove(action.pairing);
     case "displayPairingReject": return actionKey.displayPairingReject(action.pairing);
+    case "displayRendezvousMint": return actionKey.displayRendezvousMint;
+    case "displayRendezvousRevoke": return actionKey.displayRendezvousRevoke(action.rendezvous);
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
@@ -986,6 +996,15 @@ export const fixtureClientView: ClientView = {
       build: "1.4.0",
       createdAtUnixMs: 1_755_000_000_000,
       expiresAtUnixMs: 1_755_000_600_000,
+    }],
+    pendingRendezvous: [{
+      rendezvous: "735364a213f3ff2c72274ed31551f5bb",
+      code: "7K3Q-0111",
+      site: "acme",
+      label: "Lobby",
+      assignment: { orbit: "orb_fixture", world: "com.lait.signage", surface: "signage.program" },
+      createdAtUnixMs: 1_755_000_000_000,
+      expiresAtUnixMs: 1_755_000_900_000,
     }],
     identifierCustody: { slots: ["windows-dpapi"], portable: false },
   },

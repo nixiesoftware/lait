@@ -330,6 +330,8 @@ pub struct DisplayFacts {
     pub devices: Vec<DisplayReceiverRow>,
     pub assignments: Vec<DisplayAssignmentRow>,
     pub pending_pairings: Vec<DisplayPairingRow>,
+    /// Codes minted for televisions to enter, not yet spent or expired.
+    pub pending_rendezvous: Vec<DisplayRendezvousRow>,
     /// `None` from a daemon that predates the custody split — not reported, as
     /// distinct from reported-as-none.
     pub identifier_custody: Option<DisplayIdentifierCustodyRow>,
@@ -480,6 +482,45 @@ pub struct DisplayPairingRow {
     pub build: String,
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+/// A code minted for a television to enter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayRendezvousRow {
+    pub rendezvous: String,
+    /// Grouped for reading: `XXXX-XXXX`.
+    pub code: String,
+    /// The site the television resolves this coordinator by, when the
+    /// identity publishes one.
+    pub site: Option<String>,
+    pub label: String,
+    pub assignment: Option<DisplayRendezvousAssignmentRow>,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayRendezvousAssignmentRow {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+}
+
+/// What a code pins its television to once it connects: an assignment with
+/// everything but the device, which does not exist until then.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayRendezvousAssignment {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    pub input_json: String,
+    pub theme: DisplayTheme,
+    pub stale_after_ms: u32,
+    pub on_stale: DisplayStaleAction,
+    pub sync_group: Option<String>,
+    pub sync_mode: DisplaySyncMode,
+    pub static_delay_ms: i32,
+    pub expires_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1034,6 +1075,17 @@ pub enum ActionRequest {
     DisplayPairingReject {
         pairing: String,
     },
+    /// Mint a code a television enters to enrol without the two-screen
+    /// ceremony — and, with an `assignment`, to show something the moment it
+    /// does. The code works once and lasts minutes.
+    DisplayRendezvousMint {
+        label: String,
+        assignment: Option<DisplayRendezvousAssignment>,
+    },
+    /// Withdraw a code before anything enters it.
+    DisplayRendezvousRevoke {
+        rendezvous: String,
+    },
     /// Assign one exact World display surface to an enrolled receiver. The
     /// input remains JSON here because each package owns its own input schema;
     /// the daemon canonicalizes and validates it before committing the pin.
@@ -1167,6 +1219,56 @@ impl ActionRequest {
                 Action::DisplayPairingApprove { pairing, label }
             }
             Self::DisplayPairingReject { pairing } => Action::DisplayPairingReject(pairing),
+            Self::DisplayRendezvousMint { label, assignment } => {
+                let assignment = assignment
+                    .map(|assignment| -> Result<_, String> {
+                        Ok(crate::client::display::DisplayRendezvousAssignmentInput {
+                            orbit: assignment.orbit,
+                            world: assignment.world,
+                            surface: assignment.surface,
+                            input: serde_json::from_str(&assignment.input_json)
+                                .map_err(|error| format!("invalid display input JSON: {error}"))?,
+                            theme: match assignment.theme {
+                                DisplayTheme::Light => lait::control::DisplayThemeSetting::Light,
+                                DisplayTheme::Dark => lait::control::DisplayThemeSetting::Dark,
+                                DisplayTheme::HighContrast => {
+                                    lait::control::DisplayThemeSetting::HighContrast
+                                }
+                            },
+                            stale_after_ms: assignment.stale_after_ms,
+                            on_stale: match assignment.on_stale {
+                                DisplayStaleAction::KeepWithNativeBanner => {
+                                    lait::control::DisplayStaleActionSetting::KeepWithNativeBanner
+                                }
+                                DisplayStaleAction::Blank => {
+                                    lait::control::DisplayStaleActionSetting::Blank
+                                }
+                            },
+                            sync: assignment.sync_group.map(|group| {
+                                lait::control::DisplayAssignmentSyncSetting {
+                                    group,
+                                    mode: match assignment.sync_mode {
+                                        DisplaySyncMode::StayInSync => {
+                                            lait::control::DisplaySyncModeSetting::StayInSync
+                                        }
+                                        DisplaySyncMode::Positional => {
+                                            lait::control::DisplaySyncModeSetting::Positional
+                                        }
+                                    },
+                                    static_delay_ms: assignment.static_delay_ms,
+                                }
+                            }),
+                            expires_at_unix_ms: assignment.expires_at_unix_ms,
+                        })
+                    })
+                    .transpose()?;
+                Action::DisplayRendezvousMint(Box::new(
+                    crate::client::display::DisplayRendezvousInput { label, assignment },
+                ))
+            }
+            Self::DisplayRendezvousRevoke { rendezvous } => {
+                Action::DisplayRendezvousRevoke(rendezvous)
+            }
             Self::DisplayAssignmentPut {
                 device,
                 orbit,
@@ -1864,6 +1966,25 @@ fn project(app: &App) -> ClientView {
                     build: pairing.build.clone(),
                     created_at_unix_ms: pairing.created_at_unix_ms,
                     expires_at_unix_ms: pairing.expires_at_unix_ms,
+                })
+                .collect(),
+            pending_rendezvous: display
+                .pending_rendezvous
+                .iter()
+                .map(|minted| DisplayRendezvousRow {
+                    rendezvous: minted.rendezvous.clone(),
+                    code: minted.code.clone(),
+                    site: minted.site.clone(),
+                    label: minted.label.clone(),
+                    assignment: minted.assignment.as_ref().map(|assignment| {
+                        DisplayRendezvousAssignmentRow {
+                            orbit: assignment.orbit.clone(),
+                            world: assignment.world.clone(),
+                            surface: assignment.surface.clone(),
+                        }
+                    }),
+                    created_at_unix_ms: minted.created_at_unix_ms,
+                    expires_at_unix_ms: minted.expires_at_unix_ms,
                 })
                 .collect(),
             identifier_custody: display.identifier_custody.as_ref().map(|custody| {

@@ -35,11 +35,11 @@
 
         <section class="state-panel provisioning-panel" id="provisioning-panel" hidden>
           <p class="eyebrow">Connect this display</p>
-          <h1>Enter this location's site code</h1>
+          <h1>Enter the code from Astrolabe</h1>
           <p>
-            Astrolabe gives each location a short code. This display will only ever
-            reach that location's coordinator, and nothing is enrolled until the
-            confirmation words match.
+            In Astrolabe, open <strong>Displays</strong> and choose <strong>Add a display</strong>.
+            It shows a code like <code class="entry-example">acme-7K3Q-0111</code>: this location's
+            site, then the code. Enter the site alone to pair by comparing words instead.
           </p>
           <form class="site-entry" id="site-entry">
             <input
@@ -49,8 +49,8 @@
               autocomplete="off"
               autocapitalize="none"
               spellcheck="false"
-              maxlength="32"
-              aria-label="Site code"
+              maxlength="48"
+              aria-label="Site and code from Astrolabe"
               aria-describedby="site-preview"
             >
             <button class="primary-action" id="site-submit" type="submit">

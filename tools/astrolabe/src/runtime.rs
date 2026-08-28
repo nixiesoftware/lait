@@ -247,6 +247,8 @@ pub enum Action {
         label: String,
     },
     DisplayPairingReject(String),
+    DisplayRendezvousMint(Box<crate::client::display::DisplayRendezvousInput>),
+    DisplayRendezvousRevoke(String),
     DisplayAssignmentPut(Box<DisplayAssignmentInput>),
     DisplayAssignmentRevoke(String),
     DisplayDeviceRevoke(String),
@@ -329,6 +331,10 @@ impl Action {
                 format!("display.pairing.approve:{pairing}")
             }
             Self::DisplayPairingReject(pairing) => format!("display.pairing.reject:{pairing}"),
+            Self::DisplayRendezvousMint(_) => "display.rendezvous.mint".into(),
+            Self::DisplayRendezvousRevoke(rendezvous) => {
+                format!("display.rendezvous.revoke:{rendezvous}")
+            }
             Self::DisplayAssignmentPut(assignment) => {
                 format!("display.assignment.put:{}", assignment.device)
             }
@@ -420,6 +426,10 @@ impl Action {
                 format!("approve the display '{label}'")
             }
             Self::DisplayPairingReject(_) => "reject a display pairing".into(),
+            Self::DisplayRendezvousMint(input) => {
+                format!("mint a code for the display '{}'", input.label)
+            }
+            Self::DisplayRendezvousRevoke(_) => "withdraw a display code".into(),
             Self::DisplayAssignmentPut(assignment) => {
                 format!("assign display {}", assignment.device)
             }
@@ -1649,6 +1659,17 @@ impl Worker {
             Action::DisplayPairingReject(pairing) => {
                 client.display_pairing_reject(pairing.clone()).await?;
                 Ok(Outcome::Said("rejected the display pairing".into()))
+            }
+            Action::DisplayRendezvousMint(input) => {
+                let minted = client.display_rendezvous_mint((**input).clone()).await?;
+                Ok(Outcome::Said(format!(
+                    "code {} is ready for the display '{}'",
+                    minted.code, minted.label
+                )))
+            }
+            Action::DisplayRendezvousRevoke(rendezvous) => {
+                client.display_rendezvous_revoke(rendezvous.clone()).await?;
+                Ok(Outcome::Said("withdrew the display code".into()))
             }
             Action::DisplayAssignmentPut(assignment) => {
                 client

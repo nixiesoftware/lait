@@ -157,6 +157,7 @@ h1 { margin: 0; font-size: clamp(52px, 5vw, 86px); line-height: 1.02; letter-spa
 }
 .site-entry input:focus { outline: 7px solid rgba(142, 226, 209, 0.34); outline-offset: 5px; border-color: #8ee2d1; }
 .site-preview-origin { color: #8ee2d1; }
+.entry-example { color: #d7fff4; font-size: 0.95em; letter-spacing: 0.04em; }
 
 .secondary-action {
   display: block;

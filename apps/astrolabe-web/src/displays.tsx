@@ -13,8 +13,10 @@ import {
   type ClientView,
   type Display,
   type DisplayAssignment,
+  type DisplayAssignmentRequest,
   type DisplayPairing,
   type DisplayReceiver,
+  type DisplayRendezvous,
   type DisplayStaleAction,
   type DisplaySurface,
   type DisplaySyncMode,
@@ -75,6 +77,69 @@ function parseIntStrict(value: string): number | null {
   return /^-?\d+$/.test(value) ? Number.parseInt(value, 10) : null;
 }
 
+const surfaceKey = (surface: DisplaySurface) => `${surface.world} ${surface.surface}`;
+
+/** Everything an assignment form holds, as typed. One draft serves both the Assign dialog and a code's promise. */
+export interface AssignmentDraft {
+  orbit: string;
+  chosenKey: string;
+  input: string;
+  theme: DisplayTheme;
+  staleSeconds: string;
+  onStale: DisplayStaleAction;
+  syncGroup: string;
+  syncMode: DisplaySyncMode;
+  staticDelay: string;
+}
+
+export function newAssignmentDraft(surfaces: DisplaySurface[], orbits: Orbit[]): AssignmentDraft {
+  return {
+    orbit: orbits[0]?.space ?? "",
+    chosenKey: surfaces[0] === undefined ? "" : surfaceKey(surfaces[0]),
+    input: "",
+    theme: "dark",
+    staleSeconds: "120",
+    onStale: "keepWithNativeBanner",
+    syncGroup: "",
+    syncMode: "stayInSync",
+    staticDelay: "0",
+  };
+}
+
+/**
+ * The draft as the daemon takes it, or null while it could not cross. A
+ * Signage program id is typed bare and wrapped here; every other surface's
+ * input goes verbatim to the package's own canonicalizer.
+ */
+export function assignmentPayload(draft: AssignmentDraft, surfaces: DisplaySurface[]): DisplayAssignmentRequest | null {
+  const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
+  if (chosen === undefined || !assignmentDraftValid(draft)) return null;
+  const value = draft.input.trim();
+  return {
+    orbit: draft.orbit,
+    world: chosen.world,
+    surface: chosen.surface,
+    inputJson: isSignageSurface(chosen) ? JSON.stringify({ program: value }) : value,
+    theme: draft.theme,
+    staleAfterMs: Number.parseInt(draft.staleSeconds.trim(), 10) * 1000,
+    onStale: draft.onStale,
+    syncGroup: draft.syncGroup.trim() === "" ? null : draft.syncGroup.trim(),
+    syncMode: draft.syncMode,
+    staticDelayMs: Number.parseInt(draft.staticDelay.trim(), 10),
+    expiresAtUnixMs: null,
+  };
+}
+
+/** What a person enters on the television: the site, then the code — or the code alone where no site is published. */
+export function codeEntry(minted: Pick<DisplayRendezvous, "site" | "code">): string {
+  return minted.site === null ? minted.code : `${minted.site}-${minted.code}`;
+}
+
+/** Whole minutes a code has left, never below zero. */
+export function minutesLeft(expiresAtUnixMs: number, now = Date.now()): number {
+  return Math.max(0, Math.ceil((expiresAtUnixMs - now) / 60_000));
+}
+
 /**
  * The signage surface takes a single program body id, not free JSON — the
  * dialog offers the one field and spells the wrapping itself.
@@ -88,6 +153,7 @@ const staleActionNames: Record<DisplayStaleAction, string> = { keepWithNativeBan
 const syncModeNames: Record<DisplaySyncMode, string> = { stayInSync: "Stay in sync", positional: "Positional" };
 
 type DisplaysDialog =
+  | { kind: "add" }
   | { kind: "approve"; pairing: DisplayPairing }
   | { kind: "assign"; receiver: DisplayReceiver }
   | { kind: "unassign"; assignment: DisplayAssignment }
@@ -106,6 +172,8 @@ export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }:
       <div className="header-actions">
         <button className="quiet-button" disabled={view.inFlight.includes(actionKey.refresh)}
           onClick={() => void dispatch({ type: "refresh" })}>Refresh</button>
+        <button className="primary-button" disabled={display === null}
+          onClick={() => setDialog({ kind: "add" })}>Add a display…</button>
       </div>
     </header>
     {display === null
@@ -113,10 +181,16 @@ export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }:
           <div className="skeleton" style={{ height: 152, marginBottom: 9 }} /><div className="skeleton" style={{ height: 152 }} /></div>
       : <div className="secondary-scroll displays-surface">
         <Coordinator display={display} openDialog={setDialog} />
+        {display.pendingRendezvous.length > 0 && <section className="section-block">
+          <SectionTitle label="CODES WAITING" count={display.pendingRendezvous.length} />
+          {display.pendingRendezvous.map((minted) => <RendezvousCard key={minted.rendezvous} minted={minted}
+            view={view} dispatch={dispatch} />)}
+        </section>}
         <section className="section-block">
           <SectionTitle label="PAIRING REQUESTS" count={display.pendingPairings.length} />
           {display.pendingPairings.length === 0
-            ? <Empty said="No receiver is waiting for approval." next="Open Astrolabe setup on a TV to begin pairing." />
+            ? <Empty said="No receiver is waiting for approval."
+                next="Add a display for a code the TV enters, or open Astrolabe on a TV and compare words here." />
             : display.pendingPairings.map((pairing) => <PairingCard key={pairing.pairing} pairing={pairing} view={view}
                 dispatch={dispatch} onApprove={() => setDialog({ kind: "approve", pairing })} />)}
         </section>
@@ -184,6 +258,36 @@ function IdentifierCustodyFacts({ custody, onAddPassphrase }: {
         : "Every unlock path is bound to this machine. Losing this profile invalidates the item and asset identifiers already delivered to paired screens, and they would each need pairing again. Add a passphrase or a second device."}
     </p>
   </div>;
+}
+
+/**
+ * A code waiting to be entered. Shown as the television wants it — site,
+ * then code — with what entering it will do, and how long that holds.
+ */
+function RendezvousCard({ minted, view, dispatch }: { minted: DisplayRendezvous; view: ClientView; dispatch: Dispatch }) {
+  const busy = view.inFlight.includes(actionKey.displayRendezvousRevoke(minted.rendezvous));
+  const left = minutesLeft(minted.expiresAtUnixMs);
+  const entry = codeEntry(minted);
+  return <article className="receiver-card rendezvous-card">
+    <div className="receiver-title">
+      <div>
+        <strong>{minted.label}</strong>
+        <small>{minted.assignment === null
+          ? "Enrols, then waits for an assignment"
+          : `Shows ${minted.assignment.world} · ${minted.assignment.surface} as soon as it connects`}</small>
+      </div>
+      <Badge label={left === 0 ? "EXPIRED" : `${left} MIN LEFT`} />
+    </div>
+    <p className="rendezvous-code" aria-label="Code to enter on the television">{entry}</p>
+    <p className="health-line">{minted.site === null
+      ? "This coordinator publishes no site, so the television must already reach it; enter the code where it asks."
+      : "On the television: open Astrolabe, enter this where it asks for the code, press OK."}</p>
+    <div className="button-row end">
+      <button className="quiet-button" onClick={() => void navigator.clipboard.writeText(entry)}>Copy</button>
+      <button className="quiet-button" disabled={busy}
+        onClick={() => void dispatch({ type: "displayRendezvousRevoke", rendezvous: minted.rendezvous })}>Withdraw</button>
+    </div>
+  </article>;
 }
 
 function PairingCard({ pairing, view, dispatch, onApprove }: {
@@ -262,6 +366,7 @@ function DisplaysDialogs({ dialog, display, orbits, dispatch, onDismiss }: {
   dialog: DisplaysDialog; display: Display; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
 }) {
   switch (dialog.kind) {
+    case "add": return <AddDisplayDialog display={display} orbits={orbits} dispatch={dispatch} onDismiss={onDismiss} />;
     case "passphrase": return <PassphraseDialog dispatch={dispatch} onDismiss={onDismiss} />;
     case "approve": return <ApproveDialog pairing={dialog.pairing} dispatch={dispatch} onDismiss={onDismiss} />;
     case "assign": return <AssignDialog receiver={dialog.receiver} surfaces={display.surfaces} orbits={orbits}
@@ -339,81 +444,101 @@ function ApproveDialog({ pairing, dispatch, onDismiss }: { pairing: DisplayPairi
   </AppDialog>;
 }
 
-const surfaceKey = (surface: DisplaySurface) => `${surface.world} ${surface.surface}`;
-
-function AssignDialog({ receiver, surfaces, orbits, dispatch, onDismiss }: {
-  receiver: DisplayReceiver; surfaces: DisplaySurface[]; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
+/** The assignment form: what to show, where from, and how it goes stale. */
+function AssignmentDraftFields({ draft, setDraft, surfaces, orbits }: {
+  draft: AssignmentDraft; setDraft(next: AssignmentDraft): void; surfaces: DisplaySurface[]; orbits: Orbit[];
 }) {
-  const [orbit, setOrbit] = useState(orbits[0]?.space ?? "");
-  const [chosenKey, setChosenKey] = useState(surfaces[0] === undefined ? "" : surfaceKey(surfaces[0]));
-  const [input, setInput] = useState("");
-  const [theme, setTheme] = useState<DisplayTheme>("dark");
-  const [staleSeconds, setStaleSeconds] = useState("120");
-  const [onStale, setOnStale] = useState<DisplayStaleAction>("keepWithNativeBanner");
-  const [syncGroup, setSyncGroup] = useState("");
-  const [syncMode, setSyncMode] = useState<DisplaySyncMode>("stayInSync");
-  const [staticDelay, setStaticDelay] = useState("0");
-  const chosen = surfaces.find((surface) => surfaceKey(surface) === chosenKey);
+  const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
   const signage = chosen !== undefined && isSignageSurface(chosen);
-  const valid = chosen !== undefined && assignmentDraftValid({ input, staleSeconds, syncGroup, staticDelay });
-  const assign = () => {
-    if (chosen === undefined || !valid) return;
-    const value = input.trim();
-    void dispatch({
-      type: "displayAssignmentPut",
-      device: receiver.device,
-      orbit,
-      world: chosen.world,
-      surface: chosen.surface,
-      inputJson: signage ? JSON.stringify({ program: value }) : value,
-      theme,
-      staleAfterMs: Number.parseInt(staleSeconds.trim(), 10) * 1000,
-      onStale,
-      syncGroup: syncGroup.trim() === "" ? null : syncGroup.trim(),
-      syncMode,
-      staticDelayMs: Number.parseInt(staticDelay.trim(), 10),
-      expiresAtUnixMs: null,
-    });
-    onDismiss();
-  };
-  return <AppDialog title={`Assign ${receiver.label}`}
-    description="The daemon validates the package input, queries the exact Orbit, and pins the resulting receiver program."
-    onDismiss={onDismiss}>
-    <label>ORBIT<select value={orbit} onChange={(event) => setOrbit(event.target.value)}>
+  const set = <K extends keyof AssignmentDraft>(key: K, value: AssignmentDraft[K]) => setDraft({ ...draft, [key]: value });
+  return <>
+    <label>ORBIT<select value={draft.orbit} onChange={(event) => set("orbit", event.target.value)}>
       {orbits.map((row) => <option key={row.space} value={row.space}>{row.name}</option>)}
     </select></label>
-    <label>DISPLAY SURFACE<select value={chosenKey} onChange={(event) => {
-      setChosenKey(event.target.value);
-      setInput("");
-    }}>
+    <label>DISPLAY SURFACE<select value={draft.chosenKey} onChange={(event) => setDraft({ ...draft, chosenKey: event.target.value, input: "" })}>
       {surfaces.map((surface) => <option key={surfaceKey(surface)} value={surfaceKey(surface)}>
         {surface.title} · {surface.world}
       </option>)}
     </select></label>
     {signage
-      ? <label>Signage program body ID<input className="mono" value={input} onChange={(event) => setInput(event.target.value)} /></label>
-      : <label>Package input JSON<textarea className="mono" rows={4} value={input} onChange={(event) => setInput(event.target.value)} /></label>}
+      ? <label>Signage program body ID<input className="mono" value={draft.input} onChange={(event) => set("input", event.target.value)} /></label>
+      : <label>Package input JSON<textarea className="mono" rows={4} value={draft.input} onChange={(event) => set("input", event.target.value)} /></label>}
     <div className="dialog-grid">
-      <label>THEME<select value={theme} onChange={(event) => setTheme(event.target.value as DisplayTheme)}>
+      <label>THEME<select value={draft.theme} onChange={(event) => set("theme", event.target.value as DisplayTheme)}>
         {(Object.keys(themeNames) as DisplayTheme[]).map((option) => <option key={option} value={option}>{themeNames[option]}</option>)}
       </select></label>
-      <label>Stale after (seconds)<input value={staleSeconds} onChange={(event) => setStaleSeconds(event.target.value)} /></label>
+      <label>Stale after (seconds)<input value={draft.staleSeconds} onChange={(event) => set("staleSeconds", event.target.value)} /></label>
     </div>
-    <label>WHEN STALE<select value={onStale} onChange={(event) => setOnStale(event.target.value as DisplayStaleAction)}>
+    <label>WHEN STALE<select value={draft.onStale} onChange={(event) => set("onStale", event.target.value as DisplayStaleAction)}>
       {(Object.keys(staleActionNames) as DisplayStaleAction[]).map((option) =>
         <option key={option} value={option}>{staleActionNames[option]}</option>)}
     </select></label>
-    <label>Sync group (optional)<input className="mono" value={syncGroup} onChange={(event) => setSyncGroup(event.target.value)} /></label>
+    <label>Sync group (optional)<input className="mono" value={draft.syncGroup} onChange={(event) => set("syncGroup", event.target.value)} /></label>
     <div className="dialog-grid">
-      <label>SYNC MODE<select value={syncMode} onChange={(event) => setSyncMode(event.target.value as DisplaySyncMode)}>
+      <label>SYNC MODE<select value={draft.syncMode} onChange={(event) => set("syncMode", event.target.value as DisplaySyncMode)}>
         {(Object.keys(syncModeNames) as DisplaySyncMode[]).map((option) =>
           <option key={option} value={option}>{syncModeNames[option]}</option>)}
       </select></label>
-      <label>Static delay (ms, + advances)<input value={staticDelay} onChange={(event) => setStaticDelay(event.target.value)} /></label>
+      <label>Static delay (ms, + advances)<input value={draft.staticDelay} onChange={(event) => set("staticDelay", event.target.value)} /></label>
     </div>
+  </>;
+}
+
+function AssignDialog({ receiver, surfaces, orbits, dispatch, onDismiss }: {
+  receiver: DisplayReceiver; surfaces: DisplaySurface[]; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
+}) {
+  const [draft, setDraft] = useState(() => newAssignmentDraft(surfaces, orbits));
+  const payload = assignmentPayload(draft, surfaces);
+  const assign = () => {
+    if (payload === null) return;
+    void dispatch({ type: "displayAssignmentPut", device: receiver.device, ...payload });
+    onDismiss();
+  };
+  return <AppDialog title={`Assign ${receiver.label}`}
+    description="The daemon validates the package input, queries the exact Orbit, and pins the resulting receiver program."
+    onDismiss={onDismiss}>
+    <AssignmentDraftFields draft={draft} setDraft={setDraft} surfaces={surfaces} orbits={orbits} />
     <DialogFooter>
       <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-      <button className="primary-button" disabled={!valid} onClick={assign}>Assign</button>
+      <button className="primary-button" disabled={payload === null} onClick={assign}>Assign</button>
+    </DialogFooter>
+  </AppDialog>;
+}
+
+/**
+ * A code for a television to enter: the whole of enrolment, and — with a
+ * promise — the whole of "connect this screen to the lobby loop", as one act
+ * at the desk. Minting is what the button does; the code itself arrives on
+ * the surface with the next authoritative refresh, under "codes waiting".
+ */
+function AddDisplayDialog({ display, orbits, dispatch, onDismiss }: {
+  display: Display; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
+}) {
+  const canPromise = display.surfaces.length > 0 && orbits.length > 0;
+  const [label, setLabel] = useState("");
+  const [promise, setPromise] = useState(canPromise);
+  const [draft, setDraft] = useState(() => newAssignmentDraft(display.surfaces, orbits));
+  const payload = promise ? assignmentPayload(draft, display.surfaces) : null;
+  const ready = label.trim() !== "" && (!promise || payload !== null);
+  const mint = () => {
+    if (!ready) return;
+    void dispatch({ type: "displayRendezvousMint", label: label.trim(), assignment: payload });
+    onDismiss();
+  };
+  return <AppDialog title="Add a display"
+    description="A code the television enters. It works once and lasts fifteen minutes, and it stands in for comparing words: whoever enters it enrols that screen as this display."
+    onDismiss={onDismiss}>
+    <label>Display name<input value={label} placeholder="Lobby" autoFocus onChange={(event) => setLabel(event.target.value)} /></label>
+    {canPromise
+      ? <label className="check-row"><input type="checkbox" checked={promise} onChange={(event) => setPromise(event.target.checked)} />
+          Show something as soon as it connects</label>
+      : <p className="custody-note">{display.surfaces.length === 0
+          ? "No selected World declares a display surface, so the display will enrol and wait for an assignment."
+          : "This identity has no Orbit to draw from, so the display will enrol and wait for an assignment."}</p>}
+    {promise && canPromise && <AssignmentDraftFields draft={draft} setDraft={setDraft} surfaces={display.surfaces} orbits={orbits} />}
+    <DialogFooter>
+      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
+      <button className="primary-button" disabled={!ready} onClick={mint}>Get a code</button>
     </DialogFooter>
   </AppDialog>;
 }

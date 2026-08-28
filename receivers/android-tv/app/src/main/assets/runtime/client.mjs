@@ -498,31 +498,42 @@ export class DisplayReceiverClient {
       timeoutMs: 30_000,
     });
     if (response.status < 200 || response.status >= 300) {
-      throw new ProtocolError("coordinator_refused", `Coordinator returned HTTP ${response.status}`);
+      const refused = new ProtocolError("coordinator_refused", `Coordinator returned HTTP ${response.status}`);
+      refused.status = response.status;
+      throw refused;
     }
     return response.body;
   }
 
   async fetchInstance() {
     const instance = await this.publicJson("/head/v1/instance");
-    exactFields(instance, ["protocol_major", "instance", "label", "trust"], "coordinator instance");
+    exactFields(instance, ["protocol_major", "instance", "label", "profile", "trust"], "coordinator instance");
     if (instance.protocol_major !== PROTOCOL_MAJOR
       || !isLowerHex(instance.instance, 32)
+      || !isProfileId(instance.profile)
       || typeof instance.label !== "string"
       || new TextEncoder().encode(instance.label).byteLength < 1
       || new TextEncoder().encode(instance.label).byteLength > 96
       || /[\u0000-\u001f\u007f-\u009f]/u.test(instance.label)) {
       throw new ProtocolError("unsupported", "Coordinator does not speak protocol major 1");
     }
-    const trustFields = this.trust.kind === "pinned_certificate"
-      ? ["kind", "origin", "sha256"]
-      : ["kind", "origin"];
-    exactFields(instance.trust, trustFields, "coordinator trust");
-    if (instance.trust.kind !== this.trust.kind
-      || coordinatorOrigin(instance.trust.origin) !== this.origin
-      || (this.trust.kind === "pinned_certificate"
-        && instance.trust.sha256 !== this.trust.sha256)) {
-      throw new ProtocolError("unsupported_trust", "Coordinator trust does not match the receiver bootstrap");
+    // The instance describes the *placement* that answered: where it listens
+    // and which certificate it holds. A pinned bootstrap holds it to exactly
+    // that. A routed one — reached by site through the deployment's Web PKI —
+    // cannot: the certificate is the placement's and the route is the
+    // deployment's, and a coordinator that moves machines keeps neither.
+    // What it keeps is its identity, and that is what a routed receiver holds
+    // it to: the profile the offer must derive its words from, and the one a
+    // credential is stored against.
+    if (this.trust.kind === "pinned_certificate") {
+      exactFields(instance.trust, ["kind", "origin", "sha256"], "coordinator trust");
+      if (instance.trust.kind !== "pinned_certificate"
+        || coordinatorOrigin(instance.trust.origin) !== this.origin
+        || instance.trust.sha256 !== this.trust.sha256) {
+        throw new ProtocolError("unsupported_trust", "Coordinator trust does not match the receiver bootstrap");
+      }
+    } else if (!["pinned_certificate", "web_pki_origin", "profile"].includes(instance.trust?.kind)) {
+      throw new ProtocolError("unsupported_trust", "Coordinator trust kind is unsupported");
     }
     return instance;
   }
@@ -538,7 +549,24 @@ export class DisplayReceiverClient {
       rendezvous: this.rendezvous,
       capabilities: this.capabilities,
     };
-    const response = await this.publicJson("/head/v1/pairings", "POST", request);
+    let response;
+    try {
+      response = await this.publicJson("/head/v1/pairings", "POST", request);
+    } catch (error) {
+      // A start carrying a code the coordinator does not hold is refused as
+      // a credential, not as a malformed request — which is the one refusal
+      // a person at the television can act on.
+      if (this.rendezvous !== null
+        && error instanceof ProtocolError
+        && error.code === "coordinator_refused"
+        && error.status === 403) {
+        throw new ProtocolError(
+          "rendezvous_refused",
+          "The code entered is not one this coordinator holds, or it has expired",
+        );
+      }
+      throw error;
+    }
     // The offer names two things about the coordinator: the certificate it
     // is speaking through (`coordinator_fingerprint`) and the identity it is
     // (`coordinator_profile`). The words derive from the identity — v2 of the
@@ -569,6 +597,10 @@ export class DisplayReceiverClient {
       && response.coordinator_fingerprint !== this.trust.sha256) {
       throw new ProtocolError("pairing_integrity", "Pairing certificate does not match the receiver bootstrap");
     }
+    // The identity that made the offer is the one the instance said it was.
+    if (response.coordinator_profile !== instance.profile) {
+      throw new ProtocolError("pairing_integrity", "Pairing offer names a different identity than the coordinator");
+    }
     const expectedPhrase = await confirmationPhrase(
       response.coordinator_profile,
       response.pairing,
@@ -587,8 +619,20 @@ export class DisplayReceiverClient {
       profile: response.coordinator_profile,
       phrase: expectedPhrase,
       userConfirmed: false,
+      // Whether a code from the controller opened this pairing. The code is
+      // the person's confirmation, made in advance at the controller; there
+      // is nobody to press anything here, and the words are not shown.
+      viaCode: this.rendezvous !== null,
     };
+    // A code is spent by the start that carried it. Forgetting it here means
+    // a cancelled or re-paired ceremony goes the long way rather than
+    // presenting a spent code and being refused for it.
+    this.rendezvous = null;
     await this.vault.save(this.credential);
+    if (this.credential.viaCode) {
+      await this.confirmPairing();
+      return;
+    }
     this.presentPairing();
   }
 
@@ -597,6 +641,7 @@ export class DisplayReceiverClient {
       phrase: this.credential.phrase,
       fingerprint: this.credential.fingerprint,
       confirmed: this.credential.userConfirmed,
+      viaCode: Boolean(this.credential.viaCode),
     });
   }
 
@@ -690,6 +735,7 @@ export class DisplayReceiverClient {
         this.credential = {
           mode: "enrolling",
           origin: this.origin,
+          profile: current.profile,
           pairing: current.pairing,
           device: response.device,
           proofKey: response.proof_key,
@@ -735,6 +781,9 @@ export class DisplayReceiverClient {
     this.credential = {
       mode: "paired",
       origin: this.origin,
+      // The identity this receiver is enrolled with — what it would hold a
+      // coordinator to if the route ever answered as somebody else.
+      profile: this.credential.profile ?? null,
       device: this.credential.device,
       proofKey: this.credential.proofKey,
     };

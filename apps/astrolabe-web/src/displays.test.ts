@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { Display, DisplayAssignment } from "./client";
-import { assignmentDraftValid, assignmentFor, isSignageSurface, platformName, receiverBootstrap } from "./displays";
+import type { Display, DisplayAssignment, DisplaySurface } from "./client";
+import {
+  assignmentDraftValid, assignmentFor, assignmentPayload, codeEntry, isSignageSurface, minutesLeft,
+  newAssignmentDraft, platformName, receiverBootstrap,
+} from "./displays";
 
 describe("the displays coordination rules", () => {
   it("spells the pinned receiver bootstrap exactly", () => {
@@ -35,6 +38,39 @@ describe("the displays coordination rules", () => {
     expect(assignmentDraftValid({ ...draft, staticDelay: "-60000" })).toBe(true);
     expect(assignmentDraftValid({ ...draft, staticDelay: "60001" })).toBe(false);
     expect(assignmentDraftValid({ ...draft, staticDelay: "soon" })).toBe(false);
+  });
+
+  it("spells a code the way the television takes it: site, then code", () => {
+    expect(codeEntry({ site: "acme", code: "7K3Q-0111" })).toBe("acme-7K3Q-0111");
+    // No published site: the television already reaches this coordinator,
+    // and the code stands alone.
+    expect(codeEntry({ site: null, code: "7K3Q-0111" })).toBe("7K3Q-0111");
+  });
+
+  it("counts a code's remaining minutes up, and never below zero", () => {
+    expect(minutesLeft(10 * 60_000 + 1, 0)).toBe(11);
+    expect(minutesLeft(10 * 60_000, 0)).toBe(10);
+    expect(minutesLeft(5, 10)).toBe(0);
+  });
+
+  it("turns a draft into the assignment the daemon takes, wrapping only the signage program id", () => {
+    const surfaces: DisplaySurface[] = [
+      { world: "com.lait.signage", surface: "signage.program", title: "Signage program", contractVersion: 1, outputs: [] },
+      { world: "issues", surface: "board", title: "Issue board", contractVersion: 1, outputs: [] },
+    ];
+    const orbits = [{ space: "orb_1", name: "Home", path: "/x", lastOpened: null }];
+    const draft = newAssignmentDraft(surfaces, orbits);
+    expect(assignmentPayload(draft, surfaces)).toBeNull();
+    expect(assignmentPayload({ ...draft, input: "bod_lobby" }, surfaces)).toEqual({
+      orbit: "orb_1", world: "com.lait.signage", surface: "signage.program",
+      inputJson: JSON.stringify({ program: "bod_lobby" }), theme: "dark", staleAfterMs: 120_000,
+      onStale: "keepWithNativeBanner", syncGroup: null, syncMode: "stayInSync", staticDelayMs: 0, expiresAtUnixMs: null,
+    });
+    // Any other surface's input crosses verbatim.
+    expect(assignmentPayload({ ...draft, chosenKey: "issues board", input: "{\"project\":\"ENG\"}" }, surfaces)?.inputJson)
+      .toBe("{\"project\":\"ENG\"}");
+    // A draft with nothing to show is not an assignment.
+    expect(assignmentPayload({ ...draft, chosenKey: "nowhere", input: "x" }, surfaces)).toBeNull();
   });
 
   it("special-cases the signage program surface and nothing else", () => {

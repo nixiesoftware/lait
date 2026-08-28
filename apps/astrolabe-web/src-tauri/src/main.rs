@@ -423,6 +423,7 @@ struct WebDisplayFacts {
     devices: Vec<WebDisplayReceiver>,
     assignments: Vec<WebDisplayAssignment>,
     pending_pairings: Vec<WebDisplayPairing>,
+    pending_rendezvous: Vec<WebDisplayRendezvous>,
     /// `None` from a daemon that predates the custody split — not reported,
     /// as distinct from reported-as-none.
     identifier_custody: Option<WebIdentifierCustody>,
@@ -503,6 +504,45 @@ struct WebDisplayPairing {
     build: String,
     created_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+}
+
+/// A code minted for a television to enter.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayRendezvous {
+    rendezvous: String,
+    code: String,
+    site: Option<String>,
+    label: String,
+    assignment: Option<WebDisplayRendezvousAssignment>,
+    created_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayRendezvousAssignment {
+    orbit: String,
+    world: String,
+    surface: String,
+}
+
+/// What a code pins its television to: the assignment fields without the
+/// device.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayAssignmentRequest {
+    orbit: String,
+    world: String,
+    surface: String,
+    input_json: String,
+    theme: WebDisplayTheme,
+    stale_after_ms: u32,
+    on_stale: WebDisplayStaleAction,
+    sync_group: Option<String>,
+    sync_mode: WebDisplaySyncMode,
+    static_delay_ms: i32,
+    expires_at_unix_ms: Option<u64>,
 }
 
 impl From<ClientView> for WebClientView {
@@ -720,6 +760,25 @@ impl From<ClientView> for WebClientView {
                         build: pairing.build,
                         created_at_unix_ms: pairing.created_at_unix_ms,
                         expires_at_unix_ms: pairing.expires_at_unix_ms,
+                    })
+                    .collect(),
+                pending_rendezvous: display
+                    .pending_rendezvous
+                    .into_iter()
+                    .map(|minted| WebDisplayRendezvous {
+                        rendezvous: minted.rendezvous,
+                        code: minted.code,
+                        site: minted.site,
+                        label: minted.label,
+                        assignment: minted.assignment.map(|assignment| {
+                            WebDisplayRendezvousAssignment {
+                                orbit: assignment.orbit,
+                                world: assignment.world,
+                                surface: assignment.surface,
+                            }
+                        }),
+                        created_at_unix_ms: minted.created_at_unix_ms,
+                        expires_at_unix_ms: minted.expires_at_unix_ms,
                     })
                     .collect(),
                 identifier_custody: display.identifier_custody.map(|custody| {
@@ -1162,6 +1221,13 @@ enum WebAction {
     DisplayPairingReject {
         pairing: String,
     },
+    DisplayRendezvousMint {
+        label: String,
+        assignment: Option<WebDisplayAssignmentRequest>,
+    },
+    DisplayRendezvousRevoke {
+        rendezvous: String,
+    },
     DisplayAssignmentPut {
         device: String,
         orbit: String,
@@ -1357,6 +1423,37 @@ impl From<WebAction> for ActionRequest {
                 Self::DisplayPairingApprove { pairing, label }
             }
             WebAction::DisplayPairingReject { pairing } => Self::DisplayPairingReject { pairing },
+            WebAction::DisplayRendezvousMint { label, assignment } => Self::DisplayRendezvousMint {
+                label,
+                assignment: assignment.map(|assignment| api::DisplayRendezvousAssignment {
+                    orbit: assignment.orbit,
+                    world: assignment.world,
+                    surface: assignment.surface,
+                    input_json: assignment.input_json,
+                    theme: match assignment.theme {
+                        WebDisplayTheme::Light => api::DisplayTheme::Light,
+                        WebDisplayTheme::Dark => api::DisplayTheme::Dark,
+                        WebDisplayTheme::HighContrast => api::DisplayTheme::HighContrast,
+                    },
+                    stale_after_ms: assignment.stale_after_ms,
+                    on_stale: match assignment.on_stale {
+                        WebDisplayStaleAction::KeepWithNativeBanner => {
+                            api::DisplayStaleAction::KeepWithNativeBanner
+                        }
+                        WebDisplayStaleAction::Blank => api::DisplayStaleAction::Blank,
+                    },
+                    sync_group: assignment.sync_group,
+                    sync_mode: match assignment.sync_mode {
+                        WebDisplaySyncMode::StayInSync => api::DisplaySyncMode::StayInSync,
+                        WebDisplaySyncMode::Positional => api::DisplaySyncMode::Positional,
+                    },
+                    static_delay_ms: assignment.static_delay_ms,
+                    expires_at_unix_ms: assignment.expires_at_unix_ms,
+                }),
+            },
+            WebAction::DisplayRendezvousRevoke { rendezvous } => {
+                Self::DisplayRendezvousRevoke { rendezvous }
+            }
             WebAction::DisplayAssignmentPut {
                 device,
                 orbit,

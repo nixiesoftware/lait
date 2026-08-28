@@ -2,7 +2,8 @@
 
 use lait::control::{
     ControlRoute, DisplayAssignmentSyncSetting, DisplayCoordinatorView, DisplayPresentationView,
-    DisplayStaleActionSetting, DisplayThemeSetting, Request, Response,
+    DisplayRendezvousAssignmentSetting, DisplayRendezvousView, DisplayStaleActionSetting,
+    DisplayThemeSetting, Request, Response,
 };
 
 use super::{Client, ClientError, ClientResult};
@@ -19,6 +20,28 @@ pub struct DisplayAssignmentInput {
     pub on_stale: DisplayStaleActionSetting,
     pub sync: Option<DisplayAssignmentSyncSetting>,
     pub expires_at_unix_ms: Option<u64>,
+}
+
+/// What a code pins its television to once it connects: an assignment with
+/// everything but the device, which does not exist until then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayRendezvousAssignmentInput {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    pub input: serde_json::Value,
+    pub theme: DisplayThemeSetting,
+    pub stale_after_ms: u32,
+    pub on_stale: DisplayStaleActionSetting,
+    pub sync: Option<DisplayAssignmentSyncSetting>,
+    pub expires_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayRendezvousInput {
+    /// The name the television enrols under.
+    pub label: String,
+    pub assignment: Option<DisplayRendezvousAssignmentInput>,
 }
 
 impl Client {
@@ -52,6 +75,58 @@ impl Client {
             ));
         }
         self.display_ok(Request::DisplayPairingReject { pairing })
+            .await
+    }
+
+    /// Mint a code for a television to enter.
+    ///
+    /// A promised assignment's Orbit is resolved the way an assignment's is,
+    /// because a code that named a Space where the daemon wants an Orbit would
+    /// fail on the television, minutes from now, instead of here.
+    pub async fn display_rendezvous_mint(
+        &self,
+        input: DisplayRendezvousInput,
+    ) -> ClientResult<DisplayRendezvousView> {
+        if input.label.trim().is_empty() {
+            return Err(ClientError::invalid(
+                "a display code needs the name the display will enrol under",
+            ));
+        }
+        let assignment = match input.assignment {
+            None => None,
+            Some(assignment) => Some(DisplayRendezvousAssignmentSetting {
+                orbit: self.display_orbit(&assignment.orbit).await?,
+                world: assignment.world,
+                surface: assignment.surface,
+                input: assignment.input,
+                theme: assignment.theme,
+                stale_after_ms: assignment.stale_after_ms,
+                on_stale: assignment.on_stale,
+                sync: assignment.sync,
+                expires_at_unix_ms: assignment.expires_at_unix_ms,
+            }),
+        };
+        match self
+            .display_request(Request::DisplayRendezvousMint {
+                label: input.label,
+                assignment,
+            })
+            .await?
+        {
+            Response::DisplayRendezvous(view) => Ok(*view),
+            other => Err(ClientError::internal(format!(
+                "unexpected display rendezvous reply: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn display_rendezvous_revoke(&self, rendezvous: String) -> ClientResult<()> {
+        if rendezvous.trim().is_empty() {
+            return Err(ClientError::invalid(
+                "withdrawing a display code requires its rendezvous id",
+            ));
+        }
+        self.display_ok(Request::DisplayRendezvousRevoke { rendezvous })
             .await
     }
 
