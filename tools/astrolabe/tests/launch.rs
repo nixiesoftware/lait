@@ -709,11 +709,11 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
 }
 
 /// What the durable Signage World holds once seeded: the Space, the program,
-/// and one screen per receiver the test will point at it.
+/// and the one screen both receivers are pointed at.
 struct SeededSignage {
     space: String,
     program: String,
-    screens: [String; 2],
+    screen: String,
 }
 
 async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
@@ -775,7 +775,8 @@ async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
     write_signage_program(client, &orbit.space, program.clone()).await;
     // A receiver is pointed at a screen, not a program: the screen is tuned to
     // a channel, and the channel's base is what plays when nothing is being
-    // broadcast at it. One screen per receiver, because a screen is a panel.
+    // broadcast at it. One screen for both receivers, because a sync group is
+    // a frame-lock cohort and its members must pin the same canonical input.
     let channel = signage::SignageChannel {
         id: replica::body::BodyId::from_bytes([20; 16]).render(),
         name: "Lobby channel".into(),
@@ -783,17 +784,12 @@ async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
         schedule: Vec::new(),
     };
     write_signage_channel(client, &orbit.space, channel.clone()).await;
-    let screens = [
-        signage_screen(21, "Lobby wall", &channel.id),
-        signage_screen(22, "Synced wall", &channel.id),
-    ];
-    for screen in &screens {
-        write_signage_screen(client, &orbit.space, screen.clone()).await;
-    }
+    let screen = signage_screen(21, "Lobby wall", &channel.id);
+    write_signage_screen(client, &orbit.space, screen.clone()).await;
     SeededSignage {
         space: orbit.space.clone(),
         program: program.id,
-        screens: screens.map(|screen| screen.id),
+        screen: screen.id,
     }
 }
 
@@ -1285,7 +1281,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     let seeded = seed_signage_program(&client, identity.path()).await;
     let signage_orbit = seeded.space.clone();
     let signage_program = seeded.program.clone();
-    let [lobby_screen, synced_screen] = seeded.screens.clone();
+    let signage_screen = seeded.screen.clone();
 
     // Run the real receiver binary against the real coordinator. This is the
     // restart/recovery seam: the public certificate copied by Astrolabe must
@@ -1349,7 +1345,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 orbit: signage_orbit,
                 world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "screen": lobby_screen }),
+                input: serde_json::json!({ "screen": signage_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
@@ -1436,7 +1432,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 orbit: assignment.space.clone(),
                 world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "screen": synced_screen }),
+                input: serde_json::json!({ "screen": signage_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
