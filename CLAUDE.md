@@ -273,7 +273,8 @@ window.dispatchEvent(new CustomEvent("lait:nav", { detail: { view: "settings" } 
   No-milestone bucket and `null` clears the scope. Applied *after* `project`, so
   `{ project: "ENG", milestone: "mls_x" }` in one detail scopes ENG. Stays on the
   current view if it draws rows (list/board/calendar), else lands on Issues.
-- `{ tab }` — Settings sub-page: `general | members | devices | labels | workflow | access`
+- `{ tab }` — Settings sub-page: `preferences | profile | notifications | general | members | teams | devices | labels | workflow | access`
+  (the list lives in `viewer/src/ui/settings/pages.ts`)
 - `{ project: "<PROJECT_KEY>", view: "overview" }` — enter that project's overview page
 
 Canonical project URLs are nested under

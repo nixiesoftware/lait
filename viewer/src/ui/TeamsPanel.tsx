@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Search, Trash2, UserPlus } from "lucide-react";
 
 import { rpc } from "../api";
@@ -34,6 +34,8 @@ export function TeamsPanel({
   members,
   readOnly,
   onError,
+  focus = null,
+  onFocusConsumed,
 }: {
   spaceId: string;
   teams: TeamDto[];
@@ -41,10 +43,19 @@ export function TeamsPanel({
   members: MemberDto[];
   readOnly: boolean;
   onError: (message: string) => void;
+  /** A team the settings rail asked for. Opens that team's step once, then
+   *  hands the request back so the rail can ask again for the same team. */
+  focus?: string | null;
+  onFocusConsumed?: () => void;
 }) {
-  const [step, setStep] = useState<{ at: "list" } | { at: "team"; id: string } | { at: "new" }>({
-    at: "list",
-  });
+  const [step, setStep] = useState<{ at: "list" } | { at: "team"; id: string } | { at: "new" }>(
+    () => (focus ? { at: "team", id: focus } : { at: "list" }),
+  );
+  useEffect(() => {
+    if (!focus) return;
+    setStep({ at: "team", id: focus });
+    onFocusConsumed?.();
+  }, [focus, onFocusConsumed]);
 
   const send = async (fn: () => Promise<unknown>): Promise<boolean> => {
     try {
@@ -152,6 +163,7 @@ function TeamList({
           ) : undefined
         }
       />
+      {teams.length > 0 && (
       <div className="mb-4 max-w-md">
         <TextInput
           label="Filter teams"
@@ -163,6 +175,7 @@ function TeamList({
           width="100%"
         />
       </div>
+      )}
 
       {teams.length === 0 ? (
         <EmptyState

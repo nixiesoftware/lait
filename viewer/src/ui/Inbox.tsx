@@ -3,7 +3,9 @@ import { AtSign, Check, CheckCheck, Circle, MessageSquare, RotateCcw, Settings2,
 
 import { rpc } from "../api";
 import {
-  defaultInboxPreferences,
+  inboxCauseLabel as causeLabel,
+  loadInboxPreferences as loadPreferences,
+  persistInboxPreferences as persistPreferences,
   inboxEntryKey,
   type InboxKind,
   type InboxPreferences,
@@ -421,24 +423,6 @@ export function Inbox({
       )}
     </div>
   );
-}
-
-function causeLabel(kind: string): string {
-  return { assigned: "Assignments", comment: "Comments and mentions", status: "Status changes", chronological: "Latest" }[kind] ?? "Other";
-}
-
-const preferencesKey = (spaceId: string) => `lait.inbox-preferences:${spaceId}`;
-function loadPreferences(spaceId: string): InboxPreferences {
-  try {
-    const saved = JSON.parse(localStorage.getItem(preferencesKey(spaceId)) ?? "null") as Partial<InboxPreferences> | null;
-    const defaults = defaultInboxPreferences();
-    return saved ? { ...defaults, ...saved, kinds: { ...defaults.kinds, ...saved.kinds }, snoozed: saved.snoozed ?? {} } : defaults;
-  } catch {
-    return defaultInboxPreferences();
-  }
-}
-function persistPreferences(spaceId: string, value: InboxPreferences): void {
-  try { localStorage.setItem(preferencesKey(spaceId), JSON.stringify(value)); } catch { /* memory remains authoritative */ }
 }
 
 interface InboxContext { active: string; scroll: number }

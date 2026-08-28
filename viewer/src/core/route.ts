@@ -75,7 +75,17 @@ export interface ViewerRoute {
 
 /** The Settings sub-pages that have an address. Mirrors `Settings.tsx`'s `Tab`;
  *  an unknown value falls back to `general` rather than rendering nothing. */
-const SETTINGS_TABS = new Set(["teams", "members", "devices", "labels", "workflow", "access"]);
+const SETTINGS_TABS = new Set([
+  "preferences",
+  "profile",
+  "notifications",
+  "teams",
+  "members",
+  "devices",
+  "labels",
+  "workflow",
+  "access",
+]);
 
 export const DEFAULT_ROUTE: ViewerRoute = {
   spaceId: null,

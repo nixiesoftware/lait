@@ -39,6 +39,7 @@ import { rpc } from "../api";
 import { downloadUrl, upload as uploadContent } from "../content";
 import { useIssueDetail, usePacket, useProjectBaselines, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
+import { usePreferences } from "../core/preferences";
 import {
   describeEventRich,
   EDIT_KINDS,
@@ -199,6 +200,7 @@ export function IssueDetail({
   } | null>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
+  const { commentSubmit } = usePreferences();
 
   useEffect(
     () => saveDraft(canonicalSpaceId, reff, "comment", comment),
@@ -1109,7 +1111,12 @@ export function IssueDetail({
                 setCommentError(null);
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && comment.trim()) {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  (commentSubmit === "enter" || e.metaKey || e.ctrlKey) &&
+                  comment.trim()
+                ) {
                   e.preventDefault();
                   void submitComment();
                 }
@@ -1145,7 +1152,7 @@ export function IssueDetail({
                 onClick={() => void submitComment()}
                 variant="ghost"
                 size="sm"
-                tooltip={`${commentError ? "Retry comment" : "Comment"}  ${"Ctrl/⌘ ↵"}`}
+                tooltip={`${commentError ? "Retry comment" : "Comment"}  ${commentSubmit === "enter" ? "↵" : "Ctrl/⌘ ↵"}`}
                 icon={<ArrowUp className="size-icon-sm" />}
               />
             </div>
