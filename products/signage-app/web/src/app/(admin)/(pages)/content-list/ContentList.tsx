@@ -5,6 +5,7 @@ import { Images, Plus, Trash2, Upload } from "lucide-react";
 import {
   CatalogueRow,
   Chips,
+  CommitText,
   Confirm,
   Empty,
   GalleryShot,
@@ -16,11 +17,16 @@ import {
   SelectionBar,
   ViewToggle,
   haptic,
+  litProps,
+  useFocus,
+  useHoldable,
+  useLive,
   useOrbit,
   useToast,
   useWide,
   type MenuItem,
 } from "@/ds";
+import { useFleet } from "@/utils/screens/fleet";
 import {
   type ContentItemProps,
   type SourceCategory,
@@ -58,6 +64,21 @@ const CATEGORY_LABEL: Record<SourceCategory, string> = {
 };
 
 export const ContentListPage: React.FC = () => {
+  const fleet = useFleet();
+  const { now } = useLive();
+  const { held } = useFocus();
+
+  /** Which programs hold a file, and whether any screen is showing it now. */
+  const usageOf = (id: string) => {
+    const holders = fleet.programs.filter((program) => program.items.some((item) => item.media === id));
+    const holderIds = new Set(holders.map((program) => program.id));
+    const onGlass = fleet.screens.some((screen) => {
+      const showing = fleet.playbackFor(screen, now).showing;
+      return showing.showing === "program" && holderIds.has(showing.program);
+    });
+    return { holders, onGlass };
+  };
+
   const { q: searchQuery } = useSearch({ strict: false }) as { q?: string };
   const toast = useToast();
   const orbit = useOrbit();
@@ -251,7 +272,7 @@ export const ContentListPage: React.FC = () => {
     <Page>
       <div {...getRootProps()}>
         <input {...getInputProps()} />
-        <PageHeader title="Media" icon={<Images size={20} />}>
+        <PageHeader title="Files" icon={<Images size={20} />}>
           <button
             type="button"
             className="ds-btn ds-btn-solid"
@@ -341,8 +362,8 @@ export const ContentListPage: React.FC = () => {
         ) : showList ? (
           <div className="ds-rows">
             {displayItems.map((item) => (
+              <Star key={item.tempId || item.id} id={item.id} use={item.isUploading || fleet.loading ? null : usageOf(item.id)} held={held}>
               <CatalogueRow
-                key={item.tempId || item.id}
                 name={item.name}
                 meta={
                   item.isUploading
@@ -365,13 +386,14 @@ export const ContentListPage: React.FC = () => {
               >
                 <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
               </CatalogueRow>
+              </Star>
             ))}
           </div>
         ) : (
           <div className="ds-gallery">
             {displayItems.map((item) => (
+              <Star key={item.tempId || item.id} id={item.id} use={item.isUploading || fleet.loading ? null : usageOf(item.id)} held={held}>
               <GalleryShot
-                key={item.tempId || item.id}
                 name={item.isUploading ? "Uploading…" : item.name}
                 badge={item.isUploading ? undefined : sourceLabel(item)}
                 play={
@@ -388,6 +410,7 @@ export const ContentListPage: React.FC = () => {
               >
                 <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
               </GalleryShot>
+              </Star>
             ))}
           </div>
         )}
@@ -402,17 +425,6 @@ export const ContentListPage: React.FC = () => {
         actions={
           inspect && (
             <>
-              <button
-                type="button"
-                className="ds-btn ds-btn-solid"
-                onClick={() => {
-                  if (inspect && rename.trim() && rename.trim() !== inspect.name) {
-                    void updateName(inspect.id, rename);
-                  }
-                }}
-              >
-                Save name
-              </button>
               <button
                 type="button"
                 className="ds-btn ds-btn-danger"
@@ -432,14 +444,11 @@ export const ContentListPage: React.FC = () => {
             >
               <Thumb media={inspect} orbit={orbit} />
             </div>
-            <label className="ds-field">
-              <span>Name</span>
-              <input
-                className="ds-input"
-                value={rename}
-                onChange={(event) => setRename(event.target.value)}
-              />
-            </label>
+            <CommitText
+              label="Name"
+              value={inspect.name}
+              onWrite={(next) => (next.trim() && next.trim() !== inspect.name ? updateName(inspect.id, next) : Promise.resolve())}
+            />
             <p className="ds-hint">Type · {sourceLabel(inspect)}</p>
             <p className="ds-hint">
               Size ·{" "}
@@ -482,3 +491,35 @@ export const ContentListPage: React.FC = () => {
     </Page>
   );
 };
+
+/**
+ * A file, wearing its use: faint when no program holds it, a dot of now when a
+ * screen is showing it. Holding it lights the programs that hold it elsewhere.
+ */
+function Star({
+  id,
+  use,
+  held,
+  children,
+}: {
+  id: string;
+  use: { holders: { id: string }[]; onGlass: boolean } | null;
+  held: ReturnType<typeof useFocus>["held"];
+  children: React.ReactNode;
+}) {
+  const hold = useHoldable("file", id);
+  const related =
+    held?.kind === "program" && use != null && use.holders.some((program) => program.id === held.id);
+  return (
+    <div
+      className="ds-star"
+      data-unused={use != null && use.holders.length === 0 ? "true" : undefined}
+      data-onglass={use?.onGlass ? "true" : undefined}
+      {...hold.bind}
+      {...(hold.held ? {} : litProps(held, related))}
+    >
+      {children}
+      {use?.onGlass && <span className="ds-star-now" aria-label="Showing now" />}
+    </div>
+  );
+}

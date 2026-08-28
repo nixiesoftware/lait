@@ -6,7 +6,7 @@ interface ContentListSearch {
 }
 
 function ContentListRoute() {
-  document.title = 'Media | Signage';
+  document.title = 'Files | Signage';
   return <ContentListPage />;
 }
 

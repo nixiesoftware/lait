@@ -107,6 +107,7 @@ export function channelDay(
   channel: SignageChannel,
   now: number,
   open?: (program: string) => void,
+  nameOf?: (program: string) => string | undefined,
 ): Segment[] {
   const segments: Segment[] = [];
   if (channel.base) {
@@ -115,6 +116,8 @@ export function channelDay(
       start: 0,
       end: DAY_MS,
       tone: "ground",
+      title: nameOf?.(channel.base),
+      children: nameOf?.(channel.base),
       onOpen: open ? () => open(channel.base as string) : undefined,
     });
   }
@@ -127,6 +130,8 @@ export function channelDay(
       end: span.end,
       tone: "part",
       height: part.priority,
+      title: nameOf?.(part.program),
+      children: nameOf?.(part.program),
       onOpen: open ? () => open(part.program) : undefined,
     });
   }

@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { Clapperboard, Copy, Plus, Trash2 } from "lucide-react";
 import {
+  Bezel,
   Confirm,
   Cover,
+  DayTrack,
   Empty,
   Inspector,
   Page,
@@ -14,12 +16,18 @@ import {
   PlaylistTile,
   SelectionBar,
   ViewToggle,
+  channelDay,
   haptic,
+  litProps,
+  useFocus,
+  useHoldable,
+  useLive,
   useOrbit,
   useToast,
   useWide,
   type MenuItem,
 } from "@/ds";
+import { useFleet } from "@/utils/screens/fleet";
 import { Thumb } from "@/program-editor/Thumb";
 import { formatDuration, itemDurationMs } from "@/program-editor/model";
 import {
@@ -55,6 +63,9 @@ export const BroadcastListPage: React.FC = () => {
   const toast = useToast();
   const orbit = useOrbit();
   const wide = useWide();
+  const fleet = useFleet();
+  const { now } = useLive();
+  const { held } = useFocus();
 
   const [query, setQuery] = useState(searchQuery || "");
   const [programs, setPrograms] = useState<BroadcastSummary[]>([]);
@@ -225,6 +236,64 @@ export const BroadcastListPage: React.FC = () => {
     },
   ];
 
+  /** The channels that carry this program, and where in their day it sits. */
+  const carriedBy = (row: BroadcastSummary) =>
+    fleet.channels.filter(
+      (channel) =>
+        channel.base === row.id ||
+        (channel.schedule ?? []).some((part) => part.program === row.id),
+    );
+
+  /** The screens the World says are showing it, drawn as themselves. */
+  const showingOn = (row: BroadcastSummary) =>
+    row.assignedScreens
+      .map((info) => fleet.screens.find((screen) => screen.id === info.id))
+      .filter((screen): screen is NonNullable<typeof screen> => screen != null);
+
+  const relations = (row: BroadcastSummary) => {
+    const channels = carriedBy(row);
+    const screens = showingOn(row);
+    if (channels.length === 0 && screens.length === 0) return null;
+    return (
+      <span className="ds-constellation" onClick={(event) => event.stopPropagation()}>
+        {channels.map((channel) => (
+          <span
+            key={channel.id}
+            className="ds-carried"
+            title={channel.name}
+            {...litProps(held, held?.kind === "channel" && held.id === channel.id)}
+          >
+            <DayTrack
+              size="sm"
+              now={now}
+              segments={channelDay(channel, now).map((segment) => ({
+                ...segment,
+                tone: segment.id === `base:${row.id}` || (channel.schedule ?? []).some((part) => part.id === segment.id && part.program === row.id) ? segment.tone : "ground",
+              }))}
+            />
+          </span>
+        ))}
+        {screens.length > 0 && (
+          <span className="ds-attached">
+            {screens.map((screen) => (
+              <Bezel
+                key={screen.id}
+                size="xs"
+                screen={screen}
+                playback={fleet.playbackFor(screen, now)}
+                programs={fleet.programs}
+                media={fleet.media}
+                presets={fleet.presets}
+                orbit={orbit}
+                now={now}
+              />
+            ))}
+          </span>
+        )}
+      </span>
+    );
+  };
+
   const coverCells = (row: BroadcastSummary) =>
     row.items.slice(0, 4).map((item) => (
       <Thumb key={item.id} media={mediaMap.get(item.media)} orbit={orbit} />
@@ -236,11 +305,7 @@ export const BroadcastListPage: React.FC = () => {
       0,
     );
     const clips = `${row.contentCount} ${row.contentCount === 1 ? "clip" : "clips"}`;
-    const screens =
-      row.assignedScreenCount > 0
-        ? `${row.assignedScreenCount} ${row.assignedScreenCount === 1 ? "screen" : "screens"}`
-        : "not showing";
-    return `${clips} · ${formatDuration(ms)} · ${screens}`;
+    return `${clips} · ${formatDuration(ms)}`;
   };
 
   const showList = !wide || viewMode === "list";
@@ -297,35 +362,39 @@ export const BroadcastListPage: React.FC = () => {
       ) : showList ? (
         <div className="ds-pl-list">
           {rows.map((row) => (
-            <PlaylistRow
-              key={row.id}
-              name={row.name}
-              meta={meta(row)}
-              selected={selected.has(row.id)}
-              onSelect={() => toggle(row.id)}
-              onOpen={() => openEditor(row.id)}
-              menu={menuFor(row)}
-              more={menuFor(row)}
-            >
-              <Cover>{coverCells(row)}</Cover>
-            </PlaylistRow>
+            <ProgramRow key={row.id} id={row.id}>
+              <PlaylistRow
+                name={row.name}
+                meta={meta(row)}
+                selected={selected.has(row.id)}
+                onSelect={() => toggle(row.id)}
+                onOpen={() => openEditor(row.id)}
+                menu={menuFor(row)}
+                more={menuFor(row)}
+              >
+                <Cover>{coverCells(row)}</Cover>
+              </PlaylistRow>
+              {relations(row)}
+            </ProgramRow>
           ))}
         </div>
       ) : (
         <div className="ds-pl-grid">
           {rows.map((row) => (
-            <PlaylistTile
-              key={row.id}
-              name={row.name}
-              meta={meta(row)}
-              selected={selected.has(row.id)}
-              onSelect={() => toggle(row.id)}
-              onOpen={() => openEditor(row.id)}
-              menu={menuFor(row)}
-              more={menuFor(row)}
-            >
-              <Cover>{coverCells(row)}</Cover>
-            </PlaylistTile>
+            <ProgramRow key={row.id} id={row.id} tile>
+              <PlaylistTile
+                name={row.name}
+                meta={meta(row)}
+                selected={selected.has(row.id)}
+                onSelect={() => toggle(row.id)}
+                onOpen={() => openEditor(row.id)}
+                menu={menuFor(row)}
+                more={menuFor(row)}
+              >
+                <Cover>{coverCells(row)}</Cover>
+              </PlaylistTile>
+              {relations(row)}
+            </ProgramRow>
           ))}
         </div>
       )}
@@ -384,11 +453,7 @@ export const BroadcastListPage: React.FC = () => {
               />
             </label>
             <p className="ds-hint">{meta(inspect)}</p>
-            {inspect.assignedScreens.length > 0 && (
-              <p className="ds-hint">
-                Showing on {inspect.assignedScreens.map((s) => s.name).join(", ")}
-              </p>
-            )}
+            {relations(inspect)}
           </>
         )}
       </Inspector>
@@ -411,3 +476,21 @@ export const BroadcastListPage: React.FC = () => {
     </Page>
   );
 };
+
+/** A program's row or tile, holdable: what carries it and shows it lights. */
+function ProgramRow({
+  id,
+  tile,
+  children,
+}: {
+  id: string;
+  tile?: boolean;
+  children: React.ReactNode;
+}) {
+  const hold = useHoldable("program", id);
+  return (
+    <div className={`ds-program${tile ? " is-tile" : ""}`} {...hold.bind}>
+      {children}
+    </div>
+  );
+}

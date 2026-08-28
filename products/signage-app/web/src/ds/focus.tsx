@@ -102,7 +102,8 @@ export function useHoldable(kind: HeldKind, id: string) {
 /**
  * The attributes a related thing wears. `lit` when it relates to what is held,
  * `dim` when something else is held and it does not. Nothing is dimmed when
- * nothing is held: the resting state is the honest one.
+ * nothing is held: the resting state is the honest one. The held thing itself
+ * wears neither — a holder that dims under its own hand reads as broken.
  */
 export function litProps(held: Held | null, related: boolean) {
   if (!held) return {};

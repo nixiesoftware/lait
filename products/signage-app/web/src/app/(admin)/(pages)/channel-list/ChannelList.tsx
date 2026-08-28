@@ -179,10 +179,14 @@ function ChannelCard({
   const tuned = fleet.tunedTo(channel.id);
   const day = useMemo(
     () =>
-      channelDay(channel, now, (program) =>
-        void navigate({ to: "/broadcast-list/broadcast/$id", params: { id: program } }),
+      channelDay(
+        channel,
+        now,
+        (program) =>
+          void navigate({ to: "/broadcast-list/broadcast/$id", params: { id: program } }),
+        (program) => programs.find((entry) => entry.id === program)?.name,
       ),
-    [channel, now, navigate],
+    [channel, now, navigate, programs],
   );
   const put = useCallback(
     async (next: SignageChannel) => {

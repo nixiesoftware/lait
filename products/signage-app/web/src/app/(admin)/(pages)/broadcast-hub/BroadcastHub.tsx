@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Megaphone, Plus, Radio, X } from "lucide-react";
 import {
   Confirm,
+  DayTrack,
   Empty,
   Footprint,
   OnAir,
@@ -30,6 +31,9 @@ import {
   useLive,
   useRevision,
   useToast,
+  windowToday,
+  DAY_MS,
+  type Segment,
 } from "@/ds";
 import {
   cancelBroadcast,
@@ -58,6 +62,7 @@ import type {
 export default function BroadcastHub({ screen: addressed }: { screen?: string } = {}) {
   const toast = useToast();
   const revision = useRevision();
+  const { now: tick } = useLive();
   const [broadcasts, setBroadcasts] = useState<SignageBroadcast[]>([]);
   const [audiences, setAudiences] = useState<SignageAudience[]>([]);
   const [screens, setScreens] = useState<SignageScreen[]>([]);
@@ -140,23 +145,35 @@ export default function BroadcastHub({ screen: addressed }: { screen?: string } 
         {live.map((broadcast) => {
           const rule = audiences.find((entry) => entry.id === broadcast.audience);
           const reached = rule ? screensReached(rule.rule, screens, audiences) : [];
+          const span =
+            broadcast.timing.timing === "window"
+              ? windowToday(broadcast.timing, tick)
+              : { start: 0, end: DAY_MS };
+          const band: Segment[] = span
+            ? [{ id: broadcast.id, start: span.start, end: span.end, tone: "band", title: broadcast.name }]
+            : [];
           return (
-            <div className="ds-unit is-onair" key={broadcast.id}>
-              <OnAir label="On air" tone="alarm" />
-              <div className="ds-unit-copy">
-                <strong>{broadcast.name}</strong>
-                <span>
-                  {describe(broadcast.action)} · reaching {reached.length} of{" "}
-                  {screens.length}
-                </span>
+            <div className="ds-unit is-onair ds-transit" key={broadcast.id}>
+              <div className="ds-transit-head">
+                <OnAir label="On air" tone="alarm" />
+                <div className="ds-unit-copy">
+                  <strong>{broadcast.name}</strong>
+                  <span>
+                    {describe(broadcast.action)} · {rule?.name ?? "an audience"} · priority{" "}
+                    {broadcast.timing.timing === "when" ? broadcast.timing.priority : (broadcast.timing.priority ?? 0)}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="ds-btn ds-btn-quiet is-danger"
+                  onClick={() => setStopping(broadcast)}
+                >
+                  Stop
+                </button>
               </div>
-              <button
-                type="button"
-                className="ds-btn ds-btn-quiet is-danger"
-                onClick={() => setStopping(broadcast)}
-              >
-                Stop
-              </button>
+              {/* When it is open, laid over the day; whom it reaches, as the fleet. */}
+              <DayTrack size="sm" segments={band} now={tick} />
+              <Footprint screens={screens} reached={new Set(reached.map((s) => s.id))} />
             </div>
           );
         })}

@@ -635,3 +635,96 @@
 .ds-attached-hit:hover {
   transform: translateY(-1px);
 }
+
+/* ── Transit: a broadcast as a row — when it is open, whom it reaches ──── */
+
+.ds-unit.ds-transit {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.ds-transit-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-3);
+}
+
+/* ── Constellation: a program with what carries it and what shows it ───── */
+
+.ds-program {
+  display: grid;
+  gap: 6px;
+}
+
+.ds-program + .ds-program {
+  border-top: 1px solid var(--ds-rule);
+}
+
+.ds-pl-list .ds-program > .ds-pl {
+  border-top: 0;
+}
+
+.ds-constellation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 0 0 10px 68px;
+}
+
+.ds-program.is-tile .ds-constellation {
+  padding: 0;
+}
+
+.ds-carried {
+  display: block;
+  width: 120px;
+  border-radius: var(--ds-r-pill);
+}
+
+/* ── Star: a file wearing its use ──────────────────────────────────────── */
+
+.ds-star {
+  position: relative;
+  display: contents;
+}
+
+.ds-gallery .ds-star,
+.ds-rows .ds-star {
+  display: block;
+}
+
+.ds-rows .ds-star + .ds-star {
+  border-top: 1px solid var(--ds-rule);
+}
+
+.ds-rows .ds-star > .ds-row {
+  border-top: 0;
+}
+
+/* Nothing holds it: faint, not hidden. It is still a file. */
+.ds-star[data-unused] > * {
+  opacity: 0.55;
+}
+
+/* A screen is showing it now. */
+.ds-star-now {
+  position: absolute;
+  top: 15px;
+  left: 38px;
+  z-index: 4;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-positive);
+  box-shadow: 0 0 0 2px var(--ds-surface);
+  animation: ds-breathe 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.ds-rows .ds-star-now {
+  top: 50%;
+  right: 60px;
+  transform: translateY(-50%);
+}

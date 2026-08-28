@@ -144,8 +144,12 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
   /** Today: the channel's day, with every open claim laid over it. */
   const day = useMemo<Segment[]>(() => {
     const segments: Segment[] = channel
-      ? channelDay(channel, now, (program) =>
-          void navigate({ to: "/broadcast-list/broadcast/$id", params: { id: program } }),
+      ? channelDay(
+          channel,
+          now,
+          (program) =>
+            void navigate({ to: "/broadcast-list/broadcast/$id", params: { id: program } }),
+          (program) => fleet.programs.find((entry) => entry.id === program)?.name,
         )
       : [];
     claims.forEach((claim, index) => {
