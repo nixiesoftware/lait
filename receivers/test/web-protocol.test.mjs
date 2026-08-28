@@ -342,3 +342,159 @@ test("the provisioned bootstrap is Web-PKI and carries no pinned material", () =
     vaultFactory: async () => ({}),
   }));
 });
+
+// ─── Pairing against a real offer ───────────────────────────────────────────
+//
+// The fixture proves the phrase function; nothing above drove `startPairing`
+// itself, which is how the client kept accepting a five-field offer from a
+// coordinator that had been sending six. These run the whole first exchange
+// — instance, then offer — over the native-transport seam the Android bridge
+// uses, so no XHR and no television are needed.
+
+function fakeCoordinator(routes) {
+  const encoder = new TextEncoder();
+  const requests = [];
+  globalThis.AstrolabeNativeTransport = {
+    request(requestId, payload) {
+      const request = JSON.parse(payload);
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      const handler = routes[`${request.method} ${path}`];
+      Promise.resolve()
+        .then(() => handler(request.body === null ? null : JSON.parse(request.body)))
+        .then(
+          (reply) => ({
+            status: reply.status ?? 200,
+            body_base64: Buffer.from(encoder.encode(JSON.stringify(reply.body))).toString("base64"),
+            content_type: "application/json",
+            next_challenge: "",
+          }),
+          (error) => ({ error: String(error) }),
+        )
+        .then((response) => globalThis.__astrolabeNativeTransportResolve(requestId, JSON.stringify(response)));
+    },
+  };
+  return { requests, dispose: () => { delete globalThis.AstrolabeNativeTransport; } };
+}
+
+function recordingUi() {
+  const events = [];
+  return {
+    events,
+    showBooting: () => events.push(["booting"]),
+    showPairing: (pairing) => events.push(["pairing", pairing]),
+    showFailure: (code, detail) => events.push(["failure", code, detail]),
+    setTransportState: () => {},
+  };
+}
+
+function memoryVault() {
+  const saved = [];
+  return {
+    saved,
+    factory: async () => ({
+      load: async () => null,
+      save: async (state) => { saved.push(structuredClone(state)); },
+      clear: async () => {},
+      close: () => {},
+    }),
+  };
+}
+
+const ORIGIN = "https://acme.foundation.pub";
+const PROFILE = fixture.confirmation_phrase.profile;
+const OTHER_PROFILE = "prf_00000000000000000000000000";
+const FINGERPRINT = "c".repeat(64);
+const PAIRING = "d".repeat(32);
+
+function instanceRoute() {
+  return {
+    body: {
+      protocol_major: 1,
+      instance: "e".repeat(32),
+      label: "Home Astrolabe",
+      trust: { kind: "web_pki_origin", origin: ORIGIN },
+    },
+  };
+}
+
+/** What the coordinator sends since it anchored on its identity. */
+async function identityOffer(request, { profile = PROFILE, phraseProfile = profile, shape = null } = {}) {
+  const words = await confirmationPhrase(phraseProfile, PAIRING, request.receiver_nonce);
+  const offer = {
+    protocol_major: 1,
+    pairing: PAIRING,
+    expires_in_ms: 600_000,
+    confirmation_phrase: words,
+    coordinator_fingerprint: FINGERPRINT,
+    coordinator_profile: profile,
+  };
+  return { body: shape ? shape(offer) : offer };
+}
+
+async function pair(t, offerOptions) {
+  const ui = recordingUi();
+  const vault = memoryVault();
+  const coordinator = fakeCoordinator({
+    "GET /head/v1/instance": () => instanceRoute(),
+    "POST /head/v1/pairings": (request) => identityOffer(request, offerOptions),
+  });
+  t.after(coordinator.dispose);
+  const receiver = new DisplayReceiverClient({
+    bootstrap: webPkiBootstrap(ORIGIN),
+    capabilities: { protocol_major: 1, platform: "webos", build: "test/0" },
+    ui,
+    vaultFactory: vault.factory,
+  });
+  await receiver.start();
+  receiver.stop();
+  return { receiver, ui, vault, requests: coordinator.requests };
+}
+
+test("the receiver pairs with a coordinator that anchors on its identity", async (t) => {
+  const { ui, vault, requests } = await pair(t);
+
+  const failure = ui.events.find(([kind]) => kind === "failure");
+  assert.equal(failure, undefined, `pairing refused: ${JSON.stringify(failure)}`);
+  const shown = ui.events.find(([kind]) => kind === "pairing")?.[1];
+  assert.ok(shown, "the pairing screen was shown");
+
+  // The words the television shows are the words the coordinator derived
+  // from its identity and this receiver's nonce — the ones Astrolabe shows.
+  const start = requests.find((request) => request.url.endsWith("/head/v1/pairings"));
+  const started = JSON.parse(start.body);
+  assert.deepEqual(shown.phrase, await confirmationPhrase(PROFILE, PAIRING, started.receiver_nonce));
+  assert.equal(shown.fingerprint, FINGERPRINT);
+  assert.equal(shown.confirmed, false);
+
+  // And the credential written before anything is proven records which
+  // identity those words belong to, beside the certificate that carried them.
+  assert.equal(vault.saved.length, 1);
+  assert.equal(vault.saved[0].mode, "pairing");
+  assert.equal(vault.saved[0].profile, PROFILE);
+  assert.equal(vault.saved[0].fingerprint, FINGERPRINT);
+  assert.equal(vault.saved[0].receiverNonce, started.receiver_nonce);
+  assert.equal(vault.saved[0].pollKey, started.poll_key);
+});
+
+test("an offer that does not name the coordinator's identity is refused", async (t) => {
+  // The pre-identity shape: five fields, phrase from the certificate. A
+  // receiver that accepted it would show words no current Astrolabe shows.
+  const { ui, vault } = await pair(t, {
+    shape: ({ coordinator_profile: _dropped, ...rest }) => rest,
+  });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "unknown_field"]);
+  assert.equal(vault.saved.length, 0, "nothing is written for a refused offer");
+});
+
+test("words derived from a different identity than the one named are refused", async (t) => {
+  const { ui, vault } = await pair(t, { phraseProfile: OTHER_PROFILE });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "pairing_integrity"]);
+  assert.equal(vault.saved.length, 0);
+});
+
+test("a coordinator profile that is not a profile id is refused before the phrase is checked", async (t) => {
+  const { ui, vault } = await pair(t, { profile: FINGERPRINT, phraseProfile: PROFILE });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "invalid_pairing"]);
+  assert.equal(vault.saved.length, 0);
+});

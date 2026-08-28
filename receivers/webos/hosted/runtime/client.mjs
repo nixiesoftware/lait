@@ -539,14 +539,27 @@ export class DisplayReceiverClient {
       capabilities: this.capabilities,
     };
     const response = await this.publicJson("/head/v1/pairings", "POST", request);
+    // The offer names two things about the coordinator: the certificate it
+    // is speaking through (`coordinator_fingerprint`) and the identity it is
+    // (`coordinator_profile`). The words derive from the identity — v2 of the
+    // phrase — so they survive a certificate rotation or a move to another
+    // machine; the fingerprint is still what a pinned bootstrap checks.
     exactFields(
       response,
-      ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"],
+      [
+        "protocol_major",
+        "pairing",
+        "expires_in_ms",
+        "confirmation_phrase",
+        "coordinator_fingerprint",
+        "coordinator_profile",
+      ],
       "pairing start response",
     );
     if (response.protocol_major !== PROTOCOL_MAJOR
       || !isLowerHex(response.pairing, 32)
       || !isLowerHex(response.coordinator_fingerprint, 64)
+      || !isProfileId(response.coordinator_profile)
       || !Number.isSafeInteger(response.expires_in_ms)
       || response.expires_in_ms <= 0
       || response.expires_in_ms > 600_000) {
@@ -557,7 +570,7 @@ export class DisplayReceiverClient {
       throw new ProtocolError("pairing_integrity", "Pairing certificate does not match the receiver bootstrap");
     }
     const expectedPhrase = await confirmationPhrase(
-      response.coordinator_fingerprint,
+      response.coordinator_profile,
       response.pairing,
       receiverNonce,
     );
@@ -571,6 +584,7 @@ export class DisplayReceiverClient {
       receiverNonce,
       pollKey,
       fingerprint: response.coordinator_fingerprint,
+      profile: response.coordinator_profile,
       phrase: expectedPhrase,
       userConfirmed: false,
     };
