@@ -84,7 +84,10 @@ impl SignageScreen {
                 .labels
                 .iter()
                 .all(|label| crate::addressing::valid_label(label))
-            && self.labels.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .labels
+                .windows(2)
+                .all(|pair| matches!(pair, [earlier, later] if earlier < later))
             && self
                 .facts
                 .iter()
