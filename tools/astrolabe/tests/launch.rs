@@ -708,7 +708,15 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
     program_id
 }
 
-async fn seed_signage_program(client: &Client, store: &Path) -> (String, String) {
+/// What the durable Signage World holds once seeded: the Space, the program,
+/// and one screen per receiver the test will point at it.
+struct SeededSignage {
+    space: String,
+    program: String,
+    screens: [String; 2],
+}
+
+async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
     client
         .space_found(
             &store.to_string_lossy(),
@@ -765,7 +773,101 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
         write_signage_media(client, &orbit.space, entry.clone()).await;
     }
     write_signage_program(client, &orbit.space, program.clone()).await;
-    (orbit.space.clone(), program.id)
+    // A receiver is pointed at a screen, not a program: the screen is tuned to
+    // a channel, and the channel's base is what plays when nothing is being
+    // broadcast at it. One screen per receiver, because a screen is a panel.
+    let channel = signage::SignageChannel {
+        id: replica::body::BodyId::from_bytes([20; 16]).render(),
+        name: "Lobby channel".into(),
+        base: Some(program.id.clone()),
+        schedule: Vec::new(),
+    };
+    write_signage_channel(client, &orbit.space, channel.clone()).await;
+    let screens = [
+        signage_screen(21, "Lobby wall", &channel.id),
+        signage_screen(22, "Synced wall", &channel.id),
+    ];
+    for screen in &screens {
+        write_signage_screen(client, &orbit.space, screen.clone()).await;
+    }
+    SeededSignage {
+        space: orbit.space.clone(),
+        program: program.id,
+        screens: screens.map(|screen| screen.id),
+    }
+}
+
+/// A sited-nowhere screen tuned to one channel.
+fn signage_screen(tag: u8, name: &str, channel: &str) -> signage::SignageScreen {
+    signage::SignageScreen {
+        id: replica::body::BodyId::from_bytes([tag; 16]).render(),
+        name: name.into(),
+        place: None,
+        facts: std::collections::BTreeMap::new(),
+        sync: None,
+        labels: Vec::new(),
+        tuned: Some(channel.to_owned()),
+    }
+}
+
+/// Put one Signage record through the real World adapter and hand back the
+/// typed answer, so a seed can assert what it was told.
+async fn signage_write(
+    client: &Client,
+    space: &str,
+    request: signage_app::SignageRequest,
+) -> signage_app::SignageResponse {
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let store = registered_store(client, space).await;
+    let call = signage_app::encode_call(&request).expect("encode Signage write");
+    let reply = client
+        .daemon()
+        .expect("identity daemon for Signage write")
+        .call_world(
+            lait::control::ControlRoute::World {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&store),
+                    space_id,
+                ),
+                world: signage::contract::product_world().into(),
+            },
+            call.clone(),
+            None,
+        )
+        .await
+        .expect("write the Signage record through its real World adapter");
+    let decoded = signage_app::decode_reply(&call, reply).expect("decode Signage write reply");
+    serde_json::from_value(decoded).expect("typed Signage write reply")
+}
+
+async fn write_signage_channel(client: &Client, space: &str, channel: signage::SignageChannel) {
+    let response = signage_write(
+        client,
+        space,
+        signage_app::SignageRequest::ChannelPut {
+            channel: channel.clone(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, signage_app::SignageResponse::ChannelSaved { channel: ref saved } if saved == &channel.id),
+        "Signage World did not save the channel: {response:?}"
+    );
+}
+
+async fn write_signage_screen(client: &Client, space: &str, screen: signage::SignageScreen) {
+    let response = signage_write(
+        client,
+        space,
+        signage_app::SignageRequest::ScreenPut {
+            screen: screen.clone(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, signage_app::SignageResponse::ScreenSaved { screen: ref saved } if saved == &screen.id),
+        "Signage World did not save the screen: {response:?}"
+    );
 }
 
 /// The store path as the daemon spelled it when it registered the Orbit.
@@ -1180,7 +1282,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     );
     attached.shutdown().await;
 
-    let (signage_orbit, signage_program) = seed_signage_program(&client, identity.path()).await;
+    let seeded = seed_signage_program(&client, identity.path()).await;
+    let signage_orbit = seeded.space.clone();
+    let signage_program = seeded.program.clone();
+    let [lobby_screen, synced_screen] = seeded.screens.clone();
 
     // Run the real receiver binary against the real coordinator. This is the
     // restart/recovery seam: the public certificate copied by Astrolabe must
@@ -1244,7 +1349,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 orbit: signage_orbit,
                 world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "program": signage_program }),
+                input: serde_json::json!({ "screen": lobby_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
@@ -1331,7 +1436,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 orbit: assignment.space.clone(),
                 world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "program": signage_program }),
+                input: serde_json::json!({ "screen": synced_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
