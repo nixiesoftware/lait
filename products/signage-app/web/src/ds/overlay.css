@@ -185,7 +185,7 @@
   }
 
   .ds-leave[data-starting-style],
-  .ds-leave[data-ending-style] {
+.ds-leave[data-ending-style] {
     opacity: 1;
     transform: translateY(16%);
   }
@@ -564,7 +564,7 @@
   }
 
   .ds-sheet[data-starting-style],
-  .ds-sheet[data-ending-style] {
+.ds-sheet[data-ending-style] {
     opacity: 0;
     transform: translate(-50%, -50%) scale(0.96);
   }

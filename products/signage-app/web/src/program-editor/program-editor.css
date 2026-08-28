@@ -52,41 +52,6 @@
   border-bottom: 1px solid var(--ds-rule);
 }
 
-.pe.is-narrow .pe-discard {
-  display: none;
-}
-
-.pe-name {
-  flex: 1;
-  min-width: 0;
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: var(--ds-weight-medium);
-  font-size: var(--ds-fs-heading);
-  letter-spacing: var(--ds-track-heading);
-  padding: var(--ds-space-2) var(--ds-space-1);
-}
-
-.pe-name:focus {
-  outline: none;
-}
-
-.pe-workspace {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: row;
-  position: relative;
-}
-
-.pe-workspace > .pe-stage {
-  flex: 1;
-  min-width: 0;
-}
-
 .pe-stage {
   position: relative;
   flex: 1;
@@ -245,11 +210,6 @@
   text-align: right;
 }
 
-.pe-thumb-athan {
-  background: #120e0a;
-  color: #f3c07a;
-}
-
 .pe-placeholder {
   text-align: center;
   padding: var(--ds-space-5);
@@ -263,9 +223,7 @@
   margin-bottom: 6px;
 }
 
-/* ── The dock: transport and the filmstrip, in a well ──────────────────── */
-
-.pe-dock {
+/* ── The dock: transport and the filmstrip {
   flex: 0 0 auto;
   background: var(--ds-surface-sunken);
   padding-bottom: max(12px, env(safe-area-inset-bottom), var(--vv-keyboard, 0px));
@@ -301,29 +259,7 @@
   gap: 2px;
 }
 
-.pe-rail-clip {
-  justify-self: end;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.pe-rail-name {
-  font-size: var(--ds-fs-small);
-  font-weight: var(--ds-weight-medium);
-  max-width: 14vw;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pe-play,
-.pe-skip,
-.pe-remove,
-.pe-tool {
+.pe-play, .pe-skip {
   appearance: none;
   border: 0;
   background: transparent;
@@ -333,13 +269,10 @@
   place-items: center;
   padding: 0;
   transition:
-    background var(--ds-dur-fast) var(--ds-ease),
-    color var(--ds-dur-fast) var(--ds-ease);
+    background var(--ds-dur-fast) var(--ds-ease),     color var(--ds-dur-fast) var(--ds-ease);
 }
 
-.pe-skip,
-.pe-remove,
-.pe-tool {
+.pe-skip {
   width: 36px;
   height: 36px;
   flex-shrink: 0;
@@ -359,8 +292,7 @@
   color: var(--ds-ink);
 }
 
-.pe-skip:hover:not(:disabled),
-.pe-tool:hover {
+.pe-skip:hover:not(:disabled) {
   background: var(--ds-hover);
   color: var(--ds-ink);
 }
@@ -368,52 +300,6 @@
 .pe-play:disabled,
 .pe-skip:disabled {
   opacity: 0.35;
-}
-
-.pe-remove {
-  color: var(--ds-alarm);
-}
-
-.pe-remove:hover {
-  background: var(--ds-alarm-soft);
-}
-
-.pe-duration {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: var(--ds-r-pill);
-  background: var(--ds-surface);
-  box-shadow: var(--ds-material-control);
-  color: inherit;
-  font: inherit;
-  font-size: var(--ds-fs-small);
-  font-weight: var(--ds-weight-medium);
-  font-variant-numeric: tabular-nums;
-}
-
-.pe-duration button {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  padding: 0;
-  cursor: text;
-}
-
-.pe-duration input {
-  width: 3.2em;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 16px;
-  font-variant-numeric: tabular-nums;
-  outline: none;
 }
 
 .pe-strip-wrap {
@@ -698,7 +584,7 @@
 
 @media (pointer: coarse) {
   .pe-clip,
-  .pe-clip-slot {
+.pe-clip-slot {
     touch-action: pan-x;
     cursor: default;
   }
@@ -708,9 +594,7 @@
   }
 
   .pe-skip,
-  .pe-remove,
-  .pe-tool,
-  .pe-play {
+.pe-play {
     width: 44px;
     height: 44px;
   }
@@ -736,14 +620,6 @@
   align-self: center;
 }
 
-.pe-rail.is-narrow .pe-rail-clip {
-  grid-area: clip;
-}
-
-.pe-rail.is-narrow .pe-rail-name {
-  display: none;
-}
-
 @media (max-width: 719px) {
   .pe-stage {
     padding: var(--ds-space-3);
@@ -755,7 +631,6 @@
     padding: var(--ds-space-3) 20px;
   }
 
-  .pe-dock,
   .pe-strip-wrap {
     padding-left: var(--ds-space-3);
     padding-right: var(--ds-space-3);
