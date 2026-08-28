@@ -4,13 +4,13 @@ lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crate
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-809 crates, under 42 distinct licence expressions.
+810 crates, under 42 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 379 |
+| `MIT OR Apache-2.0` | 380 |
 | `MIT` | 149 |
 | `Apache-2.0 OR MIT` | 75 |
 | `MIT/Apache-2.0` | 39 |
@@ -636,6 +636,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | spin | 0.9.8 | `MIT` | <https://github.com/mvdnes/spin-rs.git> |
 | spki | 0.7.3 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/spki> |
 | spki | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
+| sse-stream | 0.2.5 | `MIT OR Apache-2.0` | <https://github.com/4t145/sse-stream/> |
 | stable_deref_trait | 1.2.1 | `MIT OR Apache-2.0` | <https://github.com/storyyeller/stable_deref_trait> |
 | stacker | 0.1.25 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/stacker> |
 | static_assertions | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/nvzqz/static-assertions-rs> |
