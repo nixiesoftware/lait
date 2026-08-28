@@ -267,7 +267,7 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
    room, spaced the way it is typed. */
 .rendezvous-card { border-color:#53667d; background:linear-gradient(135deg,#22324d,#1b222c); }
 .rendezvous-code { margin:2px 0; color:#fff; font-size:26px; font-weight:700; letter-spacing:.1em; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; user-select:all; }
-.check-row { display:flex; align-items:center; gap:8px; }
-.check-row input { width:auto; margin:0; }
+.dialog-body label.check-row { display:flex; align-items:center; gap:8px; color:var(--text); font-size:12px; font-weight:500; letter-spacing:0; }
+.dialog-body label.check-row input { width:auto; margin:0; }
 /* Forget removes a row, never a tree — which is why it sits with the World's
    own controls and not beside anything that deletes. */
