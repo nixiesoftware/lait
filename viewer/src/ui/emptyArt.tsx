@@ -24,8 +24,9 @@ import { useEffect, useRef } from "react";
  * Fields are 4-bit, one nibble per cell, base64. 2.5KB each, against the 110KB
  * PNG apiece they replace, and they carry no colour of their own: the ink is
  * resolved from the element's own `currentColor` against the background it
- * actually sits on, so the set follows the theme rather than being a light-
- * theme raster with `filter: invert()` over it.
+ * actually sits on, and the tone travels the app's own ladder — mute, the
+ * element's colour, the accent, bright — so the set follows the theme rather
+ * than being a light-theme raster with `filter: invert()` over it. See `ramp`.
  */
 export type EmptyStateArt =
   | "activity"
@@ -40,13 +41,13 @@ export type EmptyStateArt =
   | "unavailable";
 
 /** The screen. Pitch and dot radius are in CSS px and are not scalable — a
- *  halftone that resizes is no longer a halftone, so the box is fixed. */
+ *  halftone that resizes is no longer a halftone, so the ruling is fixed and a
+ *  plate is as big as the drawing on it. The lattice is the authoring grid; see
+ *  `inkBox` for why nothing is drawn at its full extent. */
 const COLS = 72;
 const ROWS = 52;
 const CELL = 2.5;
 const MAX_R = 1.0;
-export const ART_W = COLS * CELL;
-export const ART_H = ROWS * CELL;
 
 const FIELDS: Record<EmptyStateArt, string> = {
   // a paper roll, part of it unspooled
@@ -349,9 +350,132 @@ const mix = (a: number[], b: number[], k: number) => [
   a[2]! + (b[2]! - a[2]!) * k,
 ];
 
-function parseColor(value: string): number[] | null {
-  const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(value);
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+type Box = { x: number; y: number; w: number; h: number };
+
+const boxes = new Map<EmptyStateArt, Box>();
+
+/**
+ * The drawing's own extent, in cells, with the lattice's blank left out.
+ *
+ * Each field is centred in the 72×52 lattice, so its padding is symmetric —
+ * and different for every drawing, because the objects are different sizes. A
+ * plate drawn at the full lattice therefore sets its own leading edge and its
+ * own gap to the title: 22.5px of blank down the left of `projects` against
+ * 37.5px for `unavailable`, and 32.5px under `projects` against 22.5px under
+ * `filtered`. Ten states, ten spacings, none of them declared anywhere.
+ *
+ * Cropping to the ink hands that spacing back to the layout, where it is one
+ * margin for the whole set. It is not a resize: the pitch, the cell and the
+ * dot radius are untouched, and the same cells are drawn at the same size.
+ */
+function inkBox(art: EmptyStateArt): Box {
+  const hit = boxes.get(art);
+  if (hit) return hit;
+  const cells = field(art);
+  let x0 = COLS;
+  let x1 = -1;
+  let y0 = ROWS;
+  let y1 = -1;
+  for (let j = 0; j < ROWS; j += 1) {
+    for (let i = 0; i < COLS; i += 1) {
+      if (cells[j * COLS + i] === 0) continue;
+      if (i < x0) x0 = i;
+      if (i > x1) x1 = i;
+      if (j < y0) y0 = j;
+      if (j > y1) y1 = j;
+    }
+  }
+  // A blank field cannot happen, but a zero box would size a canvas at nothing
+  // and paint nothing forever, so it degrades to the whole lattice.
+  const box =
+    x1 < 0
+      ? { x: 0, y: 0, w: COLS, h: ROWS }
+      : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  boxes.set(art, box);
+  return box;
+}
+
+/** One plate's drawn size in CSS px. The pitch is fixed, so this is the
+ *  drawing's own measure rather than a scale it was given. */
+export function artSize(art: EmptyStateArt): { width: number; height: number } {
+  const box = inkBox(art);
+  return { width: box.w * CELL, height: box.h * CELL };
+}
+
+/**
+ * The browser's own colour parser, borrowed one pixel at a time.
+ *
+ * Our tokens are `light-dark()` over `oklch()`, and both survive into the
+ * computed value: `getComputedStyle` picks the light or the dark arm but keeps
+ * the colour space. So the `rgb(…)` this file used to match never arrived, the
+ * ink fell back to a hardcoded pink and the ground to an assumed black — which
+ * is most of why the plates looked like they came from another app.
+ *
+ * Rather than carry an OKLCH converter that would have to agree with the
+ * browser's own gamut mapping, hand the string back to the browser: fill one
+ * pixel, read it. That parses every notation the page can actually paint with,
+ * which is exactly the set that matters.
+ */
+let scratch: CanvasRenderingContext2D | null | undefined;
+
+/** A colour no palette holds. `fillStyle` keeps its previous value when handed
+ *  something it cannot parse, so this is how "unparseable" is told from black. */
+const UNPARSED = "#123456";
+
+/** What a probe inherits when the token it asked for does not exist. */
+const ABSENT = "rgb(1, 2, 3)";
+
+function toRgb(value: string): number[] | null {
+  const literal = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(value);
+  if (literal) return [Number(literal[1]), Number(literal[2]), Number(literal[3])];
+  if (!value) return null;
+  if (scratch === undefined) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    scratch = canvas.getContext("2d", { willReadFrequently: true });
+  }
+  const ctx = scratch;
+  if (!ctx) return null; // jsdom, and any surface without a 2d context
+  ctx.fillStyle = UNPARSED;
+  ctx.fillStyle = value;
+  if (ctx.fillStyle === UNPARSED) return null;
+  ctx.clearRect(0, 0, 1, 1);
+  ctx.fillRect(0, 0, 1, 1);
+  try {
+    const pixel = ctx.getImageData(0, 0, 1, 1).data;
+    return pixel[3] === 0 ? null : [pixel[0]!, pixel[1]!, pixel[2]!];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Palette tokens, resolved the way the page resolves them: on a real element,
+ * inside the tree the plate sits in, so `light-dark()` picks the same arm the
+ * surface around it did. Reading the custom property directly would hand back
+ * the unresolved `light-dark(…, …)` text instead.
+ *
+ * The probe sits inside a wrapper holding a colour no palette holds, because a
+ * token that does not exist is invalid at computed-value time and leaves the
+ * probe at its inherited colour — which is how an absent token is told from a
+ * resolved one rather than silently becoming the ink.
+ */
+function tokenColors(el: HTMLElement, names: string[]): (number[] | null)[] {
+  const host = el.parentElement ?? document.body;
+  const wrapper = document.createElement("span");
+  wrapper.setAttribute("aria-hidden", "true");
+  wrapper.style.cssText = `position:absolute;width:0;height:0;overflow:hidden;color:${ABSENT}`;
+  const probe = document.createElement("span");
+  wrapper.appendChild(probe);
+  host.appendChild(wrapper);
+  const out = names.map((name) => {
+    probe.style.color = `var(${name})`;
+    const value = getComputedStyle(probe).color;
+    return value === ABSENT ? null : toRgb(value);
+  });
+  wrapper.remove();
+  return out;
 }
 
 /** The nearest ancestor that actually paints. A canvas over a transparent
@@ -359,9 +483,9 @@ function parseColor(value: string): number[] | null {
 function groundOf(el: HTMLElement): number[] {
   let node: HTMLElement | null = el;
   while (node) {
-    const rgb = getComputedStyle(node).backgroundColor;
-    if (rgb && !/rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(rgb)) {
-      const parsed = parseColor(rgb);
+    const value = getComputedStyle(node).backgroundColor;
+    if (value && !/rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(value)) {
+      const parsed = toRgb(value);
       if (parsed) return parsed;
     }
     node = node.parentElement;
@@ -371,36 +495,39 @@ function groundOf(el: HTMLElement): number[] {
 
 const luma = (c: number[]) => 0.2126 * c[0]! + 0.7152 * c[1]! + 0.0722 * c[2]!;
 
+type Stops = { quiet: number[]; ink: number[]; lit: number[]; core: number[] };
+
 /*
- * The ink runs a spectrum rather than one hue lightened and darkened: a cool
- * cast in the thin tail, the element's own colour through the body, ochre as
- * the tone climbs, and a burn toward the far end of the page's contrast at the
- * cores. A single-hue ramp reads as a flat wash at this dot size — the colour
- * travel is what gives a halftone its depth.
+ * The ink runs a spectrum rather than one hue lightened and darkened, because
+ * a single-hue ramp reads as a flat wash at this dot size — the colour travel
+ * is what gives a halftone its depth.
  *
- * Every one of those stops has to know WHICH WAY the page goes. On a dark
- * ground the cores burn toward white and the ochre is a bright one; on paper
- * both invert, and the landing hero's own gold (a light warm) would make the
- * densest part of the plate the palest — the tone would run backwards.
+ * Where it travels *to* is the app's own ladder, not the landing hero's. The
+ * hero runs a lilac tail, ochre as the tone climbs and ivory at the cores,
+ * which is the correct ramp for gold on black and a foreign palette anywhere
+ * in a tracker whose one chromatic voice is `--color-accent`. The stops here
+ * are `--color-mute` in the thin tail, the element's own colour through the
+ * body, the accent as the tone climbs, and `--color-bright` at the cores.
+ *
+ * Which way the page goes is no longer computed. `--color-bright` is
+ * `light-dark(near-black, white)` and `--color-mute` sits toward the ground in
+ * both themes, so the plate inverts on paper because the tokens do.
  */
-function ramp(ink: number[], ground: number[]) {
-  const up = luma(ink) > luma(ground);
-  const hot = up ? [255, 249, 238] : [24, 20, 16];
-  const gold = up ? [214, 158, 92] : [150, 101, 45];
-  const cool = mix(ink, up ? [150, 140, 190] : [128, 126, 158], up ? 0.55 : 0.45);
+function ramp(stops: Stops) {
   const table: string[] = [];
   for (let i = 0; i < 16; i += 1) {
     const v = i / 15;
-    // 0.58, not 0.42. The hero keeps ochre for filament CORES and runs ivory
-    // through the body; started earlier it catches the whole midrange and the
-    // plate turns orange, which on paper is the only thing you see.
-    const warm = smoothstep(0.58, 1, v) * 0.85;
+    // 0.58, and never the whole way. Started earlier the accent catches the
+    // midrange and the plate turns blue — the same failure the hero's ochre
+    // has at 0.42, which is a coloured wash rather than a lit solid.
+    const climb = smoothstep(0.58, 1, v) * 0.75;
     const knee = 0.44;
-    const base = warm < knee
-      ? mix(cool, ink, warm / knee)
-      : mix(ink, gold, (warm - knee) / (1 - knee));
-    const burn = smoothstep(0.74, 1, v) * (0.3 + 0.55 * warm);
-    const c = mix(base, hot, burn);
+    const base =
+      climb < knee
+        ? mix(stops.quiet, stops.ink, climb / knee)
+        : mix(stops.ink, stops.lit, (climb - knee) / (1 - knee));
+    const burn = smoothstep(0.74, 1, v) * (0.3 + 0.55 * climb);
+    const c = mix(base, stops.core, burn);
     table.push(`rgb(${Math.round(c[0]!)},${Math.round(c[1]!)},${Math.round(c[2]!)})`);
   }
   return table;
@@ -409,18 +536,34 @@ function ramp(ink: number[], ground: number[]) {
 function paint(canvas: HTMLCanvasElement, art: EmptyStateArt) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return; // jsdom, and any surface without a 2d context
+  const box = inkBox(art);
+  const width = box.w * CELL;
+  const height = box.h * CELL;
   const dpr = Math.min(2, window.devicePixelRatio || 1);
-  canvas.width = Math.round(ART_W * dpr);
-  canvas.height = Math.round(ART_H * dpr);
-  const style = getComputedStyle(canvas);
-  const ink = parseColor(style.color) ?? [235, 215, 224];
-  const table = ramp(ink, groundOf(canvas));
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+  const ink = toRgb(getComputedStyle(canvas).color) ?? [128, 128, 128];
+  const ground = groundOf(canvas);
+  const [mute, accent, bright] = tokenColors(canvas, [
+    "--color-mute",
+    "--color-accent",
+    "--color-bright",
+  ]);
+  // The fallbacks are for a page that is not this app's — the plate still has
+  // to hold shape, so it borrows the direction of travel from the ground.
+  const up = luma(ink) > luma(ground);
+  const table = ramp({
+    quiet: mix(ink, mute ?? mix(ink, ground, 0.5), 0.6),
+    ink,
+    lit: accent ?? mix(ink, up ? [255, 255, 255] : [0, 0, 0], 0.25),
+    core: bright ?? (up ? [255, 255, 255] : [20, 18, 24]),
+  });
   const cells = field(art);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, ART_W, ART_H);
-  for (let j = 0; j < ROWS; j += 1) {
-    for (let i = 0; i < COLS; i += 1) {
-      const q = cells[j * COLS + i]!;
+  ctx.clearRect(0, 0, width, height);
+  for (let j = 0; j < box.h; j += 1) {
+    for (let i = 0; i < box.w; i += 1) {
+      const q = cells[(box.y + j) * COLS + (box.x + i)]!;
       if (q === 0) continue;
       const v = q / 15;
       // 0.62, not the engine's 0.78. That curve suits a field meant to be
@@ -438,6 +581,9 @@ function paint(canvas: HTMLCanvasElement, art: EmptyStateArt) {
 
 /**
  * The drawing alone: no spacing and no colour of its own.
+ *
+ * Its box is the drawing's own extent, so the margin under it is the gap you
+ * see under every plate and the leading edge is the same in all ten states.
  *
  * It repaints when the theme moves, because the ink is resolved from the page
  * rather than baked in. `data-theme` on `<html>` covers an explicit choice and
@@ -467,6 +613,7 @@ export function EmptyArt({ art, className }: { art: EmptyStateArt; className?: s
     };
   }, [art]);
 
+  const { width, height } = artSize(art);
   return (
     <canvas
       aria-hidden
@@ -474,7 +621,7 @@ export function EmptyArt({ art, className }: { art: EmptyStateArt; className?: s
       data-empty-state-art={art}
       ref={ref}
       role="presentation"
-      style={{ width: `${ART_W}px`, height: `${ART_H}px` }}
+      style={{ width: `${width}px`, height: `${height}px` }}
     />
   );
 }
