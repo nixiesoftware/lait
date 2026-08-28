@@ -894,48 +894,6 @@
 .ds-pl-tile .ds-row-copy strong {
   font-size: var(--ds-fs-small);
 }
-
-/* ── Devices: a monitor, .ds-device-list {
-  display: flex;
-  flex-direction: column;
-  padding: 0 16px;
-  border-radius: var(--ds-r-lg);
-  background: var(--ds-surface);
-  box-shadow: var(--ds-material-card);
-}
-
-.ds-device {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 12px 0;
-  border-top: 1px solid var(--ds-rule);
-  transition: background var(--ds-dur-fast) var(--ds-ease);
-}
-
-.ds-device:first-child {
-  border-top: 0;
-}
-
-/* A bezel is a screen. Dark in every room, lit from above like a panel on a
-   wall, and carrying whatever the panel is showing. */
-.ds-bezel {
-  width: 92px;
-  height: 58px;
-  flex-shrink: 0;
-  border-radius: 7px;
-  background: var(--ds-panel-screen);
-  box-shadow:
-    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
-    0 1px 2px -0.5px rgb(var(--ds-ink-rgb) / 0.3),
-    0 6px 14px -8px rgb(var(--ds-ink-rgb) / 0.35);
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  color: rgb(var(--ds-panel-screen-ink) / 0.6);
-  position: relative;
-}
-
 @media (max-width: 639px) {
   .tsqd-open-btn-container,
 .tsqd-parent-container {

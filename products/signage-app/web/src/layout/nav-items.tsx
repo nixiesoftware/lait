@@ -7,12 +7,17 @@ export type NavItem = {
   Icon: LucideIcon;
 };
 
+/**
+ * Ordered from the glass down to the source, which is the order resolution
+ * ranks them: a broadcast outranks a channel, a channel carries programs, a
+ * program is made of files. The rail is the ladder.
+ */
 export const NAV_ITEMS: NavItem[] = [
   { name: "Screens", path: "/screen-list", Icon: Monitor },
-  { name: "Programs", path: "/broadcast-list", Icon: Clapperboard },
-  { name: "Channels", path: "/channel-list", Icon: Tv },
   { name: "Broadcasts", path: "/broadcast-hub", Icon: Radio },
-  { name: "Media", path: "/content-list", Icon: Images },
+  { name: "Channels", path: "/channel-list", Icon: Tv },
+  { name: "Programs", path: "/broadcast-list", Icon: Clapperboard },
+  { name: "Files", path: "/content-list", Icon: Images },
 ];
 
 export function navActive(pathname: string, path: string): boolean {

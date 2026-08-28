@@ -10,6 +10,7 @@ import './ds/controls.css';
 import './ds/language.css';
 import './ds/overlay.css';
 import './ds/page.css';
+import './ds/instruments.css';
 
 const router = createRouter({ routeTree });
 

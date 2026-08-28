@@ -10,22 +10,30 @@
  * there is nothing to save.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, Radio, Tv } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { Plus, Radio } from "lucide-react";
 import {
+  Bezel,
   Confirm,
+  DayTrack,
   Empty,
-  LiveValue,
   Page,
   PageHeader,
   PageStatus,
   Prompt,
   CommitText,
   Field,
+  channelDay,
+  litProps,
   useCommit,
-  useRevision,
+  useFocus,
+  useHoldable,
+  useLive,
+  useOrbit,
   useToast,
 } from "@/ds";
+import { useFleet, type Fleet } from "@/utils/screens/fleet";
 import {
   deleteChannel,
   fetchChannels,
@@ -42,46 +50,21 @@ import type {
 
 export default function ChannelList() {
   const toast = useToast();
-  const revision = useRevision();
-  const [channels, setChannels] = useState<SignageChannel[]>([]);
-  const [programs, setPrograms] = useState<SignageProgram[]>([]);
-  const [screens, setScreens] = useState<SignageScreen[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const fleet = useFleet();
+  const { channels, programs, loading, error, reload } = fleet;
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<SignageChannel | null>(null);
 
-  const reload = useCallback(async () => {
-    try {
-      setError(null);
-      const [streams, shows, fleet] = await Promise.all([
-        fetchChannels(),
-        fetchPrograms(),
-        fetchScreens(),
-      ]);
-      setChannels(streams);
-      setPrograms(shows);
-      setScreens(fleet);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load channels");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void reload();
-  }, [reload, revision]);
 
   /** How many panels are on each channel, live. */
   const tunedCount = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const screen of screens) {
+    for (const screen of fleet.screens) {
       if (!screen.tuned) continue;
       counts.set(screen.tuned, (counts.get(screen.tuned) ?? 0) + 1);
     }
     return counts;
-  }, [screens]);
+  }, [fleet.screens]);
 
   return (
     <Page>
@@ -113,7 +96,7 @@ export default function ChannelList() {
               key={channel.id}
               channel={channel}
               programs={programs}
-              tuned={tunedCount.get(channel.id) ?? 0}
+              fleet={fleet}
               onRemove={() => setRemoving(channel)}
               onError={(message) => toast.show("Could not save", message)}
             />
@@ -178,16 +161,29 @@ export default function ChannelList() {
 function ChannelCard({
   channel,
   programs,
-  tuned,
+  fleet,
   onRemove,
   onError,
 }: {
   channel: SignageChannel;
   programs: SignageProgram[];
-  tuned: number;
+  fleet: Fleet;
   onRemove: () => void;
   onError: (message: string) => void;
 }) {
+  const navigate = useNavigate();
+  const orbit = useOrbit();
+  const { now } = useLive();
+  const { held } = useFocus();
+  const hold = useHoldable("channel", channel.id);
+  const tuned = fleet.tunedTo(channel.id);
+  const day = useMemo(
+    () =>
+      channelDay(channel, now, (program) =>
+        void navigate({ to: "/broadcast-list/broadcast/$id", params: { id: program } }),
+      ),
+    [channel, now, navigate],
+  );
   const put = useCallback(
     async (next: SignageChannel) => {
       try {
@@ -206,7 +202,7 @@ function ChannelCard({
   });
 
   return (
-    <section className="ds-panel">
+    <section className="ds-panel" {...hold.bind}>
       <div className="ds-row-between">
         <ChannelName channel={channel} put={put} />
         <button
@@ -218,15 +214,40 @@ function ChannelCard({
         </button>
       </div>
 
-      <div className="ds-row-between">
-        <span className="ds-tag">
-          <Tv size={11} />
-          {/* Live because a panel can be retuned from anywhere. */}
-          <LiveValue>
-            {tuned === 1 ? "1 screen tuned" : `${tuned} screens tuned`}
-          </LiveValue>
-        </span>
-      </div>
+      {/* The channel's day, as it is authored: its ground and its dayparts. An
+          empty track says "carries nothing" without a sentence. */}
+      <DayTrack segments={day} now={now} />
+
+      {/* The screens tuned to it, drawn as themselves — attached, not counted.
+          Holding the channel lights them. */}
+      {tuned.length > 0 && (
+        <div
+          className="ds-attached"
+          {...litProps(held, held?.kind === "channel" && held.id === channel.id)}
+        >
+          {tuned.map((screen) => (
+            <button
+              type="button"
+              key={screen.id}
+              className="ds-attached-hit"
+              title={screen.name}
+              aria-label={screen.name}
+              onClick={() => void navigate({ to: "/screen-list/$id", params: { id: screen.id } })}
+            >
+              <Bezel
+                size="xs"
+                screen={screen}
+                playback={fleet.playbackFor(screen, now)}
+                programs={fleet.programs}
+                media={fleet.media}
+                presets={fleet.presets}
+                orbit={orbit}
+                now={now}
+              />
+            </button>
+          ))}
+        </div>
+      )}
 
       <Field
         label="Carries"

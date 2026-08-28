@@ -486,7 +486,7 @@ export function DeviceRow({
 }) {
   return (
     <ItemMenu items={menu ?? []} className="ds-device">
-      <span className="ds-bezel">{children}</span>
+      {children}
       <button type="button" className="ds-row-hit" onClick={onOpen}>
         <span className="ds-row-copy">
           <strong>{name}</strong>

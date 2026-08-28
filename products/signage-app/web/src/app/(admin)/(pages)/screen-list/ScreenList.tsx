@@ -9,10 +9,11 @@
  * one set is the assumption this product removed.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { MapPin, Monitor, Plus, Tv } from "lucide-react";
+import { Monitor, Plus } from "lucide-react";
 import {
+  Bezel,
   Confirm,
   DeviceRow,
   Empty,
@@ -22,46 +23,27 @@ import {
   PageStatus,
   Prompt,
   haptic,
+  useLive,
+  useOrbit,
   useToast,
   type MenuItem,
 } from "@/ds";
-import {
-  createScreen,
-  deleteScreen,
-  fetchScreens,
-  tuneScreen,
-} from "@/utils/screens/api";
-import { fetchChannels } from "@/utils/apps/api";
-import type { SignageChannel, SignageScreen } from "@/utils/lait/types";
+import { createScreen, deleteScreen, tuneScreen } from "@/utils/screens/api";
+import { useFleet } from "@/utils/screens/fleet";
+import type { SignageScreen } from "@/utils/lait/types";
 
 export default function ScreenList() {
   const navigate = useNavigate();
   const toast = useToast();
-  const [screens, setScreens] = useState<SignageScreen[]>([]);
-  const [channels, setChannels] = useState<SignageChannel[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const orbit = useOrbit();
+  const { now } = useLive();
+  const fleet = useFleet();
+  const { screens, channels, loading, error, reload } = fleet;
   const [query, setQuery] = useState("");
   const [label, setLabel] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<SignageScreen | null>(null);
 
-  const reload = useCallback(async () => {
-    try {
-      setError(null);
-      const [fleet, streams] = await Promise.all([fetchScreens(), fetchChannels()]);
-      setScreens(fleet);
-      setChannels(streams);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the fleet");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
 
   /** Every label anybody has used, so the filter offers what exists. */
   const labels = useMemo(
@@ -192,7 +174,16 @@ export default function ScreenList() {
                 })
               }
             >
-              {screen.tuned ? <Tv size={18} /> : <MapPin size={18} />}
+              <Bezel
+                size="sm"
+                screen={screen}
+                playback={fleet.playbackFor(screen, now)}
+                programs={fleet.programs}
+                media={fleet.media}
+                presets={fleet.presets}
+                orbit={orbit}
+                now={now}
+              />
             </DeviceRow>
           ))}
         </div>

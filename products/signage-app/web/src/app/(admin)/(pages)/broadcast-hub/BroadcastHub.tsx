@@ -21,6 +21,7 @@ import { Megaphone, Plus, Radio, X } from "lucide-react";
 import {
   Confirm,
   Empty,
+  Footprint,
   OnAir,
   Page,
   PageHeader,
@@ -54,7 +55,7 @@ import type {
   SignageScreen,
 } from "@/utils/lait/types";
 
-export default function BroadcastHub() {
+export default function BroadcastHub({ screen: addressed }: { screen?: string } = {}) {
   const toast = useToast();
   const revision = useRevision();
   const [broadcasts, setBroadcasts] = useState<SignageBroadcast[]>([]);
@@ -64,7 +65,7 @@ export default function BroadcastHub() {
   const [channels, setChannels] = useState<SignageChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [composing, setComposing] = useState(false);
+  const [composing, setComposing] = useState(Boolean(addressed));
   const [stopping, setStopping] = useState<SignageBroadcast | null>(null);
 
   const reload = useCallback(async () => {
@@ -141,7 +142,7 @@ export default function BroadcastHub() {
           const reached = rule ? screensReached(rule.rule, screens, audiences) : [];
           return (
             <div className="ds-unit is-onair" key={broadcast.id}>
-              <OnAir label="ON AIR" tone="alarm" />
+              <OnAir label="On air" tone="alarm" />
               <div className="ds-unit-copy">
                 <strong>{broadcast.name}</strong>
                 <span>
@@ -185,6 +186,7 @@ export default function BroadcastHub() {
 
       {composing && (
         <Composer
+          addressed={addressed}
           screens={screens}
           audiences={audiences}
           programs={programs}
@@ -231,6 +233,7 @@ export default function BroadcastHub() {
 type Reach = { reached: SignageScreen[]; missed: SignageScreen[] };
 
 function Composer({
+  addressed,
   screens,
   audiences,
   programs,
@@ -238,6 +241,8 @@ function Composer({
   onClose,
   onSend,
 }: {
+  /** A screen handed in from its own page: the rule starts with it. */
+  addressed?: string;
   screens: SignageScreen[];
   audiences: SignageAudience[];
   programs: SignageProgram[];
@@ -255,6 +260,8 @@ function Composer({
   const [reuse, setReuse] = useState<string>("");
   const [labels, setLabels] = useState<string[]>([]);
   const [region, setRegion] = useState("");
+  /** Named screens, one at a time. A page hands one in; chips add more. */
+  const [named, setNamed] = useState<string[]>(addressed ? [addressed] : []);
   const [action, setAction] = useState<BroadcastAction>({ action: "blank" });
   const [priority, setPriority] = useState(50);
 
@@ -283,12 +290,16 @@ function Composer({
       return audiences.find((entry) => entry.id === reuse)?.rule ?? null;
     }
     if (everyone) return { match: "all" };
-    const terms: Match[] = labels.map((label) => ({ match: "label", label }));
-    if (region) terms.push({ match: "place", place: { kind: "region", region } });
-    if (terms.length === 0) return null;
-    if (terms.length === 1) return terms[0];
-    return { match: "all_of", of: terms };
-  }, [reuse, everyone, labels, region, audiences]);
+    const slice: Match[] = labels.map((label) => ({ match: "label", label }));
+    if (region) slice.push({ match: "place", place: { kind: "region", region } });
+    const sliced: Match | null =
+      slice.length === 0 ? null : slice.length === 1 ? slice[0] : { match: "all_of", of: slice };
+    // Named screens are reached whatever the slice says: "these, and also the lobby".
+    const names: Match[] = named.map((screen) => ({ match: "screen", screen }));
+    if (names.length === 0) return sliced;
+    const any: Match[] = sliced ? [sliced, ...names] : names;
+    return any.length === 1 ? any[0] : { match: "any_of", of: any };
+  }, [reuse, everyone, labels, region, named, audiences]);
 
   const reach: Reach = useMemo(() => {
     if (!rule) return { reached: [], missed: screens };
@@ -406,6 +417,22 @@ function Composer({
             </div>
             {!everyone && (
               <>
+                {named.length > 0 && (
+                  <div className="ds-chips" style={{ marginTop: 6 }}>
+                    {named.map((id) => (
+                      <button
+                        type="button"
+                        key={id}
+                        className="ds-chip is-on"
+                        onClick={() => setNamed(named.filter((held) => held !== id))}
+                        aria-label={`Stop naming ${screens.find((s) => s.id === id)?.name ?? "this screen"}`}
+                      >
+                        {screens.find((s) => s.id === id)?.name ?? id}
+                        <X size={12} />
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="ds-chips" style={{ marginTop: 6 }}>
                   {facets.map(([label, count]) => (
                     <button
@@ -459,30 +486,22 @@ function Composer({
           <span style={{ width: `${share * 100}%` }} />
         </div>
 
-        {reach.reached.length > 0 && (
-          <div className="ds-reach-names">
-            {reach.reached.map((screen) => (
-              <span className="ds-tag is-reached" key={screen.id}>
-                {screen.name}
-              </span>
-            ))}
-          </div>
+        {/* The fleet as the fleet: the reached lit, the missed outlined in the
+            colour of the miss. Under-reach is the failure that matters when the
+            message is "evacuate", so the miss is not hidden and not red. */}
+        {screens.length > 0 && (
+          <Footprint
+            size="sm"
+            screens={screens}
+            reached={new Set(reach.reached.map((screen) => screen.id))}
+            onOpen={(screen) =>
+              setNamed(named.includes(screen.id) ? named.filter((h) => h !== screen.id) : [...named, screen.id])
+            }
+          />
         )}
-
-        {/* The half nobody else shows. Under-reach is the failure that matters
-            when the message is "evacuate". */}
-        {reach.missed.length > 0 && (
+        {reach.missed.length > 0 && rule && (
           <div className="ds-reach-miss">
-            <strong>
-              Not reached — {reach.missed.length}
-            </strong>
-            <div className="ds-reach-names">
-              {reach.missed.map((screen) => (
-                <span className="ds-tag is-miss" key={screen.id}>
-                  {screen.name}
-                </span>
-              ))}
-            </div>
+            <strong>Not reached — {reach.missed.length}. Tap a screen to name it.</strong>
           </div>
         )}
 

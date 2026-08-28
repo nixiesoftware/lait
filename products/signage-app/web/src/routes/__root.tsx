@@ -1,10 +1,12 @@
 import { createRootRoute, Outlet } from '@tanstack/react-router';
-import { ToastProvider } from '@/ds';
+import { FocusProvider, ToastProvider } from '@/ds';
 
 function RootComponent() {
   return (
     <ToastProvider>
-      <Outlet />
+      <FocusProvider>
+        <Outlet />
+      </FocusProvider>
     </ToastProvider>
   );
 }

@@ -1,0 +1,637 @@
+/*
+ * The instruments.
+ *
+ * A bezel, a day, a footprint, a sky stack, a readout. Each draws a relation
+ * the model has — what a screen shows, what a channel does across a day, whom
+ * a broadcast reaches, what outranks what — so the relation never needs a
+ * caption. Containment is composition, height is precedence, time is
+ * horizontal, light is state, and holding one thing lights its relations.
+ */
+
+/* ── Held: one thing lit, the unrelated dimmed ─────────────────────────── */
+
+[data-lit="true"] {
+  outline: 2px solid var(--ds-accent);
+  outline-offset: 2px;
+}
+
+[data-dim="true"] {
+  opacity: 0.38;
+}
+
+[data-lit],
+[data-dim] {
+  transition:
+    opacity var(--ds-dur-fast) var(--ds-ease),
+    outline-color var(--ds-dur-fast) var(--ds-ease);
+}
+
+/* ── Bezel: a screen drawn as a screen ─────────────────────────────────── */
+
+.ds-bezel {
+  position: relative;
+  display: block;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    0 1px 2px -0.5px rgb(var(--ds-ink-rgb) / 0.3),
+    0 6px 14px -8px rgb(var(--ds-ink-rgb) / 0.35);
+  transition: box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-bezel.is-xs {
+  width: 40px;
+  height: 25px;
+  border-radius: 4px;
+}
+
+.ds-bezel.is-sm {
+  width: 92px;
+  height: 58px;
+}
+
+.ds-bezel.is-md {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--ds-r-sm);
+}
+
+/* The hero: a lit panel on a wall, with the height of a real object. */
+.ds-bezel.is-lg {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--ds-r-md);
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    var(--ds-material-lift);
+}
+
+/* Nothing reaches it: not a black panel pretending, a light empty horizon. */
+.ds-bezel[data-state="unaddressed"] {
+  background: var(--ds-surface-sunken);
+  color: var(--ds-faint);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
+}
+
+/* Never heard from is a rim of ochre. On air is a rim of alarm, and it wins
+   when both are true: what is reaching the panel matters more right now than
+   whether the panel has ever answered. */
+.ds-bezel[data-never] {
+  box-shadow:
+    0 0 0 2px var(--ds-paper),
+    0 0 0 4px var(--ds-miss),
+    0 6px 14px -8px rgb(var(--ds-ink-rgb) / 0.35);
+}
+
+.ds-bezel[data-onair] {
+  box-shadow:
+    0 0 0 2px var(--ds-paper),
+    0 0 0 4px var(--ds-alarm),
+    0 6px 14px -8px rgb(var(--ds-ink-rgb) / 0.35);
+}
+
+.ds-glass {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+}
+
+.ds-glass .pe-thumb {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+}
+
+.ds-glass.is-kind > * {
+  width: 100%;
+  height: 100%;
+}
+
+/* Dark on purpose: a faint standby mark, so it is not mistaken for off. */
+.ds-glass.is-dark::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14%;
+  height: 2px;
+  transform: translate(-50%, -50%);
+  border-radius: var(--ds-r-pill);
+  background: rgb(var(--ds-panel-screen-ink) / 0.18);
+}
+
+/* The empty horizon: a line where the ground would be. */
+.ds-glass.is-horizon::after {
+  content: "";
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: 62%;
+  height: 1px;
+  background: rgb(var(--ds-ink-rgb) / 0.14);
+}
+
+.ds-bezel.is-xs .ds-glass.is-horizon::after {
+  left: 25%;
+  right: 25%;
+}
+
+/* ── Day: one axis, one playhead ───────────────────────────────────────── */
+
+.ds-day {
+  position: relative;
+  width: 100%;
+  display: grid;
+  gap: 4px;
+}
+
+.ds-day-track {
+  position: relative;
+  height: 28px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
+  overflow: hidden;
+}
+
+.ds-day.is-sm .ds-day-track {
+  height: 10px;
+}
+
+.ds-day-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgb(var(--ds-ink-rgb) / 0.08);
+  pointer-events: none;
+}
+
+.ds-day-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  appearance: none;
+  border: 0;
+  padding: 0 8px;
+  border-radius: var(--ds-r-pill);
+  font: inherit;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  color: var(--ds-ink);
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: filter var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-day-seg:disabled {
+  cursor: default;
+}
+
+.ds-day-seg:not(:disabled):hover {
+  filter: brightness(0.96);
+}
+
+/* The ground is what plays when nothing else does: the well itself, tinted. */
+.ds-day-seg.is-ground {
+  background: color-mix(in srgb, var(--ds-surface-sunken) 70%, var(--ds-ink) 6%);
+  color: var(--ds-muted);
+  border-radius: 0;
+  padding: 0 12px;
+}
+
+/* A daypart is an object on the track. */
+.ds-day-seg.is-part {
+  top: 3px;
+  bottom: 3px;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-day.is-sm .ds-day-seg {
+  padding: 0;
+  font-size: 0;
+}
+
+.ds-day.is-sm .ds-day-seg.is-part {
+  top: 2px;
+  bottom: 2px;
+}
+
+/* Bands are broadcasts laid over the day, higher priority higher. */
+.ds-day-bands {
+  position: relative;
+  height: 12px;
+}
+
+.ds-day-band {
+  position: absolute;
+  top: 0;
+  height: 10px;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-alarm-soft);
+  box-shadow: inset 0 0 0 1px var(--ds-alarm);
+  cursor: pointer;
+}
+
+.ds-day-band:disabled {
+  cursor: default;
+}
+
+.ds-day-now {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ds-accent);
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ds-day-now::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%);
+  border-radius: var(--ds-r-round);
+  background: var(--ds-accent);
+  box-shadow: 0 0 0 2px var(--ds-surface-sunken);
+}
+
+.ds-day.is-sm .ds-day-now::before {
+  width: 6px;
+  height: 6px;
+}
+
+/* ── Footprint: the fleet as the fleet ─────────────────────────────────── */
+
+.ds-footprint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ds-footprint-cell {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  display: block;
+}
+
+.ds-footprint-cell:disabled {
+  cursor: default;
+}
+
+.ds-footprint-glass {
+  display: block;
+  width: 40px;
+  height: 25px;
+  border-radius: 4px;
+  background: var(--ds-panel-screen);
+  box-shadow: inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12);
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-footprint.is-sm .ds-footprint-glass {
+  width: 56px;
+  height: 35px;
+  border-radius: 5px;
+}
+
+/* Reached: lit, in the colour of now. */
+.ds-footprint-cell[data-reached] .ds-footprint-glass {
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    inset 0 0 0 2px var(--ds-positive),
+    inset 0 0 12px rgb(53 203 145 / 0.45);
+}
+
+/* Missed: the empty horizon, outlined in the colour of the miss. */
+.ds-footprint-cell[data-missed] .ds-footprint-glass {
+  background: var(--ds-surface-sunken);
+  box-shadow:
+    inset 0 0 0 1.5px var(--ds-miss),
+    inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.06);
+}
+
+/* ── Sky stack: what outranks what, on one screen ──────────────────────── */
+
+.ds-sky {
+  display: flex;
+  flex-direction: column;
+  padding: 0 18px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+}
+
+.ds-sky-rung {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--ds-rule);
+}
+
+.ds-sky-rung:first-child {
+  border-top: 0;
+}
+
+/* The rung that answers is lit; the ones below it wait. */
+.ds-sky-rung[data-wins] {
+  margin: 0 -18px;
+  padding-inline: 18px;
+  background: var(--ds-positive-soft);
+  border-top-color: transparent;
+}
+
+.ds-sky-rung[data-wins][data-onair] {
+  background: var(--ds-alarm-soft);
+  box-shadow: inset 3px 0 0 var(--ds-alarm);
+}
+
+.ds-sky-rung[data-wins]:first-child {
+  border-radius: var(--ds-r-lg) var(--ds-r-lg) 0 0;
+}
+
+.ds-sky-rung + .ds-sky-rung[data-wins] {
+  border-top: 0;
+}
+
+.ds-sky-mark {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  flex-shrink: 0;
+}
+
+.ds-sky-rung[data-wins] .ds-sky-mark {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-sky-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ds-sky-copy > strong {
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-sky-copy > span {
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+}
+
+.ds-sky-hit {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  min-width: 0;
+  cursor: pointer;
+  display: contents;
+}
+
+.ds-sky-acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ds-sky-rung.is-fallback {
+  color: var(--ds-faint);
+}
+
+/* ── Readout: a value the page shows you, not a field you fill in ──────── */
+
+.ds-readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.ds-readout {
+  appearance: none;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  padding: 12px 14px;
+  display: grid;
+  gap: 5px;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-sunken);
+  cursor: pointer;
+  transition: background var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-readout:hover {
+  background: color-mix(in srgb, var(--ds-surface-sunken) 92%, var(--ds-ink));
+}
+
+.ds-readout:disabled {
+  cursor: default;
+}
+
+.ds-readout > span {
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+}
+
+.ds-readout > strong {
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-readout > strong.is-absent {
+  color: var(--ds-miss);
+}
+
+/* ── The horizon page's hero ───────────────────────────────────────────── */
+
+.ds-horizon {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+  gap: clamp(18px, 3vw, 32px);
+  align-items: start;
+  margin-bottom: var(--ds-space-5);
+}
+
+.ds-horizon-copy {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.ds-horizon-why {
+  margin: 0;
+  font-size: var(--ds-fs-body);
+  line-height: 1.45;
+}
+
+.ds-horizon-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+}
+
+.ds-horizon-facts > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ds-horizon-facts svg {
+  color: var(--ds-faint);
+}
+
+@media (max-width: 760px) {
+  .ds-horizon {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Sections on the horizon page ──────────────────────────────────────── */
+
+.ds-band {
+  display: grid;
+  gap: 10px;
+  margin-bottom: var(--ds-space-5);
+}
+
+.ds-band > h3 {
+  margin: 0;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+}
+
+.ds-audiences {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ds-audience {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+  cursor: pointer;
+}
+
+.ds-audience > strong {
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+}
+
+.ds-log {
+  display: flex;
+  flex-direction: column;
+  padding: 0 18px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+}
+
+.ds-log-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--ds-rule);
+  font-size: var(--ds-fs-small);
+}
+
+.ds-log-row:first-child {
+  border-top: 0;
+}
+
+.ds-log-row > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-log-row > span:nth-child(2) em {
+  font-style: normal;
+  color: var(--ds-muted);
+}
+
+/* ── Attached: the screens tuned to a channel, drawn beneath it ────────── */
+
+.ds-attached {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ds-attached-hit {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-attached-hit:hover {
+  transform: translateY(-1px);
+}

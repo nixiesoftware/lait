@@ -154,7 +154,7 @@ export function LiveProvider({
  */
 export function OnAir({
   since,
-  label = "ON AIR",
+  label = "On air",
   tone = "live",
 }: {
   since?: number | null;
