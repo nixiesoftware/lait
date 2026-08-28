@@ -23,7 +23,7 @@ import {
   type DisplayTheme,
   type Orbit,
 } from "./client";
-import { AppDialog, Badge, DialogFooter, Empty, Fact, SectionTitle, shortId, words } from "./kit";
+import { AppDialog, Badge, DialogFooter, Empty, Fact, Notice, SectionTitle, shortId, words } from "./kit";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
@@ -111,9 +111,29 @@ export function newAssignmentDraft(surfaces: DisplaySurface[], orbits: Orbit[]):
  * Signage program id is typed bare and wrapped here; every other surface's
  * input goes verbatim to the package's own canonicalizer.
  */
+/**
+ * Why the draft's input cannot cross yet, or null when it can. A signage
+ * program id is any non-empty text; every other surface's input is JSON,
+ * and the daemon's parser is the one that would otherwise say so — from
+ * the other window, after the fact.
+ */
+export function inputProblem(draft: Pick<AssignmentDraft, "chosenKey" | "input">, surfaces: DisplaySurface[]): string | null {
+  const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
+  if (chosen === undefined) return "Choose a display surface.";
+  const value = draft.input.trim();
+  if (value === "") return isSignageSurface(chosen) ? "Enter the program's body id." : "Enter the package input as JSON.";
+  if (isSignageSurface(chosen)) return null;
+  try {
+    JSON.parse(value);
+    return null;
+  } catch {
+    return "The package input must be JSON — for example {\"project\":\"ENG\"}.";
+  }
+}
+
 export function assignmentPayload(draft: AssignmentDraft, surfaces: DisplaySurface[]): DisplayAssignmentRequest | null {
   const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
-  if (chosen === undefined || !assignmentDraftValid(draft)) return null;
+  if (chosen === undefined || !assignmentDraftValid(draft) || inputProblem(draft, surfaces) !== null) return null;
   const value = draft.input.trim();
   return {
     orbit: draft.orbit,
@@ -165,6 +185,10 @@ export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }:
 }) {
   const [dialog, setDialog] = useState<DisplaysDialog | null>(null);
   const display = view.display;
+  // A refusal of something asked from this window is answered in this
+  // window. The main window's bar keeps the whole list; here only the
+  // latest that concerns displays, which is the one the person is waiting on.
+  const failure = view.failures.find((candidate) => /display/i.test(candidate.what) || /display/i.test(candidate.error));
   return <section className="secondary-surface" aria-label="Displays">
     <header className="secondary-header">
       <button className="back-button" onClick={onBack}>{ownedWindow ? "Close window" : "← Library"}</button>
@@ -180,6 +204,7 @@ export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }:
       ? <div className="secondary-scroll"><div className="skeleton" style={{ height: 112, marginBottom: 22 }} />
           <div className="skeleton" style={{ height: 152, marginBottom: 9 }} /><div className="skeleton" style={{ height: 152 }} /></div>
       : <div className="secondary-scroll displays-surface">
+        {failure !== undefined && <Notice tone="danger">{failure.what}: {failure.error}</Notice>}
         <Coordinator display={display} openDialog={setDialog} />
         {display.pendingRendezvous.length > 0 && <section className="section-block">
           <SectionTitle label="CODES WAITING" count={display.pendingRendezvous.length} />
@@ -450,6 +475,7 @@ function AssignmentDraftFields({ draft, setDraft, surfaces, orbits }: {
 }) {
   const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
   const signage = chosen !== undefined && isSignageSurface(chosen);
+  const problem = inputProblem(draft, surfaces);
   const set = <K extends keyof AssignmentDraft>(key: K, value: AssignmentDraft[K]) => setDraft({ ...draft, [key]: value });
   return <>
     <label>ORBIT<select value={draft.orbit} onChange={(event) => set("orbit", event.target.value)}>
@@ -463,6 +489,7 @@ function AssignmentDraftFields({ draft, setDraft, surfaces, orbits }: {
     {signage
       ? <label>Signage program body ID<input className="mono" value={draft.input} onChange={(event) => set("input", event.target.value)} /></label>
       : <label>Package input JSON<textarea className="mono" rows={4} value={draft.input} onChange={(event) => set("input", event.target.value)} /></label>}
+    {draft.input.trim() !== "" && problem !== null && <p className="custody-note" data-warning>{problem}</p>}
     <div className="dialog-grid">
       <label>THEME<select value={draft.theme} onChange={(event) => set("theme", event.target.value as DisplayTheme)}>
         {(Object.keys(themeNames) as DisplayTheme[]).map((option) => <option key={option} value={option}>{themeNames[option]}</option>)}

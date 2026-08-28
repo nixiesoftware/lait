@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Display, DisplayAssignment, DisplaySurface } from "./client";
 import {
-  assignmentDraftValid, assignmentFor, assignmentPayload, codeEntry, isSignageSurface, minutesLeft,
+  assignmentDraftValid, assignmentFor, assignmentPayload, codeEntry, inputProblem, isSignageSurface, minutesLeft,
   newAssignmentDraft, platformName, receiverBootstrap,
 } from "./displays";
 
@@ -71,6 +71,13 @@ describe("the displays coordination rules", () => {
       .toBe("{\"project\":\"ENG\"}");
     // A draft with nothing to show is not an assignment.
     expect(assignmentPayload({ ...draft, chosenKey: "nowhere", input: "x" }, surfaces)).toBeNull();
+    // Non-JSON input for a JSON surface is refused here, with a reason, not
+    // by the daemon from the other window.
+    expect(assignmentPayload({ ...draft, chosenKey: "issues board", input: "bod_lobby" }, surfaces)).toBeNull();
+    expect(inputProblem({ chosenKey: "issues board", input: "bod_lobby" }, surfaces)).toMatch(/must be JSON/);
+    expect(inputProblem({ chosenKey: "issues board", input: "{\"project\":\"ENG\"}" }, surfaces)).toBeNull();
+    expect(inputProblem({ chosenKey: "com.lait.signage signage.program", input: "bod_lobby" }, surfaces)).toBeNull();
+    expect(inputProblem({ chosenKey: "com.lait.signage signage.program", input: " " }, surfaces)).toMatch(/body id/);
   });
 
   it("special-cases the signage program surface and nothing else", () => {
