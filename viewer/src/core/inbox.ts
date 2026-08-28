@@ -52,3 +52,36 @@ export function groupActivity(events: ActivityEvent[]): ActivityGroup[] {
   }
   return groups;
 }
+
+/** What each cause is called wherever the inbox is configured. */
+export function inboxCauseLabel(kind: string): string {
+  return (
+    { assigned: "Assignments", comment: "Comments and mentions", status: "Status changes", chronological: "Latest" }[
+      kind
+    ] ?? "Other"
+  );
+}
+
+const preferencesKey = (spaceId: string) => `lait.inbox-preferences:${spaceId}`;
+
+/** Per-space, per-device inbox preferences — read by the Inbox on mount and by
+ *  the Notifications settings page, which is the second place they are set. */
+export function loadInboxPreferences(spaceId: string): InboxPreferences {
+  try {
+    const saved = JSON.parse(localStorage.getItem(preferencesKey(spaceId)) ?? "null") as Partial<InboxPreferences> | null;
+    const defaults = defaultInboxPreferences();
+    return saved
+      ? { ...defaults, ...saved, kinds: { ...defaults.kinds, ...saved.kinds }, snoozed: saved.snoozed ?? {} }
+      : defaults;
+  } catch {
+    return defaultInboxPreferences();
+  }
+}
+
+export function persistInboxPreferences(spaceId: string, value: InboxPreferences): void {
+  try {
+    localStorage.setItem(preferencesKey(spaceId), JSON.stringify(value));
+  } catch {
+    // Memory remains authoritative for this page.
+  }
+}

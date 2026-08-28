@@ -673,7 +673,10 @@ struct AccessGrantArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct AccessRevokeArgs {
-    grant_id: String,
+    /// The grant ids to revoke as one all-or-nothing set — a role grant's
+    /// whole expansion, as `access_list` groups it, or a single id.
+    #[schemars(length(min = 1))]
+    grant_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1039,7 +1042,12 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<AccessRevokeArgs>(
             "access_revoke",
-            "Revoke an effective assignment.",
+            "Revoke effective assignments by grant id, as one all-or-nothing set. \
+             Pass `grant_ids` — the ids access_list groups under one role grant \
+             — or a single `grant_id`. Assignments whose origin is founder, \
+             admission, membership or sponsorship are the base role: change \
+             the role on Members instead of revoking them here.",
+
             access_revoke,
         ),
         tool::<WorkflowShowArgs>("workflow_show", "Read a project's workflow.", workflow_show),
@@ -2080,7 +2088,7 @@ fn access_revoke(input: Value) -> Result<ClientInvocation, Failure> {
     let a: AccessRevokeArgs = args(input)?;
     local(
         LOCAL_ACCESS,
-        json!({ "action": "revoke", "grant_id": a.grant_id }),
+        json!({ "action": "revoke", "grant_ids": a.grant_ids }),
     )
 }
 

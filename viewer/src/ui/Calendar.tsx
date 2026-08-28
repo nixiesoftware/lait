@@ -1,4 +1,5 @@
 import { Toolbar } from "./layout";
+import { usePreferences, weekColumn, weekdayLabels, type WeekStart } from "../core/preferences";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
@@ -75,7 +76,9 @@ export function Calendar({
     setAnchor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   };
 
-  const weeks = useMemo(() => monthGrid(year, month), [year, month]);
+  const { weekStart } = usePreferences();
+  const weeks = useMemo(() => monthGrid(year, month, weekStart), [year, month, weekStart]);
+  const weekdays = weekdayLabels(weekStart);
   const todayKey = dayKey(new Date());
   const monthLabel = anchorDate.toLocaleDateString(undefined, {
     timeZone: "UTC",
@@ -120,7 +123,7 @@ export function Calendar({
       </Toolbar>
 
       <div className="grid shrink-0 grid-cols-7 border-b border-line">
-        {WEEKDAYS.map((d) => (
+        {weekdays.map((d) => (
           <div key={d} className="text-mute px-2 py-1 text-2xs font-semibold tracking-wider uppercase">
             {d}
           </div>
@@ -225,19 +228,18 @@ export function Calendar({
   );
 }
 
-const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /** The `YYYY-MM-DD` UTC key a due date files under. */
 function dayKey(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Six weeks of UTC days covering `month`, Monday-first, spilling into the
- *  neighbouring months so the grid is always a full rectangle. */
-function monthGrid(year: number, month: number): Date[][] {
+/** Six weeks of UTC days covering `month`, starting the week where the person
+ *  starts theirs, spilling into the neighbouring months so the grid is always
+ *  a full rectangle. */
+function monthGrid(year: number, month: number, weekStart: WeekStart): Date[][] {
   const first = new Date(Date.UTC(year, month, 1));
-  // JS: 0=Sun … 6=Sat. Shift so Monday=0.
-  const lead = (first.getUTCDay() + 6) % 7;
+  const lead = weekColumn(first.getUTCDay(), weekStart);
   const start = Date.UTC(year, month, 1 - lead);
   const weeks: Date[][] = [];
   for (let w = 0; w < 6; w++) {

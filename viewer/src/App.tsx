@@ -89,6 +89,7 @@ import { DialogHost } from "./ui/dialogs";
 import { Combobox } from "./ui/Picker";
 import { Dialog, Theme } from "@astryxdesign/core";
 
+import { loadPreferences } from "./core/preferences";
 import { laitTheme } from "./theme/lait";
 import { Button, IconButton } from "@astryxdesign/core";
 import { Sidebar } from "./ui/Sidebar";
@@ -200,7 +201,13 @@ export function App() {
   // resolves the space id to its own local replica after `/api/spaces` answers.
   const initialRoute = useRef((() => {
     const fromUrl = parseRoute(window.location);
-    return fromUrl.spaceId ? fromUrl : (loadLastRoute() ?? fromUrl);
+    if (fromUrl.spaceId) return fromUrl;
+    const last = loadLastRoute();
+    if (!last) return fromUrl;
+    // A chosen home view overrides where you left off — but only on launch,
+    // and only the view: the Space and project it opens in are still yours.
+    const home = loadPreferences().homeView;
+    return home === "last" ? last : { ...last, view: home, issue: null };
   })()).current;
   const [spaces, setSpaces] = useState<SpaceRow[]>([]);
   /** Canonical `ws_…` identity in the URL, distinct from the supervisor's
@@ -2362,7 +2369,7 @@ export function App() {
                 <HeaderActionsOutlet />
               ) : (
             <>
-              {!projectShell && (
+              {!projectShell && current && (
                 <TrustPopover
                   liveness={liveness}
                   status={statusInfo}
@@ -2576,7 +2583,7 @@ export function App() {
               body={
                 routeSpace
                   ? `${routeSpace} isn’t on this device. Enter it with an invite.`
-                  : "Select a local replica from the sidebar."
+                  : "Open the space menu at the top of the sidebar, or start a new one."
               }
               // A route naming a space this device does not hold is answered by
               // entering it, not by founding a second one under the same name.
@@ -2635,6 +2642,15 @@ export function App() {
               onTabChange={openSettingsTab}
               onError={setError}
               onExit={() => api.goto("list")}
+              theme={theme}
+              onThemeChange={api.setTheme}
+              density={density}
+              onDensityChange={(nextDensity) => {
+                setDensity(nextDensity);
+                applyDensity(nextDensity);
+              }}
+              onOpenShortcuts={() => setModal("shortcuts")}
+              onForget={() => void forgetSpace(current)}
             />
           ) : view === "my-issues" ? (
             <MyIssues

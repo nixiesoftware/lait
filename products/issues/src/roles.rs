@@ -215,6 +215,14 @@ pub fn provenance_ref(role_id: &str, revision_id: &[u8; 32]) -> Vec<u8> {
     postcard::to_stdvec(&(role_id, revision_id)).expect("role provenance")
 }
 
+/// Read a [`provenance_ref`] back: the role id and revision it named. This
+/// product is the only reader of its own reference — the host carries it
+/// opaque and a surface asks here, never by decoding it itself.
+pub fn decode_provenance_ref(bytes: &[u8]) -> Option<(String, [u8; 32])> {
+    let (role_id, revision_id): (String, [u8; 32]) = postcard::from_bytes(bytes).ok()?;
+    (role_id.len() <= MAX_ROLE_ID).then_some((role_id, revision_id))
+}
+
 /// The complete expanded admission evidence for a role: the role's
 /// capabilities on the Space resource, plus the mandatory `space.issue.read`
 /// baseline, plus — for the administrator — the Mechanics policy-admin

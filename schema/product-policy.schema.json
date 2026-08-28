@@ -1,6 +1,65 @@
 {
   "$defs": {
     "AssignmentDto": {
+      "$defs": {
+        "AssignmentOrigin": {
+          "additionalProperties": false,
+          "description": "Why an assignment exists, as the grant op that installed it recorded.\n\n`founder`, `admission`, `membership` and `sponsorship` are all \"came with\nbeing a member\": the assignment is the base role, expanded. `grant` is the\none kind a surface may present as an extra on top of it.",
+          "properties": {
+            "definition_ref": {
+              "description": "The opaque product role reference (hex) whose expansion this is, for\nthe kinds that carry one. Only the World that minted it can read it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "$ref": "#/$defs/AssignmentOriginKind"
+            },
+            "role": {
+              "description": "The role id the owning World resolved `definition_ref` to. The host\nleaves this empty: the reference is opaque to it by design, and the\nWorld's own reply is where the name is filled in.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        "AssignmentOriginKind": {
+          "description": "Which kind of act put an assignment in force — the wire form of\n[`GrantOrigin`]'s variants.",
+          "oneOf": [
+            {
+              "const": "founder",
+              "description": "Seeded for a founding actor by a World's founder policy at formation.",
+              "type": "string"
+            },
+            {
+              "const": "admission",
+              "description": "Installed when an admission was redeemed — the joiner's role.",
+              "type": "string"
+            },
+            {
+              "const": "membership",
+              "description": "A membership role change by an admin.",
+              "type": "string"
+            },
+            {
+              "const": "grant",
+              "description": "Granted beyond membership by a policy admin or delegate.",
+              "type": "string"
+            },
+            {
+              "const": "sponsorship",
+              "description": "Minted with an agent's sponsorship.",
+              "type": "string"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "One effective scoped capability assignment (Mechanics authority history,\nprojected for `access ls`).",
@@ -16,6 +75,17 @@
         "grant_id": {
           "description": "The grant id (64-hex) — the revocation handle.",
           "type": "string"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssignmentOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the assignment exists, when its grant op said. Absent means *not\nrecorded* — a grant authored before origins were — and is not any kind\nin particular; a reader must not fold it into membership or into\n\"granted here\"."
         },
         "resource": {
           "description": "The exact resource segments (empty = the Space resource).",

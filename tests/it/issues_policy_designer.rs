@@ -93,7 +93,10 @@ fn grant_role(
         home,
         issues_app::IssuesRequest::AccessPlan { role, project },
     ) {
-        IssueResponse::AccessPlan { assignments } => req(
+        IssueResponse::AccessPlan {
+            assignments,
+            definition_ref,
+        } => req(
             rt,
             home,
             Request::AssignmentGrant {
@@ -106,8 +109,10 @@ fn grant_role(
                         resource: assignment.resource,
                     })
                     .collect(),
+                definition_ref,
             },
         ),
+
         IssueResponse::Error { message, .. } => Response::err(message),
         other => Response::err(format!("unexpected access plan: {other:?}")),
     }
@@ -476,6 +481,31 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         .find(|r| r.capability == "workflow.transition.ship")
         .expect("the exact expansion landed");
     assert_eq!(grant.resource, vec![project_id.clone()]);
+    // The grant says why it exists — and what came with membership says so
+    // too, so a surface can tell the founder's base role from an extra
+    // instead of drawing both as revocable grants.
+    let origin = grant
+        .origin
+        .as_ref()
+        .expect("a grant made here records its origin");
+    assert_eq!(
+        origin.kind,
+        mechanics::assignment::AssignmentOriginKind::Grant
+    );
+    assert!(
+        origin.definition_ref.is_some(),
+        "the role reference rides on the grant: {origin:?}"
+    );
+    let base = rows
+        .iter()
+        .find(|r| r.capability == "space.admin")
+        .expect("the founder holds space.admin from the founder policy");
+    assert_eq!(
+        base.origin.as_ref().map(|o| o.kind),
+        Some(mechanics::assignment::AssignmentOriginKind::Founder),
+        "{base:?}"
+    );
+
     let allowed = issue_req(
         &rt,
         &home,
@@ -499,7 +529,8 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         &rt,
         &home,
         Request::AssignmentRevoke {
-            grant_id: grant.grant_id.clone(),
+            grant_id: None,
+            grant_ids: vec![grant.grant_id.clone()],
         },
     );
     assert!(matches!(revoked, Response::Ok { .. }), "{revoked:?}");
@@ -519,6 +550,45 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
             .any(|r| r.capability == "workflow.transition.ship"),
         "revocation removed the assignment"
     );
+    // Granted again after the revoke, the role comes back under a NEW grant
+    // id. A revoked id is revoked for good, so re-deriving the old one would
+    // author a grant that reports installed and is never effective.
+    let regranted = grant_role(
+        &rt,
+        &home,
+        me.clone(),
+        role_id.clone(),
+        Some(project_id.clone()),
+    );
+    assert!(matches!(regranted, Response::Ok { .. }), "{regranted:?}");
+    let rows = match req(
+        &rt,
+        &home,
+        Request::AssignmentList {
+            actor: Some(me.clone()),
+        },
+    ) {
+        Response::Assignments { rows } => rows,
+        other => panic!("{other:?}"),
+    };
+    let back = rows
+        .iter()
+        .find(|r| r.capability == "workflow.transition.ship")
+        .expect("a role granted again after a revoke is effective again");
+    assert_ne!(
+        back.grant_id, grant.grant_id,
+        "a fresh id, not the revoked one"
+    );
+    let revoked = req(
+        &rt,
+        &home,
+        Request::AssignmentRevoke {
+            grant_id: Some(back.grant_id.clone()),
+            grant_ids: vec![],
+        },
+    );
+    assert!(matches!(revoked, Response::Ok { .. }), "{revoked:?}");
+
     let denied_again = issue_req(
         &rt,
         &home,

@@ -146,6 +146,14 @@ impl Endpoint {
 ///
 /// v15: native World update consent/progress is daemon-owned and durable;
 /// Busy/Capacity are typed so a client never guesses whether retry is safe.
+///
+/// Additive within v15 — an installed World declares `lait.control >=15, <16`,
+/// so a change a v15 World can still speak must not move this number: an
+/// assignment says why it exists. `AssignmentGrant` may carry the role
+/// reference its expansion came from, `AssignmentList` rows may carry an
+/// `origin`, and `AssignmentRevoke` accepts `grant_ids` — the set a role
+/// expanded into, revoked all-or-nothing — beside the single `grant_id` a
+/// v15 World still sends.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 15;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
@@ -867,11 +875,23 @@ pub enum Request {
     AssignmentGrant {
         actor: String,
         assignments: Vec<AssignmentSpec>,
+        /// The package's opaque reference (hex) to the role definition these
+        /// assignments expand — recorded on every grant as its origin. Absent
+        /// leaves the origin unrecorded; the daemon never guesses one.
+        #[serde(default)]
+        definition_ref: Option<String>,
     },
-    /// Revoke one effective assignment by its grant id (64-hex).
+    /// Revoke effective assignments by grant id (64-hex each), as one
+    /// all-or-nothing authority batch — a role's expansion is revoked the way
+    /// it was granted, as a set. `grant_id` is the single-id spelling a v15
+    /// World sends; both are honoured, together, at least one required.
     AssignmentRevoke {
-        grant_id: String,
+        #[serde(default)]
+        grant_id: Option<String>,
+        #[serde(default)]
+        grant_ids: Vec<String>,
     },
+
     /// Activate the selected runner's reviewed implementation for one World
     /// (admin-authored ACL action; idempotent when already active).
     /// The activation is what receipts pin — a runner whose descriptor differs
@@ -1888,8 +1908,12 @@ pub fn representative_requests() -> Vec<Request> {
         Request::AssignmentGrant {
             actor: s(),
             assignments: vec![],
+            definition_ref: None,
         },
-        Request::AssignmentRevoke { grant_id: s() },
+        Request::AssignmentRevoke {
+            grant_id: None,
+            grant_ids: vec![s()],
+        },
         Request::WorldActivate { world: s() },
         Request::Work {
             request: runtime::exec::WorkRequest::Inspect {

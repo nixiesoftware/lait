@@ -1,22 +1,24 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
+  Bell,
   Hash,
   KeyRound,
   Laptop,
   Palette,
+  RotateCcw,
+  Search,
   ShieldCheck,
   ShieldPlus,
   SlidersHorizontal,
   Tag,
   Trash2,
+  UserRound,
   Users,
   UsersRound,
-  X,
 } from "lucide-react";
 
 import { rpc, spaceRpc } from "../api";
-import { useProjectViewerStore } from "../projectStore";
 import type {
   AssignmentDto,
   LabelDto,
@@ -25,42 +27,65 @@ import type {
   RoleProjection,
   TeamDto,
 } from "../types";
-import { memberName } from "./Avatar";
+import { Avatar, memberName } from "./Avatar";
 import { catalogColor } from "./colors";
-import { ColorPicker } from "./ColorPicker";
 import * as ask from "./dialogs";
-import { ProjectIcon, StatusIcon } from "./icons";
+import { ProjectIcon } from "./icons";
 import { Members } from "./Members";
 import { TeamsPanel } from "./TeamsPanel";
 import { Combobox } from "./Picker";
-import { Button, IconButton, TextArea, TextInput } from "@astryxdesign/core";
+import { Button, TextArea, TextInput } from "@astryxdesign/core";
 import { cn, navigationItem } from "./primitives";
+import {
+  extrasOf,
+  foldAccess,
+  type HeldCapability,
+  type MembershipLine,
+  type RoleGrant,
+} from "../core/access";
 import {
   SettingsField,
   SettingsPageHeader,
   SettingsSection,
   SettingsSurface,
 } from "./settingsLayout";
+import { LabelsPanel } from "./settings/Labels";
+import { SETTINGS_GROUPS, isSettingsTab, searchSettings, type SettingsTab } from "./settings/pages";
+import {
+  PreferencesPanel,
+  type DensityPreference,
+  type ThemePreference,
+} from "./settings/Preferences";
+import { NotificationsPanel } from "./settings/Notifications";
+import { ProfilePanel } from "./settings/Profile";
+import { WorkflowPanel } from "./settings/Workflow";
 
-type Tab = "general" | "teams" | "members" | "devices" | "labels" | "workflow" | "access";
+const TAB_ICON: Record<SettingsTab, React.ReactNode> = {
+  preferences: <SlidersHorizontal className="size-icon-sm" />,
+  profile: <UserRound className="size-icon-sm" />,
+  notifications: <Bell className="size-icon-sm" />,
+  general: <Hash className="size-icon-sm" />,
+  members: <Users className="size-icon-sm" />,
+  teams: <UsersRound className="size-icon-sm" />,
+  access: <ShieldCheck className="size-icon-sm" />,
+  devices: <Laptop className="size-icon-sm" />,
+  labels: <Tag className="size-icon-sm" />,
+  workflow: <Palette className="size-icon-sm" />,
+};
 
-const TABS: readonly Tab[] = ["general", "teams", "members", "devices", "labels", "workflow", "access"];
-
-/** Narrow a route value to a sub-page. The route already refuses names it does
- *  not know, so this is the second half of one contract rather than a second
- *  list — but it is the half TypeScript can see. */
-function isTab(value: string | null | undefined): value is Tab {
-  return value !== null && value !== undefined && (TABS as readonly string[]).includes(value);
-}
+/** The pages that draw a table and want the wider column. */
+const WIDE: ReadonlySet<SettingsTab> = new Set(["teams", "members", "labels"]);
 
 /**
  * The settings surface — the place a space is administered like an application.
  *
  * It is a real destination (a `settings` view/route), not a modal, because it hosts
  * several editors that each own state; a popover would throw that away on the first
- * outside click. The left rail is the taxonomy Linear uses — General, Labels,
- * Workflow — over the engine's now-mutable catalog (space rename, label lifecycle,
- * workflow states), which until recently was create-only.
+ * outside click. The left rail is grouped the way Linear groups its own —
+ * **Personal** (what this person wants, on this device), **Issues** (the vocabulary
+ * every project shares), **Administration** (the space itself) — with a search box
+ * above it that answers to a page's rows and not only its name, and the teams
+ * listed beneath so a team is one click from anywhere in settings.
  */
 export function Settings({
   spaceId,
@@ -76,6 +101,12 @@ export function Settings({
   onTabChange,
   onError,
   onExit,
+  theme,
+  onThemeChange,
+  density,
+  onDensityChange,
+  onOpenShortcuts,
+  onForget,
 }: {
   spaceId: string;
   spaceName: string;
@@ -96,6 +127,13 @@ export function Settings({
   /** Leave settings and return to the app — the workspace sidebar is collapsed
    *  while this page is open, so this is the way back. */
   onExit: () => void;
+  theme: ThemePreference;
+  onThemeChange: (theme: ThemePreference) => void;
+  density: DensityPreference;
+  onDensityChange: (density: DensityPreference) => void;
+  onOpenShortcuts: () => void;
+  /** Deregister this space on this device. Absent when the host cannot. */
+  onForget?: () => void;
 }) {
   /**
    * The sub-page comes from the route, not from `window.location` read here.
@@ -111,67 +149,68 @@ export function Settings({
    */
   const legacyMembersPath =
     window.location.pathname.split("/").filter(Boolean).at(-1) === "members";
-  const tab: Tab = isTab(routeTab) ? routeTab : legacyMembersPath ? "members" : "general";
-  const setTab = (next: Tab) => onTabChange(next === "general" ? null : next);
+  const tab: SettingsTab = isSettingsTab(routeTab)
+    ? routeTab
+    : legacyMembersPath
+      ? "members"
+      : "general";
+  const setTab = (next: SettingsTab) => onTabChange(next === "general" ? null : next);
   // Reliable driver hook: `lait:nav { tab }` selects a sub-page without a click.
   useEffect(() => {
     const onNav = (event: Event) => {
       const t = (event as CustomEvent).detail?.tab;
-      if (isTab(t)) onTabChange(t === "general" ? null : t);
+      if (isSettingsTab(t)) onTabChange(t === "general" ? null : t);
     };
     window.addEventListener("lait:nav", onNav as EventListener);
     return () => window.removeEventListener("lait:nav", onNav as EventListener);
   }, [onTabChange]);
-  const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
-    { id: "general", label: "General", icon: <SlidersHorizontal className="size-icon-sm" /> },
-    // Beside Members, and above it, because a team is the container a member
-    // is in — which is the order Linear puts them in for the same reason.
-    { id: "teams", label: "Teams", icon: <UsersRound className="size-icon-sm" /> },
-    { id: "members", label: "Members", icon: <Users className="size-icon-sm" /> },
-    { id: "devices", label: "Devices & recovery", icon: <Laptop className="size-icon-sm" /> },
-    { id: "labels", label: "Labels", icon: <Tag className="size-icon-sm" /> },
-    { id: "workflow", label: "Workflow", icon: <Palette className="size-icon-sm" /> },
-    { id: "access", label: "Roles & access", icon: <ShieldCheck className="size-icon-sm" /> },
-  ];
+
+  /** A team chosen from the rail: opens Teams on that team. Held here rather
+   *  than in the route because the team page is a step inside Teams, and the
+   *  rail is the one other place that can start that step. */
+  const [teamFocus, setTeamFocus] = useState<string | null>(null);
+  const openTeam = (id: string) => {
+    setTeamFocus(id);
+    setTab("teams");
+  };
+
+  const isAdmin = members.some((m) => m.me && m.role === "admin");
 
   return (
     <div className="bg-sunken flex h-full min-h-0">
-      <nav className="flex w-48 shrink-0 flex-col gap-0.5 p-2">
-        <button
-          onClick={onExit}
-          className={cn(navigationItem({ size: "lg" }), "text-mute mb-3")}
-        >
-          <ArrowLeft className="size-icon-sm" />
-          Back to app
-        </button>
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={cn(navigationItem({ selected: tab === t.id, size: "lg" }))}
-          >
-            {t.icon}
-            {t.label}
-          </button>
-        ))}
-      </nav>
+      <SettingsRail tab={tab} teams={teams} onPick={setTab} onPickTeam={openTeam} onExit={onExit} />
       <section className="border-line bg-bg m-1 min-h-0 flex-1 overflow-hidden rounded-surface border">
-        <div className="h-full overflow-y-auto px-6 py-7">
-          <div
-            className={cn(
-              "mx-auto w-full",
-              tab === "teams" || tab === "members" || tab === "labels"
-                ? "max-w-4xl"
-                : "max-w-2xl",
+        <div className="h-full overflow-y-auto px-6 py-8">
+          <div className={cn("mx-auto w-full", WIDE.has(tab) ? "max-w-4xl" : "max-w-2xl")}>
+            {tab === "preferences" && (
+              <PreferencesPanel
+                theme={theme}
+                onThemeChange={onThemeChange}
+                density={density}
+                onDensityChange={onDensityChange}
+                onOpenShortcuts={onOpenShortcuts}
+              />
             )}
-          >
+            {tab === "profile" && (
+              <ProfilePanel
+                spaceId={spaceId}
+                spaceName={spaceName}
+                revision={revision}
+                onError={onError}
+              />
+            )}
+            {tab === "notifications" && <NotificationsPanel spaceId={spaceId} />}
             {tab === "general" && (
               <GeneralPanel
                 spaceId={spaceId}
                 spaceName={spaceName}
                 spaceDescription={spaceDescription}
                 readOnly={readOnly}
+                isAdmin={isAdmin}
+                memberCount={members.length}
+                projectCount={projects.length}
                 onError={onError}
+                {...(onForget ? { onForget } : {})}
               />
             )}
             {tab === "teams" && (
@@ -182,6 +221,8 @@ export function Settings({
                 members={members}
                 readOnly={readOnly}
                 onError={onError}
+                focus={teamFocus}
+                onFocusConsumed={() => setTeamFocus(null)}
               />
             )}
             {tab === "members" && (
@@ -202,7 +243,12 @@ export function Settings({
               />
             )}
             {tab === "labels" && (
-              <LabelsPanel spaceId={spaceId} labels={labels} readOnly={readOnly} onError={onError} />
+              <LabelsPanel
+                spaceId={spaceId}
+                labels={labels}
+                readOnly={readOnly}
+                onError={onError}
+              />
             )}
             {tab === "workflow" && (
               <WorkflowPanel
@@ -229,24 +275,166 @@ export function Settings({
   );
 }
 
-/** General — the space's mutable display label, description, and immutable identity. */
+/**
+ * The rail: back, search, then the pages under their group headings, then the
+ * teams. Typing filters the pages to the ones that answer — by name first, and
+ * by a row on the page second, with the row's word shown so the person knows
+ * why Preferences turned up for "theme". Enter opens the first answer.
+ */
+function SettingsRail({
+  tab,
+  teams,
+  onPick,
+  onPickTeam,
+  onExit,
+}: {
+  tab: SettingsTab;
+  teams: TeamDto[];
+  onPick: (tab: SettingsTab) => void;
+  onPickTeam: (id: string) => void;
+  onExit: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const searching = query.trim() !== "";
+  const matches = useMemo(() => searchSettings(query), [query]);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  const pick = (next: SettingsTab) => {
+    setQuery("");
+    onPick(next);
+  };
+
+  return (
+    <nav className="flex w-56 shrink-0 flex-col gap-0.5 overflow-y-auto p-2" aria-label="Settings">
+      <button onClick={onExit} className={cn(navigationItem({ size: "lg" }), "text-mute mb-2")}>
+        <ArrowLeft className="size-icon-sm" />
+        Back to app
+      </button>
+
+      <div className="mb-3 px-0.5">
+        <TextInput
+          ref={searchRef}
+          label="Search settings"
+          isLabelHidden
+          value={query}
+          onChange={setQuery}
+          placeholder="Search…"
+          startIcon={<Search className="size-icon-sm" />}
+          size="sm"
+          width="100%"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && matches[0]) pick(matches[0].page.tab);
+            if (e.key === "Escape") setQuery("");
+          }}
+        />
+      </div>
+
+      {searching ? (
+        matches.length === 0 ? (
+          <p className="text-mute px-2 py-2 text-sm">Nothing matches “{query.trim()}”.</p>
+        ) : (
+          <ul className="flex flex-col gap-0.5" role="list">
+            {matches.map(({ page, via }, i) => (
+              <li key={page.tab}>
+                <button
+                  onClick={() => pick(page.tab)}
+                  className={cn(navigationItem({ selected: i === 0, size: "lg" }))}
+                >
+                  {TAB_ICON[page.tab]}
+                  <span className="min-w-0 flex-1 truncate">{page.label}</span>
+                  {via && <span className="text-mute truncate text-2xs">{via}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )
+      ) : (
+        <>
+          {SETTINGS_GROUPS.map((group) => (
+            <div key={group} className="mb-3">
+              <h2 className="text-mute px-2 pb-1 pt-1 text-2xs font-semibold tracking-wider uppercase">
+                {group}
+              </h2>
+              <ul className="flex flex-col gap-0.5" role="list">
+                {matches
+                  .filter(({ page }) => page.group === group)
+                  .map(({ page }) => (
+                    <li key={page.tab}>
+                      <button
+                        onClick={() => pick(page.tab)}
+                        aria-current={tab === page.tab ? "page" : undefined}
+                        className={cn(
+                          navigationItem({
+                            selected: tab === page.tab,
+                            size: "lg",
+                          }),
+                        )}
+                      >
+                        {TAB_ICON[page.tab]}
+                        {page.label}
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          ))}
+          {teams.length > 0 && (
+            <div className="mb-3">
+              <h2 className="text-mute px-2 pb-1 pt-1 text-2xs font-semibold tracking-wider uppercase">
+                Your teams
+              </h2>
+              <ul className="flex flex-col gap-0.5" role="list">
+                {teams.map((team) => (
+                  <li key={team.id}>
+                    <button
+                      onClick={() => onPickTeam(team.id)}
+                      className={cn(navigationItem({ size: "lg" }))}
+                    >
+                      <span className="text-mute w-icon-sm shrink-0 text-center font-mono text-2xs">
+                        {team.key.slice(0, 2)}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{team.name}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </nav>
+  );
+}
+
+/** General — the space's mutable display label, description, immutable
+ *  identity, and the two things a person does to a space as a whole. */
 function GeneralPanel({
   spaceId,
   spaceName,
   spaceDescription,
   readOnly,
+  isAdmin,
+  memberCount,
+  projectCount,
   onError,
+  onForget,
 }: {
   spaceId: string;
   spaceName: string;
   spaceDescription: string;
   readOnly: boolean;
+  isAdmin: boolean;
+  memberCount: number;
+  projectCount: number;
   onError: (message: string) => void;
+  onForget?: () => void;
 }) {
   const [name, setName] = useState(spaceName);
   const [description, setDescription] = useState(spaceDescription);
   const [saving, setSaving] = useState(false);
   const [savingDesc, setSavingDesc] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [note, setNote] = useState("");
   useEffect(() => setName(spaceName), [spaceName]);
   useEffect(() => setDescription(spaceDescription), [spaceDescription]);
   const dirty = name.trim() !== spaceName && name.trim() !== "";
@@ -266,7 +454,10 @@ function GeneralPanel({
   const saveDescription = async () => {
     setSavingDesc(true);
     try {
-      await rpc(spaceId, { cmd: "space_describe", description: description.trim() });
+      await rpc(spaceId, {
+        cmd: "space_describe",
+        description: description.trim(),
+      });
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -274,78 +465,159 @@ function GeneralPanel({
     }
   };
 
+  /**
+   * Rotating the key is what removing a member does implicitly; offered on its
+   * own for the case where a device was lost rather than a member removed. It
+   * seals everything written from now on under a key only current members
+   * hold — and nothing written before, which the confirmation says.
+   */
+  const rotate = async () => {
+    const ok = await ask.confirm({
+      title: "Rotate the space key?",
+      body: "Everything written from now on is sealed under a new key that only current members receive. Copies anyone already holds stay readable. Members on other devices pick the new key up on their next sync.",
+      confirmText: "Rotate key",
+      danger: true,
+    });
+    if (!ok) return;
+    setRotating(true);
+    setNote("");
+    try {
+      const reply = await spaceRpc(spaceId, { cmd: "key_rotate" });
+      setNote((reply.kind === "ok" && reply.message) || "The space key was rotated.");
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRotating(false);
+    }
+  };
+
   return (
     <>
       <SettingsPageHeader
         title="General"
-        description="Manage the shared name, description, and immutable identity of this space."
+        description="The shared name and description of this space, and the identity it cannot change."
       />
-      <SettingsSurface>
-        <SettingsField
-          label="Space name"
-          hint="A mutable display label. The space identity never changes."
+      <SettingsSection title="Space">
+        <SettingsSurface>
+          <SettingsField
+            label="Space name"
+            hint="A mutable display label. The space identity never changes."
+          >
+            <div className="flex items-center gap-2">
+              <TextInput
+                label="Space name"
+                isLabelHidden
+                value={name}
+                isDisabled={readOnly}
+                onChange={setName}
+                className="flex-1"
+                width="100%"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && dirty && !readOnly) void save();
+                }}
+              />
+              <Button
+                isDisabled={!dirty || readOnly}
+                isLoading={saving}
+                onClick={() => void save()}
+                label="Update"
+                variant="primary"
+                size="sm"
+              />
+            </div>
+          </SettingsField>
+          <SettingsField
+            label="Description"
+            hint="Shared with everyone in the space."
+            align="start"
+          >
+            <div className="flex flex-col gap-2">
+              <TextArea
+                label="Description"
+                isLabelHidden
+                value={description}
+                isDisabled={readOnly}
+                rows={3}
+                placeholder="What is this space for? Goals, scope, links…"
+                onChange={setDescription}
+                aria-label="Space description"
+                width="100%"
+              />
+              {!readOnly && (
+                <div className="flex justify-end">
+                  <Button
+                    isDisabled={!descDirty}
+                    isLoading={savingDesc}
+                    onClick={() => void saveDescription()}
+                    label="Save description"
+                    variant="primary"
+                    size="sm"
+                  />
+                </div>
+              )}
+            </div>
+          </SettingsField>
+          <SettingsField
+            label="Identity"
+            hint="Derived at founding from keys, not the name. It cannot be changed."
+          >
+            <div className="border-line bg-hover text-dim flex items-center gap-2 rounded-control border px-2 py-1.5 font-mono text-xs">
+              <Hash className="text-mute size-icon-sm shrink-0" />
+              <span className="min-w-0 truncate">{spaceId}</span>
+            </div>
+          </SettingsField>
+          <SettingsField label="In this space" hint="What the space holds right now">
+            <p className="text-dim text-right text-sm tabular-nums">
+              {memberCount} {memberCount === 1 ? "member" : "members"} · {projectCount}{" "}
+              {projectCount === 1 ? "project" : "projects"}
+            </p>
+          </SettingsField>
+        </SettingsSurface>
+      </SettingsSection>
+
+      {(onForget || (isAdmin && !readOnly)) && (
+        <SettingsSection
+          title="Danger zone"
+          hint="Each of these asks before it acts, and says what it does not undo."
         >
-          <div className="flex items-center gap-2">
-            <TextInput
-              label="Space name"
-              isLabelHidden
-              value={name}
-              isDisabled={readOnly}
-              onChange={setName}
-              className="flex-1"
-              width="100%"
-            />
-            <Button
-              isDisabled={!dirty || readOnly}
-              isLoading={saving}
-              onClick={() => void save()}
-              label="Update"
-              variant="primary"
-              size="sm"
-            />
-          </div>
-        </SettingsField>
-        <SettingsField
-          label="Description"
-          hint="Shared with everyone in the space."
-          align="start"
-        >
-          <div className="flex flex-col gap-2">
-            <TextArea
-              label="Description"
-              isLabelHidden
-              value={description}
-              isDisabled={readOnly}
-              rows={3}
-              placeholder="What is this space for? Goals, scope, links…"
-              onChange={setDescription}
-              aria-label="Space description"
-              width="100%"
-            />
-            {!readOnly && (
-              <div className="flex justify-end">
-                <Button
-                  isDisabled={!descDirty}
-                  isLoading={savingDesc}
-                  onClick={() => void saveDescription()}
-                  label="Save description"
-                  variant="primary"
-                  size="sm"
-                />
-              </div>
+          <SettingsSurface className="border-danger/40">
+            {isAdmin && !readOnly && (
+              <SettingsField
+                label="Rotate the space key"
+                hint="Seal everything from now on under a key only current members hold. Use it when a device is lost."
+              >
+                <div className="flex flex-col items-end gap-1">
+                  <Button
+                    label="Rotate key…"
+                    variant="danger"
+                    size="sm"
+                    isLoading={rotating}
+                    icon={<RotateCcw className="size-icon-sm" />}
+                    onClick={() => void rotate()}
+                  />
+                  {note && <p className="text-dim text-right text-xs">{note}</p>}
+                </div>
+              </SettingsField>
             )}
-          </div>
-        </SettingsField>
-        <SettingsField
-          label="Identity"
-          hint="Derived at founding from keys, not the name. It cannot be changed."
-        >
-          <div className="border-line bg-hover text-dim flex items-center gap-2 rounded-control border px-2 py-1.5 font-mono text-xs">
-            <Hash className="text-mute size-icon-sm shrink-0" />
-            <span className="min-w-0 truncate">{spaceId}</span>
-          </div>
-        </SettingsField>
-      </SettingsSurface>
+            {onForget && (
+              <SettingsField
+                label="Forget this space on this device"
+                hint="Removes it from this device's list. The encrypted store stays on disk, and no other device is affected."
+              >
+                <div className="flex justify-end">
+                  <Button
+                    label="Forget…"
+                    variant="danger"
+                    size="sm"
+                    icon={<Trash2 className="size-icon-sm" />}
+                    onClick={onForget}
+                  />
+                </div>
+              </SettingsField>
+            )}
+          </SettingsSurface>
+        </SettingsSection>
+      )}
     </>
   );
 }
@@ -422,7 +694,7 @@ function DevicesPanel({
     <>
       <SettingsPageHeader
         title="Devices & recovery"
-        description="Manage the devices that sign as you and the custody material that protects recovery."
+        description="The machines that sign as you, and the custody material that protects recovery."
       />
       <SettingsSection
         title="Your devices"
@@ -430,42 +702,54 @@ function DevicesPanel({
       >
         <SettingsSurface>
           {devices.length === 0 ? (
-            <div className="text-mute px-4 py-3 text-sm">Only this device.</div>
-          ) : (
-            <div className="divide-line divide-y">
-            {devices.map((line) => (
-              <div key={line} className="flex items-center gap-2 px-4 py-3 text-sm">
-                <Laptop className="text-mute size-icon-sm shrink-0" />
-                <code className="min-w-0 flex-1 truncate">{line}</code>
-                {!readOnly && !line.includes("(this device)") && (
-                  <IconButton
-                    label="Revoke this device"
-                    isDisabled={busy !== ""}
-                    onClick={() =>
-                      void act("revoke", async () => {
-                        const device = line.trim().split(/\s+/)[0] ?? "";
-                        if (
-                          !(await ask.confirm({
-                            title: `Revoke device ${device}?`,
-                            body: "It stops signing as you. Content it already holds stays readable until an admin rotates the space key.",
-                            confirmText: "Revoke",
-                            danger: true,
-                          }))
-                        )
-                          return null;
-                        const reply = await spaceRpc(spaceId, { cmd: "device_revoke", device });
-                        return reply.kind === "ok" ? reply.message : null;
-                      })
-                    }
-                    variant="danger"
-                    size="sm"
-                    tooltip="Revoke this device"
-                    icon={<Trash2 className="size-icon-sm" />}
-                  />
-                )}
-              </div>
-            ))}
+            <div className="flex items-center gap-3 px-4 py-3 text-sm">
+              <Laptop className="text-mute size-icon-sm shrink-0" />
+              <span className="min-w-0 flex-1">This device</span>
+              <span className="text-mute text-2xs">current</span>
             </div>
+          ) : (
+            devices.map((line) => {
+              const current = line.includes("(this device)");
+              const id = line.trim().split(/\s+/)[0] ?? "";
+              return (
+                <div key={line} className="flex items-center gap-3 px-4 py-3 text-sm">
+                  <Laptop className="text-mute size-icon-sm shrink-0" />
+                  <code className="min-w-0 flex-1 truncate font-mono text-xs" title={line}>
+                    {id}
+                  </code>
+                  {current ? (
+                    <span className="text-mute text-2xs">current</span>
+                  ) : (
+                    !readOnly && (
+                      <Button
+                        label="Revoke"
+                        variant="ghost"
+                        size="sm"
+                        isDisabled={busy !== ""}
+                        onClick={() =>
+                          void act("revoke", async () => {
+                            if (
+                              !(await ask.confirm({
+                                title: `Revoke device ${id}?`,
+                                body: "It stops signing as you. Content it already holds stays readable until an admin rotates the space key.",
+                                confirmText: "Revoke",
+                                danger: true,
+                              }))
+                            )
+                              return null;
+                            const reply = await spaceRpc(spaceId, {
+                              cmd: "device_revoke",
+                              device: id,
+                            });
+                            return reply.kind === "ok" ? reply.message : null;
+                          })
+                        }
+                      />
+                    )
+                  )}
+                </div>
+              );
+            })
           )}
         </SettingsSurface>
       </SettingsSection>
@@ -487,21 +771,23 @@ function DevicesPanel({
                   isDisabled={busy !== ""}
                   onClick={() =>
                     void act("invite", async () => {
-                      const reply = await spaceRpc(spaceId, { cmd: "device_invite" });
+                      const reply = await spaceRpc(spaceId, {
+                        cmd: "device_invite",
+                      });
                       if (reply.kind === "text") setToken(reply.text.trim());
                       return null;
                     })
                   }
                   icon={<KeyRound className="size-icon-sm" />}
                   label="Mint token"
-                  variant="ghost"
+                  variant="secondary"
                   size="sm"
                 />
                 {token && (
-                <code className="border-line bg-hover block w-full rounded-control border p-2 font-mono text-xs break-all">
-                  {token}
-                </code>
-              )}
+                  <code className="border-line bg-hover block w-full rounded-control border p-2 font-mono text-xs break-all">
+                    {token}
+                  </code>
+                )}
               </div>
             </SettingsField>
             <SettingsField
@@ -529,7 +815,7 @@ function DevicesPanel({
                     })
                   }
                   label="Add device"
-                  variant="ghost"
+                  variant="secondary"
                   size="sm"
                 />
               </div>
@@ -571,459 +857,57 @@ function DevicesPanel({
               align="start"
             >
               <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                isLoading={busy === "export"}
-                isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
-                onClick={() =>
-                  void act("export", async () => {
-                    const reply = await spaceRpc(spaceId, {
-                      cmd: "space_custody_export",
-                      path: custodyPath.trim(),
-                      passphrase,
-                    });
-                    setPassphrase("");
-                    return reply.kind === "ok" ? reply.message : null;
-                  })
-                }
-                label="Export share"
-                variant="ghost"
-                size="sm"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                label="Import share"
-                isLoading={busy === "import"}
-                isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
-                onClick={() =>
-                  void act("import", async () => {
-                    const reply = await spaceRpc(spaceId, {
-                      cmd: "space_custody_import",
-                      path: custodyPath.trim(),
-                      passphrase,
-                      // Never blind: replacing a share that is merely unreadable
-                      // by *this* build is how a recoverable space becomes an
-                      // unrecoverable one.
-                      force: await ask.confirm({
-                        title: "Replace an existing share?",
-                        body: "Answer yes only if this machine's current share is the broken one. Otherwise the import is refused when a share is already here, which is the safe answer.",
-                        confirmText: "Replace it",
-                        danger: true,
-                      }),
-                    });
-                    setPassphrase("");
-                    return reply.kind === "ok" ? reply.message : null;
-                  })
-                }
-              />
-              </div>
-              {note && <p className="text-dim mt-2 text-sm">{note}</p>}
-            </SettingsField>
-          </SettingsSurface>
-        </SettingsSection>
-      )}
-    </>
-  );
-}
-
-/** Labels — the registry lifecycle the engine gained: create, rename, recolor, delete. */
-function LabelsPanel({
-  spaceId,
-  labels,
-  readOnly,
-  onError,
-}: {
-  spaceId: string;
-  labels: LabelDto[];
-  readOnly: boolean;
-  onError: (message: string) => void;
-}) {
-  const projectStore = useProjectViewerStore();
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newColor, setNewColor] = useState("blue");
-  const [editing, setEditing] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return needle ? labels.filter((label) => label.name.toLowerCase().includes(needle)) : labels;
-  }, [labels, query]);
-
-  const send = async (fn: () => Promise<unknown>) => {
-    try {
-      await fn();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const create = () => {
-    const name = newName.trim();
-    if (!name) return;
-    setNewName("");
-    setCreating(false);
-    void send(() => projectStore.createLabel(spaceId, name, newColor));
-  };
-
-  return (
-    <>
-      <SettingsPageHeader
-        title="Labels"
-        description="Shared across every project. Renaming re-points every issue that uses one."
-        actions={
-          !readOnly && !creating ? (
-            <Button label="New label" variant="primary" size="sm" onClick={() => setCreating(true)} />
-          ) : undefined
-        }
-      />
-      <div className="mb-4 max-w-md">
-        <TextInput
-          label="Filter labels"
-          isLabelHidden
-          value={query}
-          onChange={setQuery}
-          placeholder="Filter by name…"
-          size="sm"
-          width="100%"
-        />
-      </div>
-
-      {!readOnly && creating && (
-        <div className="border-line bg-raised mb-4 flex flex-col gap-3 rounded-surface border p-3">
-          <input
-            autoFocus
-            value={newName}
-            placeholder="Label name"
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && newName.trim()) create();
-              if (e.key === "Escape") setCreating(false);
-            }}
-            className="control-hover-outline border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
-            aria-label="New label name"
-          />
-          <ColorPicker value={newColor} onChange={setNewColor} />
-          <div className="flex justify-end gap-2">
-            <Button
-              onClick={() => setCreating(false)}
-              label="Cancel"
-              variant="secondary"
-              size="sm"
-            />
-            <Button
-              isDisabled={!newName.trim()}
-              onClick={create}
-              label="Create label"
-              variant="primary"
-              size="sm"
-            />
-          </div>
-        </div>
-      )}
-
-      {shown.length === 0 ? (
-        <div className="text-mute flex min-h-64 items-center justify-center text-sm">
-          {labels.length === 0 ? "No labels yet." : `Nothing matches “${query}”.`}
-        </div>
-      ) : (
-      <ul className="border-line divide-line divide-y overflow-hidden rounded-surface border">
-        {shown.map((l) =>
-          editing === l.id ? (
-            <LabelEditor
-              key={l.id}
-              label={l}
-              onCancel={() => setEditing(null)}
-              onSave={(name, color) => {
-                setEditing(null);
-                void send(() => projectStore.editLabel(spaceId, l.id, name, color));
-              }}
-            />
-          ) : (
-            <li
-              key={l.id}
-              className="group/label hover:bg-hover flex min-h-ctl-lg items-center gap-2 px-3 py-1.5"
-            >
-              <span
-                className="size-mark-lg shrink-0 rounded-full"
-                style={{ background: catalogColor(l.color) }}
-              />
-              <span className="min-w-0 flex-1 truncate text-sm">{l.name}</span>
-              {!readOnly && (
-                <span className="flex items-center gap-0.5 opacity-0 group-hover/label:opacity-100 focus-within:opacity-100">
-                  <Button onClick={() => setEditing(l.id)} label="Edit" variant="ghost" size="sm" />
-                  <IconButton
-                    label={`Delete ${l.name}`}
-                    onClick={() =>
-                      void ask
-                        .confirm({
-                          title: `Delete label “${l.name}”?`,
-                          body: "Issues keep the reference until it's re-created; it just leaves the registry.",
-                          confirmText: "Delete",
-                          danger: true,
-                        })
-                        .then((ok) => {
-                          if (ok) void send(() => projectStore.deleteLabel(spaceId, l.id));
-                        })
-                    }
-                    variant="ghost"
-                    size="sm"
-                    tooltip={`Delete ${l.name}`}
-                    icon={<Trash2 className="size-icon-sm" />}
-                  />
-                </span>
-              )}
-            </li>
-          ),
-        )}
-      </ul>
-      )}
-    </>
-  );
-}
-
-function LabelEditor({
-  label,
-  onCancel,
-  onSave,
-}: {
-  label: LabelDto;
-  onCancel: () => void;
-  onSave: (name: string, color: string) => void;
-}) {
-  const [name, setName] = useState(label.name);
-  const [color, setColor] = useState(label.color);
-  return (
-    <li className="bg-raised flex flex-col gap-3 p-3">
-      <input
-        autoFocus
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && name.trim()) onSave(name.trim(), color);
-          if (e.key === "Escape") onCancel();
-        }}
-        className="control-hover-outline border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
-        aria-label="Label name"
-      />
-      <ColorPicker value={color} onChange={setColor} />
-      <div className="flex justify-end gap-2">
-        <Button onClick={onCancel} label="Cancel" variant="secondary" size="sm" />
-        <Button
-          isDisabled={!name.trim()}
-          onClick={() => onSave(name.trim(), color)}
-          label="Save"
-          variant="primary"
-          size="sm"
-        />
-      </div>
-    </li>
-  );
-}
-
-interface StateWire {
-  state_id: string;
-  name: string;
-  category: string;
-  color: string;
-}
-interface WorkflowWire {
-  project_id: string;
-  revision: {
-    revision_id: string;
-    body: { name: string; states: StateWire[]; transitions: unknown[] };
-  } | null;
-  conflict_heads: string[];
-}
-
-/**
- * Workflow — rename and recolor the status columns of a project.
- *
- * The engine already speaks this (`WorkflowSet` is a whole-body CAS replace at the
- * current heads); the viewer only ever read it. This edits the *display* of each
- * state — name and colour — and re-submits the same `state_id`s and transitions, so
- * referential integrity is preserved for free. Adding/removing states (which would
- * rewrite transitions) is deliberately out of scope here.
- */
-function WorkflowPanel({
-  spaceId,
-  projects,
-  readOnly,
-  revision,
-  onError,
-}: {
-  spaceId: string;
-  projects: ProjectDto[];
-  readOnly: boolean;
-  revision: number;
-  onError: (message: string) => void;
-}) {
-  const [projectKey, setProjectKey] = useState<string | null>(projects[0]?.key ?? null);
-  const [wf, setWf] = useState<WorkflowWire | null>(null);
-  const [draft, setDraft] = useState<StateWire[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [editingColor, setEditingColor] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!projectKey) return;
-    let alive = true;
-    setWf(null);
-    void rpc(spaceId, { cmd: "workflow_show", project: projectKey })
-      .then((r) => {
-        if (!alive) return;
-        if (r.kind === "text") {
-          const parsed = JSON.parse(r.text) as WorkflowWire;
-          setWf(parsed);
-          setDraft(parsed.revision?.body.states.map((s) => ({ ...s })) ?? []);
-        }
-      })
-      .catch((e) => {
-        if (alive) onError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [spaceId, projectKey, revision, onError]);
-
-  const dirty = useMemo(() => {
-    const original = wf?.revision?.body.states ?? [];
-    return draft.some((s, i) => s.name !== original[i]?.name || s.color !== original[i]?.color);
-  }, [draft, wf]);
-
-  const save = async () => {
-    if (!wf?.revision || !projectKey) return;
-    setSaving(true);
-    try {
-      const body = { ...wf.revision.body, states: draft };
-      const heads = [wf.revision.revision_id, ...wf.conflict_heads];
-      await rpc(spaceId, {
-        cmd: "workflow_set",
-        project: projectKey,
-        expect_heads: heads,
-        body_json: JSON.stringify(body),
-      });
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const patch = (id: string, change: Partial<StateWire>) =>
-    setDraft((d) => d.map((s) => (s.state_id === id ? { ...s, ...change } : s)));
-  const selectedProject = projects.find((p) => p.key === projectKey);
-
-  return (
-    <>
-      <SettingsPageHeader
-        title="Workflow"
-        description="Configure the states issues move through in each project."
-      />
-      <SettingsSection
-        title="Workflow states"
-        hint="Rename and recolor the statuses issues move through. Applies to the selected project."
-      >
-      <div className="mb-4 flex items-center gap-2">
-        <span className="text-mute text-sm">Project</span>
-        <Combobox
-          label="Project"
-          value={
-            projectKey
-              ? {
-                  id: projectKey,
-                  label: selectedProject?.name ?? projectKey,
-                  ...(selectedProject
-                    ? { icon: <ProjectIcon color={catalogColor(selectedProject.color)} /> }
-                    : {}),
-                }
-              : null
-          }
-          placeholder="Select…"
-          options={projects.map((p) => ({
-            id: p.key,
-            label: p.name,
-            icon: <ProjectIcon color={catalogColor(p.color)} />,
-            hint: p.key,
-          }))}
-          onPick={setProjectKey}
-        />
-      </div>
-
-      {!wf && projectKey && <p className="text-mute text-sm">Loading…</p>}
-      {wf && !wf.revision && (
-        <p className="text-warn text-sm">This project has unresolved concurrent workflow revisions.</p>
-      )}
-      {wf?.revision && (
-        <>
-          <ul className="flex flex-col gap-1">
-            {draft.map((s) => (
-              <li
-                key={s.state_id}
-                className="border-line -mx-1 flex items-center gap-2 rounded-control px-1 py-1"
-              >
-                <div className="relative">
-                  <button
-                    disabled={readOnly}
-                    onClick={() => setEditingColor(editingColor === s.state_id ? null : s.state_id)}
-                    aria-label={`Colour of ${s.name}`}
-                    className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1 disabled:opacity-50"
-                  >
-                    <StatusIcon
-                      category={s.category as "backlog"}
-                      color={catalogColor(s.color)}
-                    />
-                  </button>
-                  {editingColor === s.state_id && (
-                    <div className="border-line-strong bg-raised shadow-overlay absolute left-0 top-7 z-10 rounded-surface border p-2">
-                      <ColorPicker
-                        value={s.color}
-                        onChange={(color) => {
-                          patch(s.state_id, { color });
-                          setEditingColor(null);
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-                <input
-                  value={s.name}
-                  disabled={readOnly}
-                  onChange={(e) => patch(s.state_id, { name: e.target.value })}
-                  className="focus:border-line-strong min-w-0 flex-1 rounded-control border border-transparent bg-transparent px-1.5 py-1 text-sm outline-none disabled:opacity-50"
-                  aria-label={`Name of ${s.name}`}
-                />
-                <span className="text-mute text-2xs capitalize">
-                  {s.category.replaceAll("_", " ")}
-                </span>
-              </li>
-            ))}
-          </ul>
-          {!readOnly && (
-            <div className="mt-4 flex items-center justify-between">
-              <p className="text-mute text-xs">
-                Adding or removing states (which rewrites transitions) is CLI-only for now.
-              </p>
-              <div className="flex gap-2">
                 <Button
-                  isDisabled={!dirty}
-                  onClick={() => setDraft(wf.revision!.body.states.map((s) => ({ ...s })))}
-                  label="Reset"
+                  isLoading={busy === "export"}
+                  isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
+                  onClick={() =>
+                    void act("export", async () => {
+                      const reply = await spaceRpc(spaceId, {
+                        cmd: "space_custody_export",
+                        path: custodyPath.trim(),
+                        passphrase,
+                      });
+                      setPassphrase("");
+                      return reply.kind === "ok" ? reply.message : null;
+                    })
+                  }
+                  label="Export share"
                   variant="secondary"
                   size="sm"
                 />
                 <Button
-                  isDisabled={!dirty}
-                  isLoading={saving}
-                  onClick={() => void save()}
-                  label="Save workflow"
-                  variant="primary"
                   size="sm"
+                  variant="secondary"
+                  label="Import share"
+                  isLoading={busy === "import"}
+                  isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
+                  onClick={() =>
+                    void act("import", async () => {
+                      const reply = await spaceRpc(spaceId, {
+                        cmd: "space_custody_import",
+                        path: custodyPath.trim(),
+                        passphrase,
+                        // Never blind: replacing a share that is merely unreadable
+                        // by *this* build is how a recoverable space becomes an
+                        // unrecoverable one.
+                        force: await ask.confirm({
+                          title: "Replace an existing share?",
+                          body: "Answer yes only if this machine's current share is the broken one. Otherwise the import is refused when a share is already here, which is the safe answer.",
+                          confirmText: "Replace it",
+                          danger: true,
+                        }),
+                      });
+                      setPassphrase("");
+                      return reply.kind === "ok" ? reply.message : null;
+                    })
+                  }
                 />
               </div>
-            </div>
-          )}
-        </>
+              {note && <p className="text-dim mt-2 text-right text-sm">{note}</p>}
+            </SettingsField>
+          </SettingsSurface>
+        </SettingsSection>
       )}
-      </SettingsSection>
     </>
   );
 }
@@ -1035,14 +919,20 @@ interface RoleWire {
   built_in: boolean;
   revision: {
     revision_id: string;
-    body: { name: string; description: string; scope_kind: string; capabilities: string[] };
+    body: {
+      name: string;
+      description: string;
+      scope_kind: string;
+      capabilities: string[];
+    };
   } | null;
   conflict_heads: string[];
 }
 
 function roleFromProjection({ summary, revision }: RoleProjection): RoleWire {
-  return { ...summary, revision: revision ?? null };
+  return { ...summary, conflict_heads: summary.conflict_heads ?? [], revision: revision ?? null };
 }
+
 
 /** The name a role grant carries, falling back to its id. */
 function roleName(r: RoleWire): string {
@@ -1060,9 +950,16 @@ function roleName(r: RoleWire): string {
  * role's capabilities to an actor, revoke one — first-class here.
  *
  * A grant expands a role into one assignment per capability, each with its own
- * `grant_id`; revoke is per capability, so the list is grouped by actor and every
- * held capability carries its own revoke handle.
+ * `grant_id`. The list reads them back the way they were made: what came with
+ * membership is one line per actor with no revoke handle — its verbs are on
+ * Members — and what was granted on top is one row per role grant, revoked as
+ * the set it was granted as. See `core/access.ts` for the fold.
  */
+/** The access list's columns: what is held, at which scope, in which World,
+ *  and the verb — the same recipe Members uses, so the two pages read as one
+ *  family. */
+const ACCESS_GRID = "grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_7rem_5.5rem] items-center gap-4";
+
 function AccessPanel({
   spaceId,
   projects,
@@ -1114,9 +1011,11 @@ function AccessPanel({
       if (response.kind === "roles") {
         setRoles((current) => [
           ...(current ?? []),
-          ...response.page.items.map(roleFromProjection).filter(
-            (candidate) => !(current ?? []).some((role) => role.role_id === candidate.role_id),
-          ),
+          ...response.page.items
+            .map(roleFromProjection)
+            .filter(
+              (candidate) => !(current ?? []).some((role) => role.role_id === candidate.role_id),
+            ),
         ]);
         setRoleCursor(response.page.next_cursor ?? null);
       }
@@ -1132,7 +1031,11 @@ function AccessPanel({
   }, [load, revision]);
 
   const nameOf = useCallback(
-    (actor: string) => memberName(actor, members?.find((m) => m.key === actor)),
+    (actor: string) =>
+      memberName(
+        actor,
+        members?.find((m) => m.key === actor),
+      ),
     [members],
   );
   const projectLabel = useCallback(
@@ -1141,16 +1044,20 @@ function AccessPanel({
   );
   const grantProjectDto = projects.find((p) => p.id === grantProject || p.key === grantProject);
 
-  /** Assignments folded by actor, so each person reads as one block. */
-  const byActor = useMemo(() => {
-    const groups = new Map<string, AssignmentDto[]>();
-    for (const row of rows ?? []) {
-      const list = groups.get(row.actor) ?? [];
-      list.push(row);
-      groups.set(row.actor, list);
-    }
-    return [...groups.entries()].sort((a, b) => nameOf(a[0]).localeCompare(nameOf(b[0])));
-  }, [rows, nameOf]);
+  /** Each person as one block: their membership, then what they hold beyond it. */
+  const byActor = useMemo(
+    () => foldAccess(rows ?? []).sort((a, b) => nameOf(a.actor).localeCompare(nameOf(b.actor))),
+    [rows, nameOf],
+  );
+  /** A role id as its catalog name, or the id when the catalog has not loaded it. */
+  const roleLabelOf = useCallback(
+    (roleId: string) => {
+      const known = roles?.find((r) => r.role_id === roleId);
+      return known ? roleName(known) : roleId;
+    },
+    [roles],
+  );
+  const scopeLabel = (scope: string) => (scope ? projectLabel(scope) : "the whole space");
 
   const grant = async () => {
     if (!grantActor || !grantRole) return;
@@ -1173,26 +1080,52 @@ function AccessPanel({
     }
   };
 
-  const revoke = (row: AssignmentDto) =>
+  /** One request for the whole set: a role's expansion is revoked the way it
+   *  was granted, all or nothing, so a failure never leaves it half-held. */
+  const revokeIds = async (grant_ids: string[]) => {
+    setBusy(true);
+    try {
+      await rpc(spaceId, { cmd: "access_revoke", grant_ids });
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeGrant = (actor: string, grant: RoleGrant) => {
+    const n = grant.capabilities.length;
     void ask
       .confirm({
-        title: `Revoke ${row.capability}?`,
-        body: `Removes this one capability from ${nameOf(row.actor)}. Their base membership role is unaffected.`,
+        title: `Revoke ${grant.role ? roleLabelOf(grant.role) : "this grant"} at ${scopeLabel(grant.scope)}?`,
+        body: `Removes the ${n === 1 ? "capability" : `${n} capabilities`} this grant installed for ${nameOf(actor)}. What they hold as a member is unaffected.`,
         confirmText: "Revoke",
         danger: true,
       })
-      .then(async (ok) => {
-        if (!ok) return;
-        setBusy(true);
-        try {
-          await rpc(spaceId, { cmd: "access_revoke", grant_id: row.grant_id });
-          await load();
-        } catch (e) {
-          onError(e instanceof Error ? e.message : String(e));
-        } finally {
-          setBusy(false);
-        }
-      });
+      .then((ok) => (ok ? revokeIds(grant.grantIds) : undefined));
+  };
+
+  const revokeHeld = (actor: string, held: HeldCapability) => {
+    const copies = held.grantIds.length > 1 ? ` — all ${held.grantIds.length} grants of it` : "";
+    void ask
+      .confirm({
+        title: `Revoke ${held.capability}?`,
+        body: `Removes this capability from ${nameOf(actor)} at ${scopeLabel(held.scope)}${copies}. Its origin was not recorded, so whether it came with their membership is not known; if it did, their role can be set again on Members.`,
+        confirmText: "Revoke",
+        danger: true,
+      })
+      .then((ok) => (ok ? revokeIds(held.grantIds) : undefined));
+  };
+
+  /** What a membership line came from, in words: the roles it named, plus
+   *  the kinds that name no role. */
+  const membershipHint = (line: MembershipLine) => {
+    const parts = line.roles.map(roleLabelOf);
+    if (line.kinds.includes("founder")) parts.push("founder policy");
+    if (line.kinds.includes("sponsorship")) parts.push("sponsorship");
+    return parts.join(" · ");
+  };
 
   const grantableRoles = (roles ?? []).filter((r) => r.revision && !r.conflict_heads.length);
 
@@ -1207,37 +1140,47 @@ function AccessPanel({
         hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with the issues_role_create and issues_role_edit tools."
       >
         {!roles && <p className="text-mute text-sm">Loading…</p>}
-        <ul className="flex flex-col gap-2">
-          {roles?.map((role) => (
-            <li key={role.role_id} className="border-line rounded-surface border p-3">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{roleName(role)}</span>
-                {role.built_in && (
-                  <span className="text-accent flex items-center gap-1 text-2xs" title="Immutable">
-                    <ShieldCheck className="size-icon-xs" />
-                    built-in
+        {roles && roles.length === 0 && (
+          <SettingsSurface>
+            <p className="text-mute px-4 py-3 text-sm">None beyond the built-in memberships.</p>
+          </SettingsSurface>
+        )}
+        {roles && roles.length > 0 && (
+          <SettingsSurface>
+            {roles.map((role) => (
+              <div key={role.role_id} className="px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold">{roleName(role)}</span>
+                  {role.built_in && (
+                    <span
+                      className="text-accent flex items-center gap-1 text-2xs"
+                      title="Immutable"
+                    >
+                      <ShieldCheck className="size-icon-xs" />
+                      built-in
+                    </span>
+                  )}
+                  <span className="text-mute text-2xs capitalize">
+                    {role.revision?.body.scope_kind ?? ""}
                   </span>
+                </div>
+                {role.revision?.body.description && (
+                  <p className="text-dim mt-0.5 text-xs">{role.revision.body.description}</p>
                 )}
-                <span className="text-mute text-2xs capitalize">
-                  {role.revision?.body.scope_kind ?? ""}
-                </span>
+                <ul className="mt-2 flex flex-wrap gap-1">
+                  {(role.revision?.body.capabilities ?? []).map((c) => (
+                    <li
+                      key={c}
+                      className="border-line-strong text-dim rounded-full border px-2 py-px font-mono text-2xs"
+                    >
+                      {c}
+                    </li>
+                  ))}
+                </ul>
               </div>
-              {role.revision?.body.description && (
-                <p className="text-dim mt-1 text-sm">{role.revision.body.description}</p>
-              )}
-              <ul className="mt-2 flex flex-wrap gap-1">
-                {(role.revision?.body.capabilities ?? []).map((c) => (
-                  <li
-                    key={c}
-                    className="border-line-strong text-dim rounded-full border px-2 py-px font-mono text-2xs"
-                  >
-                    {c}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ))}
-        </ul>
+            ))}
+          </SettingsSurface>
+        )}
         {roleCursor && (
           <Button
             type="button"
@@ -1246,23 +1189,20 @@ function AccessPanel({
             isDisabled={busy}
             label={busy ? "Loading…" : "Load more roles"}
             onClick={() => void loadMoreRoles()}
+            className="mt-3"
           />
         )}
       </SettingsSection>
 
       <SettingsSection
         title="Access grants"
-        hint="Capabilities granted to an actor beyond their base membership role, at the Space or a single project."
+        hint="What each member holds: the role they came with, as one line, and anything granted on top at the Space or a single project. A member's role changes on Members, not here."
       >
         {!readOnly && (
-          <div className="border-line mb-4 flex flex-wrap items-end gap-2 rounded-surface border p-3">
+          <div className="border-line bg-raised mb-4 flex flex-wrap items-end gap-2 rounded-surface border p-3">
             <Combobox
               label="Member"
-              value={
-                grantActor
-                  ? { id: grantActor, label: nameOf(grantActor) }
-                  : null
-              }
+              value={grantActor ? { id: grantActor, label: nameOf(grantActor) } : null}
               placeholder="Member…"
               options={(members ?? []).map((m) => ({
                 id: m.key,
@@ -1302,7 +1242,9 @@ function AccessPanel({
                 id: grantProject ?? "",
                 label: grantProject ? projectLabel(grantProject) : "Whole space",
                 ...(grantProjectDto
-                  ? { icon: <ProjectIcon color={catalogColor(grantProjectDto.color)} /> }
+                  ? {
+                      icon: <ProjectIcon color={catalogColor(grantProjectDto.color)} />,
+                    }
                   : {}),
               }}
               placeholder="Whole space"
@@ -1331,40 +1273,182 @@ function AccessPanel({
 
         {!rows && <p className="text-mute text-sm">Loading…</p>}
         {rows && byActor.length === 0 && (
-          <p className="text-mute text-sm">
-            No scoped grants. Members act with their base role until granted extra capabilities here.
-          </p>
+          <SettingsSurface>
+            <p className="text-mute px-4 py-3 text-sm">
+              Nobody holds anything yet. Members act with the role they came with until granted
+              more here.
+            </p>
+          </SettingsSurface>
         )}
-        <ul className="flex flex-col gap-3">
-          {byActor.map(([actor, items]) => (
-            <li key={actor} className="border-line rounded-surface border p-3">
-              <div className="mb-2 font-medium">{nameOf(actor)}</div>
-              <ul className="flex flex-col gap-1">
-                {items.map((row) => (
-                  <li key={row.grant_id} className="flex items-center gap-2 text-sm">
-                    <code className="font-mono text-xs">{row.capability}</code>
-                    <span className="text-mute text-2xs">
-                      {row.resource.length === 0 ? "space" : projectLabel(row.resource[0] ?? "")}
+        {byActor.length > 0 && (
+          <div className="border-line overflow-hidden rounded-surface border">
+            <div className={cn(ACCESS_GRID, "text-mute border-line border-b px-3 py-2 text-2xs")}>
+              <span>Holds</span>
+              <span>Scope</span>
+              <span>World</span>
+              <span aria-hidden />
+            </div>
+            {byActor.map((access) => {
+              const member = members?.find((m) => m.key === access.actor);
+              const extras = extrasOf(access);
+              const line = access.membership;
+              const lineScopes = line
+                ? [...new Set(line.capabilities.map((c) => c.scope))]
+                : [];
+              const lineWorlds = line ? [...new Set(line.capabilities.map((c) => c.world))] : [];
+              return (
+                <div key={access.actor}>
+                  <div className="bg-sunken flex items-center gap-2 px-3 py-1.5">
+                    <Avatar
+                      deviceKey={access.actor}
+                      {...(member ? { alias: member.alias, me: member.me } : {})}
+                      size="sm"
+                    />
+                    <span className="text-sm font-medium">{nameOf(access.actor)}</span>
+                    {member && <span className="text-mute text-2xs capitalize">{member.role}</span>}
+                    <span className="text-mute ml-auto text-2xs tabular-nums">
+                      {extras === 0
+                        ? "nothing beyond membership"
+                        : `${extras} beyond membership`}
                     </span>
-                    {!readOnly && (
-                      <IconButton
-                        label={`Revoke ${row.capability}`}
-                        isDisabled={busy}
-                        className="ml-auto"
-                        onClick={() => revoke(row)}
-                        variant="danger"
-                        size="sm"
-                        tooltip={`Revoke ${row.capability}`}
-                        icon={<X className="size-icon-sm" />}
-                      />
+                  </div>
+                  <ul className="divide-line divide-y">
+                    {line && (
+                      <li className={cn(ACCESS_GRID, "min-h-ctl-lg px-3 py-2")}>
+                        <span className="min-w-0">
+                          <span className="flex items-baseline gap-2">
+                            <span className="text-sm font-medium">Membership</span>
+                            <span className="text-mute truncate text-2xs">
+                              {membershipHint(line)}
+                            </span>
+                          </span>
+                          {capabilityChips(line.capabilities.map((c) => c.capability))}
+                        </span>
+                        {lineScopes.length === 1 ? (
+                          scopeCell(lineScopes[0] ?? "")
+                        ) : (
+                          <span
+                            className="text-dim text-xs"
+                            title={lineScopes.map((s) => s || "Whole space").join(", ")}
+                          >
+                            {lineScopes.length} scopes
+                          </span>
+                        )}
+                        {worldCell(lineWorlds.join(", "))}
+                        <span className="text-mute flex justify-end text-2xs">via Members</span>
+                      </li>
                     )}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ))}
-        </ul>
+                    {access.grants.map((grant) => (
+                      <li
+                        key={grant.key}
+                        className={cn(
+                          "group/grant hover:bg-hover",
+                          ACCESS_GRID,
+                          "min-h-ctl-lg px-3 py-2",
+                        )}
+                      >
+                        <span className="min-w-0">
+                          <span className="flex items-baseline gap-2">
+                            <span
+                              className="truncate text-sm font-medium"
+                              title={grant.definitionRef ?? undefined}
+                            >
+                              {grant.role ? roleLabelOf(grant.role) : "Role not named"}
+                            </span>
+                            <span className="text-mute text-2xs">granted</span>
+                          </span>
+                          {capabilityChips(grant.capabilities)}
+                        </span>
+                        {scopeCell(grant.scope)}
+                        {worldCell(grant.world)}
+                        {revokeCell(() => revokeGrant(access.actor, grant))}
+                      </li>
+                    ))}
+                    {access.unrecorded.map((held) => (
+                      <li
+                        key={`${held.world} ${held.capability} ${held.scope}`}
+                        className={cn(
+                          "group/grant hover:bg-hover",
+                          ACCESS_GRID,
+                          "min-h-ctl-lg px-3 py-1",
+                        )}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <code className="truncate font-mono text-xs">{held.capability}</code>
+                          <span className="text-mute text-2xs">origin not recorded</span>
+                        </span>
+                        {scopeCell(held.scope)}
+                        {worldCell(held.world)}
+                        {revokeCell(() => revokeHeld(access.actor, held))}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </SettingsSection>
     </>
   );
+
+  /** A capability list as chips — the same chip the Roles section draws. */
+  function capabilityChips(capabilities: string[]) {
+    return (
+      <span className="mt-1 flex flex-wrap gap-1">
+        {capabilities.map((c) => (
+          <code
+            key={c}
+            className="border-line-strong text-dim rounded-full border px-2 py-px font-mono text-2xs"
+          >
+            {c}
+          </code>
+        ))}
+      </span>
+    );
+  }
+
+  function scopeCell(scope: string) {
+    const scoped = projects.find((p) => p.id === scope || p.key === scope);
+    return (
+      <span className="flex min-w-0 items-center gap-1.5 text-xs">
+        {scoped ? (
+          <>
+            <ProjectIcon color={catalogColor(scoped.color)} />
+            <span className="truncate">{scoped.name}</span>
+            <span className="text-mute font-mono text-2xs">{scoped.key}</span>
+          </>
+        ) : scope ? (
+          <code className="text-dim truncate font-mono text-2xs">{scope}</code>
+        ) : (
+          <span className="text-dim">Whole space</span>
+        )}
+      </span>
+    );
+  }
+
+  function worldCell(world: string) {
+    return (
+      <code className="text-mute truncate font-mono text-2xs" title={world}>
+        {world}
+      </code>
+    );
+  }
+
+  function revokeCell(onClick: () => void) {
+    return (
+      <span className="flex justify-end">
+        {!readOnly && (
+          <Button
+            label="Revoke"
+            variant="ghost"
+            size="sm"
+            isDisabled={busy}
+            className="opacity-0 group-hover/grant:opacity-100 focus-visible:opacity-100"
+            onClick={onClick}
+          />
+        )}
+      </span>
+    );
+  }
 }

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Calendar, ChevronLeft, ChevronRight, X } from "lucide-react";
 
 import { IconButton, Popover } from "@astryxdesign/core";
+
+import { usePreferences, weekColumn, weekdayLabels } from "../core/preferences";
 import { cn, controlTrigger, navigationItem, type ControlSize, type ControlTone } from "./primitives";
 
 /** The month grid's measure. Stated once, because the Popover needs the number
@@ -51,12 +53,6 @@ function startOfMonth(d: Date): Date {
 function addMonths(d: Date, n: number): Date {
   return utcDay(d.getUTCFullYear(), d.getUTCMonth() + n, 1);
 }
-// Monday-indexed weekday (0 = Monday), the week most product calendars open on.
-function mondayIndex(d: Date): number {
-  return (d.getUTCDay() + 6) % 7;
-}
-
-const WEEKDAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 function labelFor(value: string): string {
   const d = parseInput(value);
@@ -99,6 +95,7 @@ export function DatePicker({
   face?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const { weekStart } = usePreferences();
   /**
    * Which edge the calendar hangs from. Astryx's Popover does not flip, so a
    * Due date chip in the issue rail put a 256px grid against the window's right
@@ -135,7 +132,8 @@ export function DatePicker({
   }
 
   const monthStart = view;
-  const gridStart = addDays(monthStart, -mondayIndex(monthStart));
+  const gridStart = addDays(monthStart, -weekColumn(monthStart.getUTCDay(), weekStart));
+  const weekdays = weekdayLabels(weekStart, "tiny");
   const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
 
   const quick: { label: string; value: string | null }[] = [
@@ -213,7 +211,7 @@ export function DatePicker({
           </div>
 
           <div className="grid grid-cols-7 gap-0.5">
-            {WEEKDAYS.map((w) => (
+            {weekdays.map((w) => (
               <span key={w} className="text-mute py-1 text-center text-2xs font-medium">
                 {w}
               </span>

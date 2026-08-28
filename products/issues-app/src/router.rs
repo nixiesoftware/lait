@@ -1365,6 +1365,9 @@ impl<'a> IssueRouter<'a> {
                 Ok((
                     Response::AccessPlan {
                         assignments: plan.assignments,
+                        definition_ref: plan
+                            .definition_ref
+                            .map(|bytes| data_encoding::HEXLOWER.encode(&bytes)),
                     },
                     false,
                 ))

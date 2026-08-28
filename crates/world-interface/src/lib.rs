@@ -349,9 +349,15 @@ pub enum HostControlRequest {
     AssignmentGrant {
         actor: String,
         assignments: Vec<HostAssignment>,
+        /// The package's opaque reference (hex) to the role definition the
+        /// assignments expand, recorded as each grant's origin. `None` leaves
+        /// the origin unrecorded rather than guessed.
+        definition_ref: Option<String>,
     },
+    /// Revoke a set of grants as one all-or-nothing batch — the set a role
+    /// expanded into, revoked the way it was granted.
     AssignmentRevoke {
-        grant_id: String,
+        grant_ids: Vec<String>,
     },
     WorldActivate {
         world: WorldId,
