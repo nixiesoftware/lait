@@ -75,18 +75,34 @@ let served: string | null = null;
  * The Orbit this head serves, resolved once. The URL carries the local Orbit
  * id — never the Space id.
  */
-export async function space(): Promise<string> {
-  if (selectedSpace) return selectedSpace;
-  const r = await fetch('/api/spaces', { credentials: 'same-origin' });
-  if (!r.ok) throw new LaitError('the head refused the spaces listing', r.status);
-  const reply = (await r.json()) as SpacesReply;
-  // The head restating a fact about itself; the page has no other way to learn it.
-  served = reply.world ?? DECLARED_MOUNT;
-  const first = reply.spaces[0];
-  if (!first) throw new LaitError('this head serves no Space yet', 404, 'not_found');
-  selectedSpace = first.id;
-  return selectedSpace;
+export function space(): Promise<string> {
+  if (selectedSpace) return Promise.resolve(selectedSpace);
+  // Single-flight. A page mounts a dozen hooks that each want the Orbit before
+  // their first request, and every one of them used to send its own listing.
+  // Those duplicates filled the browser's six-connection pool and queued the
+  // requests that actually mattered behind them, which is why a page that
+  // needs seven reads took over a second to draw.
+  if (!resolving) {
+    resolving = (async () => {
+      const r = await fetch('/api/spaces', { credentials: 'same-origin' });
+      if (!r.ok) throw new LaitError('the head refused the spaces listing', r.status);
+      const reply = (await r.json()) as SpacesReply;
+      // The head restating a fact about itself; the page has no other way to learn it.
+      served = reply.world ?? DECLARED_MOUNT;
+      const first = reply.spaces[0];
+      if (!first) throw new LaitError('this head serves no Space yet', 404, 'not_found');
+      selectedSpace = first.id;
+      return selectedSpace;
+    })().catch((err: unknown) => {
+      // A refusal is not a fact worth caching: the next caller asks again.
+      resolving = null;
+      throw err;
+    });
+  }
+  return resolving;
 }
+
+let resolving: Promise<string> | null = null;
 
 /** Which mount to address this World at. Resolved by the same request that resolves the Space. */
 async function mount(): Promise<string> {

@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
-import { useLive, useRevision } from "@/ds";
-import { fetchBroadcasts } from "@/utils/apps/api";
+import { useLive } from "@/ds";
+import { useFleet } from "@/utils/screens/fleet";
 import { NAV_ITEMS, navActive } from "./nav-items";
 
 /**
@@ -10,28 +10,18 @@ import { NAV_ITEMS, navActive } from "./nav-items";
  * Whop puts a LIVE badge on the sidebar item itself, and for a fleet that is
  * the difference between a product you check and a product that tells you.
  * Nobody should have to navigate to Broadcasts to discover that something is
- * interrupting every screen they own.
+ * interrupting every screen they own. It reads the same held copy every page
+ * reads, so it never disagrees with the page beside it.
  */
 const AppSidebar: React.FC = () => {
   const location = useLocation();
   const pathname = location.pathname;
   const isOn = useCallback((path: string) => navActive(pathname, path), [pathname]);
-  const revision = useRevision();
-  const { attached } = useLive();
-  const [onAir, setOnAir] = useState(0);
-
-  useEffect(() => {
-    let live = true;
-    void fetchBroadcasts()
-      .then((rows) => {
-        if (!live) return;
-        setOnAir(rows.filter((row) => row.cancelled_at_unix_ms == null).length);
-      })
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, [revision]);
+  const { attached, now } = useLive();
+  const { broadcasts } = useFleet();
+  const onAir = broadcasts.filter(
+    (row) => row.cancelled_at_unix_ms == null || now < row.cancelled_at_unix_ms,
+  ).length;
 
   return (
     <aside className="ds-nav">

@@ -62,6 +62,72 @@ export function ItemMenu({
   );
 }
 
+export type ChoiceItem = {
+  id: string;
+  label: string;
+  hint?: string;
+  on?: boolean;
+  disabled?: boolean;
+  danger?: boolean;
+};
+
+/**
+ * A value you change by choosing: the control shows what is chosen, opens on
+ * one press, and the pick is the commit. Two gestures, and the second one is
+ * the outcome — there is no field to fill and nothing to submit afterwards.
+ */
+export function ChoiceMenu({
+  label,
+  items,
+  onPick,
+  className,
+  align = "start",
+  children,
+}: {
+  label: string;
+  items: ChoiceItem[];
+  onPick: (id: string) => void;
+  className?: string;
+  align?: "start" | "end";
+  children: ReactNode;
+}) {
+  return (
+    <Menu.Root>
+      <Menu.Trigger
+        className={className}
+        aria-label={label}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {children}
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner className="ds-overlay" sideOffset={4} align={align}>
+          <Menu.Popup className="ds-menu ds-menu-choice">
+            {items.length === 0 && <span className="ds-menu-empty">Nothing to choose from yet.</span>}
+            {items.map((item) => (
+              <Menu.Item
+                key={item.id}
+                className={`ds-menu-item${item.on ? " is-on" : ""}${item.danger ? " is-danger" : ""}`}
+                disabled={item.disabled}
+                onClick={() => {
+                  if (item.disabled) return;
+                  onPick(item.id);
+                }}
+              >
+                <span className="ds-menu-check" aria-hidden />
+                <span className="ds-menu-copy">
+                  {item.label}
+                  {item.hint && <small>{item.hint}</small>}
+                </span>
+              </Menu.Item>
+            ))}
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
+
 /** Always-visible ⋯. Works on coarse and fine. */
 export function MoreMenu({
   items,

@@ -8,7 +8,8 @@
  * and the miss is where somebody's eye goes first in an emergency.
  *
  * The same object, inverted, is a screen's page asking which audiences include
- * it: each audience drawn as a footprint with this one screen lit.
+ * it: each audience drawn as a footprint with this one screen lit. And in the
+ * composer it is the control: pressing a panel names it.
  */
 
 import { useFocus, litProps } from "./focus";
@@ -19,6 +20,7 @@ export function Footprint({
   reached,
   onOpen,
   size = "xs",
+  named = false,
   className,
 }: {
   screens: SignageScreen[];
@@ -28,6 +30,8 @@ export function Footprint({
   reached?: Set<string>;
   onOpen?: (screen: SignageScreen) => void;
   size?: "xs" | "sm";
+  /** Print each panel's name under it — for a footprint that is a control. */
+  named?: boolean;
   className?: string;
 }) {
   const { held } = useFocus();
@@ -45,10 +49,12 @@ export function Footprint({
             {...litProps(held, held?.kind === "screen" && held.id === screen.id)}
             title={screen.name}
             aria-label={hit == null ? screen.name : `${screen.name}: ${hit ? "reached" : "not reached"}`}
+            aria-pressed={onOpen && hit != null ? hit : undefined}
             onClick={onOpen ? () => onOpen(screen) : undefined}
             disabled={!onOpen}
           >
             <span className="ds-footprint-glass" />
+            {named && <small>{screen.name}</small>}
           </button>
         );
       })}

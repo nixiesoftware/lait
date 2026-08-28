@@ -8,18 +8,19 @@
  * audiences that include it. Facts are readouts, true of the panel, opened
  * into an inspector to change — never a form the page is made of.
  *
- * Nothing here has a Save button. Every field commits itself and says so on
- * itself. The acts live where the relation is drawn: tune on the channel rung,
- * broadcast from the sky.
+ * Nothing here has a Save button, and nothing here asks. A label is a chip
+ * you press to remove; the tuning is a chip you press to change; removal is a
+ * press and an offer to undo. Every change is on screen the frame it is made.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeft,
   Clock,
   MapPin,
   Megaphone,
+  Plus,
   Radio,
   Trash2,
   Tv,
@@ -28,16 +29,16 @@ import {
 import {
   Ago,
   Bezel,
+  ChoiceMenu,
   CommitSelect,
   CommitText,
-  Confirm,
   DayTrack,
   Footprint,
   Inspector,
   OnAir,
   Page,
-  Picker,
   channelDay,
+  haptic,
   litProps,
   useCommit,
   useFocus,
@@ -46,11 +47,13 @@ import {
   useOrbit,
   useRevision,
   useToast,
+  useUndo,
   windowToday,
+  type ChoiceItem,
   type Segment,
 } from "@/ds";
-import { deleteScreen, fetchAsRun, saveScreen, tuneScreen } from "@/utils/screens/api";
-import { useFleet } from "@/utils/screens/fleet";
+import { fetchAsRun } from "@/utils/screens/api";
+import { putScreen, removeScreen, tune, useFleet } from "@/utils/screens/fleet";
 import { explain, reaches, type Context } from "@/utils/lait/resolve";
 import { KIND_PANELS } from "@/program-editor/kinds/registry";
 import { CityPicker, type CitySelection } from "@/program-editor/fields/CityPicker";
@@ -64,12 +67,11 @@ import type {
 export default function ScreenDetail({ screenId }: { screenId: string }) {
   const navigate = useNavigate();
   const toast = useToast();
+  const undo = useUndo();
   const orbit = useOrbit();
   const { now } = useLive();
   const fleet = useFleet();
   const { held } = useFocus();
-  const [removing, setRemoving] = useState(false);
-  const [tuning, setTuning] = useState(false);
   const [inspecting, setInspecting] = useState<"place" | string | null>(null);
   const [asRun, setAsRun] = useState<SignageAsRun | null>(null);
   const revision = useRevision();
@@ -88,13 +90,20 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
     };
   }, [screenId, revision]);
 
-  /** Every field on this page funnels through here. */
+  const refused = useCallback(
+    (what: string) => (err: unknown) => {
+      haptic("error");
+      toast.show(what, err instanceof Error ? err.message : String(err));
+    },
+    [toast],
+  );
+
+  /** Every field on this page funnels through here: applied now, written after. */
   const put = useCallback(
     async (next: SignageScreen) => {
-      await saveScreen(next);
-      await fleet.reload();
+      await putScreen(next);
     },
-    [fleet],
+    [],
   );
 
   const playback = useMemo(
@@ -169,11 +178,37 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
       });
     });
     return segments;
-  }, [channel, claims, now, navigate]);
+  }, [channel, claims, now, navigate, fleet.programs]);
 
   const heard = asRun?.entries?.length
     ? asRun.entries[asRun.entries.length - 1]?.ended_unix_ms ?? null
     : null;
+
+  /** The tuning, as the items of one menu. Shared by every place it appears. */
+  const tuneItems: ChoiceItem[] = useMemo(
+    () => [
+      ...fleet.channels.map((entry) => ({
+        id: entry.id,
+        label: entry.name,
+        hint: `${fleet.tunedTo(entry.id).length} tuned`,
+        on: entry.id === screen?.tuned,
+      })),
+      {
+        id: "",
+        label: "Nothing",
+        hint: "Untuned",
+        on: !screen?.tuned,
+        danger: !!screen?.tuned,
+      },
+    ],
+    [fleet, screen?.tuned],
+  );
+
+  const retune = (id: string) => {
+    if (!screen) return;
+    haptic("select");
+    void tune(screen.id, id || null).catch(refused("Could not tune"));
+  };
 
   if (fleet.loading && !screen) return <Page>Loading…</Page>;
   if (!screen) {
@@ -187,6 +222,17 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
   const winner = playback?.source;
   const interrupted = winner?.via === "broadcast";
 
+  const remove = () => {
+    haptic("delete");
+    const was = screen;
+    void navigate({ to: "/screen-list" });
+    void removeScreen(was.id)
+      .then((gone) => {
+        if (gone) undo.offer(`Removed ${gone.name}`, () => putScreen(gone));
+      })
+      .catch(refused("Could not remove"));
+  };
+
   return (
     <Page>
       <header className="ds-row-between" style={{ marginBottom: 18 }}>
@@ -198,12 +244,8 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
         >
           <ArrowLeft size={20} />
         </button>
-        <ScreenName screen={screen} put={put} />
-        <button
-          type="button"
-          className="ds-btn ds-btn-quiet is-danger"
-          onClick={() => setRemoving(true)}
-        >
+        <ScreenName screen={screen} put={put} select={screen.name === "New screen"} />
+        <button type="button" className="ds-btn ds-btn-quiet is-danger" onClick={remove}>
           <Trash2 size={15} />
           Remove
         </button>
@@ -233,16 +275,21 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
           </div>
           <p className="ds-horizon-why">{playback ? explain(playback, showingName) : "Unknown"}</p>
           <div className="ds-horizon-facts">
-            <span>
+            <button type="button" className="ds-tuned" onClick={() => setInspecting("place")}>
               <MapPin size={14} />
               {screen.place
                 ? `${screen.place.region ? `${screen.place.region} · ` : ""}${screen.place.timezone}`
-                : "No place"}
-            </span>
-            <span>
+                : "Not placed"}
+            </button>
+            <ChoiceMenu
+              label="Tune"
+              className={`ds-tuned${channel ? "" : " is-absent"}`}
+              items={tuneItems}
+              onPick={retune}
+            >
               <Tv size={14} />
               {channel ? channel.name : "Not tuned"}
-            </span>
+            </ChoiceMenu>
             <span>
               <Clock size={14} />
               {heard == null ? (
@@ -252,7 +299,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
               )}
             </span>
           </div>
-          <Labels screen={screen} put={put} />
+          <Labels screen={screen} put={put} onRefused={refused("Could not label")} />
         </div>
       </section>
 
@@ -269,7 +316,6 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
                 key={claim.id}
                 data-wins={wins || undefined}
                 data-onair={wins || undefined}
-                {...litProps(held, held?.kind === "broadcast" && held.id === claim.id)}
               >
                 <span className="ds-sky-mark">
                   <Megaphone size={14} />
@@ -300,7 +346,8 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
                 ? fleet.programs.find((program) => program.id === channel.base)?.name
                 : undefined
             }
-            onTune={() => setTuning(true)}
+            tuneItems={tuneItems}
+            onTune={retune}
             onOpen={() => void navigate({ to: "/channel-list" })}
           />
 
@@ -314,9 +361,10 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
                 <span>Tune it to a channel, or address a broadcast at it.</span>
               </span>
               <span className="ds-sky-acts">
-                <button type="button" className="ds-btn ds-btn-ghost" onClick={() => setTuning(true)}>
+                <ChoiceMenu label="Tune" className="ds-tuned is-absent" items={tuneItems} onPick={retune} align="end">
+                  <Tv size={14} />
                   Tune…
-                </button>
+                </ChoiceMenu>
               </span>
             </div>
           )}
@@ -403,28 +451,6 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
       </section>
 
       {/* ── Overlays ───────────────────────────────────────────────────── */}
-      <Picker
-        open={tuning}
-        onOpenChange={setTuning}
-        title="Tune to"
-        empty="No channels yet. Make one first."
-        items={[
-          ...fleet.channels.map((entry) => ({
-            id: entry.id,
-            label: entry.name,
-            hint: `${fleet.tunedTo(entry.id).length} tuned`,
-          })),
-          ...(screen.tuned ? [{ id: "", label: "Nothing", hint: "Untune", danger: true }] : []),
-        ]}
-        onPick={(id) => {
-          void tuneScreen(screen.id, id || null)
-            .then(() => fleet.reload())
-            .catch((err: unknown) =>
-              toast.show("Could not tune", err instanceof Error ? err.message : String(err)),
-            );
-        }}
-      />
-
       <Inspector
         open={inspecting === "place"}
         onOpenChange={(open) => !open && setInspecting(null)}
@@ -472,22 +498,6 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
             )}
         </Inspector>
       ))}
-
-      <Confirm
-        open={removing}
-        onOpenChange={setRemoving}
-        title={`Remove ${screen.name}?`}
-        description="The panel stops being addressable. Pairing and grants are Astrolabe's and are not touched here."
-        confirmLabel="Remove"
-        danger
-        onConfirm={() => {
-          void deleteScreen(screen.id)
-            .then(() => navigate({ to: "/screen-list" }))
-            .catch((err: unknown) =>
-              toast.show("Could not remove", err instanceof Error ? err.message : String(err)),
-            );
-        }}
-      />
     </Page>
   );
 }
@@ -534,25 +544,23 @@ function ChannelRung({
   channel,
   wins,
   programName,
+  tuneItems,
   onTune,
   onOpen,
 }: {
   channel: { id: string; name: string } | null;
   wins: boolean;
   programName?: string;
-  onTune: () => void;
+  tuneItems: ChoiceItem[];
+  onTune: (id: string) => void;
   onOpen: () => void;
 }) {
-  const { held } = useFocus();
+  // Holding the rung lights what is tuned to the channel elsewhere on the
+  // page; the rung itself is the holder, so it wears neither lit nor dim.
   const hold = useHoldable("channel", channel?.id ?? "");
   if (!channel) return null;
   return (
-    <div
-      className="ds-sky-rung"
-      data-wins={wins || undefined}
-      {...hold.bind}
-      {...litProps(held, held?.kind === "channel" && held.id === channel.id)}
-    >
+    <div className="ds-sky-rung" data-wins={wins || undefined} {...hold.bind}>
       <span className="ds-sky-mark">
         <Tv size={14} />
       </span>
@@ -563,9 +571,10 @@ function ChannelRung({
         </span>
       </button>
       <span className="ds-sky-acts">
-        <button type="button" className="ds-btn ds-btn-quiet" onClick={onTune}>
+        <ChoiceMenu label="Tune" className="ds-tuned" items={tuneItems} onPick={onTune} align="end">
+          <Tv size={14} />
           Tune…
-        </button>
+        </ChoiceMenu>
       </span>
     </div>
   );
@@ -597,23 +606,36 @@ function AudienceCard({
 function ScreenName({
   screen,
   put,
+  select,
 }: {
   screen: SignageScreen;
   put: (next: SignageScreen) => Promise<void>;
+  select: boolean;
 }) {
+  const ref = useRef<HTMLInputElement>(null);
   const name = useCommit<string>({
     committed: screen.name,
     write: (next) => put({ ...screen, name: next.trim() || screen.name }),
   });
+  // A screen the page just made lands with its name selected: the first
+  // keystroke is the rename, and there was never a dialog asking for it.
+  const selectOnce = useRef(select);
+  useEffect(() => {
+    if (selectOnce.current) ref.current?.select();
+  }, []);
   return (
     <span style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
       <input
+        ref={ref}
         className="ds-title-input"
         value={name.value}
         aria-label="Screen name"
         onChange={(event) => name.set(event.target.value)}
         onBlur={() => {
           if (name.state === "pending") name.setNow(name.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") (event.target as HTMLInputElement).blur();
         }}
       />
       {name.state !== "settled" && (
@@ -625,62 +647,78 @@ function ScreenName({
   );
 }
 
-/** Labels are identity, so they sit under the name, not in a settings panel. */
+/**
+ * Labels are identity, so they sit under the name, not in a settings panel.
+ * A label is a chip; pressing its × removes it, and the "+ label" chip becomes
+ * the field when pressed. Enter commits and stays open for the next one.
+ */
 function Labels({
   screen,
   put,
+  onRefused,
 }: {
   screen: SignageScreen;
   put: (next: SignageScreen) => Promise<void>;
+  onRefused: (err: unknown) => void;
 }) {
-  const [label, setLabel] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const labels = screen.labels ?? [];
+
+  const commit = (keepOpen: boolean) => {
+    const next = draft.trim();
+    setDraft("");
+    if (!keepOpen) setAdding(false);
+    if (!next || labels.includes(next)) return;
+    haptic("select");
+    void put({ ...screen, labels: [...new Set([...labels, next])].sort() }).catch(onRefused);
+  };
+
   return (
-    <div className="ds-stack" style={{ gap: 8 }}>
-      <div className="ds-chips">
-        {(screen.labels ?? []).map((held) => (
-          <span className="ds-tag" key={held}>
-            {held}
-            <button
-              type="button"
-              aria-label={`Remove ${held}`}
-              className="ds-icon"
-              style={{ width: 18, height: 18 }}
-              onClick={() =>
-                void put({
-                  ...screen,
-                  labels: (screen.labels ?? []).filter((other) => other !== held),
-                })
-              }
-            >
-              <X size={11} />
-            </button>
-          </span>
-        ))}
-      </div>
-      <form
-        style={{ display: "flex", gap: 8, maxWidth: 360 }}
-        onSubmit={(event) => {
-          event.preventDefault();
-          const next = label.trim();
-          if (!next) return;
-          void put({
-            ...screen,
-            labels: [...new Set([...(screen.labels ?? []), next])].sort(),
-          });
-          setLabel("");
-        }}
-      >
+    <div className="ds-labels">
+      {labels.map((held) => (
+        <span className="ds-tag" key={held}>
+          {held}
+          <button
+            type="button"
+            aria-label={`Remove ${held}`}
+            className="ds-tag-x"
+            onClick={() => {
+              haptic("delete");
+              void put({ ...screen, labels: labels.filter((other) => other !== held) }).catch(
+                onRefused,
+              );
+            }}
+          >
+            <X size={11} />
+          </button>
+        </span>
+      ))}
+      {adding ? (
         <input
-          className="ds-input"
-          value={label}
-          placeholder="Add a label"
-          aria-label="Add a label"
-          onChange={(event) => setLabel(event.target.value)}
+          className="ds-tag-input"
+          value={draft}
+          placeholder="label"
+          aria-label="New label"
+          autoFocus
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => commit(false)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commit(true);
+            } else if (event.key === "Escape") {
+              setDraft("");
+              setAdding(false);
+            }
+          }}
         />
-        <button type="submit" className="ds-btn ds-btn-ghost">
-          Add
+      ) : (
+        <button type="button" className="ds-tag-add" onClick={() => setAdding(true)}>
+          <Plus size={12} />
+          label
         </button>
-      </form>
+      )}
     </div>
   );
 }

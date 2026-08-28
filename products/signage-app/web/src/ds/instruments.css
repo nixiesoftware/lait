@@ -340,49 +340,75 @@
 .ds-sky {
   display: flex;
   flex-direction: column;
-  padding: 0 18px;
+  padding: 4px;
   border-radius: var(--ds-r-lg);
   background: var(--ds-surface);
   box-shadow: var(--ds-material-card);
 }
 
+/* A rung is one object in the stack: it fills the card's width, keeps its
+   own inset hairline to the rung above, and rounds with the card at the
+   ends. Hovering it is a whisper of ink, never a ring — the ring is what a
+   held relation wears elsewhere, and a rung is never lit by itself. */
 .ds-sky-rung {
+  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
-  padding: 12px 0;
-  border-top: 1px solid var(--ds-rule);
+  padding: 13px 14px;
+  border-radius: calc(var(--ds-r-lg) - 4px);
+  transition: background var(--ds-dur-fast) var(--ds-ease);
 }
 
-.ds-sky-rung:first-child {
-  border-top: 0;
+.ds-sky-rung + .ds-sky-rung::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 14px;
+  height: 1px;
+  background: var(--ds-rule);
 }
 
-/* The rung that answers is lit; the ones below it wait. */
+@media (hover: hover) {
+  .ds-sky-rung:not([data-wins]):hover {
+    background: var(--ds-hover);
+  }
+}
+
+/* The rung that answers is lit from within; the ones below it wait. The
+   hairlines touching it disappear, because a lit object has its own edge. */
 .ds-sky-rung[data-wins] {
-  margin: 0 -18px;
-  padding-inline: 18px;
-  background: var(--ds-positive-soft);
-  border-top-color: transparent;
+  background: linear-gradient(180deg, rgb(53 203 145 / 0.16), rgb(53 203 145 / 0.1));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.5);
 }
 
+.ds-sky-rung[data-wins]::before,
+.ds-sky-rung[data-wins] + .ds-sky-rung::before {
+  display: none;
+}
+
+/* On air, inside a card: the same soft light the winning rung always wears,
+   in the colour of reach, and the mark is what carries it. No edge. */
 .ds-sky-rung[data-wins][data-onair] {
-  background: var(--ds-alarm-soft);
-  box-shadow: inset 3px 0 0 var(--ds-alarm);
+  background: linear-gradient(180deg, rgb(216 71 46 / 0.09), rgb(216 71 46 / 0.05));
 }
 
-.ds-sky-rung[data-wins]:first-child {
-  border-radius: var(--ds-r-lg) var(--ds-r-lg) 0 0;
+.ds-sky-rung[data-wins][data-onair] .ds-sky-mark {
+  color: var(--ds-alarm);
+  box-shadow:
+    var(--ds-material-control),
+    0 4px 10px -4px rgb(216 71 46 / 0.35);
 }
 
-.ds-sky-rung + .ds-sky-rung[data-wins] {
-  border-top: 0;
+.ds-sky-rung[data-wins]:not([data-onair]) .ds-sky-mark {
+  color: var(--ds-positive);
 }
 
 .ds-sky-mark {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border-radius: var(--ds-r-round);

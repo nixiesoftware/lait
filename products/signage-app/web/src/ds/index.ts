@@ -5,6 +5,7 @@ export {
   presence,
 } from "./motion";
 export { ToastProvider, useToast } from "./toast";
+export { UndoProvider, useUndo } from "./undo";
 export {
   useCoarsePointer,
   suppressCoarseContextMenu,
@@ -13,7 +14,7 @@ export {
 export { haptic, type HapticKind } from "./haptic";
 export { Confirm } from "./confirm";
 export { Prompt } from "./prompt";
-export { ItemMenu, MoreMenu, OverlayMenu, type MenuItem } from "./menu";
+export { ChoiceMenu, ItemMenu, MoreMenu, OverlayMenu, type ChoiceItem, type MenuItem } from "./menu";
 export {
   Page,
   PageHeader,

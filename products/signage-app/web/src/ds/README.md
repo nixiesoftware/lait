@@ -24,7 +24,13 @@ never needed.
 | ochre | `--ds-miss` | the miss | who a broadcast does not reach; a screen never heard from |
 
 Nothing else in the interface is coloured. Everything else is ink at one of
-three strengths. An app's mark (`.ds-app-mark`) is the one exception, and it
+three strengths.
+
+A state is never an edge bar. A thing that is on air is lit by its own
+colour the way every other object here is lit — a hairline where its contact
+line was, a soft cast on the field beneath it (`--ds-material-onair`) — and
+the pill on it says the word. Inside a card, the winning rung wears the same
+faint tint it always did, and its mark carries the light. An app's mark (`.ds-app-mark`) is the one exception, and it
 is the app's colour, not ours.
 
 ## Light, and only light
@@ -75,6 +81,27 @@ other, and the dependence is shown by five rules rather than told by a label.
 
 `useFleet` (`utils/screens/fleet.ts`) loads the seven lists once per page, so
 the instruments on it cannot disagree with each other.
+
+## One gesture, one outcome
+
+Every change is on screen the frame it is made. `utils/screens/fleet.ts` holds
+the seven lists once, outside React; a mutation is applied to that copy first
+and written to the World after, and a refusal re-reads and is thrown back to
+the surface that made it. A page that mounts draws what is already held —
+"Loading…" is seen once per session, not once per click.
+
+Nothing asks "are you sure". A removal is a press, and for eight seconds the
+bar at the foot of the page (`undo.tsx`) offers to put it back; undo is a fresh
+put of the document the remover kept. Nothing asks for a name first, either: a
+new screen or channel exists on the press under a name the page hands it,
+with that name selected, so the first keystroke is the rename.
+
+A value is changed by pressing what it is: the tuning is a chip that opens a
+`ChoiceMenu` whose pick is the commit; what a channel carries is a row of
+covers; a daypart's hours are the controls that set them; a label is a chip
+whose × removes it and whose "+ label" becomes the field. The composer is two
+questions drawn as objects — what, as the programs; whom, as the fleet — and
+one act in the colour of reach, wearing its count.
 
 ## The sheets, in load order
 

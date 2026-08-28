@@ -516,7 +516,8 @@
   object-fit: cover;
 }
 
-/* A thumbnail is what a screen would show, .pe-thumb {
+/* A thumbnail is what a screen would show, filling its frame. */
+.pe-thumb {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -679,14 +680,6 @@
 .ds-app-mark.is-web {
   background: var(--ds-accent-soft);
   color: var(--ds-accent);
-}
-
-/* A labelled checkbox row. Not the selection box above {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: var(--ds-fs-small);
-  color: var(--ds-ink);
 }
 
 /* ── Gallery: the image is the cell ────────────────────────────────────── */
@@ -901,11 +894,68 @@
   }
 }
 
-/* ── The fleet, its facts {
+/* ── The fleet: one row per panel, in one card ─────────────────────────── */
+
+.ds-device-list {
   display: flex;
+  flex-direction: column;
+  padding: 0 16px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+}
+
+.ds-device {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--ds-rule);
+}
+
+.ds-device:first-child {
+  border-top: 0;
+}
+
+.ds-device .ds-row-copy strong {
+  font-size: var(--ds-fs-body);
+}
+
+.ds-device .ds-row-copy > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+}
+
+.ds-device-tags,
+.ds-device .ds-row-copy .ds-tag {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+}
+
+.ds-device .ds-row-copy .ds-tag {
+  gap: 5px;
+}
+
+@media (max-width: 639px) {
+  .ds-device {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .ds-device > .ds-tuned {
+    grid-column: 2 / span 2;
+    justify-self: start;
+  }
+
+  .ds-device > .ds-more {
+    grid-column: 3;
+    grid-row: 1;
+  }
 }
 
 /* The composer is a sheet with real height, held above everything. */

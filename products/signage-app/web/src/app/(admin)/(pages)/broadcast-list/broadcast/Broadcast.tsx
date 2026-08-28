@@ -1,20 +1,28 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ProgramEditor } from "@/program-editor";
-import { fetchProgram, saveProgram } from "@/utils/broadcasts/api";
+import { fetchProgram } from "@/utils/broadcasts/api";
 import { fetchLibrary } from "@/utils/content/api";
+import { current, putProgram, useFleet } from "@/utils/screens/fleet";
 import { draftNameKey } from "@/utils/navigation/actions";
 import { goBack } from "@/utils/navigation/goBack";
 import type { SignageMedia, SignageProgram } from "@/utils/lait/types";
 
+/**
+ * The editor's page. The program and the library are what the fleet already
+ * holds, so the editor opens on the same frame the row was pressed; the
+ * World's own copy is read behind that and adopted if it differs.
+ */
 export default function BroadcastPage() {
   const params = useParams({ strict: false });
   const programId = String(params.id ?? "");
   const navigate = useNavigate();
-  const [program, setProgram] = useState<SignageProgram | null>(null);
-  const [library, setLibrary] = useState<SignageMedia[]>([]);
-  const [persisted, setPersisted] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const fleet = useFleet();
+  const known = current().programs.find((row) => row.id === programId) ?? null;
+  const [program, setProgram] = useState<SignageProgram | null>(known);
+  const [library, setLibrary] = useState<SignageMedia[]>(current().media);
+  const [persisted, setPersisted] = useState(known != null);
+  const [loading, setLoading] = useState(known == null && fleet.loading);
   const [error, setError] = useState("");
 
   const refreshLibrary = async (): Promise<SignageMedia[]> => {
@@ -26,33 +34,35 @@ export default function BroadcastPage() {
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      setLoading(true);
       setError("");
       try {
-        const [loaded, catalog] = await Promise.all([
-          fetchProgram(programId),
-          fetchLibrary(),
-        ]);
+        const [loaded, catalog] = await Promise.all([fetchProgram(programId), fetchLibrary()]);
         if (cancelled) return;
         setLibrary(catalog);
         if (loaded) {
-          setProgram(loaded.program);
+          setProgram((held) => held ?? loaded.program);
           setPersisted(true);
           return;
         }
         const draftName = sessionStorage.getItem(draftNameKey(programId));
         if (!draftName) {
-          setError("This program is not on the World, and no draft name was kept.");
+          setProgram((held) => {
+            if (!held) setError("This program is not on the World, and no draft name was kept.");
+            return held;
+          });
           return;
         }
         setPersisted(false);
-        setProgram({
-          id: programId,
-          name: draftName,
-          cycle: "loop",
-          items: [],
-          windows: [],
-        });
+        setProgram(
+          (held) =>
+            held ?? {
+              id: programId,
+              name: draftName,
+              cycle: "loop",
+              items: [],
+              windows: [],
+            },
+        );
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "The program could not be loaded.");
@@ -67,7 +77,7 @@ export default function BroadcastPage() {
     };
   }, [programId]);
 
-  if (loading) {
+  if (!program && loading) {
     return <p className="pe-hint">Loading program…</p>;
   }
   if (error || !program) {
@@ -85,7 +95,7 @@ export default function BroadcastPage() {
         if (next.items.length === 0) {
           throw new Error("A program needs at least one item before it can be saved.");
         }
-        await saveProgram(next);
+        await putProgram(next);
         sessionStorage.removeItem(draftNameKey(programId));
         setProgram(next);
         setPersisted(true);

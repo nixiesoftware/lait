@@ -1,4 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/**
+ * Files — what programs are made of.
+ *
+ * A file wears its use: faint when no program holds it, a dot of now when a
+ * screen is showing it. Dropping files on the page uploads them; deleting one
+ * is a press, and the bar at the foot offers to put it back — with a word
+ * about the programs that still name it, because that is the thing a person
+ * would have wanted a warning about.
+ */
+
+import React, { useMemo, useRef, useState } from "react";
 import { useSearch } from "@tanstack/react-router";
 import { useDropzone } from "react-dropzone";
 import { Images, Plus, Trash2, Upload } from "lucide-react";
@@ -6,7 +16,6 @@ import {
   CatalogueRow,
   Chips,
   CommitText,
-  Confirm,
   Empty,
   GalleryShot,
   Inspector,
@@ -23,10 +32,11 @@ import {
   useLive,
   useOrbit,
   useToast,
+  useUndo,
   useWide,
   type MenuItem,
 } from "@/ds";
-import { useFleet } from "@/utils/screens/fleet";
+import { adopt, current, putMedia, removeMedia, useFleet } from "@/utils/screens/fleet";
 import {
   type ContentItemProps,
   type SourceCategory,
@@ -36,23 +46,10 @@ import {
 import { Thumb } from "@/program-editor/Thumb";
 import { formatDuration } from "@/program-editor/model";
 import { useCreateBroadcast } from "@/utils/navigation/hooks";
-import {
-  deleteMedia,
-  fetchLibrary,
-  fetchMediaUsedBy,
-  saveMedia,
-  uploadContentAll,
-} from "@/utils/content/api";
-import { fetchPrograms } from "@/utils/broadcasts/api";
+import { uploadContentAll } from "@/utils/content/api";
+import type { SignageMedia } from "@/utils/lait/types";
 
-const CATEGORY_ORDER: SourceCategory[] = [
-  "image",
-  "video",
-  "card",
-  "kind",
-  "live",
-  "stored",
-];
+const CATEGORY_ORDER: SourceCategory[] = ["image", "video", "card", "kind", "live", "stored"];
 
 const CATEGORY_LABEL: Record<SourceCategory, string> = {
   image: "Images",
@@ -67,6 +64,7 @@ export const ContentListPage: React.FC = () => {
   const fleet = useFleet();
   const { now } = useLive();
   const { held } = useFocus();
+  const undo = useUndo();
 
   /** Which programs hold a file, and whether any screen is showing it now. */
   const usageOf = (id: string) => {
@@ -86,38 +84,21 @@ export const ContentListPage: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [query, setQuery] = useState(searchQuery || "");
-  const [items, setItems] = useState<ContentItemProps[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [uploading, setUploading] = useState<ContentItemProps[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<"all" | SourceCategory>("all");
-  const [inspect, setInspect] = useState<ContentItemProps | null>(null);
-  const [rename, setRename] = useState("");
-  const [deleteIds, setDeleteIds] = useState<string[] | null>(null);
-  const [deleteUsedBy, setDeleteUsedBy] = useState<string[]>([]);
-
-  useEffect(() => {
-    setQuery(searchQuery || "");
-  }, [searchQuery]);
+  const [inspect, setInspect] = useState<string | null>(null);
 
   const { handleCreate: handleCreateProgram, isCreating: isCreatingProgram } =
     useCreateBroadcast();
 
-  const load = useCallback(() => {
-    setLoading(true);
-    fetchLibrary()
-      .then(setItems)
-      .catch((err) => {
-        setError((err as Error).message || "Failed to load the library");
-      })
-      .finally(() => setLoading(false));
-  }, []);
+  const items: ContentItemProps[] = fleet.media;
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  const refused = (what: string) => (err: unknown) => {
+    haptic("error");
+    toast.show(what, err instanceof Error ? err.message : String(err));
+  };
 
   const uploadFiles = async (files: File[]) => {
     if (files.length === 0) return;
@@ -138,6 +119,9 @@ export const ContentListPage: React.FC = () => {
     setUploading(placeholders);
     try {
       const outcome = await uploadContentAll(files);
+      if (outcome.uploaded.length > 0) {
+        adopt({ media: [...outcome.uploaded, ...current().media] });
+      }
       if (outcome.refused.length > 0) {
         toast.show(
           "Some files were refused",
@@ -152,7 +136,6 @@ export const ContentListPage: React.FC = () => {
       haptic("error");
     } finally {
       setUploading([]);
-      load();
     }
   };
 
@@ -165,59 +148,23 @@ export const ContentListPage: React.FC = () => {
     },
   });
 
-  const offerDelete = async (ids: string[]) => {
-    try {
-      const usedBy = await Promise.all(ids.map((id) => fetchMediaUsedBy(id)));
-      const programIds = [...new Set(usedBy.flat())];
-      let names: string[] = [];
-      if (programIds.length > 0) {
-        const programs = await fetchPrograms();
-        names = programIds.map(
-          (pid) => programs.find((p) => p.id === pid)?.name ?? pid,
-        );
-      }
-      setDeleteUsedBy(names);
-    } catch (err) {
-      toast.show(
-        "Could not check which programs use this media",
-        (err as Error).message,
-      );
-      haptic("error");
-      return;
-    }
-    setDeleteIds(ids);
-  };
-
-  const confirmDelete = async () => {
-    if (!deleteIds) return;
-    try {
-      for (const id of deleteIds) await deleteMedia(id);
-      setSelected(new Set());
-      if (inspect && deleteIds.includes(inspect.id)) setInspect(null);
-      haptic("delete");
-      load();
-    } catch (err) {
-      toast.show("Failed to delete media", (err as Error).message);
-      haptic("error");
-    } finally {
-      setDeleteIds(null);
-      setDeleteUsedBy([]);
-    }
-  };
-
-  const updateName = async (id: string, name: string) => {
-    const item = items.find((row) => row.id === id);
-    if (!item || !name.trim()) return;
-    try {
-      const { isUploading: _u, tempId: _t, ...media } = item;
-      await saveMedia({ ...media, name: name.trim() });
-      if (inspect?.id === id) setInspect({ ...inspect, name: name.trim() });
-      haptic("save");
-      load();
-    } catch (err) {
-      toast.show("Failed to rename media", (err as Error).message);
-      haptic("error");
-    }
+  const remove = (ids: string[]) => {
+    haptic("delete");
+    setSelected(new Set());
+    if (inspect && ids.includes(inspect)) setInspect(null);
+    const holders = new Set(
+      ids.flatMap((id) => usageOf(id).holders.map((program) => program.name)),
+    );
+    void Promise.all(ids.map((id) => removeMedia(id)))
+      .then((gone) => {
+        const kept = gone.filter((row): row is SignageMedia => row != null);
+        if (kept.length === 0) return;
+        const what = kept.length === 1 ? `Deleted ${kept[0].name}` : `Deleted ${kept.length} files`;
+        const still =
+          holders.size > 0 ? ` — still named by ${[...holders].join(", ")}` : "";
+        undo.offer(`${what}${still}`, () => Promise.all(kept.map((row) => putMedia(row))));
+      })
+      .catch(refused("Could not delete"));
   };
 
   const toggle = (id: string) => {
@@ -231,8 +178,7 @@ export const ContentListPage: React.FC = () => {
 
   const openInspect = (item: ContentItemProps) => {
     if (item.isUploading) return;
-    setInspect(item);
-    setRename(item.name);
+    setInspect(item.id);
   };
 
   const availableTypes = CATEGORY_ORDER.filter((c) =>
@@ -252,21 +198,11 @@ export const ContentListPage: React.FC = () => {
 
   const menuFor = (item: ContentItemProps): MenuItem[] => [
     { label: "Details", onPick: () => openInspect(item) },
-    {
-      label: "Delete",
-      danger: true,
-      onPick: () => {
-        void offerDelete([item.id]);
-      },
-    },
+    { label: "Delete", danger: true, onPick: () => remove([item.id]) },
   ];
 
-  const usedByNote =
-    deleteUsedBy.length > 0
-      ? ` Still playing in: ${deleteUsedBy.join(", ")}.`
-      : "";
-
   const showList = wide && viewMode === "list";
+  const inspected = inspect ? items.find((row) => row.id === inspect) ?? null : null;
 
   return (
     <Page>
@@ -288,7 +224,7 @@ export const ContentListPage: React.FC = () => {
             onClick={() => void handleCreateProgram()}
           >
             <Plus size={16} />
-            {isCreatingProgram ? "Creating…" : "New program"}
+            New program
           </button>
         </PageHeader>
 
@@ -305,42 +241,34 @@ export const ContentListPage: React.FC = () => {
           }}
         />
 
-        <PageStatus loading={loading && items.length === 0} error={error} />
+        <PageStatus loading={fleet.loading} error={fleet.error ?? ""} />
 
         {selected.size > 0 ? (
-          <SelectionBar
-            count={selected.size}
-            onClear={() => setSelected(new Set())}
-          >
+          <SelectionBar count={selected.size} onClear={() => setSelected(new Set())}>
             <button
               type="button"
               className="ds-btn ds-btn-danger"
-              onClick={() => void offerDelete(Array.from(selected))}
+              onClick={() => remove(Array.from(selected))}
             >
               <Trash2 size={16} />
               Delete
             </button>
           </SelectionBar>
         ) : (
-          <div className="ds-toolbar">
-            <PageSearch
-              value={query}
-              onChange={setQuery}
-              placeholder="Filter media…"
-            />
-            <Chips
-              value={filter}
-              onChange={setFilter}
-              items={[
-                { id: "all" as const, label: "All" },
-                ...availableTypes.map((id) => ({
-                  id,
-                  label: CATEGORY_LABEL[id],
-                })),
-              ]}
-            />
-            <ViewToggle value={viewMode} onChange={setViewMode} />
-          </div>
+          items.length > 0 && (
+            <div className="ds-toolbar">
+              <PageSearch value={query} onChange={setQuery} placeholder="Filter media…" />
+              <Chips
+                value={filter}
+                onChange={setFilter}
+                items={[
+                  { id: "all" as const, label: "All" },
+                  ...availableTypes.map((id) => ({ id, label: CATEGORY_LABEL[id] })),
+                ]}
+              />
+              <ViewToggle value={viewMode} onChange={setViewMode} />
+            </div>
+          )
         )}
 
         {isDragActive && (
@@ -349,67 +277,74 @@ export const ContentListPage: React.FC = () => {
           </p>
         )}
 
-        {items.length === 0 && !loading && uploading.length === 0 ? (
+        {items.length === 0 && !fleet.loading && uploading.length === 0 ? (
           <Empty title="Drop images or videos here, or upload.">
             <button
               type="button"
               className="ds-btn ds-btn-solid"
               onClick={() => fileInputRef.current?.click()}
             >
+              <Upload size={16} />
               Upload
             </button>
           </Empty>
         ) : showList ? (
           <div className="ds-rows">
             {displayItems.map((item) => (
-              <Star key={item.tempId || item.id} id={item.id} use={item.isUploading || fleet.loading ? null : usageOf(item.id)} held={held}>
-              <CatalogueRow
-                name={item.name}
-                meta={
-                  item.isUploading
-                    ? "Uploading…"
-                    : [
-                        sourceLabel(item),
-                        item.width && item.height
-                          ? `${item.width}×${item.height}`
-                          : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")
-                }
-                selected={selected.has(item.id)}
-                onSelect={() => toggle(item.id)}
-                onOpen={() => openInspect(item)}
-                menu={item.isUploading ? [] : menuFor(item)}
-                more={item.isUploading ? [] : menuFor(item)}
-                disabled={item.isUploading}
+              <Star
+                key={item.tempId || item.id}
+                id={item.id}
+                use={item.isUploading || fleet.loading ? null : usageOf(item.id)}
+                held={held}
               >
-                <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
-              </CatalogueRow>
+                <CatalogueRow
+                  name={item.name}
+                  meta={
+                    item.isUploading
+                      ? "Uploading…"
+                      : [
+                          sourceLabel(item),
+                          item.width && item.height ? `${item.width}×${item.height}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                  }
+                  selected={selected.has(item.id)}
+                  onSelect={() => toggle(item.id)}
+                  onOpen={() => openInspect(item)}
+                  menu={item.isUploading ? [] : menuFor(item)}
+                  more={item.isUploading ? [] : menuFor(item)}
+                  disabled={item.isUploading}
+                >
+                  <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
+                </CatalogueRow>
               </Star>
             ))}
           </div>
         ) : (
           <div className="ds-gallery">
             {displayItems.map((item) => (
-              <Star key={item.tempId || item.id} id={item.id} use={item.isUploading || fleet.loading ? null : usageOf(item.id)} held={held}>
-              <GalleryShot
-                name={item.isUploading ? "Uploading…" : item.name}
-                badge={item.isUploading ? undefined : sourceLabel(item)}
-                play={
-                  !item.isUploading &&
-                  item.source === "stored" &&
-                  item.mime.startsWith("video/")
-                }
-                selected={selected.has(item.id)}
-                onSelect={() => toggle(item.id)}
-                onOpen={() => openInspect(item)}
-                menu={item.isUploading ? [] : menuFor(item)}
-                more={item.isUploading ? [] : menuFor(item)}
-                disabled={item.isUploading}
+              <Star
+                key={item.tempId || item.id}
+                id={item.id}
+                use={item.isUploading || fleet.loading ? null : usageOf(item.id)}
+                held={held}
               >
-                <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
-              </GalleryShot>
+                <GalleryShot
+                  name={item.isUploading ? "Uploading…" : item.name}
+                  badge={item.isUploading ? undefined : sourceLabel(item)}
+                  play={
+                    !item.isUploading && item.source === "stored" && item.mime.startsWith("video/")
+                  }
+                  selected={selected.has(item.id)}
+                  onSelect={() => toggle(item.id)}
+                  onOpen={() => openInspect(item)}
+                  menu={item.isUploading ? [] : menuFor(item)}
+                  more={item.isUploading ? [] : menuFor(item)}
+                  disabled={item.isUploading}
+                >
+                  <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
+                </GalleryShot>
               </Star>
             ))}
           </div>
@@ -417,77 +352,60 @@ export const ContentListPage: React.FC = () => {
       </div>
 
       <Inspector
-        open={inspect != null}
+        open={inspected != null}
         onOpenChange={(open) => {
           if (!open) setInspect(null);
         }}
-        title={inspect?.name ?? "Media"}
+        title={inspected?.name ?? "Media"}
         actions={
-          inspect && (
-            <>
-              <button
-                type="button"
-                className="ds-btn ds-btn-danger"
-                onClick={() => void offerDelete([inspect.id])}
-              >
-                Delete
-              </button>
-            </>
+          inspected && (
+            <button
+              type="button"
+              className="ds-btn ds-btn-danger"
+              onClick={() => remove([inspected.id])}
+            >
+              Delete
+            </button>
           )
         }
       >
-        {inspect && (
+        {inspected && (
           <>
-            <div
-              className="ds-tile-media"
-              style={{ borderRadius: 10, marginBottom: 12 }}
-            >
-              <Thumb media={inspect} orbit={orbit} />
+            <div className="ds-tile-media" style={{ borderRadius: 10, marginBottom: 12 }}>
+              <Thumb media={inspected} orbit={orbit} />
             </div>
             <CommitText
               label="Name"
-              value={inspect.name}
-              onWrite={(next) => (next.trim() && next.trim() !== inspect.name ? updateName(inspect.id, next) : Promise.resolve())}
+              value={inspected.name}
+              onWrite={(next) =>
+                next.trim() && next.trim() !== inspected.name
+                  ? putMedia({ ...inspected, name: next.trim() })
+                  : Promise.resolve()
+              }
             />
-            <p className="ds-hint">Type · {sourceLabel(inspect)}</p>
+            <p className="ds-hint">Type · {sourceLabel(inspected)}</p>
             <p className="ds-hint">
-              Size ·{" "}
-              {inspect.width && inspect.height
-                ? `${inspect.width}×${inspect.height}`
-                : "unknown"}
+              Size · {inspected.width && inspected.height ? `${inspected.width}×${inspected.height}` : "unknown"}
             </p>
-            {inspect.duration_ms != null && (
-              <p className="ds-hint">
-                Duration · {formatDuration(inspect.duration_ms)}
-              </p>
+            {inspected.duration_ms != null && (
+              <p className="ds-hint">Duration · {formatDuration(inspected.duration_ms)}</p>
             )}
-            {"size" in inspect && inspect.source === "stored" && (
-              <p className="ds-hint">
-                File · {(inspect.size / (1024 * 1024)).toFixed(1)} MB
-              </p>
+            {inspected.source === "stored" && (
+              <p className="ds-hint">File · {(inspected.size / (1024 * 1024)).toFixed(1)} MB</p>
             )}
+            {(() => {
+              const use = usageOf(inspected.id);
+              return (
+                <p className="ds-hint">
+                  {use.holders.length === 0
+                    ? "Held by no program."
+                    : `Held by ${use.holders.map((program) => program.name).join(", ")}.`}
+                </p>
+              );
+            })()}
           </>
         )}
       </Inspector>
-
-      <Confirm
-        open={deleteIds != null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteIds(null);
-            setDeleteUsedBy([]);
-          }
-        }}
-        title={
-          deleteIds && deleteIds.length > 1
-            ? `Delete ${deleteIds.length} items?`
-            : `Delete “${items.find((i) => i.id === deleteIds?.[0])?.name ?? inspect?.name ?? "this media"}”?`
-        }
-        description={`This cannot be undone.${usedByNote}`}
-        confirmLabel="Delete"
-        danger
-        onConfirm={confirmDelete}
-      />
     </Page>
   );
 };

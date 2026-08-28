@@ -1,0 +1,593 @@
+/*
+ * One gesture, one outcome.
+ *
+ * The vocabulary for a product in which nothing is submitted: a control that
+ * is the value it changes, a menu whose pick is the commit, a bar that offers
+ * to put back what a press removed, and a composer whose one deliberate act
+ * carries its count. Nothing here has a Cancel, because nothing here is a
+ * form — leaving is the same as finishing.
+ */
+
+/* ── Undo: what just happened, and the one act that reverses it ────────── */
+
+.ds-undo {
+  position: fixed;
+  left: 50%;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  z-index: 100004;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 8px 8px 18px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-inverse);
+  color: var(--ds-ink-inverse);
+  box-shadow: var(--ds-material-lift);
+  font-size: var(--ds-fs-small);
+  overflow: hidden;
+  animation: ds-undo-in var(--ds-dur-medium) var(--ds-ease-enter);
+}
+
+@media (max-width: 639px) {
+  .ds-undo {
+    bottom: calc(60px + var(--ds-header-gap) + max(var(--ds-header-gap), env(safe-area-inset-bottom)));
+  }
+}
+
+@keyframes ds-undo-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.ds-undo-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ds-undo-act {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: var(--ds-r-pill);
+  background: rgb(255 255 255 / 0.14);
+  color: inherit;
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+  transition: background var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-undo-act:hover {
+  background: rgb(255 255 255 / 0.24);
+}
+
+/* The fuse: how long the offer stands, drawn rather than counted. */
+.ds-undo-fuse {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 100%;
+  background: rgb(255 255 255 / 0.35);
+  transform-origin: left;
+  animation: ds-fuse linear forwards;
+}
+
+@keyframes ds-fuse {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* ── A choice menu: the pick is the commit ─────────────────────────────── */
+
+.ds-menu-choice {
+  min-width: 220px;
+}
+
+.ds-menu-choice .ds-menu-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.ds-menu-check {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+}
+
+.ds-menu-item.is-on .ds-menu-check::after {
+  content: "";
+  width: 8px;
+  height: 5px;
+  margin-top: -2px;
+  border-left: 2px solid var(--ds-accent);
+  border-bottom: 2px solid var(--ds-accent);
+  transform: rotate(-45deg);
+}
+
+.ds-menu-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ds-menu-copy small {
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+}
+
+.ds-menu-empty {
+  padding: 10px 12px;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-small);
+}
+
+/* ── Tuned: the chip that is the tuning ────────────────────────────────── */
+
+.ds-tuned {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px 0 10px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-ink);
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-tuned:hover,
+.ds-tuned[data-popup-open] {
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-tuned svg {
+  color: var(--ds-faint);
+}
+
+.ds-tuned.is-absent {
+  color: var(--ds-miss);
+}
+
+.ds-tuned.is-absent svg {
+  color: currentColor;
+}
+
+/* ── Labels: chips, and a chip that becomes the field ──────────────────── */
+
+.ds-labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ds-tag .ds-tag-x {
+  appearance: none;
+  border: 0;
+  width: 16px;
+  height: 16px;
+  margin-right: -4px;
+  padding: 0;
+  border-radius: var(--ds-r-round);
+  background: transparent;
+  color: var(--ds-faint);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.ds-tag .ds-tag-x:hover {
+  background: var(--ds-hover-strong);
+  color: var(--ds-ink);
+}
+
+.ds-tag-add {
+  appearance: none;
+  border: 1px dashed var(--ds-rule-strong);
+  background: transparent;
+  color: var(--ds-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 10px 0 8px;
+  border-radius: var(--ds-r-pill);
+  font: inherit;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+}
+
+.ds-tag-add:hover {
+  color: var(--ds-ink);
+  border-color: var(--ds-muted);
+}
+
+.ds-tag-input {
+  appearance: none;
+  border: 0;
+  min-height: 26px;
+  width: 9em;
+  padding: 0 10px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  font: inherit;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  box-shadow: 0 0 0 2px var(--ds-accent);
+  outline: none;
+}
+
+/* ── Carries: a program chosen by pressing its cover ───────────────────── */
+
+.ds-carry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ds-carry-pick {
+  appearance: none;
+  border: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px 5px 5px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-carry-pick .ds-cover {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--ds-r-xs);
+  box-shadow: none;
+}
+
+.ds-carry-pick:hover {
+  color: var(--ds-ink);
+}
+
+.ds-carry-pick.is-on {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow:
+    var(--ds-material-control),
+    0 0 0 2px var(--ds-accent);
+}
+
+.ds-carry-pick.is-none {
+  padding-left: 12px;
+}
+
+/* ── Dayparts: hours, as controls that are the hours ───────────────────── */
+
+.ds-daypart {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 12px;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-sunken);
+}
+
+.ds-daypart-when {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+}
+
+.ds-daypart-when .ds-input {
+  width: auto;
+  min-height: 34px;
+  padding: 4px 12px;
+  font-weight: var(--ds-weight-medium);
+  color: var(--ds-ink);
+}
+
+.ds-daypart-when input[type="time"].ds-input {
+  width: 9.5em;
+}
+
+.ds-daypart-when input[type="number"].ds-input {
+  width: 4.5em;
+  padding-right: 6px;
+}
+
+.ds-daypart-when select.ds-input {
+  width: auto;
+  padding-right: 34px;
+}
+
+/* ── The composer: what, to whom, and one deliberate act ───────────────── */
+
+.ds-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 20px 28px;
+  padding: 20px 22px;
+  border-radius: var(--ds-r-xl);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-lift);
+  margin-bottom: var(--ds-space-5);
+}
+
+@media (max-width: 760px) {
+  .ds-compose {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ds-compose-col {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.ds-compose-col > h3 {
+  margin: 0;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+}
+
+.ds-compose-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ds-rule);
+}
+
+.ds-compose-foot .ds-btn-alarm {
+  margin-left: auto;
+  min-height: var(--ds-control-lg);
+  padding-inline: 22px;
+  font-size: var(--ds-fs-body);
+}
+
+.ds-compose-name {
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 320px;
+}
+
+/* What: every act as a pressable object, the chosen one ringed. */
+.ds-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ds-act {
+  appearance: none;
+  border: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px 6px 6px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-act .ds-cover {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--ds-r-xs);
+  box-shadow: none;
+}
+
+.ds-act-mark {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--ds-r-xs);
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.7);
+}
+
+.ds-act-mark.is-restore {
+  background: var(--ds-surface);
+  color: var(--ds-positive);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-act:hover {
+  color: var(--ds-ink);
+}
+
+.ds-act.is-on {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow:
+    var(--ds-material-control),
+    0 0 0 2px var(--ds-accent);
+}
+
+/* Who: the fleet is the control. */
+.ds-who {
+  display: grid;
+  gap: 10px;
+}
+
+.ds-who .ds-footprint {
+  gap: 8px;
+}
+
+.ds-who .ds-footprint-cell {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  max-width: 64px;
+}
+
+.ds-who .ds-footprint-cell small {
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.6875rem;
+  color: var(--ds-muted);
+}
+
+.ds-who .ds-footprint-cell[data-reached] small {
+  color: var(--ds-ink);
+}
+
+.ds-reach-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+}
+
+.ds-reach-line strong {
+  font-size: 1.25rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
+  color: var(--ds-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-reach-line .is-miss {
+  color: var(--ds-miss);
+}
+
+/* Priority is three words, not a number. */
+.ds-urgency {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+}
+
+.ds-urgency button {
+  appearance: none;
+  border: 0;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: var(--ds-r-pill);
+  background: transparent;
+  color: var(--ds-muted);
+  font: inherit;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+}
+
+.ds-urgency button.is-on {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-urgency button.is-on.is-top {
+  color: var(--ds-alarm);
+}
+
+/* ── Programs: what carries it, legibly ────────────────────────────────── */
+
+.ds-carried {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  padding: 3px 10px 3px 6px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  color: var(--ds-muted);
+}
+
+.ds-carried .ds-day {
+  width: 96px;
+}
+
+.ds-carried svg {
+  color: var(--ds-faint);
+}
+
+/* ── The empty state that offers the first act, in the same gesture ────── */
+
+.ds-empty-card .ds-btn {
+  margin-top: 4px;
+}
+
+/* ── A row that is being removed leaves; one that just arrived settles ─── */
+
+.ds-arrive {
+  animation: ds-arrive var(--ds-dur-medium) var(--ds-ease-enter);
+}
+
+@keyframes ds-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
