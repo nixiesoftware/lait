@@ -1571,17 +1571,31 @@ impl StationHost {
                             return Response::err(format!("expand administrator role: {error}"))
                         }
                     };
-                administrator.push((
-                    mechanics::membership::policy_admin_capability(),
-                    mechanics::membership::policy_admin_resource(),
-                ));
-                administrator.sort();
-                administrator.dedup();
+                // The Mechanics meta-grant is part of administration whatever
+                // the Worlds say; it has no product role definition to name.
+                administrator.push(crate::orbital::worlds::MembershipAssignment {
+                    capability: mechanics::membership::policy_admin_capability(),
+                    resource: mechanics::membership::policy_admin_resource(),
+                    definition_ref: Vec::new(),
+                });
+                let same =
+                    |a: &crate::orbital::worlds::MembershipAssignment,
+                     b: &crate::orbital::worlds::MembershipAssignment| {
+                        a.capability == b.capability && a.resource == b.resource
+                    };
+                let mut deduped: Vec<crate::orbital::worlds::MembershipAssignment> = Vec::new();
+                for assignment in administrator {
+                    if !deduped.iter().any(|seen| same(seen, &assignment)) {
+                        deduped.push(assignment);
+                    }
+                }
+                let administrator = deduped;
                 let revoke: Vec<_> = administrator
                     .iter()
-                    .filter(|assignment| !contributor.contains(assignment))
-                    .cloned()
+                    .filter(|assignment| !contributor.iter().any(|c| same(c, assignment)))
+                    .map(|assignment| (assignment.capability.clone(), assignment.resource.clone()))
                     .collect();
+
                 match self.mechanics.member_set_role(
                     &who,
                     admin,
@@ -1767,10 +1781,26 @@ impl StationHost {
                     rows: self.mechanics.assignment_rows(subject.as_ref()),
                 }
             }
-            Request::AssignmentGrant { actor, assignments } => {
+            Request::AssignmentGrant {
+                actor,
+                assignments,
+                definition_ref,
+            } => {
                 let Some(subject) = self.mechanics.resolve_actor_ref(&actor) else {
                     return Response::not_found(format!("no actor matches '{actor}'"));
                 };
+                let origin = match definition_ref {
+                    None => None,
+                    Some(hex) => match data_encoding::HEXLOWER_PERMISSIVE
+                        .decode(hex.trim().as_bytes())
+                    {
+                        Ok(definition_ref) => {
+                            Some(mechanics::membership::GrantOrigin::Grant { definition_ref })
+                        }
+                        Err(_) => return Response::err("expected a hex role definition reference"),
+                    },
+                };
+
                 let assignments = assignments
                     .into_iter()
                     .map(|assignment| {
@@ -1786,7 +1816,10 @@ impl StationHost {
                         )
                     })
                     .collect::<Vec<_>>();
-                match self.mechanics.grant_assignments(&subject, &assignments) {
+                match self
+                    .mechanics
+                    .grant_assignments(&subject, &assignments, origin)
+                {
                     Ok(granted) => Response::Ok {
                         message: Some(format!(
                             "installed {} assignment(s) for {}",
@@ -1797,22 +1830,38 @@ impl StationHost {
                     Err(error) => Response::err(format!("{error}")),
                 }
             }
-            Request::AssignmentRevoke { grant_id } => {
-                let raw = match data_encoding::HEXLOWER_PERMISSIVE
-                    .decode(grant_id.trim().as_bytes())
-                    .ok()
-                    .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
-                {
-                    Some(id) => id,
-                    None => return Response::err("expected a 64-hex grant id"),
-                };
-                match self.mechanics.revoke_assignment(raw) {
+            Request::AssignmentRevoke {
+                grant_id,
+                mut grant_ids,
+            } => {
+                grant_ids.extend(grant_id);
+                if grant_ids.is_empty() {
+                    return Response::err("expected at least one grant id");
+                }
+
+                let mut raw = Vec::with_capacity(grant_ids.len());
+                for grant_id in &grant_ids {
+                    match data_encoding::HEXLOWER_PERMISSIVE
+                        .decode(grant_id.trim().as_bytes())
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+                    {
+                        Some(id) => raw.push(id),
+                        None => return Response::err("expected a 64-hex grant id"),
+                    }
+                }
+                match self.mechanics.revoke_assignments(&raw) {
                     Ok(()) => Response::Ok {
-                        message: Some("revoked the assignment".into()),
+                        message: Some(if raw.len() == 1 {
+                            "revoked the assignment".into()
+                        } else {
+                            format!("revoked {} assignments", raw.len())
+                        }),
                     },
                     Err(e) => Response::err(format!("{e}")),
                 }
             }
+
             // The production classifier routed this here; any other variant
             // reaching this arm is a routing invariant violation, not a
             // servable request.
@@ -2275,8 +2324,12 @@ impl StationHost {
             mechanics::authorization::Resource,
         )>,
     > {
-        self.worlds
-            .membership_assignments("contributor", self.station.frontier().root)
+        Ok(self
+            .worlds
+            .membership_assignments("contributor", self.station.frontier().root)?
+            .into_iter()
+            .map(|assignment| (assignment.capability, assignment.resource))
+            .collect())
     }
 
     /// The reconciled presence assembly: the persistent Neighbor registry's

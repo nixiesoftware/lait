@@ -67,8 +67,9 @@ interface RoleWire {
 }
 
 function roleFromProjection({ summary, revision }: RoleProjection): RoleWire {
-  return { ...summary, revision: revision ?? null };
+  return { ...summary, conflict_heads: summary.conflict_heads ?? [], revision: revision ?? null };
 }
+
 
 /** One sentence for a demand template: what the gate asks of the actor. */
 function demandPhrase(d: DemandWire): string {

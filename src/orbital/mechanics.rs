@@ -66,10 +66,18 @@ const RECOVERY_KEY_FILE: &str = "recovery.key";
 /// authority material an elevation converts into a threshold group key.
 const SPACE_RECOVERY_KEY_FILE: &str = "space-recovery.key";
 
+/// The deterministic salt for one assignment, at one generation.
+///
+/// Generation 0 is the salt every grant has always had, so an exact retry
+/// derives the identical grant id and replay stays idempotent. Later
+/// generations exist for one reason: a revoked grant id is revoked for good,
+/// and re-deriving it after a revoke would author a grant that is never
+/// effective while reporting that it installed. See [`fresh_assignment_salt`].
 fn assignment_salt(
     actor: &ActorId,
     capability: &mechanics::authorization::PolicyCapability,
     resource: &mechanics::authorization::Resource,
+    generation: u32,
 ) -> Result<[u8; 16]> {
     let mut input = Vec::new();
     input.extend_from_slice(actor.as_str().as_bytes());
@@ -77,6 +85,10 @@ fn assignment_salt(
     input.extend_from_slice(capability.name.as_bytes());
     input.push(0);
     input.extend_from_slice(resource.segments.join("/").as_bytes());
+    if generation > 0 {
+        input.push(0);
+        input.extend_from_slice(&generation.to_be_bytes());
+    }
     let derived = blake3::derive_key("lait.access-grant-salt.v1", &input);
     let mut salt = [0u8; 16];
     salt.copy_from_slice(
@@ -85,6 +97,31 @@ fn assignment_salt(
             .ok_or_else(|| anyhow!("derived access-grant salt is too short"))?,
     );
     Ok(salt)
+}
+
+/// The salt and grant id to author for an assignment now: the first
+/// generation whose id this frontier has not revoked. Deterministic in the
+/// state, so two replicas retrying the same grant against the same frontier
+/// still agree — and a grant that was revoked and granted again is a new id
+/// rather than the old one re-authored into permanent ineffectiveness.
+fn fresh_assignment_salt(
+    acl_state: &AclState,
+    actor: &ActorId,
+    capability: &mechanics::authorization::PolicyCapability,
+    resource: &mechanics::authorization::Resource,
+) -> Result<([u8; 16], [u8; 32])> {
+    for generation in 0..u32::MAX {
+        let salt = assignment_salt(actor, capability, resource, generation)?;
+        let grant_id = acl::capability_grant_id(actor, capability, resource, &salt)
+            .ok_or_else(|| anyhow!("grant id"))?;
+        if !acl_state.is_grant_revoked(&grant_id) {
+            return Ok((salt, grant_id));
+        }
+    }
+    Err(anyhow!(
+        "every grant generation for `{}` is revoked",
+        capability.name
+    ))
 }
 
 /// Extract an invite nonce from either an orbital Coordinates link (its
@@ -591,12 +628,15 @@ impl Inner {
             let op = acl::sign_op(
                 &self.seed,
                 &AclOp {
-                    action: AclAction::GrantCapability {
+                    action: AclAction::GrantCapabilityFrom {
                         grant_id,
                         actor: joiner_actor.clone(),
                         capability: capability.clone(),
                         resource: resource.clone(),
                         salt,
+                        origin: acl::GrantOrigin::Admission {
+                            definition_ref: admission.evidence.opaque_definition_ref.clone(),
+                        },
                     },
                     by: me_actor.clone(),
                     actor_asof: actor_asof.clone(),
@@ -605,6 +645,7 @@ impl Inner {
                 vec![prev.clone()],
                 &self.space,
             );
+
             prev = op.hash();
             effects.push(Effect::Acl(op).encode());
         }
@@ -764,21 +805,46 @@ fn inner_grant(
     capability: mechanics::authorization::PolicyCapability,
     resource: mechanics::authorization::Resource,
     salt: [u8; 16],
+    origin: Option<acl::GrantOrigin>,
 ) -> Result<()> {
     let grant_id = acl::capability_grant_id(actor, &capability, &resource, &salt)
         .ok_or_else(|| anyhow!("grant id"))?;
     inner.author(
-        AclAction::GrantCapability {
+        grant_action(grant_id, actor, capability, resource, salt, origin),
+        None,
+        vec![],
+        vec![],
+    )
+}
+
+/// The grant op for one assignment: one that records why it exists when the
+/// caller can say, the plain one when it cannot. A caller that cannot say
+/// leaves the origin *unrecorded* rather than guessing a kind.
+fn grant_action(
+    grant_id: [u8; 32],
+    actor: &ActorId,
+    capability: mechanics::authorization::PolicyCapability,
+    resource: mechanics::authorization::Resource,
+    salt: [u8; 16],
+    origin: Option<acl::GrantOrigin>,
+) -> AclAction {
+    match origin {
+        Some(origin) => AclAction::GrantCapabilityFrom {
+            grant_id,
+            actor: actor.clone(),
+            capability,
+            resource,
+            salt,
+            origin,
+        },
+        None => AclAction::GrantCapability {
             grant_id,
             actor: actor.clone(),
             capability,
             resource,
             salt,
         },
-        None,
-        vec![],
-        vec![],
-    )
+    }
 }
 
 /// The shared, thread-safe mechanics composition handle. Clone freely; every
@@ -1426,10 +1492,7 @@ impl SpaceAuthority {
         &self,
         actor_str: &str,
         admin: bool,
-        grant: &[(
-            mechanics::authorization::PolicyCapability,
-            mechanics::authorization::Resource,
-        )],
+        grant: &[super::worlds::MembershipAssignment],
         revoke: &[(
             mechanics::authorization::PolicyCapability,
             mechanics::authorization::Resource,
@@ -1481,31 +1544,34 @@ impl SpaceAuthority {
                 }
             }
             let acl_state = inner.acl();
-            for (capability, resource) in grant {
-                if !acl_state.may_delegate(&me, capability, resource) {
+            for assignment in grant {
+                if !acl_state.may_delegate(&me, &assignment.capability, &assignment.resource) {
                     return Err(anyhow!(
                         "you may not delegate `{}` — the role change is refused",
-                        capability.name
+                        assignment.capability.name
                     ));
                 }
             }
 
             let mut actions = Vec::new();
             if admin {
-                for (capability, resource) in grant {
-                    let salt = assignment_salt(&actor, capability, resource)?;
-                    let grant_id = acl::capability_grant_id(&actor, capability, resource, &salt)
-                        .ok_or_else(|| anyhow!("grant id"))?;
+                for assignment in grant {
+                    let (capability, resource) = (&assignment.capability, &assignment.resource);
+                    let (salt, grant_id) =
+                        fresh_assignment_salt(&acl_state, &actor, capability, resource)?;
                     if !acl_state
                         .effective_capability_grants(&actor, capability, resource)
                         .contains(&grant_id)
                     {
-                        actions.push(AclAction::GrantCapability {
+                        actions.push(AclAction::GrantCapabilityFrom {
                             grant_id,
                             actor: actor.clone(),
                             capability: capability.clone(),
                             resource: resource.clone(),
                             salt,
+                            origin: acl::GrantOrigin::Membership {
+                                definition_ref: assignment.definition_ref.clone(),
+                            },
                         });
                     }
                 }
@@ -1791,17 +1857,18 @@ impl SpaceAuthority {
                 grants: acl::sponsored_agent_grants(),
             }];
             for (capability, resource) in assignments {
-                let salt = assignment_salt(&agent, capability, resource)?;
-                let grant_id = acl::capability_grant_id(&agent, capability, resource, &salt)
-                    .ok_or_else(|| anyhow!("grant id"))?;
-                actions.push(AclAction::GrantCapability {
+                let (salt, grant_id) =
+                    fresh_assignment_salt(&acl_state, &agent, capability, resource)?;
+                actions.push(AclAction::GrantCapabilityFrom {
                     grant_id,
                     actor: agent.clone(),
                     capability: capability.clone(),
                     resource: resource.clone(),
                     salt,
+                    origin: acl::GrantOrigin::Sponsorship,
                 });
             }
+
             inner.author_actions(actions, sealed)?;
             agent
         };
@@ -1989,6 +2056,7 @@ impl SpaceAuthority {
             mechanics::authorization::PolicyCapability,
             mechanics::authorization::Resource,
         )],
+        origin: Option<acl::GrantOrigin>,
     ) -> Result<Vec<[u8; 32]>> {
         let mut inner = self.lock();
         let me = inner
@@ -2013,9 +2081,7 @@ impl SpaceAuthority {
         let mut effects: Vec<Vec<u8>> = Vec::new();
         let mut granted = Vec::new();
         for (capability, resource) in assignments {
-            let salt = assignment_salt(actor, capability, resource)?;
-            let grant_id = acl::capability_grant_id(actor, capability, resource, &salt)
-                .ok_or_else(|| anyhow!("grant id"))?;
+            let (salt, grant_id) = fresh_assignment_salt(&acl_state, actor, capability, resource)?;
             if acl_state
                 .effective_capability_grants(actor, capability, resource)
                 .contains(&grant_id)
@@ -2025,14 +2091,16 @@ impl SpaceAuthority {
             let op = acl::sign_op(
                 &inner.seed,
                 &AclOp {
-                    action: AclAction::GrantCapability {
+                    action: grant_action(
                         grant_id,
-                        actor: actor.clone(),
-                        capability: capability.clone(),
-                        resource: resource.clone(),
+                        actor,
+                        capability.clone(),
+                        resource.clone(),
                         salt,
-                    },
+                        origin.clone(),
+                    ),
                     by: me.clone(),
+
                     actor_asof: actor_asof.clone(),
                     nonce: None,
                 },
@@ -2067,7 +2135,24 @@ impl SpaceAuthority {
         )
     }
 
-    /// The effective scoped assignments (all members, or one actor's).
+    /// Revoke several effective assignments as ONE authority batch — all or
+    /// nothing, the same shape [`Self::grant_assignments`] installs them in.
+    /// A role's expansion is granted as a set, so it is revoked as a set: a
+    /// per-id loop that fails midway leaves a capability half-held, and the
+    /// error names the id rather than the role.
+    pub fn revoke_assignments(&self, grant_ids: &[[u8; 32]]) -> Result<()> {
+        let mut inner = self.lock();
+        let actions = grant_ids
+            .iter()
+            .map(|grant_id| AclAction::RevokeCapability {
+                grant_id: *grant_id,
+            })
+            .collect();
+        inner.author_actions(actions, vec![])
+    }
+
+    /// The effective scoped assignments (all members, or one actor's), each
+    /// with the origin its grant op recorded — or none, when it recorded none.
     pub fn assignment_rows(
         &self,
         actor: Option<&ActorId>,
@@ -2087,9 +2172,13 @@ impl SpaceAuthority {
                     world: grant.capability.world.clone(),
                     capability: grant.capability.name.clone(),
                     resource: grant.resource.segments.clone(),
+                    origin: acl_state
+                        .grant_origin(&id)
+                        .map(mechanics::assignment::AssignmentOrigin::of),
                 });
             }
         }
+
         rows.sort_by(|a, b| (&a.actor, &a.capability).cmp(&(&b.actor, &b.capability)));
         rows
     }
@@ -2113,7 +2202,7 @@ impl SpaceAuthority {
         {
             return Ok(());
         }
-        inner_grant(&mut inner, actor, capability, resource, salt)
+        inner_grant(&mut inner, actor, capability, resource, salt, None)
     }
 
     /// Granting one scoped capability to this device's founding actor — the
@@ -2139,12 +2228,13 @@ impl SpaceAuthority {
             return Ok(());
         }
         inner.author(
-            AclAction::GrantCapability {
+            AclAction::GrantCapabilityFrom {
                 grant_id,
                 actor: me,
                 capability,
                 resource,
                 salt,
+                origin: acl::GrantOrigin::Founder,
             },
             None,
             vec![],

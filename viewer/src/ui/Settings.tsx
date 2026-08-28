@@ -35,7 +35,14 @@ import { Members } from "./Members";
 import { TeamsPanel } from "./TeamsPanel";
 import { Combobox } from "./Picker";
 import { Button, TextArea, TextInput } from "@astryxdesign/core";
-import { Badge, cn, navigationItem } from "./primitives";
+import { cn, navigationItem } from "./primitives";
+import {
+  extrasOf,
+  foldAccess,
+  type HeldCapability,
+  type MembershipLine,
+  type RoleGrant,
+} from "../core/access";
 import {
   SettingsField,
   SettingsPageHeader,
@@ -922,18 +929,10 @@ interface RoleWire {
   conflict_heads: string[];
 }
 
-/** One capability a member holds at one scope, however many grant ids say so. */
-interface Grant {
-  capability: string;
-  /** Project id or key; empty for the whole space. */
-  scope: string;
-  world: string;
-  grantIds: string[];
+function roleFromProjection({ summary, revision }: RoleProjection): RoleWire {
+  return { ...summary, conflict_heads: summary.conflict_heads ?? [], revision: revision ?? null };
 }
 
-function roleFromProjection({ summary, revision }: RoleProjection): RoleWire {
-  return { ...summary, revision: revision ?? null };
-}
 
 /** The name a role grant carries, falling back to its id. */
 function roleName(r: RoleWire): string {
@@ -951,9 +950,16 @@ function roleName(r: RoleWire): string {
  * role's capabilities to an actor, revoke one — first-class here.
  *
  * A grant expands a role into one assignment per capability, each with its own
- * `grant_id`; revoke is per capability, so the list is grouped by actor and every
- * held capability carries its own revoke handle.
+ * `grant_id`. The list reads them back the way they were made: what came with
+ * membership is one line per actor with no revoke handle — its verbs are on
+ * Members — and what was granted on top is one row per role grant, revoked as
+ * the set it was granted as. See `core/access.ts` for the fold.
  */
+/** The access list's columns: what is held, at which scope, in which World,
+ *  and the verb — the same recipe Members uses, so the two pages read as one
+ *  family. */
+const ACCESS_GRID = "grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_7rem_5.5rem] items-center gap-4";
+
 function AccessPanel({
   spaceId,
   projects,
@@ -1038,35 +1044,20 @@ function AccessPanel({
   );
   const grantProjectDto = projects.find((p) => p.id === grantProject || p.key === grantProject);
 
-  /**
-   * Assignments folded by actor, so each person reads as one block — and
-   * within a block, folded by (capability, scope), because seeding a Space
-   * can grant the same capability twice under two grant ids, and two rows
-   * saying `space.admin · space` teach nothing the first did not. A folded row
-   * keeps every grant id it stands for, so revoking it revokes the capability
-   * rather than one copy of it.
-   */
-  const byActor = useMemo(() => {
-    const groups = new Map<string, Map<string, Grant>>();
-    for (const row of rows ?? []) {
-      const scope = row.resource[0] ?? "";
-      const key = `${row.capability}\u0000${scope}`;
-      const forActor = groups.get(row.actor) ?? new Map<string, Grant>();
-      const existing = forActor.get(key);
-      if (existing) existing.grantIds.push(row.grant_id);
-      else
-        forActor.set(key, {
-          capability: row.capability,
-          scope,
-          world: row.world,
-          grantIds: [row.grant_id],
-        });
-      groups.set(row.actor, forActor);
-    }
-    return [...groups.entries()]
-      .map(([actor, grants]) => [actor, [...grants.values()]] as const)
-      .sort((a, b) => nameOf(a[0]).localeCompare(nameOf(b[0])));
-  }, [rows, nameOf]);
+  /** Each person as one block: their membership, then what they hold beyond it. */
+  const byActor = useMemo(
+    () => foldAccess(rows ?? []).sort((a, b) => nameOf(a.actor).localeCompare(nameOf(b.actor))),
+    [rows, nameOf],
+  );
+  /** A role id as its catalog name, or the id when the catalog has not loaded it. */
+  const roleLabelOf = useCallback(
+    (roleId: string) => {
+      const known = roles?.find((r) => r.role_id === roleId);
+      return known ? roleName(known) : roleId;
+    },
+    [roles],
+  );
+  const scopeLabel = (scope: string) => (scope ? projectLabel(scope) : "the whole space");
 
   const grant = async () => {
     if (!grantActor || !grantRole) return;
@@ -1089,30 +1080,52 @@ function AccessPanel({
     }
   };
 
-  const revoke = (actor: string, grant: Grant) =>
+  /** One request for the whole set: a role's expansion is revoked the way it
+   *  was granted, all or nothing, so a failure never leaves it half-held. */
+  const revokeIds = async (grant_ids: string[]) => {
+    setBusy(true);
+    try {
+      await rpc(spaceId, { cmd: "access_revoke", grant_ids });
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeGrant = (actor: string, grant: RoleGrant) => {
+    const n = grant.capabilities.length;
     void ask
       .confirm({
-        title: `Revoke ${grant.capability}?`,
-        body: `Removes this capability from ${nameOf(actor)} at ${
-          grant.scope ? projectLabel(grant.scope) : "the whole space"
-        }${grant.grantIds.length > 1 ? ` — all ${grant.grantIds.length} grants of it` : ""}. Their base membership role is unaffected.`,
+        title: `Revoke ${grant.role ? roleLabelOf(grant.role) : "this grant"} at ${scopeLabel(grant.scope)}?`,
+        body: `Removes the ${n === 1 ? "capability" : `${n} capabilities`} this grant installed for ${nameOf(actor)}. What they hold as a member is unaffected.`,
         confirmText: "Revoke",
         danger: true,
       })
-      .then(async (ok) => {
-        if (!ok) return;
-        setBusy(true);
-        try {
-          for (const grant_id of grant.grantIds) {
-            await rpc(spaceId, { cmd: "access_revoke", grant_id });
-          }
-          await load();
-        } catch (e) {
-          onError(e instanceof Error ? e.message : String(e));
-        } finally {
-          setBusy(false);
-        }
-      });
+      .then((ok) => (ok ? revokeIds(grant.grantIds) : undefined));
+  };
+
+  const revokeHeld = (actor: string, held: HeldCapability) => {
+    const copies = held.grantIds.length > 1 ? ` — all ${held.grantIds.length} grants of it` : "";
+    void ask
+      .confirm({
+        title: `Revoke ${held.capability}?`,
+        body: `Removes this capability from ${nameOf(actor)} at ${scopeLabel(held.scope)}${copies}. Its origin was not recorded, so whether it came with their membership is not known; if it did, their role can be set again on Members.`,
+        confirmText: "Revoke",
+        danger: true,
+      })
+      .then((ok) => (ok ? revokeIds(held.grantIds) : undefined));
+  };
+
+  /** What a membership line came from, in words: the roles it named, plus
+   *  the kinds that name no role. */
+  const membershipHint = (line: MembershipLine) => {
+    const parts = line.roles.map(roleLabelOf);
+    if (line.kinds.includes("founder")) parts.push("founder policy");
+    if (line.kinds.includes("sponsorship")) parts.push("sponsorship");
+    return parts.join(" · ");
+  };
 
   const grantableRoles = (roles ?? []).filter((r) => r.revision && !r.conflict_heads.length);
 
@@ -1183,7 +1196,7 @@ function AccessPanel({
 
       <SettingsSection
         title="Access grants"
-        hint="Capabilities granted to an actor beyond their base membership role, at the Space or a single project."
+        hint="What each member holds: the role they came with, as one line, and anything granted on top at the Space or a single project. A member's role changes on Members, not here."
       >
         {!readOnly && (
           <div className="border-line bg-raised mb-4 flex flex-wrap items-end gap-2 rounded-surface border p-3">
@@ -1262,91 +1275,113 @@ function AccessPanel({
         {rows && byActor.length === 0 && (
           <SettingsSurface>
             <p className="text-mute px-4 py-3 text-sm">
-              No scoped grants. Members act with their base role until granted more here.
+              Nobody holds anything yet. Members act with the role they came with until granted
+              more here.
             </p>
           </SettingsSurface>
         )}
         {byActor.length > 0 && (
           <div className="border-line overflow-hidden rounded-surface border">
-            <div className="text-mute border-line grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_7rem_5rem] items-center gap-4 border-b px-3 py-2 text-2xs">
-              <span>Capability</span>
+            <div className={cn(ACCESS_GRID, "text-mute border-line border-b px-3 py-2 text-2xs")}>
+              <span>Holds</span>
               <span>Scope</span>
               <span>World</span>
               <span aria-hidden />
             </div>
-            {byActor.map(([actor, grants]) => {
-              const member = members?.find((m) => m.key === actor);
+            {byActor.map((access) => {
+              const member = members?.find((m) => m.key === access.actor);
+              const extras = extrasOf(access);
+              const line = access.membership;
+              const lineScopes = line
+                ? [...new Set(line.capabilities.map((c) => c.scope))]
+                : [];
+              const lineWorlds = line ? [...new Set(line.capabilities.map((c) => c.world))] : [];
               return (
-                <div key={actor}>
+                <div key={access.actor}>
                   <div className="bg-sunken flex items-center gap-2 px-3 py-1.5">
                     <Avatar
-                      deviceKey={actor}
+                      deviceKey={access.actor}
                       {...(member ? { alias: member.alias, me: member.me } : {})}
                       size="sm"
                     />
-                    <span className="text-sm font-medium">{nameOf(actor)}</span>
+                    <span className="text-sm font-medium">{nameOf(access.actor)}</span>
                     {member && <span className="text-mute text-2xs capitalize">{member.role}</span>}
                     <span className="text-mute ml-auto text-2xs tabular-nums">
-                      {grants.length} {grants.length === 1 ? "capability" : "capabilities"}
+                      {extras === 0
+                        ? "nothing beyond membership"
+                        : `${extras} beyond membership`}
                     </span>
                   </div>
                   <ul className="divide-line divide-y">
-                    {grants.map((grant) => {
-                      const scoped = projects.find(
-                        (p) => p.id === grant.scope || p.key === grant.scope,
-                      );
-                      return (
-                        <li
-                          key={`${grant.capability}:${grant.scope}`}
-                          className="group/grant hover:bg-hover grid min-h-ctl-lg grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_7rem_5rem] items-center gap-4 px-3 py-1"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <code className="truncate font-mono text-xs">{grant.capability}</code>
-                            {grant.grantIds.length > 1 && (
-                              <Badge
-                                tone="neutral"
-                                title={`Granted ${grant.grantIds.length} times`}
-                              >
-                                ×{grant.grantIds.length}
-                              </Badge>
-                            )}
+                    {line && (
+                      <li className={cn(ACCESS_GRID, "min-h-ctl-lg px-3 py-2")}>
+                        <span className="min-w-0">
+                          <span className="flex items-baseline gap-2">
+                            <span className="text-sm font-medium">Membership</span>
+                            <span className="text-mute truncate text-2xs">
+                              {membershipHint(line)}
+                            </span>
                           </span>
-                          <span className="flex min-w-0 items-center gap-1.5 text-xs">
-                            {scoped ? (
-                              <>
-                                <ProjectIcon color={catalogColor(scoped.color)} />
-                                <span className="truncate">{scoped.name}</span>
-                                <span className="text-mute font-mono text-2xs">{scoped.key}</span>
-                              </>
-                            ) : grant.scope ? (
-                              <code className="text-dim truncate font-mono text-2xs">
-                                {grant.scope}
-                              </code>
-                            ) : (
-                              <span className="text-dim">Whole space</span>
-                            )}
-                          </span>
-                          <code
-                            className="text-mute truncate font-mono text-2xs"
-                            title={grant.world}
+                          {capabilityChips(line.capabilities.map((c) => c.capability))}
+                        </span>
+                        {lineScopes.length === 1 ? (
+                          scopeCell(lineScopes[0] ?? "")
+                        ) : (
+                          <span
+                            className="text-dim text-xs"
+                            title={lineScopes.map((s) => s || "Whole space").join(", ")}
                           >
-                            {grant.world}
-                          </code>
-                          <span className="flex justify-end">
-                            {!readOnly && (
-                              <Button
-                                label="Revoke"
-                                variant="ghost"
-                                size="sm"
-                                isDisabled={busy}
-                                className="opacity-0 group-hover/grant:opacity-100 focus-visible:opacity-100"
-                                onClick={() => revoke(actor, grant)}
-                              />
-                            )}
+                            {lineScopes.length} scopes
                           </span>
-                        </li>
-                      );
-                    })}
+                        )}
+                        {worldCell(lineWorlds.join(", "))}
+                        <span className="text-mute flex justify-end text-2xs">via Members</span>
+                      </li>
+                    )}
+                    {access.grants.map((grant) => (
+                      <li
+                        key={grant.key}
+                        className={cn(
+                          "group/grant hover:bg-hover",
+                          ACCESS_GRID,
+                          "min-h-ctl-lg px-3 py-2",
+                        )}
+                      >
+                        <span className="min-w-0">
+                          <span className="flex items-baseline gap-2">
+                            <span
+                              className="truncate text-sm font-medium"
+                              title={grant.definitionRef ?? undefined}
+                            >
+                              {grant.role ? roleLabelOf(grant.role) : "Role not named"}
+                            </span>
+                            <span className="text-mute text-2xs">granted</span>
+                          </span>
+                          {capabilityChips(grant.capabilities)}
+                        </span>
+                        {scopeCell(grant.scope)}
+                        {worldCell(grant.world)}
+                        {revokeCell(() => revokeGrant(access.actor, grant))}
+                      </li>
+                    ))}
+                    {access.unrecorded.map((held) => (
+                      <li
+                        key={`${held.world} ${held.capability} ${held.scope}`}
+                        className={cn(
+                          "group/grant hover:bg-hover",
+                          ACCESS_GRID,
+                          "min-h-ctl-lg px-3 py-1",
+                        )}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <code className="truncate font-mono text-xs">{held.capability}</code>
+                          <span className="text-mute text-2xs">origin not recorded</span>
+                        </span>
+                        {scopeCell(held.scope)}
+                        {worldCell(held.world)}
+                        {revokeCell(() => revokeHeld(access.actor, held))}
+                      </li>
+                    ))}
                   </ul>
                 </div>
               );
@@ -1356,4 +1391,64 @@ function AccessPanel({
       </SettingsSection>
     </>
   );
+
+  /** A capability list as chips — the same chip the Roles section draws. */
+  function capabilityChips(capabilities: string[]) {
+    return (
+      <span className="mt-1 flex flex-wrap gap-1">
+        {capabilities.map((c) => (
+          <code
+            key={c}
+            className="border-line-strong text-dim rounded-full border px-2 py-px font-mono text-2xs"
+          >
+            {c}
+          </code>
+        ))}
+      </span>
+    );
+  }
+
+  function scopeCell(scope: string) {
+    const scoped = projects.find((p) => p.id === scope || p.key === scope);
+    return (
+      <span className="flex min-w-0 items-center gap-1.5 text-xs">
+        {scoped ? (
+          <>
+            <ProjectIcon color={catalogColor(scoped.color)} />
+            <span className="truncate">{scoped.name}</span>
+            <span className="text-mute font-mono text-2xs">{scoped.key}</span>
+          </>
+        ) : scope ? (
+          <code className="text-dim truncate font-mono text-2xs">{scope}</code>
+        ) : (
+          <span className="text-dim">Whole space</span>
+        )}
+      </span>
+    );
+  }
+
+  function worldCell(world: string) {
+    return (
+      <code className="text-mute truncate font-mono text-2xs" title={world}>
+        {world}
+      </code>
+    );
+  }
+
+  function revokeCell(onClick: () => void) {
+    return (
+      <span className="flex justify-end">
+        {!readOnly && (
+          <Button
+            label="Revoke"
+            variant="ghost"
+            size="sm"
+            isDisabled={busy}
+            className="opacity-0 group-hover/grant:opacity-100 focus-visible:opacity-100"
+            onClick={onClick}
+          />
+        )}
+      </span>
+    );
+  }
 }

@@ -79,7 +79,21 @@ fn examples() -> serde_json::Value {
                 world: "com.lait.issues".into(),
                 capability: "issue.assign".into(),
                 resource: vec![],
+                origin: None,
             } },
+            { "def": "AssignmentDto", "value": issues::dto::AssignmentDto {
+                grant_id: "cd".repeat(32),
+                actor: format!("act_{}", "a".repeat(64)),
+                world: "com.lait.issues".into(),
+                capability: "issue.assign".into(),
+                resource: vec!["prj_x".into()],
+                origin: Some(mechanics::assignment::AssignmentOrigin {
+                    kind: mechanics::assignment::AssignmentOriginKind::Grant,
+                    definition_ref: Some("ef".repeat(8)),
+                    role: Some("lait.contributor".into()),
+                }),
+            } },
+
         ],
         "negative": [
             {

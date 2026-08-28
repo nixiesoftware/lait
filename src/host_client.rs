@@ -725,22 +725,29 @@ impl world_interface::ClientHost for PackageClientHost {
                 world_interface::HostControlRequest::AssignmentList { actor } => {
                     Request::AssignmentList { actor }
                 }
-                world_interface::HostControlRequest::AssignmentGrant { actor, assignments } => {
-                    Request::AssignmentGrant {
-                        actor,
-                        assignments: assignments
-                            .into_iter()
-                            .map(|assignment| crate::control::AssignmentSpec {
-                                world: assignment.world,
-                                capability: assignment.capability,
-                                resource: assignment.resource,
-                            })
-                            .collect(),
+                world_interface::HostControlRequest::AssignmentGrant {
+                    actor,
+                    assignments,
+                    definition_ref,
+                } => Request::AssignmentGrant {
+                    actor,
+                    assignments: assignments
+                        .into_iter()
+                        .map(|assignment| crate::control::AssignmentSpec {
+                            world: assignment.world,
+                            capability: assignment.capability,
+                            resource: assignment.resource,
+                        })
+                        .collect(),
+                    definition_ref,
+                },
+                world_interface::HostControlRequest::AssignmentRevoke { grant_ids } => {
+                    Request::AssignmentRevoke {
+                        grant_id: None,
+                        grant_ids,
                     }
                 }
-                world_interface::HostControlRequest::AssignmentRevoke { grant_id } => {
-                    Request::AssignmentRevoke { grant_id }
-                }
+
                 world_interface::HostControlRequest::WorldActivate { world } => {
                     Request::WorldActivate {
                         world: world.as_str().to_string(),

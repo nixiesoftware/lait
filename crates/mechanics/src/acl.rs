@@ -142,6 +142,36 @@ pub fn role_label(grants: &[Standing]) -> &'static str {
     }
 }
 
+/// Why a capability grant exists — the provenance a role name is, recorded
+/// beside the flat assignment it expanded into.
+///
+/// Mechanics evaluates the assignment and never this: an origin changes no
+/// authorization decision, and a `definition_ref` is the same opaque product
+/// role reference an admission's [`crate::authorization::WorldAssignmentEvidence`]
+/// carries, decoded only by the World that minted it. What it buys is the
+/// difference between "came with being a member" and "was granted on top" —
+/// a surface that lists every effective assignment as a revocable extra
+/// offers a founder their own membership to revoke, under copy that calls it
+/// harmless.
+///
+/// Variants are **append-only** (postcard positional), like every enum on the
+/// signed op.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrantOrigin {
+    /// A World's founder policy, seeded for a founding actor at formation.
+    Founder,
+    /// A role's exact expansion installed when an admission was redeemed.
+    Admission { definition_ref: Vec<u8> },
+    /// A membership role change by an admin — the same expansion an
+    /// admission would install, applied to a standing member.
+    Membership { definition_ref: Vec<u8> },
+    /// A scoped grant beyond membership, authored by a policy admin or a
+    /// delegate; `definition_ref` names the role whose expansion this is.
+    Grant { definition_ref: Vec<u8> },
+    /// A sponsored agent's grant set, minted with its sponsorship.
+    Sponsorship,
+}
+
 /// What a membership op does. Variants are **append-only**.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AclAction {
@@ -253,6 +283,21 @@ pub enum AclAction {
         /// where the decision is made.
         implementation_version: u32,
     },
+    /// [`AclAction::GrantCapability`] that also records *why* — see
+    /// [`GrantOrigin`]. Authorized, applied and revoked exactly as the plain
+    /// grant is; the origin is stored beside the assignment and read back by
+    /// [`AclState::grant_origin`]. A separate variant rather than a field,
+    /// because the op is postcard-positional: a field appended to
+    /// `GrantCapability` would make every grant already in a ledger
+    /// undecodable, and an undecodable op is excluded from replay.
+    GrantCapabilityFrom {
+        grant_id: [u8; 32],
+        actor: ActorId,
+        capability: crate::demand::PolicyCapability,
+        resource: crate::demand::Resource,
+        salt: [u8; 16],
+        origin: GrantOrigin,
+    },
 }
 
 /// What a World's activation put in force.
@@ -290,7 +335,13 @@ pub struct Assignment {
 pub struct PolicyPass {
     pub grants: BTreeMap<[u8; 32], Assignment>,
     pub revoked_grants: BTreeSet<[u8; 32]>,
+    /// Why each grant exists, for the grants that said. A grant authored as a
+    /// plain [`AclAction::GrantCapability`] has no entry — that absence is
+    /// "not recorded", and a reader must not fold it into any kind.
+    #[serde(default)]
+    pub origins: BTreeMap<[u8; 32], GrantOrigin>,
     pub delegations: BTreeMap<[u8; 32], Assignment>,
+
     pub revoked_delegations: BTreeSet<[u8; 32]>,
     pub implementations: BTreeMap<String, ActiveImplementation>,
 }
@@ -390,6 +441,7 @@ impl AclAction {
             AclAction::MintEpoch { .. }
             | AclAction::RevokeInvite { .. }
             | AclAction::GrantCapability { .. }
+            | AclAction::GrantCapabilityFrom { .. }
             | AclAction::RevokeCapability { .. }
             | AclAction::GrantDelegation { .. }
             | AclAction::RevokeDelegation { .. }
@@ -406,8 +458,11 @@ impl AclAction {
             AclAction::AddAgent { .. } => "add_agent",
             AclAction::MintEpoch { .. } => "mint_epoch",
             AclAction::RevokeInvite { .. } => "revoke_invite",
-            AclAction::GrantCapability { .. } => "grant_capability",
+            AclAction::GrantCapability { .. } | AclAction::GrantCapabilityFrom { .. } => {
+                "grant_capability"
+            }
             AclAction::RevokeCapability { .. } => "revoke_capability",
+
             AclAction::GrantDelegation { .. } => "grant_delegation",
             AclAction::RevokeDelegation { .. } => "revoke_delegation",
             AclAction::ActivateWorldImplementation { .. } => "activate_implementation",
@@ -798,6 +853,22 @@ impl AclState {
 
     /// Every effective assignment of `a` (audit/projection surface): sorted by
     /// grant id.
+    /// Whether a grant id has been revoked at this frontier. A revoked id is
+    /// never effective again — re-authoring the same grant bytes re-derives
+    /// the same id — so an author wanting the capability back must derive a
+    /// fresh one, and this is how it learns it has to.
+    pub fn is_grant_revoked(&self, grant_id: &[u8; 32]) -> bool {
+        self.policy.revoked_grants.contains(grant_id)
+    }
+
+    /// Why an effective grant exists, when its op said. `None` is "not
+
+    /// recorded" — a grant authored before origins were, or by a plain
+    /// [`AclAction::GrantCapability`] — and is never any kind in particular.
+    pub fn grant_origin(&self, grant_id: &[u8; 32]) -> Option<&GrantOrigin> {
+        self.policy.origins.get(grant_id)
+    }
+
     pub fn effective_assignments(&self, a: &ActorId) -> Vec<([u8; 32], Assignment)> {
         if !self.members.contains_key(a) {
             return Vec::new();
@@ -1066,6 +1137,40 @@ pub fn replay_checkpointed(
     (checkpoint, audit)
 }
 
+/// Whether revoking `grant_id` at this causal position would leave nobody
+/// holding policy administration: the grant is an effective meta-grant, no
+/// founding actor is still a human member, and no other human member holds an
+/// effective meta-grant. Evaluated against the same pass-1 state as every
+/// other verdict, so it is deterministic across replicas; it says nothing
+/// about a grant that is not the meta-capability.
+fn orphans_policy_admin(
+    grant_id: &[u8; 32],
+    founders: &BTreeSet<ActorId>,
+    humans: &BTreeSet<ActorId>,
+    agents_now: &BTreeMap<ActorId, ActorId>,
+    policy: &PolicyPass,
+) -> bool {
+    let meta_cap = policy_admin_capability();
+    let meta_res = policy_admin_resource();
+    let is_effective_meta = |id: &[u8; 32], g: &Assignment| {
+        !policy.revoked_grants.contains(id) && g.capability == meta_cap && g.resource == meta_res
+    };
+    let Some(target) = policy.grants.get(grant_id) else {
+        return false;
+    };
+    if !is_effective_meta(grant_id, target) {
+        return false;
+    }
+    let human = |a: &ActorId| humans.contains(a) && !agents_now.contains_key(a);
+    if founders.iter().any(human) {
+        return false;
+    }
+    !policy
+        .grants
+        .iter()
+        .any(|(id, g)| id != grant_id && is_effective_meta(id, g) && human(&g.actor))
+}
+
 /// The pass-1 authorization predicate for one decoded op whose device→actor
 /// binding has already been proven. Shared verbatim by the complete replay and
 /// the strict-descendant continuation — the rules exist exactly once.
@@ -1146,6 +1251,14 @@ fn judge_op(
                 capability,
                 resource,
                 salt,
+            }
+            | AclAction::GrantCapabilityFrom {
+                grant_id,
+                actor,
+                capability,
+                resource,
+                salt,
+                ..
             } => {
                 let structural = capability.validate().is_ok()
                     && resource.validate().is_ok()
@@ -1164,13 +1277,21 @@ fn judge_op(
             // revoked grant's exact capability/resource (which requires the
             // grant to be known at this causal position).
             AclAction::RevokeCapability { grant_id } => {
-                is_policy_admin(by)
+                let standing = is_policy_admin(by)
                     || (humans.contains(by)
                         && !agents_now.contains_key(by)
                         && policy.grants.get(grant_id).is_some_and(|g| {
                             policy.holds_delegation(by, &g.capability, &g.resource)
-                        }))
+                        }));
+                // A revoke that would leave the Space with no policy admin at
+                // this causal position is refused, whoever authors it. Policy
+                // administration is the only route back to every other grant,
+                // so its last holder revoking it is not a permission anybody
+                // meant to have — it is the founder's own `space.admin` row
+                // drawn with a revoke handle, one layer down.
+                standing && !orphans_policy_admin(grant_id, founders, humans, agents_now, policy)
             }
+
             // Delegation management is policy-admin only, and the meta
             // capability itself is never delegable.
             AclAction::GrantDelegation {
@@ -1248,6 +1369,13 @@ fn apply_authorized(
             capability,
             resource,
             ..
+        }
+        | AclAction::GrantCapabilityFrom {
+            grant_id,
+            actor,
+            capability,
+            resource,
+            ..
         } => {
             policy.grants.insert(
                 *grant_id,
@@ -1257,6 +1385,9 @@ fn apply_authorized(
                     resource: resource.clone(),
                 },
             );
+            if let AclAction::GrantCapabilityFrom { origin, .. } = &op.action {
+                policy.origins.insert(*grant_id, origin.clone());
+            }
         }
         AclAction::RevokeCapability { grant_id } => {
             policy.revoked_grants.insert(*grant_id);
@@ -1613,6 +1744,13 @@ fn materialize_authorized(
                 capability,
                 resource,
                 ..
+            }
+            | AclAction::GrantCapabilityFrom {
+                grant_id,
+                actor,
+                capability,
+                resource,
+                ..
             } => {
                 policy.grants.insert(
                     *grant_id,
@@ -1622,6 +1760,9 @@ fn materialize_authorized(
                         resource: resource.clone(),
                     },
                 );
+                if let AclAction::GrantCapabilityFrom { origin, .. } = &op.action {
+                    policy.origins.insert(*grant_id, origin.clone());
+                }
             }
             AclAction::RevokeCapability { grant_id } => {
                 policy.revoked_grants.insert(*grant_id);
@@ -3100,5 +3241,139 @@ mod tests {
         let (_, actor) = incept(3, &SpaceId::mint(&SystemUlidSource));
         assert!(!unknown.is_member(&actor));
         assert!(unknown.epochs().is_empty());
+    }
+
+    fn some_cap() -> crate::demand::PolicyCapability {
+        crate::demand::PolicyCapability::new("w", "cap.a")
+    }
+    fn some_res() -> crate::demand::Resource {
+        crate::demand::Resource::root("w")
+    }
+
+    /// A grant that says why it exists is read back saying so; a grant that
+    /// did not say is read back as *not recorded*, never as any kind.
+    #[test]
+    fn a_grant_records_its_origin_and_a_plain_grant_records_none() {
+        let f = fx(1, &[2]);
+        let add = f.op(
+            1,
+            1,
+            AclAction::AddMember {
+                actor: f.a(2).clone(),
+                grants: vec![Standing::Write],
+            },
+            vec![],
+        );
+        let with = capability_grant_id(f.a(2), &some_cap(), &some_res(), &[1u8; 16]).unwrap();
+        let without = capability_grant_id(f.a(2), &some_cap(), &some_res(), &[2u8; 16]).unwrap();
+        let origin = GrantOrigin::Grant {
+            definition_ref: b"role-ref".to_vec(),
+        };
+        let g_with = f.op(
+            1,
+            1,
+            AclAction::GrantCapabilityFrom {
+                grant_id: with,
+                actor: f.a(2).clone(),
+                capability: some_cap(),
+                resource: some_res(),
+                salt: [1u8; 16],
+                origin: origin.clone(),
+            },
+            vec![add.hash()],
+        );
+        let g_without = f.op(
+            1,
+            1,
+            AclAction::GrantCapability {
+                grant_id: without,
+                actor: f.a(2).clone(),
+                capability: some_cap(),
+                resource: some_res(),
+                salt: [2u8; 16],
+            },
+            vec![g_with.hash()],
+        );
+        let st = f.replay(&[add, g_with, g_without]);
+        let effective = st.effective_capability_grants(f.a(2), &some_cap(), &some_res());
+        assert!(
+            effective.contains(&with) && effective.contains(&without),
+            "both shapes of grant are effective"
+        );
+        assert_eq!(st.grant_origin(&with), Some(&origin));
+        assert_eq!(st.grant_origin(&without), None, "unsaid is unrecorded");
+    }
+
+    /// The last human holding policy administration cannot revoke it from
+    /// themselves; the same revoke is authorized while a founder is still a
+    /// member, because the founder is a policy admin by standing.
+    #[test]
+    fn the_last_policy_admin_cannot_revoke_their_own_meta_grant() {
+        let f = fx(1, &[2]);
+        let add_admin = f.op(
+            1,
+            1,
+            AclAction::AddMember {
+                actor: f.a(2).clone(),
+                grants: vec![Standing::Admin, Standing::Write],
+            },
+            vec![],
+        );
+        let meta_cap = policy_admin_capability();
+        let meta_res = policy_admin_resource();
+        let meta_id = capability_grant_id(f.a(2), &meta_cap, &meta_res, &[7u8; 16]).unwrap();
+        let grant_meta = f.op(
+            1,
+            1,
+            AclAction::GrantCapabilityFrom {
+                grant_id: meta_id,
+                actor: f.a(2).clone(),
+                capability: meta_cap,
+                resource: meta_res,
+                salt: [7u8; 16],
+                origin: GrantOrigin::Membership {
+                    definition_ref: vec![],
+                },
+            },
+            vec![add_admin.hash()],
+        );
+
+        // With the founder still a member, actor 2 may drop their own meta.
+        let self_revoke = f.op(
+            2,
+            2,
+            AclAction::RevokeCapability { grant_id: meta_id },
+            vec![grant_meta.hash()],
+        );
+        let st = f.replay(&[add_admin.clone(), grant_meta.clone(), self_revoke]);
+        assert!(
+            !st.is_policy_admin(f.a(2)),
+            "a revoke that leaves the founder in charge is authorized"
+        );
+
+        // Once the founder has left, the same revoke would orphan the Space.
+        let founder_leaves = f.op(
+            1,
+            1,
+            AclAction::RemoveMember {
+                actor: f.a(1).clone(),
+            },
+            vec![grant_meta.hash()],
+        );
+        let orphaning = f.op(
+            2,
+            2,
+            AclAction::RevokeCapability { grant_id: meta_id },
+            vec![founder_leaves.hash()],
+        );
+        let st = f.replay(&[add_admin, grant_meta, founder_leaves, orphaning]);
+        assert!(
+            !st.is_member(f.a(1)),
+            "the founder's departure is the premise of this test"
+        );
+        assert!(
+            st.is_policy_admin(f.a(2)),
+            "the last policy admin's self-revoke is refused"
+        );
     }
 }

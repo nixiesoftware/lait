@@ -89,7 +89,11 @@ fn rust_request_fields() -> BTreeMap<String, BTreeSet<String>> {
         "access_grant".into(),
         BTreeSet::from(["actor".into(), "role".into(), "project".into()]),
     );
-    out.insert("access_revoke".into(), BTreeSet::from(["grant_id".into()]));
+    out.insert(
+        "access_revoke".into(),
+        BTreeSet::from(["grant_id".into(), "grant_ids".into()]),
+    );
+
     out
 }
 

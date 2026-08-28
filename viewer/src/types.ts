@@ -776,7 +776,29 @@ export interface AssignmentDto {
   world: string;
   capability: string;
   resource: string[];
+  /** Why the assignment exists, when its grant op said. Absent means *not
+   *  recorded* — a grant authored before origins were — and is not any kind
+   *  in particular: never fold it into membership, never into "granted here". */
+  origin?: AssignmentOrigin;
 }
+
+/** `founder`, `admission`, `membership` and `sponsorship` all mean "came with
+ *  being a member" — the base role, expanded. `grant` is the one kind that is
+ *  an extra on top of it, and the only one a surface may offer to revoke as
+ *  such. */
+export type AssignmentOriginKind = "founder" | "admission" | "membership" | "grant" | "sponsorship";
+
+/** `mechanics::assignment::AssignmentOrigin`. */
+export interface AssignmentOrigin {
+  kind: AssignmentOriginKind;
+  /** The opaque role reference (hex) the expansion came from, for the kinds
+   *  that carry one. Only the owning World can read it. */
+  definition_ref?: string;
+  /** The role id the World resolved `definition_ref` to — filled in by the
+   *  Issues product on its own rows, absent on another World's. */
+  role?: string;
+}
+
 
 /** One project status update — `dto.rs` `ProjectUpdateDto` (SCOPE-1). */
 export interface ProjectUpdateDto {
@@ -1225,10 +1247,12 @@ export interface RoleProjection {
     role_id: string;
     built_in: boolean;
     revision?: string | null;
-    conflict_heads: string[];
+    /** Omitted by the runner when empty — read it as none, not as a crash. */
+    conflict_heads?: string[];
   };
   revision?: RoleRevision | null;
 }
+
 
 export interface IssueDetailPages {
   comments: PageRequest;
@@ -1612,8 +1636,10 @@ export type Request =
   /** Expand a role's pinned caps and install them for an actor (Space- or
    *  project-scoped). All-or-nothing; authority-first. */
   | { cmd: "access_grant"; actor: string; role: string; project?: string | null }
-  /** Revoke one effective capability assignment by its 64-hex grant id. */
-  | { cmd: "access_revoke"; grant_id: string }
+  /** Revoke effective assignments by 64-hex grant id, as one all-or-nothing
+   *  set — a role grant's whole expansion, the way it was granted. */
+  | { cmd: "access_revoke"; grant_ids: string[] }
+
   | { cmd: "join"; ticket: string }
   | { cmd: "seed_list" }
   | { cmd: "log"; since: number }

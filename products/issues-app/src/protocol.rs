@@ -1043,7 +1043,13 @@ pub enum IssuesResponse {
     },
     AccessPlan {
         assignments: Vec<AccessAssignment>,
+        /// The opaque reference (hex) to the role revision the assignments
+        /// expand, for the host to record as each grant's origin. Absent from
+        /// an older runner's reply, which leaves the origin unrecorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition_ref: Option<String>,
     },
+
     Projects {
         page: issues::contract::Page<issues::dto::ProjectDto>,
     },
