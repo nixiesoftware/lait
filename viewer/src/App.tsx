@@ -2659,6 +2659,7 @@ export function App() {
               spaceId={current}
               project={activeProject}
               members={members}
+              teams={teams}
               readOnly={readOnly}
               onError={setError}
             />
@@ -2884,8 +2885,6 @@ export function App() {
               <ProjectRail
                 spaceId={current}
                 project={activeProject}
-                members={members}
-                teams={teams}
                 counts={projectCounts}
                 readOnly={readOnly}
                 activeMilestone={filter.milestone}
