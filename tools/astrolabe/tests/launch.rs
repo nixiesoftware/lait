@@ -777,33 +777,43 @@ async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
     // a channel, and the channel's base is what plays when nothing is being
     // broadcast at it. One screen for both receivers, because a sync group is
     // a frame-lock cohort and its members must pin the same canonical input.
-    let channel = signage::SignageChannel {
-        id: replica::body::BodyId::from_bytes([20; 16]).render(),
-        name: "Lobby channel".into(),
-        base: Some(program.id.clone()),
-        schedule: Vec::new(),
-    };
-    write_signage_channel(client, &orbit.space, channel.clone()).await;
-    let screen = signage_screen(21, "Lobby wall", &channel.id);
-    write_signage_screen(client, &orbit.space, screen.clone()).await;
+    let screen = tune_screen(client, &orbit.space, [20, 21], "Lobby", &program.id).await;
     SeededSignage {
         space: orbit.space.clone(),
         program: program.id,
-        screen: screen.id,
+        screen,
     }
 }
 
-/// A sited-nowhere screen tuned to one channel.
-fn signage_screen(tag: u8, name: &str, channel: &str) -> signage::SignageScreen {
-    signage::SignageScreen {
-        id: replica::body::BodyId::from_bytes([tag; 16]).render(),
-        name: name.into(),
+/// A channel whose base is `program`, and a sited-nowhere screen tuned to it.
+///
+/// Returns the screen's id — the thing a receiver is pointed at. `tags` name
+/// the channel and the screen, in that order, so two callers cannot collide.
+async fn tune_screen(
+    client: &Client,
+    space: &str,
+    tags: [u8; 2],
+    name: &str,
+    program: &str,
+) -> String {
+    let channel = signage::SignageChannel {
+        id: replica::body::BodyId::from_bytes([tags[0]; 16]).render(),
+        name: format!("{name} channel"),
+        base: Some(program.to_owned()),
+        schedule: Vec::new(),
+    };
+    write_signage_channel(client, space, channel.clone()).await;
+    let screen = signage::SignageScreen {
+        id: replica::body::BodyId::from_bytes([tags[1]; 16]).render(),
+        name: format!("{name} wall"),
         place: None,
         facts: std::collections::BTreeMap::new(),
         sync: None,
         labels: Vec::new(),
-        tuned: Some(channel.to_owned()),
-    }
+        tuned: Some(channel.id),
+    };
+    write_signage_screen(client, space, screen.clone()).await;
+    screen.id
 }
 
 /// Put one Signage record through the real World adapter and hand back the
@@ -1543,13 +1553,21 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         // installs the planned presentation, so this one assertion covers the
         // whole serve-side chain.
         let film_program = seed_stored_film(&client, identity.path(), &assignment.space).await;
+        let film_screen = tune_screen(
+            &client,
+            &assignment.space,
+            [22, 23],
+            "Premiere",
+            &film_program,
+        )
+        .await;
         client
             .display_assignment_put(DisplayAssignmentInput {
                 device: device.clone(),
                 orbit: assignment.space.clone(),
                 world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "program": film_program }),
+                input: serde_json::json!({ "screen": film_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
