@@ -179,6 +179,9 @@ pub struct App {
     transitions: Option<ConnectionHistoryPage>,
     /// The Space somebody is administering, as it last answered.
     space: Option<SpaceView>,
+    /// What each display surface can show, per Orbit, as last listed. Keyed
+    /// by (orbit, world, surface); a fresh listing replaces the last.
+    display_choices: BTreeMap<(String, String, String), lait::control::DisplayChoicesView>,
     /// The identity's address book. `None` until the first successful read.
     book: Option<BookSnapshot>,
     /// This identity's correspondence, once read. `None` before the first read —
@@ -357,6 +360,10 @@ impl App {
                     Read::Events(page) => self.events = Some(*page),
                     Read::Transitions(page) => self.transitions = Some(*page),
                     Read::Space(view) => self.space = Some(*view),
+                    Read::DisplayChoices { orbit, view } => {
+                        self.display_choices
+                            .insert((orbit, view.world.clone(), view.surface.clone()), *view);
+                    }
                 }
                 return;
             }
@@ -497,6 +504,18 @@ impl App {
 
     pub fn display(&self) -> Option<&lait::control::DisplayCoordinatorView> {
         self.display.as_ref()
+    }
+
+    /// Every listing taken so far: `(orbit, world, surface)` and its answer.
+    pub fn display_choices(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &(String, String, String),
+            &lait::control::DisplayChoicesView,
+        ),
+    > {
+        self.display_choices.iter()
     }
 
     pub fn presentation(&self) -> Option<&Presentation> {

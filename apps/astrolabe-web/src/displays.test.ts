@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { Display, DisplayAssignment, DisplayReceiver, DisplaySurface } from "./client";
+import type { Display, DisplayAssignment, DisplayChoices, DisplayReceiver, DisplaySurface } from "./client";
 import {
-  assignmentDraftValid, assignmentFor, assignmentPayload, codeEntry, failureOf, inputProblem, inputPrompt, isIssuesBoard,
-  isSignageSurface, minutesLeft, newAssignmentDraft, platformName, receiverBootstrap, showingLine, surfaceChoice, surfaceInput,
-  tvStatus,
+  assignmentDraftValid, assignmentFor, assignmentPayload, chooser, choicesFor, codeEntry, failureOf, inputProblem, inputPrompt,
+  isIssuesBoard, isSignageSurface, minutesLeft, newAssignmentDraft, platformName, receiverBootstrap, showingLine, signageInputKey,
+  surfaceChoice, surfaceInput, tvStatus,
 } from "./displays";
 
 const surfaces: DisplaySurface[] = [
   { world: "com.lait.issues", surface: "issues.board.wall", title: "Issues board", contractVersion: 1, outputs: [] },
-  { world: "com.lait.signage", surface: "signage.program", title: "Signage program", contractVersion: 1, outputs: [] },
+  { world: "com.lait.signage", surface: "signage.program", title: "Signage program", contractVersion: 4, outputs: [] },
 ];
+/** The Signage World as released: its surface still calls a screen a program. */
+const releasedSignage: DisplaySurface = { ...surfaces[1], contractVersion: 3 };
 const orbits = [{ space: "orb_1", name: "Home", path: "/x", lastOpened: null }];
 
 describe("the displays coordination rules", () => {
@@ -71,11 +73,35 @@ describe("the displays coordination rules", () => {
   });
 
   it("wraps what the person typed the way each package declares its input", () => {
-    // The Signage surface takes `screen`, not `program`: sending the wrong
-    // key was refused by the package on every attempt.
+    // Which key Signage takes is the surface's declared contract, not this
+    // build's: the installed release (contract 3) refused `screen` with
+    // "missing field `program`", and this tree's (contract 4) refuses the
+    // reverse.
+    expect(signageInputKey(surfaces[1])).toBe("screen");
+    expect(signageInputKey(releasedSignage)).toBe("program");
     expect(surfaceInput(surfaces[1], "bod_lobby")).toBe(JSON.stringify({ screen: "bod_lobby" }));
+    expect(surfaceInput(releasedSignage, "bod_lobby")).toBe(JSON.stringify({ program: "bod_lobby" }));
     expect(surfaceInput(surfaces[0], "ENG")).toBe(JSON.stringify({ project: "ENG" }));
-    expect(surfaceInput({ world: "other", surface: "x" }, "{\"a\":1}")).toBe("{\"a\":1}");
+    expect(surfaceInput({ world: "other", surface: "x", contractVersion: 1 }, "{\"a\":1}")).toBe("{\"a\":1}");
+  });
+
+  it("offers a picker when the World listed its choices, and a typed field that says why not", () => {
+    const prompt = { label: "Screen", hint: "The screen's id." };
+    const lobby = { id: "bod_lobby", title: "Lobby" };
+    const listed = (over: Partial<DisplayChoices>): DisplayChoices => ({
+      orbit: "orb_1", world: "com.lait.signage", surface: "signage.program", choices: [lobby], unavailable: null, ...over,
+    });
+    expect(choicesFor([listed({})], "orb_1", surfaces[1])?.choices).toEqual([lobby]);
+    // Another Space's listing is not this one's.
+    expect(choicesFor([listed({})], "orb_2", surfaces[1])).toBeUndefined();
+    expect(chooser(listed({}), false, prompt)).toEqual({ kind: "pick", choices: [lobby] });
+    // Nothing to show and could-not-list are different facts, each said.
+    expect(chooser(listed({ choices: [] }), false, prompt)).toMatchObject({ kind: "type", hint: expect.stringMatching(/Nothing to show/) });
+    expect(chooser(listed({ choices: null, unavailable: "runner predates listing" }), false, prompt))
+      .toMatchObject({ kind: "type", hint: expect.stringMatching(/Couldn't list them \(runner predates listing\)/) });
+    // Not yet asked, or still asking: the typed field, honestly labelled.
+    expect(chooser(undefined, true, prompt)).toMatchObject({ kind: "type", hint: expect.stringMatching(/Looking up/) });
+    expect(chooser(undefined, false, prompt)).toEqual({ kind: "type", hint: prompt.hint });
   });
 
   it("turns a draft into the assignment the daemon takes", () => {

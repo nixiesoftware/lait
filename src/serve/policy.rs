@@ -77,6 +77,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::DisplayPairingReject { .. }
         | Request::DisplayRendezvousMint { .. }
         | Request::DisplayRendezvousRevoke { .. }
+        | Request::DisplaySurfaceChoices { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
@@ -291,6 +292,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::DisplayPairingReject { .. }
         | Request::DisplayRendezvousMint { .. }
         | Request::DisplayRendezvousRevoke { .. }
+        | Request::DisplaySurfaceChoices { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }

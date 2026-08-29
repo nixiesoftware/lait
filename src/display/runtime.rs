@@ -373,6 +373,15 @@ impl DisplayRuntime {
             return Some(rendered.unwrap_or_else(|error| Response::err(format!("{error:#}"))));
         }
 
+        if let Request::DisplaySurfaceChoices {
+            orbit,
+            world,
+            surface,
+        } = request
+        {
+            return Some(self.surface_choices(orbit, world, surface).await);
+        }
+
         let result = match request {
             Request::DisplayStatus => self.status().map(|view| Response::Display(Box::new(view))),
             Request::DisplayPairingApprove { pairing, label } => self
@@ -501,6 +510,51 @@ impl DisplayRuntime {
         };
         let projection = self.coordinator.render_for_member(&want).await?;
         Ok(present_view(world, surface, projection))
+    }
+
+    /// List what a surface can show. A World that could not be asked answers
+    /// with the reason rather than an empty list, so a controller can tell
+    /// "nothing to show" from "could not look".
+    async fn surface_choices(
+        &self,
+        orbit: &str,
+        world: &str,
+        surface: &str,
+    ) -> crate::control::Response {
+        use crate::control::{DisplayChoiceView, DisplayChoicesView, Response};
+        let listed: Result<Option<Vec<DisplayChoiceView>>> = async {
+            let world_id = WorldId::parse(world).context("parse display World")?;
+            let surface_id = DisplaySurfaceId::new(surface.to_string())
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let choices = self
+                .coordinator
+                .surface_choices(orbit, &world_id, &surface_id)
+                .await?;
+            Ok(choices.map(|choices| {
+                choices
+                    .into_iter()
+                    .map(|choice| DisplayChoiceView {
+                        id: choice.id,
+                        title: choice.title,
+                    })
+                    .collect()
+            }))
+        }
+        .await;
+        let (choices, unavailable) = match listed {
+            Ok(Some(choices)) => (Some(choices), None),
+            Ok(None) => (
+                None,
+                Some("this surface lists nothing to choose from".into()),
+            ),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        Response::DisplayChoices(Box::new(DisplayChoicesView {
+            world: world.to_string(),
+            surface: surface.to_string(),
+            choices,
+            unavailable,
+        }))
     }
 
     /// Add a passphrase slot to the identifier envelope.

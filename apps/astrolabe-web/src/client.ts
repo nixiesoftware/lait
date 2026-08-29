@@ -132,7 +132,16 @@ export interface DisplayRendezvousAssignment { orbit: string; world: string; sur
 /** A code minted for a television to enter: the site it resolves the coordinator by, then the code. */
 export type DisplayRendezvousState = "waiting" | "connecting" | "connected";
 export interface DisplayRendezvous { rendezvous: string; code: string; site: string | null; label: string; assignment: DisplayRendezvousAssignment | null; /** A spent code stays listed a while as the TV it became. */ state: DisplayRendezvousState; device: string | null; createdAtUnixMs: number; expiresAtUnixMs: number; }
-export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; pendingRendezvous: DisplayRendezvous[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
+/** One thing a surface can show, as the World names it: `id` is what its input takes. */
+export interface DisplayChoice { id: string; title: string; }
+/**
+ * What one surface can show in one Space, as last listed. `choices` is null
+ * when the list could not be taken and `unavailable` says why; an empty list
+ * is a Space with nothing to show — a typed field for one, an empty picker
+ * for the other.
+ */
+export interface DisplayChoices { orbit: string; world: string; surface: string; choices: DisplayChoice[] | null; unavailable: string | null; }
+export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; pendingRendezvous: DisplayRendezvous[]; /** Listings taken so far, per (space, world, surface); absent until asked. */ choices: DisplayChoices[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
 /** What a code pins its television to once it connects: an assignment without the device. */
 export interface DisplayAssignmentRequest { orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
@@ -308,6 +317,7 @@ export type ClientAction =
   | { type: "installMcp"; client: string; scope: string | null; name: string; agent: string | null; noAgent: boolean; project: string; world: string | null; preview: boolean }
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
   | { type: "displayRendezvousMint"; label: string; assignment: DisplayAssignmentRequest | null } | { type: "displayRendezvousRevoke"; rendezvous: string }
+  | { type: "displaySurfaceChoices"; orbit: string; world: string; surface: string }
   | ({ type: "displayAssignmentPut"; device: string } & DisplayAssignmentRequest)
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
   | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
@@ -356,6 +366,7 @@ export const actionKey = {
   displayPairingReject: (pairing: string) => `display.pairing.reject:${pairing}`,
   displayRendezvousMint: "display.rendezvous.mint",
   displayRendezvousRevoke: (rendezvous: string) => `display.rendezvous.revoke:${rendezvous}`,
+  displaySurfaceChoices: (orbit: string, world: string, surface: string) => `display.surface.choices:${orbit}/${world}/${surface}`,
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
@@ -418,6 +429,7 @@ export function keyFor(action: ClientAction): string {
     case "displayPairingReject": return actionKey.displayPairingReject(action.pairing);
     case "displayRendezvousMint": return actionKey.displayRendezvousMint;
     case "displayRendezvousRevoke": return actionKey.displayRendezvousRevoke(action.rendezvous);
+    case "displaySurfaceChoices": return actionKey.displaySurfaceChoices(action.orbit, action.world, action.surface);
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
@@ -1011,6 +1023,10 @@ export const fixtureClientView: ClientView = {
       device: null,
       createdAtUnixMs: 1_755_000_000_000,
       expiresAtUnixMs: 1_755_000_900_000,
+    }],
+    choices: [{
+      orbit: "orb_fixture", world: "com.lait.signage", surface: "signage.program",
+      choices: [{ id: "bod_lobby", title: "Lobby" }, { id: "bod_cafe", title: "Café" }], unavailable: null,
     }],
     identifierCustody: { slots: ["windows-dpapi"], portable: false },
   },

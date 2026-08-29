@@ -1,9 +1,9 @@
 //! Native Astrolabe control of the self-hosted display coordinator.
 
 use lait::control::{
-    ControlRoute, DisplayAssignmentSyncSetting, DisplayCoordinatorView, DisplayPresentationView,
-    DisplayRendezvousAssignmentSetting, DisplayRendezvousView, DisplayStaleActionSetting,
-    DisplayThemeSetting, Request, Response,
+    ControlRoute, DisplayAssignmentSyncSetting, DisplayChoicesView, DisplayCoordinatorView,
+    DisplayPresentationView, DisplayRendezvousAssignmentSetting, DisplayRendezvousView,
+    DisplayStaleActionSetting, DisplayThemeSetting, Request, Response,
 };
 
 use super::{Client, ClientError, ClientResult};
@@ -116,6 +116,36 @@ impl Client {
             Response::DisplayRendezvous(view) => Ok(*view),
             other => Err(ClientError::internal(format!(
                 "unexpected display rendezvous reply: {other:?}"
+            ))),
+        }
+    }
+
+    /// What one surface can show in one Orbit, or why that could not be
+    /// listed. The reason travels in the answer rather than as an error: a
+    /// World that cannot list is still a World that can be shown, typed.
+    pub async fn display_surface_choices(
+        &self,
+        orbit: &str,
+        world: String,
+        surface: String,
+    ) -> ClientResult<DisplayChoicesView> {
+        if world.trim().is_empty() || surface.trim().is_empty() {
+            return Err(ClientError::invalid(
+                "listing a display surface's choices requires its World and surface",
+            ));
+        }
+        let orbit = self.display_orbit(orbit).await?;
+        match self
+            .display_request(Request::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            })
+            .await?
+        {
+            Response::DisplayChoices(view) => Ok(*view),
+            other => Err(ClientError::internal(format!(
+                "unexpected display choices reply: {other:?}"
             ))),
         }
     }

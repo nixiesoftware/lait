@@ -249,6 +249,12 @@ pub enum Action {
     DisplayPairingReject(String),
     DisplayRendezvousMint(Box<crate::client::display::DisplayRendezvousInput>),
     DisplayRendezvousRevoke(String),
+    /// Ask a World what one of its display surfaces can show in one Orbit.
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
+    },
     DisplayAssignmentPut(Box<DisplayAssignmentInput>),
     DisplayAssignmentRevoke(String),
     DisplayDeviceRevoke(String),
@@ -335,6 +341,11 @@ impl Action {
             Self::DisplayRendezvousRevoke(rendezvous) => {
                 format!("display.rendezvous.revoke:{rendezvous}")
             }
+            Self::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => format!("display.surface.choices:{orbit}/{world}/{surface}"),
             Self::DisplayAssignmentPut(assignment) => {
                 format!("display.assignment.put:{}", assignment.device)
             }
@@ -430,6 +441,9 @@ impl Action {
                 format!("mint a code for the display '{}'", input.label)
             }
             Self::DisplayRendezvousRevoke(_) => "withdraw a display code".into(),
+            Self::DisplaySurfaceChoices { world, surface, .. } => {
+                format!("list what {world} {surface} can show")
+            }
             Self::DisplayAssignmentPut(assignment) => {
                 format!("assign display {}", assignment.device)
             }
@@ -540,6 +554,12 @@ pub enum Read {
     Events(Box<EventHistoryPage>),
     Transitions(Box<ConnectionHistoryPage>),
     Space(Box<SpaceView>),
+    /// What a display surface can show in one Orbit, keyed by the Orbit it
+    /// was asked for so the answer lands beside the question.
+    DisplayChoices {
+        orbit: String,
+        view: Box<lait::control::DisplayChoicesView>,
+    },
 }
 
 /// The background half of the client.
@@ -1670,6 +1690,19 @@ impl Worker {
             Action::DisplayRendezvousRevoke(rendezvous) => {
                 client.display_rendezvous_revoke(rendezvous.clone()).await?;
                 Ok(Outcome::Said("withdrew the display code".into()))
+            }
+            Action::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => {
+                let view = client
+                    .display_surface_choices(orbit, world.clone(), surface.clone())
+                    .await?;
+                Ok(Outcome::Read(Read::DisplayChoices {
+                    orbit: orbit.clone(),
+                    view: Box::new(view),
+                }))
             }
             Action::DisplayAssignmentPut(assignment) => {
                 client

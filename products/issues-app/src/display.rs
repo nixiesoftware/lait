@@ -37,10 +37,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use world_interface::display::{
-    CanonicalDisplayInput, DisplayAssessment, DisplayOutputKind, DisplayPartialReason,
-    DisplayProjection, DisplayRenderer, DisplayRequest, DisplaySurface, DisplaySurfaceDescriptor,
-    DisplaySurfaceId, DisplayTheme, FrameMediaType, ProgramCycle, RenderedFrame, RenderedProgram,
-    RenderedProgramItem, RenderedScene,
+    CanonicalDisplayInput, DisplayAssessment, DisplayChoice, DisplayChoices, DisplayOutputKind,
+    DisplayPartialReason, DisplayProjection, DisplayRenderer, DisplayRequest, DisplaySurface,
+    DisplaySurfaceDescriptor, DisplaySurfaceId, DisplayTheme, FrameMediaType, ProgramCycle,
+    RenderedFrame, RenderedProgram, RenderedProgramItem, RenderedScene,
 };
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
@@ -94,7 +94,41 @@ pub fn board_wall_surface() -> Result<DisplaySurface, Failure> {
         canonicalize_input,
         prepare,
         Arc::new(BoardRenderer),
-    ))
+    )
+    .with_choices(DisplayChoices {
+        prepare: choices_prepare,
+        project: choices_project,
+    }))
+}
+
+/// What a wall can show: the projects this Space has, by key.
+fn choices_prepare(surface: &DisplaySurfaceId) -> Result<ClientInvocation, Failure> {
+    if surface.as_str() != SURFACE_ID {
+        return Err(Failure::new(
+            "Issues board listing received another surface",
+        ));
+    }
+    let call = crate::encode_call(&crate::IssuesRequest::ProjectList {
+        page: issues::contract::PageRequest::default(),
+    })
+    .map_err(|error| Failure::new(error.to_string()))?;
+    Ok(ClientInvocation::world(call, ClientAccess::Query, None))
+}
+
+fn choices_project(value: Value) -> Result<Vec<DisplayChoice>, Failure> {
+    let response: crate::IssuesResponse = serde_json::from_value(value)
+        .map_err(|error| Failure::new(format!("decode Issues project list: {error}")))?;
+    let crate::IssuesResponse::Projects { page } = response else {
+        return Err(Failure::new("Issues did not answer with its projects"));
+    };
+    Ok(page
+        .items
+        .into_iter()
+        .map(|project| DisplayChoice {
+            id: project.key,
+            title: project.name,
+        })
+        .collect())
 }
 
 /// The package's own reading of its input, once.
@@ -513,6 +547,41 @@ fn draw_character(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_surface_lists_its_projects_as_choices_by_key() {
+        let invocation = choices_prepare(&DisplaySurfaceId::new(SURFACE_ID).unwrap()).unwrap();
+        assert_eq!(invocation.access(), ClientAccess::Query);
+
+        let listed = choices_project(serde_json::json!({
+            "kind": "projects",
+            "page": {
+                "publication": {
+                    "materialization": 0,
+                    "publication": {
+                        "extractor_schema_digest": vec![0u8; 32],
+                        "implementation_digest": vec![0u8; 32],
+                        "manifest_root": vec![0u8; 32],
+                    },
+                },
+                "items": [
+                    { "id": "prj_01JV9VB8C96C5A4HCML1REEL5L", "name": "Engineering", "key": "ENG", "color": "blue" },
+                ],
+                "next_cursor": null,
+                "exact_total": null,
+            },
+        }))
+        .unwrap();
+        // The key, not the id: it is what the board's input takes.
+        assert_eq!(
+            listed,
+            vec![DisplayChoice {
+                id: "ENG".into(),
+                title: "Engineering".into()
+            }]
+        );
+        assert!(choices_project(board(serde_json::json!([]))).is_err());
+    }
 
     fn request(width: u32, height: u32) -> DisplayRequest {
         DisplayRequest {

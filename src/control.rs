@@ -480,6 +480,28 @@ pub struct DisplaySurfaceView {
     pub outputs: Vec<String>,
 }
 
+/// One thing a surface can show, as the World names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayChoiceView {
+    /// What the surface's input takes: a screen id, a project key.
+    pub id: String,
+    pub title: String,
+}
+
+/// The answer to [`Request::DisplaySurfaceChoices`].
+///
+/// `choices` is `None` when the list could not be taken, and `unavailable`
+/// says why — a runner that predates listing, a World that could not be
+/// asked. An empty list is a Space with nothing to show, which is a different
+/// fact from one that could not be asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayChoicesView {
+    pub world: String,
+    pub surface: String,
+    pub choices: Option<Vec<DisplayChoiceView>>,
+    pub unavailable: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DisplayDeviceView {
     pub device: String,
@@ -657,6 +679,14 @@ pub enum Request {
     /// Withdraw a code before anything enters it.
     DisplayRendezvousRevoke {
         rendezvous: String,
+    },
+    /// What one surface can show in one Orbit — Signage screens, Issues
+    /// projects — asked of the World itself, read-only, so a controller can
+    /// offer a choice instead of asking for an id to be typed.
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
     },
     /// Commit an exact package display pin for one enrolled receiver. The
     /// daemon derives Space, implementation and contract digests from its
@@ -1866,6 +1896,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::DisplayPairingReject { .. }
         | Request::DisplayRendezvousMint { .. }
         | Request::DisplayRendezvousRevoke { .. }
+        | Request::DisplaySurfaceChoices { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
@@ -1977,6 +2008,11 @@ pub fn representative_requests() -> Vec<Request> {
             }),
         },
         Request::DisplayRendezvousRevoke { rendezvous: s() },
+        Request::DisplaySurfaceChoices {
+            orbit: s(),
+            world: s(),
+            surface: s(),
+        },
         Request::DisplayAssignmentPut {
             device: s(),
             orbit: s(),
@@ -2418,6 +2454,8 @@ pub enum Response {
     DisplayPresentation(Box<DisplayPresentationView>),
     /// A code just minted for a television to enter.
     DisplayRendezvous(Box<DisplayRendezvousView>),
+    /// What a surface can show, or why that could not be listed.
+    DisplayChoices(Box<DisplayChoicesView>),
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,

@@ -50,7 +50,7 @@ import {
   MoreHorizontal20Regular,
   Tv20Regular,
 } from "@fluentui/react-icons";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   actionKey,
@@ -59,6 +59,7 @@ import {
   type Display,
   type DisplayAssignment,
   type DisplayAssignmentRequest,
+  type DisplayChoices,
   type DisplayPairing,
   type DisplayReceiver,
   type DisplayRendezvous,
@@ -182,11 +183,47 @@ export function surfaceChoice(surface: DisplaySurface): string {
   return surface.title;
 }
 
+/**
+ * The key the Signage surface takes its screen under. The released surface
+ * (contract 3) still calls a screen a `program`; this tree's (contract 4)
+ * calls it a `screen`. Which one is talking is the surface's own declared
+ * contract, so the answer is read from it rather than assumed from the build
+ * this client came from — the installed World is the one that refuses.
+ */
+export function signageInputKey(surface: Pick<DisplaySurface, "contractVersion">): "screen" | "program" {
+  return surface.contractVersion >= 4 ? "screen" : "program";
+}
+
 /** The surface's input as the package takes it: the id or key wrapped, or the JSON verbatim. */
-export function surfaceInput(surface: Pick<DisplaySurface, "world" | "surface">, value: string): string {
-  if (isSignageSurface(surface)) return JSON.stringify({ screen: value });
+export function surfaceInput(surface: Pick<DisplaySurface, "world" | "surface" | "contractVersion">, value: string): string {
+  if (isSignageSurface(surface)) return JSON.stringify({ [signageInputKey(surface)]: value });
   if (isIssuesBoard(surface)) return JSON.stringify({ project: value });
   return value;
+}
+
+/** The listing taken for this surface in this Space, if one has been. */
+export function choicesFor(
+  listings: DisplayChoices[], orbit: string, surface: Pick<DisplaySurface, "world" | "surface">,
+): DisplayChoices | undefined {
+  return listings.find((listed) => listed.orbit === orbit && listed.world === surface.world && listed.surface === surface.surface);
+}
+
+/**
+ * How the "which one" field is drawn: a picker when the World listed its
+ * choices, a typed field otherwise — with the hint saying which case this is.
+ * "Nothing to show yet" and "could not list" are different facts; only the
+ * second is worth a typed id.
+ */
+export function chooser(
+  listed: DisplayChoices | undefined, looking: boolean, prompt: { label: string; hint: string },
+): { kind: "pick"; choices: DisplayChoices["choices"] & object } | { kind: "type"; hint: string } {
+  if (listed?.choices !== null && listed?.choices !== undefined) {
+    if (listed.choices.length > 0) return { kind: "pick", choices: listed.choices };
+    return { kind: "type", hint: `Nothing to show in this Space yet. ${prompt.hint}` };
+  }
+  if (listed !== undefined) return { kind: "type", hint: `Couldn't list them (${listed.unavailable ?? "no reason given"}). ${prompt.hint}` };
+  if (looking) return { kind: "type", hint: `Looking up what there is… ${prompt.hint}` };
+  return { kind: "type", hint: prompt.hint };
 }
 
 /**
@@ -595,7 +632,7 @@ function DisplaysDialogs({ dialog, display, view, dispatch, onDismiss }: {
     case "add": return <AddTvDialog display={display} view={view} dispatch={dispatch} onDismiss={onDismiss} />;
     case "passphrase": return <PassphraseDialog dispatch={dispatch} onDismiss={onDismiss} />;
     case "approve": return <ApproveDialog pairing={dialog.pairing} dispatch={dispatch} onDismiss={onDismiss} />;
-    case "assign": return <AssignDialog receiver={dialog.receiver} surfaces={display.surfaces} orbits={view.orbits}
+    case "assign": return <AssignDialog receiver={dialog.receiver} surfaces={display.surfaces} view={view}
       dispatch={dispatch} onDismiss={onDismiss} />;
     case "unassign": return <AppDialog title={`Stop showing on ${dialog.receiver.label}?`}
       description="The TV goes to its ready screen until you choose something else." onDismiss={onDismiss}>
@@ -673,13 +710,27 @@ function ApproveDialog({ pairing, dispatch, onDismiss }: { pairing: DisplayPairi
  * with the one thing each needs beneath the chosen one. Timing and sync are
  * one sentence of defaults until opened.
  */
-function ShowFields({ draft, setDraft, surfaces, orbits, allowNothing }: {
+function ShowFields({ draft, setDraft, surfaces, orbits, allowNothing, view, dispatch }: {
   draft: AssignmentDraft; setDraft(next: AssignmentDraft): void; surfaces: DisplaySurface[]; orbits: Orbit[]; allowNothing: boolean;
+  view: ClientView; dispatch: Dispatch;
 }) {
   const styles = useStyles();
   const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
   const problem = draft.input.trim() === "" ? null : inputProblem(draft, surfaces);
   const set = <K extends keyof AssignmentDraft>(key: K, value: AssignmentDraft[K]) => setDraft({ ...draft, [key]: value });
+  // Ask the World what there is to choose from, once per (Space, surface):
+  // the answer lands in the view, and a refusal is keyed so it is not asked
+  // again on every frame.
+  const listings = view.display?.choices ?? [];
+  const listed = chosen === undefined ? undefined : choicesFor(listings, draft.orbit, chosen);
+  const listingKey = chosen === undefined ? null : actionKey.displaySurfaceChoices(draft.orbit, chosen.world, chosen.surface);
+  const looking = listingKey !== null && view.inFlight.includes(listingKey);
+  const refused = listingKey !== null && failureOf(view.failures, listingKey) !== undefined;
+  useEffect(() => {
+    if (chosen === undefined || draft.orbit === "" || listed !== undefined || looking || refused) return;
+    void dispatch({ type: "displaySurfaceChoices", orbit: draft.orbit, world: chosen.world, surface: chosen.surface });
+  }, [chosen, draft.orbit, listed, looking, refused, dispatch]);
+  const which = chosen === undefined ? null : chooser(listed, looking, inputPrompt(chosen));
   const stale = `${staleActionNames[draft.onStale]} after ${draft.staleSeconds}s offline`;
   const sync = draft.syncGroup.trim() === "" ? "not kept in step with other TVs" : `in step with "${draft.syncGroup.trim()}"`;
   return <>
@@ -689,13 +740,20 @@ function ShowFields({ draft, setDraft, surfaces, orbits, allowNothing }: {
         {allowNothing && <Radio value="" label="Nothing yet — just connect it" />}
       </RadioGroup>
     </Field>
-    {chosen !== undefined && <div className={styles.choiceDetail}>
-      <Field label={inputPrompt(chosen).label} hint={inputPrompt(chosen).hint}
-        validationMessage={problem ?? undefined} validationState={problem === null ? "none" : "warning"}>
-        {inputPrompt(chosen).json
-          ? <Textarea rows={3} resize="vertical" value={draft.input} onChange={(_, data) => set("input", data.value)} />
-          : <Input value={draft.input} onChange={(_, data) => set("input", data.value)} />}
-      </Field>
+    {chosen !== undefined && which !== null && <div className={styles.choiceDetail}>
+      {which.kind === "pick"
+        ? <Field label={inputPrompt(chosen).label}>
+            <Select value={draft.input} onChange={(_, data) => set("input", data.value)}>
+              <option value="">Choose one…</option>
+              {which.choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.title}</option>)}
+            </Select>
+          </Field>
+        : <Field label={inputPrompt(chosen).label} hint={which.hint}
+            validationMessage={problem ?? undefined} validationState={problem === null ? "none" : "warning"}>
+            {inputPrompt(chosen).json
+              ? <Textarea rows={3} resize="vertical" value={draft.input} onChange={(_, data) => set("input", data.value)} />
+              : <Input value={draft.input} onChange={(_, data) => set("input", data.value)} />}
+          </Field>}
     </div>}
     {orbits.length > 1 && <Field label="Space"><Select value={draft.orbit} onChange={(_, data) => set("orbit", data.value)}>
       {orbits.map((row) => <option key={row.space} value={row.space}>{row.name}</option>)}
@@ -728,13 +786,14 @@ function ShowFields({ draft, setDraft, surfaces, orbits, allowNothing }: {
   </>;
 }
 
-function AssignDialog({ receiver, surfaces, orbits, dispatch, onDismiss }: {
-  receiver: DisplayReceiver; surfaces: DisplaySurface[]; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
+function AssignDialog({ receiver, surfaces, view, dispatch, onDismiss }: {
+  receiver: DisplayReceiver; surfaces: DisplaySurface[]; view: ClientView; dispatch: Dispatch; onDismiss(): void;
 }) {
+  const orbits = view.orbits;
   const [draft, setDraft] = useState(() => newAssignmentDraft(surfaces, orbits));
   const payload = assignmentPayload(draft, surfaces);
   return <AppDialog title={`What should ${receiver.label} show?`} onDismiss={onDismiss}>
-    <ShowFields draft={draft} setDraft={setDraft} surfaces={surfaces} orbits={orbits} allowNothing={false} />
+    <ShowFields draft={draft} setDraft={setDraft} surfaces={surfaces} orbits={orbits} allowNothing={false} view={view} dispatch={dispatch} />
     <DialogFooter>
       <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
       <Button appearance="primary" disabled={payload === null} onClick={() => {
@@ -837,7 +896,7 @@ function AddTvDialog({ display, view, dispatch, onDismiss }: {
     <div className={styles.step}>STEP 1 OF 3 · NAME AND CONTENT</div>
     <Field label="Name"><Input value={label} placeholder="Lobby" autoFocus onChange={(_, data) => setLabel(data.value)} /></Field>
     {canPromise
-      ? <ShowFields draft={draft} setDraft={setDraft} surfaces={display.surfaces} orbits={orbits} allowNothing />
+      ? <ShowFields draft={draft} setDraft={setDraft} surfaces={display.surfaces} orbits={orbits} allowNothing view={view} dispatch={dispatch} />
       : <Caption1 className={mergeClasses(styles.muted)}>{display.surfaces.length === 0
           ? "No installed World offers anything a TV can show yet, so this TV will connect and wait."
           : "This identity has no Space to draw from yet, so this TV will connect and wait."}</Caption1>}

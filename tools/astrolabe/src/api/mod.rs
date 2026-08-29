@@ -332,6 +332,9 @@ pub struct DisplayFacts {
     pub pending_pairings: Vec<DisplayPairingRow>,
     /// Codes minted for televisions to enter, not yet spent or expired.
     pub pending_rendezvous: Vec<DisplayRendezvousRow>,
+    /// What each surface can show, per Orbit, as last listed. Absent until
+    /// asked (`ActionRequest::DisplaySurfaceChoices`).
+    pub choices: Vec<DisplayChoicesRow>,
     /// `None` from a daemon that predates the custody split — not reported, as
     /// distinct from reported-as-none.
     pub identifier_custody: Option<DisplayIdentifierCustodyRow>,
@@ -500,6 +503,28 @@ pub struct DisplayRendezvousRow {
     pub device: Option<String>,
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+/// What one surface can show in one Orbit, as the World listed it.
+///
+/// `choices` is `None` when the list could not be taken and `unavailable`
+/// says why; an empty list is a Space with nothing to show. Distinct on
+/// purpose — a control offers a typed field for one and an empty picker for
+/// the other.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayChoicesRow {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    pub choices: Option<Vec<DisplayChoiceRow>>,
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayChoiceRow {
+    /// What the surface's input takes: a screen id, a project key.
+    pub id: String,
+    pub title: String,
 }
 
 /// Where a code is in its life; a spent code is listed a while longer as
@@ -1101,6 +1126,13 @@ pub enum ActionRequest {
     DisplayRendezvousRevoke {
         rendezvous: String,
     },
+    /// Ask a World what one of its display surfaces can show in one Orbit.
+    /// The answer lands in `DisplayFacts::choices`.
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
+    },
     /// Assign one exact World display surface to an enrolled receiver. The
     /// input remains JSON here because each package owns its own input schema;
     /// the daemon canonicalizes and validates it before committing the pin.
@@ -1284,6 +1316,15 @@ impl ActionRequest {
             Self::DisplayRendezvousRevoke { rendezvous } => {
                 Action::DisplayRendezvousRevoke(rendezvous)
             }
+            Self::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => Action::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            },
             Self::DisplayAssignmentPut {
                 device,
                 orbit,
@@ -2020,6 +2061,24 @@ fn project(app: &App) -> ClientView {
                     portable: custody.portable,
                 }
             }),
+            choices: app
+                .display_choices()
+                .map(|((orbit, _, _), listed)| DisplayChoicesRow {
+                    orbit: orbit.clone(),
+                    world: listed.world.clone(),
+                    surface: listed.surface.clone(),
+                    choices: listed.choices.as_ref().map(|choices| {
+                        choices
+                            .iter()
+                            .map(|choice| DisplayChoiceRow {
+                                id: choice.id.clone(),
+                                title: choice.title.clone(),
+                            })
+                            .collect()
+                    }),
+                    unavailable: listed.unavailable.clone(),
+                })
+                .collect(),
         }),
         presentation: app.presentation().map(|presenting| PresentationFacts {
             chosen: presenting

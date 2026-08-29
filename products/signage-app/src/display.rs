@@ -16,10 +16,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use signage::contract::{MediaSource, SignageMedia};
 use world_interface::display::{
-    BlankReason, CanonicalDisplayInput, DisplayAssessment, DisplayOutputKind, DisplayProjection,
-    DisplayRenderer, DisplayRequest, DisplayResourceId, DisplaySurface, DisplaySurfaceDescriptor,
-    DisplaySurfaceId, FrameMediaType, MediaOrigin, MediaProtocol, ProgramCycle, RenderedFrame,
-    RenderedMedia, RenderedProgram, RenderedProgramItem, RenderedScene,
+    BlankReason, CanonicalDisplayInput, DisplayAssessment, DisplayChoice, DisplayChoices,
+    DisplayOutputKind, DisplayProjection, DisplayRenderer, DisplayRequest, DisplayResourceId,
+    DisplaySurface, DisplaySurfaceDescriptor, DisplaySurfaceId, FrameMediaType, MediaOrigin,
+    MediaProtocol, ProgramCycle, RenderedFrame, RenderedMedia, RenderedProgram,
+    RenderedProgramItem, RenderedScene,
 };
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
@@ -64,7 +65,36 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
         canonicalize_input,
         prepare,
         Arc::new(SignageRenderer),
-    ))
+    )
+    .with_choices(DisplayChoices {
+        prepare: choices_prepare,
+        project: choices_project,
+    }))
+}
+
+/// What a television can be pointed at: the screens this Space has.
+fn choices_prepare(surface: &DisplaySurfaceId) -> Result<ClientInvocation, Failure> {
+    if surface.as_str() != SURFACE_ID {
+        return Err(Failure::new("Signage listing received another surface"));
+    }
+    let call = crate::encode_call(&crate::SignageRequest::ScreenList)
+        .map_err(|error| Failure::new(error.to_string()))?;
+    Ok(ClientInvocation::world(call, ClientAccess::Query, None))
+}
+
+fn choices_project(value: Value) -> Result<Vec<DisplayChoice>, Failure> {
+    let response: crate::SignageResponse = serde_json::from_value(value)
+        .map_err(|error| Failure::new(format!("decode Signage screen list: {error}")))?;
+    let crate::SignageResponse::Screens { screens } = response else {
+        return Err(Failure::new("Signage did not answer with its screens"));
+    };
+    Ok(screens
+        .into_iter()
+        .map(|screen| DisplayChoice {
+            id: screen.id,
+            title: screen.name,
+        })
+        .collect())
 }
 
 fn canonicalize_input(value: Value) -> Result<CanonicalDisplayInput, Failure> {
@@ -687,6 +717,37 @@ fn draw_character(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_surface_lists_its_screens_as_choices_by_their_names() {
+        let invocation = choices_prepare(&DisplaySurfaceId::new(SURFACE_ID).unwrap()).unwrap();
+        assert_eq!(invocation.access(), ClientAccess::Query);
+        assert!(choices_prepare(&DisplaySurfaceId::new("signage.other").unwrap()).is_err());
+
+        let listed = choices_project(serde_json::json!({
+            "kind": "screens",
+            "screens": [
+                { "id": "bod_lobby", "name": "Lobby" },
+                { "id": "bod_cafe", "name": "Café", "labels": ["food"] },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            listed,
+            vec![
+                DisplayChoice {
+                    id: "bod_lobby".into(),
+                    title: "Lobby".into()
+                },
+                DisplayChoice {
+                    id: "bod_cafe".into(),
+                    title: "Café".into()
+                },
+            ]
+        );
+        // Another answer is not a list, and says so rather than listing nothing.
+        assert!(choices_project(serde_json::json!({ "kind": "showing", "screens": [] })).is_err());
+    }
 
     fn entry(source: MediaSource) -> SignageMedia {
         SignageMedia {

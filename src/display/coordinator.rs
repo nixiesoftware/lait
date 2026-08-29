@@ -19,7 +19,9 @@ use runtime::world::call::{Call, Reply};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
-use world_interface::display::{DisplayProjection, DisplayRequest, REQUIRED_WORLD_ACCESS};
+use world_interface::display::{
+    DisplayChoice, DisplayProjection, DisplayRequest, DisplaySurfaceId, REQUIRED_WORLD_ACCESS,
+};
 use world_interface::{
     ClientAccess, ClientFuture, ClientHost, ClientInvocationKind, Failure, HostContentRequest,
     HostControlRequest, PresentationHandle, PresentationResolution, WorldClientRegistry,
@@ -135,6 +137,76 @@ impl DisplayCoordinator {
             live: LiveMediaHub::default(),
             live_tickets: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// What a surface can show in one Orbit, asked of the World.
+    ///
+    /// `Ok(None)` is a surface that lists nothing — its own answer, not a
+    /// failure. The query runs under the same query-only host a render does,
+    /// so listing reaches no further than drawing.
+    pub async fn surface_choices(
+        &self,
+        orbit: &str,
+        world: &WorldId,
+        surface: &DisplaySurfaceId,
+    ) -> Result<Option<Vec<DisplayChoice>>> {
+        let package = self
+            .registry
+            .package_for_world(world)
+            .ok_or_else(|| anyhow!("display World is not declared by a selected runner"))?;
+        let registered = package
+            .display_surface(surface)
+            .ok_or_else(|| anyhow!("display surface is not declared by the selected runner"))?;
+        let Some(invocation) = registered.choices_prepare().map_err(adapter_failure)? else {
+            return Ok(None);
+        };
+        package
+            .validate_invocation(&invocation)
+            .map_err(adapter_failure)?;
+        if invocation.access() != ClientAccess::Query
+            || !matches!(
+                invocation.kind(),
+                ClientInvocationKind::World(_)
+                    | ClientInvocationKind::Find { .. }
+                    | ClientInvocationKind::Remote(_)
+            )
+        {
+            return Err(anyhow!(
+                "display surface did not prepare a read-only listing"
+            ));
+        }
+        let resolved = self
+            .router
+            .resolve(orbit)
+            .context("resolve display Orbit")?;
+        let route = ControlRoute::World {
+            address: resolved.address,
+            world: world.as_str().to_string(),
+        };
+        let host = QueryOnlyHost {
+            router: self.router.as_ref(),
+            route,
+            world,
+            local_root: &self.local_root,
+        };
+        if package
+            .confirmation(&host, &invocation)
+            .await
+            .map_err(adapter_failure)?
+            .is_some()
+        {
+            return Err(anyhow!(
+                "display listing unexpectedly requires interactive confirmation"
+            ));
+        }
+        let value = package
+            .execute(&host, invocation)
+            .await
+            .map_err(adapter_failure)?;
+        registered
+            .choices_project(value)
+            .map(Some)
+            .map_err(adapter_failure)
     }
 
     /// What to render, independent of who is going to look at it.

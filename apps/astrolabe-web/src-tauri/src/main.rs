@@ -425,9 +425,31 @@ struct WebDisplayFacts {
     assignments: Vec<WebDisplayAssignment>,
     pending_pairings: Vec<WebDisplayPairing>,
     pending_rendezvous: Vec<WebDisplayRendezvous>,
+    /// What each surface can show, per Orbit, as last listed.
+    choices: Vec<WebDisplayChoices>,
     /// `None` from a daemon that predates the custody split — not reported,
     /// as distinct from reported-as-none.
     identifier_custody: Option<WebIdentifierCustody>,
+}
+
+/// What one surface can show in one Orbit. `choices` is null when the list
+/// could not be taken and `unavailable` says why; an empty list is a Space
+/// with nothing to show.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayChoices {
+    orbit: String,
+    world: String,
+    surface: String,
+    choices: Option<Vec<WebDisplayChoice>>,
+    unavailable: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayChoice {
+    id: String,
+    title: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -789,6 +811,25 @@ impl From<ClientView> for WebClientView {
                         device: minted.device,
                         created_at_unix_ms: minted.created_at_unix_ms,
                         expires_at_unix_ms: minted.expires_at_unix_ms,
+                    })
+                    .collect(),
+                choices: display
+                    .choices
+                    .into_iter()
+                    .map(|listed| WebDisplayChoices {
+                        orbit: listed.orbit,
+                        world: listed.world,
+                        surface: listed.surface,
+                        choices: listed.choices.map(|choices| {
+                            choices
+                                .into_iter()
+                                .map(|choice| WebDisplayChoice {
+                                    id: choice.id,
+                                    title: choice.title,
+                                })
+                                .collect()
+                        }),
+                        unavailable: listed.unavailable,
                     })
                     .collect(),
                 identifier_custody: display.identifier_custody.map(|custody| {
@@ -1239,6 +1280,11 @@ enum WebAction {
     DisplayRendezvousRevoke {
         rendezvous: String,
     },
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
+    },
     DisplayAssignmentPut {
         device: String,
         orbit: String,
@@ -1465,6 +1511,15 @@ impl From<WebAction> for ActionRequest {
             WebAction::DisplayRendezvousRevoke { rendezvous } => {
                 Self::DisplayRendezvousRevoke { rendezvous }
             }
+            WebAction::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => Self::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            },
             WebAction::DisplayAssignmentPut {
                 device,
                 orbit,
