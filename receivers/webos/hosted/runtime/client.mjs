@@ -1413,3 +1413,19 @@ export class DisplayReceiverClient {
     if (this.running) await this.startPairing();
   }
 }
+
+/**
+ * Whether the receiver's chrome — its name, its transport, its source, its
+ * delivery — has anything to say over what is on the glass.
+ *
+ * While a state panel is up the chrome is the page's header. Once a
+ * program is on the glass and every word the chrome would say is "fine",
+ * it retires: a banner over a picture is the receiver asserting itself
+ * over the World it is showing. It speaks again the moment there is
+ * something worth saying, or when the person asks with the Info key.
+ */
+export function chromeSpeaks({ panel, transport, source, stale, details }) {
+  if (details) return true;
+  if (panel !== "frame-panel" && panel !== "media-panel") return true;
+  return transport !== "online" || source === "none" || Boolean(stale);
+}

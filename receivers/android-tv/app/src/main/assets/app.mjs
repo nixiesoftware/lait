@@ -1,12 +1,17 @@
-import { DisplayReceiverClient } from "./runtime/client.mjs";
+import { DisplayReceiverClient, chromeSpeaks } from "./runtime/client.mjs";
 import { AndroidCredentialVault } from "./android-vault.mjs";
 
 const panels = ["booting-panel", "pairing-panel", "unassigned-panel", "frame-panel", "media-panel", "message-panel"];
+
+/** How long the chrome lingers over a program before it retires. */
+const CHROME_LINGER_MS = 4000;
 
 class AndroidTvReceiverUi {
   constructor() {
     this.client = null;
     this.detailsVisible = false;
+    this.chrome = { panel: "booting-panel", transport: "connecting", source: "none", stale: false, details: false };
+    this.chromeTimer = null;
     this.confirmButton = document.getElementById("confirm-pairing");
     this.retryButton = document.getElementById("retry-action");
     this.confirmButton.addEventListener("click", () => this.client && this.client.confirmPairing());
@@ -17,6 +22,7 @@ class AndroidTvReceiverUi {
 
   show(name) {
     for (const panel of panels) document.getElementById(panel).hidden = panel !== name;
+    this.reviewChrome({ panel: name });
     if (name !== "media-panel") document.querySelector("#program-media video")?.pause();
   }
 
@@ -100,6 +106,7 @@ class AndroidTvReceiverUi {
     element.dataset.state = state;
     element.textContent = state === "online" ? "Online" : state === "offline" ? "Offline" : "Connecting";
     document.getElementById("detail-transport").textContent = element.textContent;
+    this.reviewChrome({ transport: state });
   }
 
   setSourceState(state) {
@@ -107,16 +114,40 @@ class AndroidTvReceiverUi {
     element.dataset.state = state;
     element.textContent = state === "none" ? "No source" : state[0].toUpperCase() + state.slice(1);
     document.getElementById("detail-source").textContent = element.textContent;
+    this.reviewChrome({ source: state });
   }
 
   setStaleState(stale) {
     document.getElementById("stale-state").hidden = !stale;
     document.getElementById("detail-delivery").textContent = stale ? "Stale" : "Current";
+    this.reviewChrome({ stale });
   }
 
   toggleDetails() {
     this.detailsVisible = !this.detailsVisible;
     document.getElementById("detail-panel").hidden = !this.detailsVisible;
+    this.reviewChrome({ details: this.detailsVisible });
+  }
+
+  /// The chrome speaks or retires — see `chromeSpeaks`. Retiring waits a
+  /// moment so a person at the TV sees the connection land before the
+  /// picture is alone; speaking is immediate.
+  reviewChrome(change) {
+    this.chrome = { ...this.chrome, ...change };
+    const receiver = document.getElementById("receiver");
+    if (chromeSpeaks(this.chrome)) {
+      clearTimeout(this.chromeTimer);
+      this.chromeTimer = null;
+      receiver.dataset.chrome = "speaking";
+      return;
+    }
+    // A program answers every few seconds; the linger runs from the first
+    // fine answer, not the latest, or it would never end.
+    if (receiver.dataset.chrome === "retired" || this.chromeTimer !== null) return;
+    this.chromeTimer = setTimeout(() => {
+      this.chromeTimer = null;
+      receiver.dataset.chrome = "retired";
+    }, CHROME_LINGER_MS);
   }
 }
 

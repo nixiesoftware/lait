@@ -16,7 +16,7 @@ import {
   validateProgram,
   verifyProgram,
 } from "../shared/web/protocol.mjs";
-import { DisplayReceiverClient, parseLiveMediaPacket } from "../shared/web/client.mjs";
+import { DisplayReceiverClient, chromeSpeaks, parseLiveMediaPacket } from "../shared/web/client.mjs";
 import {
   deploymentRoot,
   normalizeSiteCode,
@@ -636,4 +636,20 @@ test("a code the coordinator does not hold is refused as a code, and nothing is 
   const { ui, vault } = await pair(t, {}, { rendezvous: RENDEZVOUS, holds: other });
   assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "rendezvous_refused"]);
   assert.equal(vault.saved.length, 0);
+});
+
+test("the chrome retires over a program that is fine, and speaks for anything else", () => {
+  const fine = { panel: "media-panel", transport: "online", source: "program", stale: false, details: false };
+  assert.equal(chromeSpeaks(fine), false);
+  assert.equal(chromeSpeaks({ ...fine, panel: "frame-panel" }), false);
+  // A state panel is the page, and the chrome is its header.
+  assert.equal(chromeSpeaks({ ...fine, panel: "provisioning-panel" }), true);
+  assert.equal(chromeSpeaks({ ...fine, panel: "unassigned-panel" }), true);
+  // Every word the chrome has is worth showing when it is not "fine".
+  assert.equal(chromeSpeaks({ ...fine, transport: "connecting" }), true);
+  assert.equal(chromeSpeaks({ ...fine, transport: "offline" }), true);
+  assert.equal(chromeSpeaks({ ...fine, source: "none" }), true);
+  assert.equal(chromeSpeaks({ ...fine, stale: true }), true);
+  // Asking is always answered.
+  assert.equal(chromeSpeaks({ ...fine, details: true }), true);
 });
