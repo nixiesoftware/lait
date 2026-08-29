@@ -197,6 +197,15 @@ function supportedLiveTracks(tracks) {
   if (!selected.has("video")) {
     throw new ProtocolError("unsupported", "The live catalog has no supported video rendition");
   }
+  // Packets name their rendition and nothing else, so two tracks under one
+  // name cannot be told apart on arrival. Refused here, by name, rather than
+  // letting the audio entry overwrite the video one and H.264 fragments land
+  // in an AAC SourceBuffer — which is what "codec h264 doesn't match
+  // SourceBuffer codecs" was.
+  const names = new Set(tracks.map((track) => track.rendition));
+  if (names.size !== tracks.length) {
+    throw new ProtocolError("live_catalog", "Live catalog names two tracks by one rendition");
+  }
   return new Map(Array.from(selected.values(), (track) => [track.rendition, track]));
 }
 
@@ -230,7 +239,13 @@ class MseLiveSession {
       this.video.autoplay = true;
       this.video.playsInline = true;
       this.video.setAttribute("aria-label", summary || "Assigned Astrolabe live media");
-      this.video.addEventListener("error", () => this.fail(new ProtocolError("media_decode", "Live media decoder failed")));
+      this.video.addEventListener("error", () => {
+        // The element's own words — "DEMUXER_ERROR…", "PIPELINE_ERROR_DECODE" —
+        // are the difference between a stream this box cannot decode and a
+        // stream nobody could.
+        const detail = this.video.error ? ` (${this.video.error.code}: ${this.video.error.message || "no message"})` : "";
+        this.fail(new ProtocolError("media_decode", `Live media decoder failed${detail}`));
+      });
     }
     if (this.video.parentElement !== container) container.replaceChildren(this.video);
     this.connect();
@@ -274,6 +289,7 @@ class MseLiveSession {
     }
     this.complete = hello.complete;
     this.tracks = supportedLiveTracks(hello.tracks);
+    console.info(`live catalog: ${Array.from(this.tracks.values(), (track) => `${track.rendition} ${track.mime_type}`).join(" | ")}`);
     this.rebuildMediaSource();
   }
 
@@ -396,7 +412,11 @@ class MseLiveSession {
     this.failed = true;
     if (this.socket) this.socket.close();
     this.socket = null;
-    this.onFailure(error instanceof ProtocolError ? error : new ProtocolError("media_decode", String(error)));
+    const reported = error instanceof ProtocolError ? error : new ProtocolError("media_decode", String(error));
+    // Said to the console as well as to the owner: a blank clip has a reason,
+    // and the console is where a person on a simulator can read it.
+    console.warn(`live media session failed: ${reported.code}: ${reported.message}`);
+    this.onFailure(reported);
   }
 
   release() {

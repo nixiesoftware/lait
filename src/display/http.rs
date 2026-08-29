@@ -1073,7 +1073,13 @@ async fn serve_live_socket(
                     return;
                 }
                 Err(error) => {
-                    tracing::debug!(%error, sequence, "planned MSE segment failed");
+                    // The receiver sees a closed socket and blanks the clip;
+                    // the reason has nowhere else to go.
+                    tracing::warn!(
+                        error = %format_args!("{error:#}"),
+                        sequence,
+                        "planned MSE segment failed"
+                    );
                     return;
                 }
             }
