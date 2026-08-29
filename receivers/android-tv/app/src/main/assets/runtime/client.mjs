@@ -1050,7 +1050,19 @@ export class DisplayReceiverClient {
         if (!this.program || response.revision !== this.program.revision) {
           throw new ProtocolError("invalid_revision", "No-change cursor does not name the current program");
         }
-        this.adoptCursor(response.playback, true);
+        this.validateCursor(response.playback);
+        if (response.playback.sync !== null || this.program.playback.sync !== null) {
+          // A sync group is aligned by the coordinator's clock; its cursor is
+          // computed when the answer is written and is the one to follow.
+          this.adoptCursor(response.playback, true);
+          return;
+        }
+        // An unaligned program keeps this receiver's own clock. The answer
+        // carries the cursor the poll opened with, as old as the poll itself —
+        // adopting it rewound playback by up to a long-poll every cycle, which
+        // cut the last item of a 30-second loop to five seconds.
+        this.lastProgramDeliveryAt = performance.now();
+        if (this.deliveryStale) this.renderCurrent();
         return;
       case "reset":
         exactFields(response, ["kind", "reason"], "program reset response");
@@ -1209,7 +1221,8 @@ export class DisplayReceiverClient {
     return { currentIndex: this.program.playback.current_index, elapsedMs: Math.min(elapsed, 0xffffffff) };
   }
 
-  adoptCursor(playback, programDelivery = false) {
+  /** A cursor the coordinator sent, refused before it can move anything. */
+  validateCursor(playback) {
     exactFields(playback, ["current_index", "elapsed_ms", "cycle", "sync"], "playback cursor");
     if (playback.sync !== null) {
       exactFields(playback.sync, ["group", "mode", "sampled_at_unix_ms"], "sync target");
@@ -1233,6 +1246,10 @@ export class DisplayReceiverClient {
         && playback.elapsed_ms >= this.program.items[playback.current_index].duration_ms)) {
       throw new ProtocolError("invalid_cursor", "Coordinator cursor is outside the current program");
     }
+  }
+
+  adoptCursor(playback, programDelivery = false) {
+    this.validateCursor(playback);
     const previous = this.currentPlayback();
     if (playback.sync !== null) {
       const residual = previous.currentIndex === playback.current_index

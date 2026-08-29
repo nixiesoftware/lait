@@ -286,6 +286,40 @@ test("API errors reject unknown fields before changing receiver state", () => {
   assert.equal(receiver.credential.mode, "paired");
 });
 
+test("an unaligned program keeps its own clock across a no-change answer", async () => {
+  // Three ten-second frames, looping, no sync group; the receiver is five
+  // seconds into the last one when a poll that opened at the first answers.
+  const program = structuredClone(fixture.program);
+  program.playback = { current_index: 2, elapsed_ms: 0, cycle: "loop", sync: null };
+  program.items = [0, 1, 2].map((index) => ({
+    ...structuredClone(fixture.program.items[0]),
+    id: String(index).repeat(64),
+    duration_ms: 10_000,
+  }));
+  const { receiver, events } = receiverHarness(program);
+  receiver.elapsedBase = 5_000;
+  receiver.itemStartedAt = performance.now();
+  await receiver.handleProgramResponse({
+    kind: "no_change",
+    revision: program.revision,
+    playback: { current_index: 0, elapsed_ms: 0, cycle: "loop", sync: null },
+  });
+  assert.equal(receiver.program.playback.current_index, 2, "still on the item it was showing");
+  assert.ok(receiver.currentPlayback().elapsedMs >= 5_000, "and not rewound within it");
+  assert.ok(receiver.lastProgramDeliveryAt > 0, "the delivery still counts as fresh");
+  assert.equal(events.length, 0, "nothing is redrawn for an answer that changes nothing");
+  // A malformed cursor is still refused, even one that would not be adopted.
+  await assert.rejects(
+    () => receiver.handleProgramResponse({
+      kind: "no_change",
+      revision: program.revision,
+      playback: { current_index: 7, elapsed_ms: 0, cycle: "loop", sync: null },
+    }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_cursor",
+  );
+  clearTimeout(receiver.playbackTimer);
+});
+
 test("fresh delivery atomically replaces a stale-sensitive blank", async () => {
   const program = structuredClone(fixture.program);
   program.freshness.on_stale = "blank";
