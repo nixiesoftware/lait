@@ -1,56 +1,87 @@
-//! `lait-net` — a self-sovereign L3 tunnel between lait devices, Linux-first.
+//! `lait-net` — bring up lait's L3 tunnel on a device. A thin front over
+//! [`netstack`]: it parses arguments and hands them to the boundary, naming no
+//! transport type of its own.
 //!
-//! Each node's address is derived from its own key (see [`lait_net::ula_from_key`]).
-//! Run one on each device, cross-configure the peers, and IP packets between
-//! their derived addresses ride the tunnel — `ping6` the peer's address to see
-//! it work.
+//! Each node's address is derived from its own key, and its transport identity
+//! *is* that same key — one seed gives a device its tunnel address and its
+//! `PeerId`. Name peers by their public key; `ping6` a peer's derived address
+//! to see it work.
 //!
 //! ```text
-//! # On device A (its seed is 32 bytes of hex):
-//! sudo lait-net --seed <A-seed-hex> --listen 0.0.0.0:51820 \
-//!               --peer <B-host>:51820=<B-pubkey-hex>
+//! # On a LAN, no relay, no discovery (Isolated), reach a peer directly:
+//! sudo lait-net --seed <A-seed-hex> --network isolated \
+//!               --peer <B-pubkey-hex>@<B-host>:<B-port>
 //! # `lait-net --seed <A-seed-hex> --print` shows A's pubkey and address.
 //! ```
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::net::{Ipv6Addr, SocketAddr};
 
-use lait_net::{ipv6_destination, parse_key_hex, to_hex, ula_from_key};
+use anyhow::{Context, Result};
+use mechanics::ids::DeviceId;
+
+use netstack::carry::{Config, Peer};
+use netstack::{parse_key_hex, ula_from_key, LocalNet, Network};
 
 const DEFAULT_DEV: &str = "lait0";
-const DEFAULT_LISTEN: &str = "0.0.0.0:51820";
-// A TUN read buffer larger than any plausible interface MTU.
-const MTU_CEILING: usize = 65_535;
 
-struct Args {
+struct Cli {
     seed: [u8; 32],
     dev: String,
-    listen: SocketAddr,
-    peers: Vec<(Ipv6Addr, SocketAddr)>,
+    network: Network,
+    peers: Vec<Peer>,
     print_only: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "lait-net — a self-sovereign L3 tunnel between lait devices (Linux)\n\
+        "lait-net — bring up lait's L3 tunnel on a device (Linux)\n\
          \n\
          USAGE:\n\
-         \x20 lait-net --seed <64-hex> [--dev <name>] [--listen <ip:port>]\n\
-         \x20          [--peer <host:port>=<pubkey-64-hex>]... [--print]\n\
+         \x20 lait-net --seed <64-hex> [--dev <name>] [--network public|local|isolated]\n\
+         \x20          [--relay <url>]... [--peer <pubkey-64-hex>[@<addr>[,<addr>]]]... [--print]\n\
          \n\
-         Each node's tunnel address is fd00::/8 derived from its key. Give each\n\
-         peer its UDP endpoint and its public key; the address follows. Needs\n\
-         CAP_NET_ADMIN (run with sudo). Not encrypted yet — use a trusted link."
+         Each node's tunnel address and PeerId both come from its key. Name each\n\
+         peer by public key; its fd00::/8 address follows. Under `isolated` give\n\
+         each peer a direct address; `public` resolves by discovery; `local`\n\
+         rendezvous through the `--relay` you supply. Needs CAP_NET_ADMIN (sudo).\n\
+         The carry is encrypted (QUIC)."
     );
     std::process::exit(2);
 }
 
-fn parse_args() -> Args {
+fn fail(message: &str) -> ! {
+    eprintln!("lait-net: {message}");
+    std::process::exit(2);
+}
+
+fn parse_peer(spec: &str) -> Result<Peer> {
+    let (key_hex, addrs) = match spec.split_once('@') {
+        Some((key, rest)) => (key, Some(rest)),
+        None => (spec, None),
+    };
+    let key = parse_key_hex(key_hex).context("peer key must be 64 hex characters")?;
+    let direct = match addrs {
+        Some(list) => list
+            .split(',')
+            .map(|a| {
+                a.parse::<SocketAddr>()
+                    .context("peer address must be host:port")
+            })
+            .collect::<Result<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    Ok(Peer {
+        id: DeviceId::from_key_bytes(&key),
+        ula: ula_from_key(&key),
+        direct,
+    })
+}
+
+fn parse_cli() -> Cli {
     let mut seed: Option<[u8; 32]> = None;
     let mut dev = DEFAULT_DEV.to_string();
-    let mut listen = DEFAULT_LISTEN.to_string();
+    let mut network: Option<String> = None;
+    let mut relays: Vec<String> = Vec::new();
     let mut peers = Vec::new();
     let mut print_only = false;
 
@@ -64,22 +95,16 @@ fn parse_args() -> Args {
                 );
             }
             "--dev" => dev = argv.next().unwrap_or_else(|| fail("--dev needs a value")),
-            "--listen" => {
-                listen = argv
-                    .next()
-                    .unwrap_or_else(|| fail("--listen needs a value"))
+            "--network" => {
+                network = Some(
+                    argv.next()
+                        .unwrap_or_else(|| fail("--network needs a value")),
+                );
             }
+            "--relay" => relays.push(argv.next().unwrap_or_else(|| fail("--relay needs a value"))),
             "--peer" => {
                 let spec = argv.next().unwrap_or_else(|| fail("--peer needs a value"));
-                let (endpoint, key_hex) = spec
-                    .split_once('=')
-                    .unwrap_or_else(|| fail("--peer must be <host:port>=<pubkey-hex>"));
-                let udp: SocketAddr = endpoint
-                    .parse()
-                    .unwrap_or_else(|_| fail("--peer endpoint must be host:port"));
-                let key = parse_key_hex(key_hex)
-                    .unwrap_or_else(|| fail("--peer key must be 64 hex characters"));
-                peers.push((ula_from_key(&key), udp));
+                peers.push(parse_peer(&spec).unwrap_or_else(|error| fail(&format!("{error:#}"))));
             }
             "--print" => print_only = true,
             "-h" | "--help" => usage(),
@@ -88,87 +113,72 @@ fn parse_args() -> Args {
     }
 
     let seed = seed.unwrap_or_else(|| fail("--seed is required"));
-    let listen = listen
-        .parse()
-        .unwrap_or_else(|_| fail("--listen must be ip:port"));
-    Args {
+    let network = match network.as_deref() {
+        None | Some("isolated") => Network::Isolated,
+        Some("public") => Network::Public,
+        Some("local") => {
+            if relays.is_empty() {
+                fail("--network local needs at least one --relay <url>");
+            }
+            Network::Local(LocalNet { relays })
+        }
+        Some(other) => fail(&format!(
+            "unknown --network '{other}' (public|local|isolated)"
+        )),
+    };
+
+    Cli {
         seed,
         dev,
-        listen,
+        network,
         peers,
         print_only,
     }
 }
 
-fn fail(message: &str) -> ! {
-    eprintln!("lait-net: {message}");
-    std::process::exit(2);
-}
-
-fn main() -> std::io::Result<()> {
-    let args = parse_args();
-    let device = mechanics::actor::device_from_seed(&args.seed);
-    let pubkey = device
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = parse_cli();
+    let device = mechanics::actor::device_from_seed(&cli.seed);
+    let address = device
         .key_bytes()
+        .map(|key| ula_from_key(&key))
         .expect("a seeded device carries an endpoint key");
-    let address = ula_from_key(&pubkey);
 
-    println!("device  {}", device.as_str());
-    println!("pubkey  {}", to_hex(&pubkey));
+    // The device id string is the hex of its public key — its pubkey and its
+    // name are one value.
+    println!("pubkey  {}", device.as_str());
     println!("address {address}");
-    for (peer_addr, peer_udp) in &args.peers {
-        println!("peer    {peer_addr} via {peer_udp}");
+    for peer in &cli.peers {
+        let via = if peer.direct.is_empty() {
+            "discovery".to_string()
+        } else {
+            peer.direct
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        println!("peer    {} via {via}", peer.ula);
     }
-    if args.print_only {
+    if cli.print_only {
         return Ok(());
     }
 
-    let (mut tun_reader, actual) = lait_net::tun::open(&args.dev)?;
-    let peer_addrs: Vec<Ipv6Addr> = args.peers.iter().map(|(addr, _)| *addr).collect();
-    lait_net::tun::configure(&actual, address, &peer_addrs)?;
-    println!("interface {actual} up");
+    let (tun_reader, actual) = netstack::tun::open(&cli.dev).context("open TUN")?;
+    let peer_addrs: Vec<Ipv6Addr> = cli.peers.iter().map(|peer| peer.ula).collect();
+    netstack::tun::configure(&actual, address, &peer_addrs).context("configure TUN")?;
+    let tun_writer = tun_reader.try_clone().context("clone TUN handle")?;
+    println!("interface {actual} up; carrying over lait transport");
 
-    let routes: HashMap<Ipv6Addr, SocketAddr> = args.peers.iter().copied().collect();
-    let socket = Arc::new(UdpSocket::bind(args.listen)?);
-    let mut tun_writer = tun_reader.try_clone()?;
-
-    // Inbound: a datagram from a peer is a raw IP packet; write it to the TUN.
-    let inbound = {
-        let socket = Arc::clone(&socket);
-        std::thread::spawn(move || -> std::io::Result<()> {
-            let mut buf = vec![0u8; MTU_CEILING];
-            loop {
-                let (n, _from) = socket.recv_from(&mut buf)?;
-                // A short write to a TUN would corrupt a packet; treat it as fatal.
-                tun_writer.write_all(&buf[..n])?;
-            }
-        })
-    };
-
-    // Outbound: a packet leaving the TUN is sent to the peer that owns its
-    // destination address. A packet for an unknown destination is dropped.
-    let outbound = std::thread::spawn(move || -> std::io::Result<()> {
-        let mut buf = vec![0u8; MTU_CEILING];
-        loop {
-            let n = tun_reader.read(&mut buf)?;
-            if n == 0 {
-                return Ok(());
-            }
-            if let Some(dest) = ipv6_destination(&buf[..n]) {
-                if let Some(peer) = routes.get(&dest) {
-                    socket.send_to(&buf[..n], peer)?;
-                }
-            }
-        }
-    });
-
-    match inbound.join() {
-        Ok(result) => result?,
-        Err(_) => return Err(std::io::Error::other("inbound thread panicked")),
-    }
-    match outbound.join() {
-        Ok(result) => result?,
-        Err(_) => return Err(std::io::Error::other("outbound thread panicked")),
-    }
-    Ok(())
+    netstack::carry::run(
+        Config {
+            seed: cli.seed,
+            network: cli.network,
+            peers: cli.peers,
+        },
+        tun_reader,
+        tun_writer,
+    )
+    .await
 }

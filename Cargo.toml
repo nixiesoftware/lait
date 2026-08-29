@@ -4,6 +4,7 @@ members = [
     "crates/journal",
     "crates/lait-net",
     "crates/mechanics",
+    "crates/netstack",
     "crates/mediabox",
     "crates/fabric",
     "crates/addressbook",

@@ -3,10 +3,8 @@ name = "lait-net"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
-description = "A self-sovereign L3 tunnel for a lait Space: a virtual IPv6 interface addressed by device key. Linux-first prototype."
+description = "A thin runnable front over `netstack`: bring up lait's L3 tunnel on a device. Linux-first."
 license = "PolyForm-Noncommercial-1.0.0"
-# Not published: this is lait's networking boundary made runnable, a prototype
-# of the packet layer, not a library surface.
 publish = false
 
 [lints]
@@ -17,12 +15,11 @@ name = "lait-net"
 path = "src/main.rs"
 
 [dependencies]
-# The address of a device is derived from its identity: a lait DeviceId is an
-# ed25519 key, and its tunnel address is a hash of that key. No coordinator
-# hands out addresses; the key is the address.
+# The boundary this binary fronts. It names no transport type of its own —
+# netstack owns the addressing, the TUN seam, and the carry; this parses args
+# and calls it, exactly as `lait-relay` fronts `comms::relay`.
+netstack = { path = "../netstack" }
+# Identity: turn a seed into a device, and a peer's public key into its id.
 mechanics = { path = "../mechanics" }
-blake3 = "1"
-
-# The TUN interface is a raw ioctl on Linux and nothing anywhere else yet.
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
