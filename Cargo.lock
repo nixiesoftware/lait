@@ -3858,6 +3858,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lait-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mechanics",
+ "netstack",
+ "tokio",
+]
+
+[[package]]
 name = "lait-post"
 version = "0.7.8"
 dependencies = [
@@ -4549,6 +4559,18 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
+ "tokio",
+]
+
+[[package]]
+name = "netstack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "comms",
+ "libc",
+ "mechanics",
  "tokio",
 ]
 
