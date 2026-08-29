@@ -143,7 +143,6 @@ const RUN_EVENT_VERSION: u8 = 2;
 const RUN_EVENT_ID_CONTEXT: &str = "lait.exec.run-event.v1";
 const RUN_ID_DOMAIN: &[u8] = b"lait/exec/run-id/1\0";
 const ACTIVE_RUN_BODY_DOMAIN: &[u8] = b"lait/exec/active-body/1\0";
-const ATTEMPT_ID_DOMAIN: &[u8] = b"lait/exec/attempt-id/1\0";
 const INPUT_DIGEST_CONTEXT: &str = "lait.exec.input.v1";
 const QUERY_GRANTS_DIGEST_DOMAIN: &[u8] = b"lait/exec/query-grants/1\0";
 const COMMAND_DIGEST_CONTEXT: &str = "lait.exec.command.v1";
@@ -2748,6 +2747,21 @@ opaque_id!(
     "The stable identity of one physical Attempt under a Run."
 );
 
+impl AttemptId {
+    /// An Attempt is named by its own signed `Leased` event: the event's
+    /// identity, truncated to 128 bits, is the Attempt id. Two Stations that
+    /// race the same Run sign different `Leased` events — different
+    /// predecessors, station, and device — so they mint different Attempts
+    /// with no shared counter to collide on, and a retry differs from its
+    /// predecessor by the heads it advances from. This is the fencing token,
+    /// the idempotency key, and the incarnation at once.
+    pub fn of_event(event: EventId) -> Self {
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&event.as_bytes()[..16]);
+        Self(id)
+    }
+}
+
 /// Deterministic sparse marker key for one unresolved Run. The marker value
 /// carries the canonical RunId; the derived BodyId prevents it from colliding
 /// with the Run's immutable identity Body in the same World namespace.
@@ -2772,22 +2786,6 @@ opaque_id!(
     LeaseId,
     "The stable identity of one committed Service Role lease."
 );
-
-/// A non-zero fencing epoch carried by one [`Try`] intent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Fence(u64);
-
-impl Fence {
-    /// Wrap one fencing epoch. [`Try::validate`] rejects zero.
-    pub const fn from_u64(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Return the canonical integer epoch.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-}
 
 /// Initial material committed by one [`Start`] intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2899,7 +2897,6 @@ pub struct Started {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Leased {
     pub run: RunId,
-    pub attempt: AttemptId,
     pub station: StationKey,
     pub station_epoch: StationEpoch,
     pub executor: ActorId,
@@ -2912,7 +2909,6 @@ pub struct Leased {
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
-    pub fence: Fence,
 }
 
 /// An executor's durable claim that one admitted Attempt began.
@@ -3079,11 +3075,12 @@ impl RunEvent {
         }
     }
 
-    /// The physical Attempt named by this event, when it names one.
-    pub const fn attempt(&self) -> Option<AttemptId> {
+    /// The physical Attempt named by this event, when it names one. A
+    /// `Leased` event names the Attempt it creates: its own identity.
+    pub fn attempt(&self) -> Option<AttemptId> {
         match &self.kind {
             RunEventKind::Started(_) | RunEventKind::CancelAsked(_) => None,
-            RunEventKind::Leased(event) => Some(event.attempt),
+            RunEventKind::Leased(_) => self.id().ok().map(AttemptId::of_event),
             RunEventKind::Began(event) => Some(event.attempt),
             RunEventKind::Saved(event) => Some(event.attempt),
             RunEventKind::Returned(event) => Some(event.attempt),
@@ -3155,7 +3152,6 @@ impl RunEvent {
                     limits: event.limits,
                     lease: event.lease.clone(),
                     checkpoint: event.checkpoint.clone(),
-                    fence: event.fence,
                 }
                 .validate()
                 .map_err(|_| Invalid::InvalidEvent("leased"))?;
@@ -3419,7 +3415,6 @@ pub struct Attempt {
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
-    pub fence: Fence,
     pub began: Vec<Fact<Began>>,
     pub checkpoints: Vec<Fact<Saved>>,
     pub outcomes: Vec<Outcome>,
@@ -3748,7 +3743,7 @@ impl Attempt {
     fn from_leased(event: &RunEvent, leased: &Leased) -> Result<Self, Invalid> {
         Ok(Self {
             run: leased.run,
-            id: leased.attempt,
+            id: AttemptId::of_event(event.id()?),
             leased_event: event.id()?,
             leased_predecessors: event.predecessors.clone(),
             station: leased.station.clone(),
@@ -3763,7 +3758,6 @@ impl Attempt {
             limits: leased.limits,
             lease: leased.lease.clone(),
             checkpoint: leased.checkpoint.clone(),
-            fence: leased.fence,
             began: Vec::new(),
             checkpoints: Vec::new(),
             outcomes: Vec::new(),
@@ -3829,7 +3823,7 @@ impl Run {
         for event in events {
             if let RunEventKind::Leased(leased) = &event.kind {
                 let attempt = Attempt::from_leased(event, leased)?;
-                if attempts.insert(leased.attempt, attempt).is_some() {
+                if attempts.insert(attempt.id, attempt).is_some() {
                     return Err(Invalid::InvalidEvent("duplicate attempt"));
                 }
             }
@@ -4205,36 +4199,6 @@ pub fn derive_run_id(
     let mut run = [0u8; 16];
     run.copy_from_slice(&digest.as_bytes()[..16]);
     RunId::from_bytes(run)
-}
-
-/// Derive one stable physical Attempt identity from its Run and the complete
-/// persistent-idempotency scope of the control command that admitted it.
-#[allow(
-    clippy::indexing_slicing,
-    reason = "BLAKE3 output is a fixed 32-byte array and AttemptId deliberately retains its first 16 bytes"
-)]
-pub fn derive_attempt_id(
-    run: RunId,
-    device: &DeviceId,
-    request: [u8; 16],
-    command: u32,
-) -> AttemptId {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(ATTEMPT_ID_DOMAIN);
-    hasher.update(&run.as_bytes());
-    let device = device.as_str().as_bytes();
-    hasher.update(
-        &u32::try_from(device.len())
-            .unwrap_or(u32::MAX)
-            .to_be_bytes(),
-    );
-    hasher.update(device);
-    hasher.update(&request);
-    hasher.update(&command.to_be_bytes());
-    let digest = hasher.finalize();
-    let mut attempt = [0u8; 16];
-    attempt.copy_from_slice(&digest.as_bytes()[..16]);
-    AttemptId::from_bytes(attempt)
 }
 
 /// Derive the reserved Body identity that holds one published Build envelope.
@@ -4764,7 +4728,6 @@ pub struct Try {
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
-    pub fence: Fence,
 }
 
 fn validate_resources(resources: &[Resource], owner: &'static str) -> Result<(), Invalid> {
@@ -4999,9 +4962,6 @@ impl Try {
                 return Err(Invalid::InvalidTry("checkpoint"));
             }
         }
-        if self.fence.as_u64() == 0 {
-            return Err(Invalid::InvalidTry("fence"));
-        }
         Ok(())
     }
 
@@ -5047,14 +5007,6 @@ impl Try {
             checkpoint_bytes: run.started.limits.checkpoint_bytes,
             wall_millis: run.started.limits.wall_millis,
         };
-        let fence = run
-            .attempts
-            .iter()
-            .map(|attempt| attempt.fence.as_u64())
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
         let intent = Self {
             run: run.id,
             build: run.started.build,
@@ -5064,7 +5016,6 @@ impl Try {
             limits,
             lease: None,
             checkpoint: None,
-            fence: Fence::from_u64(fence),
         };
         intent.validate_with(run.started.limits)?;
         Ok(intent)
@@ -5492,7 +5443,7 @@ mod tests {
         started.world_implementation = [0x11; 32];
         let root = RunEvent::started(started).unwrap();
         let run = root.run();
-        let mut leased_event = leased_event(run, attempt(1), root.id().unwrap(), 0x63);
+        let mut leased_event = leased_event(run, root.id().unwrap(), 0x63);
         {
             let RunEventKind::Leased(leased) = &mut leased_event.kind else {
                 unreachable!("helper constructs a lease")
@@ -5814,8 +5765,7 @@ mod tests {
         let space = started.space.clone();
         let device = started.device.clone();
         let root = RunEvent::started(started).unwrap();
-        let attempt = attempt(0x91);
-        let mut leased = leased_event(run, attempt, root.id().unwrap(), 0x63);
+        let mut leased = leased_event(run, root.id().unwrap(), 0x63);
         let (executor, executor_device) = {
             let RunEventKind::Leased(value) = &mut leased.kind else {
                 unreachable!("helper constructs a lease")
@@ -5823,6 +5773,8 @@ mod tests {
             value.lease = None;
             (value.executor.clone(), value.device.clone())
         };
+        // The Attempt is named by the (now finalized) lease event itself.
+        let attempt = AttemptId::of_event(leased.id().unwrap());
         let began = RunEvent::new(
             vec![leased.id().unwrap()],
             RunEventKind::Began(Began {
@@ -5974,11 +5926,10 @@ mod tests {
                 epoch: 4,
             }),
             checkpoint: None,
-            fence: Fence::from_u64(5),
         }
     }
 
-    fn leased_event(run: RunId, attempt: AttemptId, predecessor: EventId, station: u8) -> RunEvent {
+    fn leased_event(run: RunId, predecessor: EventId, station: u8) -> RunEvent {
         let mut intent = try_intent();
         intent.run = run;
         let offer = intent.offer.as_mut().expect("test offer");
@@ -5989,7 +5940,6 @@ mod tests {
             vec![predecessor],
             RunEventKind::Leased(Leased {
                 run,
-                attempt,
                 station: offer.station.clone(),
                 station_epoch: offer.station_epoch,
                 executor: ActorId::from_incept_hash(&"b".repeat(64)),
@@ -6002,7 +5952,6 @@ mod tests {
                 limits: intent.limits,
                 lease: intent.lease,
                 checkpoint: intent.checkpoint,
-                fence: intent.fence,
             }),
         )
         .unwrap()
@@ -6368,7 +6317,8 @@ mod tests {
     fn context_exposes_only_authenticated_attempt_coordinates_and_bounds() {
         let root = RunEvent::started(started()).unwrap();
         let run_id = root.run();
-        let leased = leased_event(run_id, attempt(1), root.id().unwrap(), 0x63);
+        let leased = leased_event(run_id, root.id().unwrap(), 0x63);
+        let attempt = AttemptId::of_event(leased.id().unwrap());
         let projection = Run::project(&[root, leased]).unwrap();
         let mut intent = start();
         intent.service = None;
@@ -6378,7 +6328,7 @@ mod tests {
 
         assert_eq!(context.world().as_str(), "com.example.product");
         assert_eq!(context.run(), run_id);
-        assert_eq!(context.attempt(), attempt(1));
+        assert_eq!(context.attempt(), attempt);
         assert_eq!(context.spec(), &schema("check", 1));
         assert_eq!(context.input_inline(), [1, 2, 3]);
         assert_eq!(context.input_content(), [content(0x50)]);
@@ -6543,7 +6493,6 @@ mod tests {
         let offer = intent.offer.clone().expect("test offer");
         let leased = Leased {
             run,
-            attempt: attempt(1),
             station: offer.station,
             station_epoch: offer.station_epoch,
             executor: actor.clone(),
@@ -6556,7 +6505,6 @@ mod tests {
             limits: intent.limits,
             lease: intent.lease,
             checkpoint: intent.checkpoint,
-            fence: intent.fence,
         };
         let kinds = [
             RunEventKind::Started(started()),
@@ -6717,10 +6665,10 @@ mod tests {
         let root = RunEvent::started(started()).unwrap();
         let run = root.run();
         let root_id = root.id().unwrap();
-        let first_attempt = attempt(1);
-        let second_attempt = attempt(2);
-        let first_lease = leased_event(run, first_attempt, root_id, 0x51);
-        let second_lease = leased_event(run, second_attempt, root_id, 0x52);
+        let first_lease = leased_event(run, root_id, 0x51);
+        let second_lease = leased_event(run, root_id, 0x52);
+        let first_attempt = AttemptId::of_event(first_lease.id().unwrap());
+        let second_attempt = AttemptId::of_event(second_lease.id().unwrap());
         let first_return = returned_event(run, first_attempt, first_lease.id().unwrap(), 0x61);
         let second_return = returned_event(run, second_attempt, second_lease.id().unwrap(), 0x62);
         let actor = ActorId::from_incept_hash(&"c".repeat(64));
@@ -6758,17 +6706,27 @@ mod tests {
 
         let projection = Run::project(&events).unwrap();
         assert_eq!(projection.id, run);
-        assert_eq!(
+        // Attempts sort by their content-hash identity, not insertion order,
+        // so look each up by id rather than by position.
+        let by_id = |id| {
             projection
                 .attempts
                 .iter()
-                .map(|attempt| attempt.id)
-                .collect::<Vec<_>>(),
-            vec![first_attempt, second_attempt]
-        );
-        assert_eq!(projection.attempts[0].outcomes.len(), 1);
-        assert_eq!(projection.attempts[0].outcomes[0].output_digest, [0x61; 32]);
-        assert_eq!(projection.attempts[1].outcomes.len(), 1);
+                .find(|attempt| attempt.id == id)
+                .expect("attempt present")
+        };
+        let mut ids = projection
+            .attempts
+            .iter()
+            .map(|attempt| attempt.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut want = vec![first_attempt, second_attempt];
+        want.sort_unstable();
+        assert_eq!(ids, want);
+        assert_eq!(by_id(first_attempt).outcomes.len(), 1);
+        assert_eq!(by_id(first_attempt).outcomes[0].output_digest, [0x61; 32]);
+        assert_eq!(by_id(second_attempt).outcomes.len(), 1);
         assert_eq!(projection.accepted.len(), 2);
         assert!(projection
             .accepted
@@ -6828,14 +6786,15 @@ mod tests {
             .unwrap()
             .is_unresolved());
 
-        let lease = leased_event(run, attempt(1), root_id, 0x51);
+        let lease = leased_event(run, root_id, 0x51);
+        let lease_attempt = AttemptId::of_event(lease.id().unwrap());
         let actor = ActorId::from_incept_hash(&"b".repeat(64));
         let device = mechanics::actor::device_from_seed(&[0x52; 32]);
         let attempt_cancelled = RunEvent::new(
             vec![lease.id().unwrap()],
             RunEventKind::Cancelled(Cancelled {
                 run,
-                attempt: Some(attempt(1)),
+                attempt: Some(lease_attempt),
                 actor: actor.clone(),
                 device: device.clone(),
             }),
@@ -6935,8 +6894,8 @@ mod tests {
         let root = RunEvent::started(started()).unwrap();
         let run = root.run();
         let root_id = root.id().unwrap();
-        let attempt_id = attempt(1);
-        let lease = leased_event(run, attempt_id, root_id, 0x51);
+        let lease = leased_event(run, root_id, 0x51);
+        let attempt_id = AttemptId::of_event(lease.id().unwrap());
         let first_return = returned_event(run, attempt_id, lease.id().unwrap(), 0x61);
         let second_return = returned_event(run, attempt_id, lease.id().unwrap(), 0x62);
         assert_eq!(
@@ -6961,10 +6920,14 @@ mod tests {
             Err(Invalid::InvalidEvent("choice without outcome"))
         );
 
-        let duplicate = leased_event(run, attempt_id, root_id, 0x52);
+        // Attempt identity is now the lease event's identity, so the only
+        // duplicate Attempt is the very same signed event twice — caught as a
+        // duplicate event before the attempt map is even built. A different
+        // Station would mint a different event id, hence a distinct Attempt.
+        let duplicate = lease.clone();
         assert_eq!(
             Run::project(&[root, lease, duplicate]),
-            Err(Invalid::InvalidEvent("duplicate attempt"))
+            Err(Invalid::InvalidEvent("duplicate event"))
         );
     }
 
@@ -6980,8 +6943,8 @@ mod tests {
         let root = RunEvent::started(bounded).unwrap();
         let run = root.run();
         let root_id = root.id().unwrap();
-        let first = leased_event(run, attempt(1), root_id, 0x51);
-        let second = leased_event(run, attempt(2), root_id, 0x52);
+        let first = leased_event(run, root_id, 0x51);
+        let second = leased_event(run, root_id, 0x52);
         assert_eq!(
             Run::project(&[root, first, second]),
             Err(Invalid::InvalidEvent("attempts"))
@@ -7407,7 +7370,7 @@ mod tests {
         assert_eq!(Cmd::decode_canonical(&intent_bytes), Ok(intent));
         assert_eq!(
             blake3::hash(&intent_bytes).to_hex().as_str(),
-            "6c8a8aa2e01f956196d7e0516ec1bd0c94dd81ffa0fcac9262b44f6437e9fca9"
+            "7a5aa8cce596bb0ce2657a5c2ea544026b7e731a08455e4f117376624e6e3666"
         );
     }
 
@@ -7468,10 +7431,6 @@ mod tests {
         station_only.offer = None;
         station_only.enforcement = None;
         assert_eq!(station_only.validate(), Ok(()));
-
-        let mut no_fence = try_intent();
-        no_fence.fence = Fence::from_u64(0);
-        assert_eq!(no_fence.validate(), Err(Invalid::InvalidTry("fence")));
 
         let mut cross_build_checkpoint = try_intent();
         cross_build_checkpoint.checkpoint = Some(CheckpointRef {

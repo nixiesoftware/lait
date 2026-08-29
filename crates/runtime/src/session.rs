@@ -3621,6 +3621,9 @@ struct RuntimeEffect {
     content_refs: Vec<(BodyKey, Vec<replica::content::ContentRef>)>,
     bodies: Vec<BodyKey>,
     demands: Vec<Vec<u8>>,
+    /// The Attempt a `Try` in this lowering minted — the identity of its
+    /// committed `Leased` event. `perform` reports it as the Tried step.
+    minted_attempt: Option<crate::exec::AttemptId>,
 }
 
 /// The host's bounded Find delegate for one dispatched Attempt.
@@ -3858,7 +3861,7 @@ fn append_run_event(
     kind: crate::exec::RunEventKind,
     demand: Vec<u8>,
     content: &[replica::content::ContentRef],
-) -> Result<(), Rejection> {
+) -> Result<crate::exec::EventId, Rejection> {
     let next_count = state
         .event_count
         .checked_add(1)
@@ -3895,7 +3898,7 @@ fn append_run_event(
     lowered.demands.push(demand);
     state.event_count = next_count;
     state.heads = vec![event_id];
-    Ok(())
+    Ok(event_id)
 }
 
 fn returned_after_began(attempt: &crate::exec::Attempt) -> bool {
@@ -4174,20 +4177,6 @@ fn lower_exec(
                         return Err(Rejection::ContractViolation);
                     }
                 }
-                let attempt = crate::exec::derive_attempt_id(
-                    intent.run,
-                    &ambient.principal.device,
-                    request,
-                    ordinal,
-                );
-                if state
-                    .run
-                    .attempts
-                    .iter()
-                    .any(|candidate| candidate.id == attempt)
-                {
-                    return Err(Rejection::ContractViolation);
-                }
                 let mut retained = Vec::new();
                 if let Some(enforcement) = intent.enforcement {
                     if snapshot.content_descriptor(&enforcement).is_none() {
@@ -4200,13 +4189,12 @@ fn lower_exec(
                 }
                 retained.sort_unstable();
                 retained.dedup();
-                append_run_event(
+                let leased_event = append_run_event(
                     &mut lowered,
                     state,
                     &ambient.world,
                     crate::exec::RunEventKind::Leased(crate::exec::Leased {
                         run: intent.run,
-                        attempt,
                         station: ambient.principal.station.clone(),
                         station_epoch: ambient.epoch,
                         executor: ambient.principal.actor.clone(),
@@ -4219,11 +4207,21 @@ fn lower_exec(
                         limits: intent.limits,
                         lease: intent.lease.clone(),
                         checkpoint: intent.checkpoint.clone(),
-                        fence: intent.fence,
                     }),
                     spec.access.control.clone(),
                     &retained,
                 )?;
+                // The Attempt is named by the Leased event just appended.
+                let minted = crate::exec::AttemptId::of_event(leased_event);
+                if state
+                    .run
+                    .attempts
+                    .iter()
+                    .any(|candidate| candidate.id == minted)
+                {
+                    return Err(Rejection::ContractViolation);
+                }
+                lowered.minted_attempt = Some(minted);
                 state.staged_attempts = state
                     .staged_attempts
                     .checked_add(1)
@@ -4396,7 +4394,7 @@ fn work_reply(
 
 /// Derive a new physical Attempt from scheduling coordinates that are already
 /// durable on the Run. Work callers select product intent (continue or resume),
-/// never an Offer, fence, enforcement artifact, or Attempt limit.
+/// never an Offer, enforcement artifact, or Attempt limit.
 ///
 /// A Started-only Run cannot cross this seam: the first Attempt is scheduling
 /// truth and has not been committed yet. Reusing a prior Attempt is safe only
@@ -4464,7 +4462,7 @@ fn continuation_try(
                 .attempts
                 .iter()
                 .filter(terminal)
-                .max_by_key(|attempt| (attempt.fence, attempt.leased_event))
+                .max_by_key(|attempt| attempt.leased_event)
                 .ok_or(crate::exec::WorkRefusal::Unsupported(
                     "this Run has no completed Attempt whose scheduling coordinates can be continued",
                 ))?;
@@ -4511,17 +4509,6 @@ fn continuation_try(
             "service-backed work requires a renewed Role lease before it can continue",
         ));
     }
-    let fence = run
-        .attempts
-        .iter()
-        .map(|attempt| attempt.fence.as_u64())
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .filter(|fence| *fence != 0)
-        .ok_or(crate::exec::WorkRefusal::Unsupported(
-            "the Run's fencing epoch is exhausted",
-        ))?;
     Ok(crate::exec::Try {
         run: run_id,
         build: run.started.build,
@@ -4536,7 +4523,6 @@ fn continuation_try(
         limits: source.limits,
         lease: None,
         checkpoint,
-        fence: crate::exec::Fence::from_u64(fence),
     })
 }
 
@@ -8286,7 +8272,7 @@ impl Session {
         // Return or handler failure is not another outbox retry.
         run.attempts
             .iter()
-            .max_by_key(|attempt| (attempt.fence, attempt.leased_event))
+            .max_by_key(|attempt| attempt.leased_event)
             .is_some_and(|attempt| {
                 attempt.station == self.principal.station
                     && attempt.outcomes.is_empty()
@@ -8497,15 +8483,7 @@ impl Session {
                 &pinned_reader,
                 &admission,
             )?;
-            let attempt = match &command {
-                crate::exec::Cmd::Try(intent) => Some(crate::exec::derive_attempt_id(
-                    intent.run,
-                    &ambient.principal.device,
-                    operation,
-                    0,
-                )),
-                _ => None,
-            };
+            let attempt = runtime.minted_attempt;
             (principal, ambient, pinned_reader, runtime, attempt)
         };
         self.commit_runtime_effect(&principal, &ambient, operation, digest, label, runtime)?;
@@ -10411,7 +10389,6 @@ mod reservation_tests {
         let epoch = Epoch::from_u64(2);
         let request = [0x42; 16];
         let run = crate::exec::derive_run_id(&space, &world, &device, request, 0);
-        let attempt = crate::exec::AttemptId::from_bytes([0x51; 16]);
         let build = crate::exec::BuildId::from_bytes([0x52; 32]);
         let start = crate::exec::Start {
             spec: crate::exec::SchemaRef {
@@ -10472,7 +10449,6 @@ mod reservation_tests {
             vec![started.id().unwrap()],
             crate::exec::RunEventKind::Leased(crate::exec::Leased {
                 run,
-                attempt,
                 station: station.clone(),
                 station_epoch: epoch,
                 executor: actor.clone(),
@@ -10492,10 +10468,11 @@ mod reservation_tests {
                 },
                 lease: None,
                 checkpoint: None,
-                fence: crate::exec::Fence::from_u64(1),
             }),
         )
         .unwrap();
+        // The prior Attempt is named by its own committed lease event.
+        let attempt = crate::exec::AttemptId::of_event(leased.id().unwrap());
         let began = crate::exec::RunEvent::new(
             vec![leased.id().unwrap()],
             crate::exec::RunEventKind::Began(crate::exec::Began {
@@ -10949,7 +10926,6 @@ mod reservation_tests {
         assert_eq!(offer.station_epoch, ambient.epoch);
         assert_eq!(offer.epoch, 1);
         assert_eq!(intent.enforcement, None);
-        assert_eq!(intent.fence, crate::exec::Fence::from_u64(2));
         assert!(intent.checkpoint.is_none());
 
         let command_request = [0x76; 16];
@@ -10973,15 +10949,14 @@ mod reservation_tests {
             panic!("continue must lower to a visible Attempt");
         };
         let event = crate::exec::RunEvent::decode_canonical(value).unwrap();
+        let attempt = crate::exec::AttemptId::of_event(event.id().unwrap());
         let crate::exec::RunEventKind::Leased(leased) = event.kind else {
             panic!("continue must commit a Leased event");
         };
-        assert_ne!(leased.attempt, prior_attempt);
-        assert_eq!(
-            leased.attempt,
-            crate::exec::derive_attempt_id(run, &ambient.principal.device, command_request, 0)
-        );
-        assert_eq!(leased.fence, crate::exec::Fence::from_u64(2));
+        // A retry advances from new heads, so its lease event — and thus its
+        // Attempt identity — differs from the prior Attempt with no counter.
+        assert_ne!(attempt, prior_attempt);
+        assert_eq!(leased.run, run);
 
         let resume = crate::exec::WorkRequest::Resume {
             world: ambient.world.clone(),
@@ -11028,7 +11003,6 @@ mod reservation_tests {
         let intent = continuation_try(&pinned, std::slice::from_ref(&spec), &ambient, &request)
             .expect("resume should derive a bounded Try from the exact checkpoint");
         assert_eq!(intent.checkpoint, Some(checkpoint.clone()));
-        assert_eq!(intent.fence, crate::exec::Fence::from_u64(2));
 
         let command_request = [0x79; 16];
         let lowered = lower_exec(
@@ -11051,12 +11025,12 @@ mod reservation_tests {
             panic!("resume must lower to a visible Attempt");
         };
         let event = crate::exec::RunEvent::decode_canonical(value).unwrap();
+        let attempt = crate::exec::AttemptId::of_event(event.id().unwrap());
         let crate::exec::RunEventKind::Leased(leased) = event.kind else {
             panic!("resume must commit a Leased event");
         };
-        assert_ne!(leased.attempt, prior_attempt);
+        assert_ne!(attempt, prior_attempt);
         assert_eq!(leased.checkpoint, Some(checkpoint));
-        assert_eq!(leased.fence, crate::exec::Fence::from_u64(2));
     }
 
     #[test]
@@ -11080,7 +11054,6 @@ mod reservation_tests {
             },
             lease: None,
             checkpoint: None,
-            fence: crate::exec::Fence::from_u64(2),
         };
         let retry = lower_exec(
             &[crate::exec::Cmd::Try(intent.clone())],
@@ -11102,14 +11075,11 @@ mod reservation_tests {
             panic!("Try lowers to a lease event");
         };
         let event = crate::exec::RunEvent::decode_canonical(value).unwrap();
+        let attempt = crate::exec::AttemptId::of_event(event.id().unwrap());
         let crate::exec::RunEventKind::Leased(leased) = event.kind else {
             panic!("Try must create a visible Attempt");
         };
-        assert_ne!(leased.attempt, prior_attempt);
-        assert_eq!(
-            leased.attempt,
-            crate::exec::derive_attempt_id(run, &ambient.principal.device, request, 0)
-        );
+        assert_ne!(attempt, prior_attempt);
         assert_eq!(leased.run, run);
         assert_eq!(leased.build, crate::exec::BuildId::from_bytes([0x52; 32]));
         assert!(matches!(
@@ -11226,7 +11196,6 @@ mod reservation_tests {
             },
             lease: None,
             checkpoint: None,
-            fence: crate::exec::Fence::from_u64(2),
         }
     }
 
