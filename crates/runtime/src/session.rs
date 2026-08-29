@@ -2179,6 +2179,11 @@ struct ExecGate {
     resolved_seen: std::collections::BTreeMap<crate::exec::RunId, std::time::Instant>,
     pacing: crate::lifecycle::ExecPacing,
     consent: crate::exec::Consent,
+    /// When this activation first observed each foreign in-flight Attempt, on
+    /// its own clock, and how many of that Attempt's renewals it had seen then.
+    /// A deadline is measured from here; a fresh renewal resets it. Activation
+    /// memory: a restart forgets, which only ever delays a presumption.
+    liveness_observed: std::collections::BTreeMap<crate::exec::AttemptId, (u64, usize)>,
 }
 
 impl StationCore {
@@ -2266,6 +2271,7 @@ impl StationCore {
                 resolved_seen: std::collections::BTreeMap::new(),
                 pacing: crate::lifecycle::ExecPacing::default(),
                 consent: crate::exec::Consent::none(),
+                liveness_observed: std::collections::BTreeMap::new(),
             }),
             exec_tick: tokio::sync::watch::Sender::new(0),
         })
@@ -2289,6 +2295,34 @@ impl StationCore {
 
     pub(crate) fn set_exec_consent(&self, consent: crate::exec::Consent) {
         self.exec.lock_recovering().consent = consent;
+    }
+
+    /// The observer's deadline anchor for one foreign Attempt: the first time
+    /// this activation saw it, on this activation's own clock. A renewal count
+    /// higher than the one recorded resets the anchor to `now` — a fresh
+    /// heartbeat is the executor refuting an incipient suspicion.
+    fn liveness_anchor(
+        &self,
+        attempt: crate::exec::AttemptId,
+        renewals: usize,
+        now_millis: u64,
+    ) -> u64 {
+        let mut gate = self.exec.lock_recovering();
+        let entry = gate
+            .liveness_observed
+            .entry(attempt)
+            .or_insert((now_millis, renewals));
+        if renewals > entry.1 {
+            *entry = (now_millis, renewals);
+        }
+        entry.0
+    }
+
+    fn forget_liveness(&self, attempt: crate::exec::AttemptId) {
+        self.exec
+            .lock_recovering()
+            .liveness_observed
+            .remove(&attempt);
     }
 
     /// Whether this Station performs `spec` for a Run some other device
@@ -4358,7 +4392,9 @@ fn lower_lifecycle_event(
         crate::exec::RunEventKind::Began(_)
         | crate::exec::RunEventKind::Saved(_)
         | crate::exec::RunEventKind::Returned(_)
-        | crate::exec::RunEventKind::Failed(_) => spec.access.control.clone(),
+        | crate::exec::RunEventKind::Failed(_)
+        | crate::exec::RunEventKind::Presumed(_)
+        | crate::exec::RunEventKind::Renewed(_) => spec.access.control.clone(),
         _ => return Err(Rejection::ContractViolation),
     };
     let mut lowered = RuntimeEffect::default();
@@ -8017,6 +8053,83 @@ impl Session {
         mut put_output: impl FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
     ) -> Result<crate::exec::PerformReport, Failure> {
         self.perform_with(package, &mut put_output, None)
+    }
+
+    /// Presume foreign, in-flight Attempts dead once their deadline has
+    /// elapsed on **this** Station's own clock.
+    ///
+    /// A presumption is a suspicion, not a verdict: it is non-terminal, it is
+    /// refuted by the executor returning (or by a renewal, which resets the
+    /// anchor), and it is written only for an Attempt some other device holds.
+    /// The deadline is `wall_millis + grace`, measured from when this
+    /// activation first observed the Attempt — never from a timestamp in the
+    /// record, so no two machines' clocks are ever compared. Unreachability is
+    /// not consulted here at all: elapsed time on the observer's clock is the
+    /// only evidence, and the executor can always overtake it.
+    ///
+    /// The `control` demand is enforced at commit like any other lifecycle
+    /// event: a caller without it presumes nothing.
+    pub fn sweep_liveness(
+        &self,
+        now_millis: u64,
+        grace_millis: u64,
+    ) -> Result<Vec<(crate::exec::RunId, crate::exec::AttemptId)>, Failure> {
+        self.ensure_live()?;
+        let reader = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
+        };
+        let unresolved =
+            crate::exec::scan_unresolved(&reader, &self.world_id).map_err(read_failure)?;
+        let mut presumed = Vec::new();
+        for item in unresolved {
+            for attempt in &item.run.attempts {
+                // Only a third party's in-flight work, and never twice by me.
+                if attempt.station == self.principal.station
+                    || attempt.device == self.principal.device
+                {
+                    continue;
+                }
+                if !attempt.outcomes.is_empty()
+                    || !attempt.failures.is_empty()
+                    || !attempt.cancellations.is_empty()
+                {
+                    continue;
+                }
+                if attempt
+                    .presumptions
+                    .iter()
+                    .any(|fact| fact.value.device == self.principal.device)
+                {
+                    continue;
+                }
+                let anchor =
+                    self.core
+                        .liveness_anchor(attempt.id, attempt.renewals.len(), now_millis);
+                let deadline = attempt.limits.wall_millis.saturating_add(grace_millis);
+                if now_millis.saturating_sub(anchor) <= deadline {
+                    continue;
+                }
+                self.commit_perform_event(
+                    item.run.id,
+                    crate::exec::RunEventKind::Presumed(crate::exec::Presumed {
+                        run: item.run.id,
+                        attempt: attempt.id,
+                        evidence: crate::exec::PresumedEvidence::Deadline,
+                        presumer: self.principal.actor.clone(),
+                        device: self.principal.device.clone(),
+                    }),
+                    &[],
+                    "exec.sweep.presume",
+                )?;
+                self.core.forget_liveness(attempt.id);
+                presumed.push((item.run.id, attempt.id));
+            }
+        }
+        Ok(presumed)
     }
 
     /// [`Self::perform`] with the host's full capability facets: the output

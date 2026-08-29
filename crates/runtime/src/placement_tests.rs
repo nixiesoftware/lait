@@ -175,6 +175,7 @@ fn activate(
     net: &comms::mem::MemNet,
     seed: [u8; 32],
     consent: crate::exec::Consent,
+    actions_per_pass: u32,
 ) -> Station {
     let transport: Arc<dyn comms::Transport> =
         Arc::new(net.peer(mechanics::actor::device_from_seed(&seed)));
@@ -182,7 +183,10 @@ fn activate(
         .unwrap()
         .open(Activation {
             consent,
-            exec: Default::default(),
+            exec: crate::lifecycle::ExecPacing {
+                actions_per_pass,
+                ..Default::default()
+            },
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -356,8 +360,9 @@ fn pair(consent_b: crate::exec::Consent) -> Pair {
         &net,
         STATION_A_SEED,
         crate::exec::Consent::none(),
+        16,
     );
-    let b = activate(&rt_b, &coords, &net, STATION_B_SEED, consent_b);
+    let b = activate(&rt_b, &coords, &net, STATION_B_SEED, consent_b, 16);
     Pair {
         a,
         b,
@@ -518,4 +523,99 @@ fn a_station_not_named_by_a_directed_start_never_leases_it() {
     assert!(inspect(&pair.b, &pair.writer_b, run, [0x09; 16])
         .attempts
         .is_empty());
+}
+
+#[test]
+fn a_third_party_presumes_a_foreign_attempt_past_its_deadline_and_a_return_reconciles() {
+    let (_space, coords) = coordinates();
+    let net = comms::mem::MemNet::new();
+    let rt_a = runtime_at(&temp_root());
+    let rt_b = runtime_at(&temp_root());
+    // A drains one action per pass, so the test can stop it at Began.
+    let a = activate(
+        &rt_a,
+        &coords,
+        &net,
+        STATION_A_SEED,
+        crate::exec::Consent::none(),
+        1,
+    );
+    let b = activate(
+        &rt_b,
+        &coords,
+        &net,
+        STATION_B_SEED,
+        consent_to_implement(),
+        16,
+    );
+    let writer_a = Runtime::identity_from_seed(&WRITER_A_SEED);
+    let writer_b = Runtime::identity_from_seed(&WRITER_B_SEED);
+
+    let run = start_run(&a, &writer_a, b"presume me");
+
+    // A leases, then begins, but never returns: one action per perform pass.
+    let session_a = a.dock(&world_id(), &writer_a).unwrap();
+    let package = echo_package(&build());
+    let tried = session_a
+        .perform(&package, |_| panic!("no content"))
+        .unwrap();
+    assert!(tried
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Tried { .. })));
+    let began = session_a
+        .perform(&package, |_| panic!("no content"))
+        .unwrap();
+    assert!(began
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Began { .. })));
+
+    // B sees A's in-flight Attempt after convergence.
+    b.contact(&station_key(&STATION_A_SEED)).unwrap();
+    let session_b = b.dock(&world_id(), &writer_b).unwrap();
+    let grace = 5_000u64;
+    // wall_millis for the test Spec is 30_000.
+    let base = 1_000_000u64;
+    // First sweep only records the anchor; nothing is past its deadline yet.
+    assert!(session_b.sweep_liveness(base, grace).unwrap().is_empty());
+    // Still inside wall + grace.
+    assert!(session_b
+        .sweep_liveness(base + 20_000, grace)
+        .unwrap()
+        .is_empty());
+    // Past the deadline on B's own clock: B presumes A's Attempt dead.
+    let presumed = session_b
+        .sweep_liveness(base + 30_000 + grace + 1, grace)
+        .unwrap();
+    assert_eq!(presumed.len(), 1, "one foreign Attempt presumed");
+    assert_eq!(presumed[0].0, run);
+    // A second sweep does not presume the same Attempt again.
+    assert!(session_b
+        .sweep_liveness(base + 60_000, grace)
+        .unwrap()
+        .is_empty());
+
+    // A presumption is non-terminal: the Run is still unresolved.
+    let state = inspect(&b, &writer_b, run, [0x21; 16]);
+    assert!(state.unresolved);
+
+    // The executor A finishes anyway: its Outcome reconciles over the
+    // presumption. (Invoke, then Return — two more single-action passes.)
+    a.contact(&station_key(&STATION_B_SEED)).unwrap();
+    // One more single-action pass invokes the handler and returns the Outcome.
+    let returned = session_a
+        .perform(&package, |_| panic!("no content"))
+        .unwrap();
+    assert!(
+        returned
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })),
+        "the executor returns despite being presumed: {returned:?}"
+    );
+    let final_state = inspect(&a, &writer_a, run, [0x22; 16]);
+    assert_eq!(final_state.attempts.len(), 1);
+    assert_eq!(final_state.attempts[0].returned.len(), 1);
+    assert!(final_state.unresolved);
 }
