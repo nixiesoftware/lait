@@ -639,12 +639,17 @@ async fn asset(
         .await
     {
         Ok(compiled) => compiled,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                error = %format_args!("{error:#}"),
+                "display asset request compilation failed"
+            );
             return consumed_refusal(
                 ApiRefusalCode::TemporarilyUnavailable,
                 authorized.next_challenge,
                 StatusCode::SERVICE_UNAVAILABLE,
-            )
+            );
         }
     };
     if parsed.assignment.as_ref() != Some(&compiled.program.assignment)
@@ -849,12 +854,19 @@ async fn live_ticket(
         .await
     {
         Ok(compiled) => compiled,
-        Err(_) => {
+        Err(error) => {
+            // The receiver hears "temporarily unavailable" and retries; the
+            // operator's log is the only place the reason can go.
+            tracing::warn!(
+                device = %authorized.record.device,
+                error = %format_args!("{error:#}"),
+                "display live ticket compilation failed"
+            );
             return consumed_refusal(
                 ApiRefusalCode::TemporarilyUnavailable,
                 authorized.next_challenge,
                 StatusCode::SERVICE_UNAVAILABLE,
-            )
+            );
         }
     };
     let Some(current_item) = parsed.current_item.as_ref() else {
@@ -897,12 +909,18 @@ async fn live_ticket(
         .await
     {
         Ok(grant) => grant,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                item = %current_item,
+                error = %format_args!("{error:#}"),
+                "display live ticket refused"
+            );
             return consumed_refusal(
                 ApiRefusalCode::TemporarilyUnavailable,
                 authorized.next_challenge,
                 StatusCode::SERVICE_UNAVAILABLE,
-            )
+            );
         }
     };
     let suffix = match transport {

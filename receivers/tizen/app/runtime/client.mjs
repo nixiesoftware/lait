@@ -1084,7 +1084,23 @@ export class DisplayReceiverClient {
         if (stagedBytes > this.capabilities.max_staged_bytes || stagedBytes > BOUNDS.maxStagedBytes) {
           throw new ProtocolError("bound_exceeded", "Program exceeds negotiated staging bytes");
         }
-        assets.set(manifest.id, await this.authorizedLiveMedia(item, program));
+        try {
+          assets.set(manifest.id, await this.authorizedLiveMedia(item, program));
+        } catch (error) {
+          if (error instanceof ProtocolError && ["revoked", "re_pair_required", "unsupported"].includes(error.code)) {
+            throw error;
+          }
+          // One clip the coordinator cannot serve yet blanks that clip while it
+          // is current; the frames beside it still draw, and the next cycle
+          // asks for the clip again. Refusing the whole program here left a
+          // screen on "No source" for one clip out of three.
+          assets.set(manifest.id, {
+            asset: manifest,
+            item,
+            session: { failed: true, release() {} },
+            lastError: error,
+          });
+        }
         continue;
       }
       if (item.scene.kind !== "frame") continue;
@@ -1233,20 +1249,23 @@ export class DisplayReceiverClient {
       this.ui.setSourceState(state);
       return;
     }
+    // An item that cannot be drawn is blanked for its own duration and the
+    // program moves on: returning early here left a screen on "Source
+    // unavailable" for as long as one clip out of three could not be served.
     if (item.scene.kind === "frame") {
       const staged = this.staged.get(item.scene.asset.id);
       if (!staged) {
         this.ui.showBlank("host_unavailable", state);
-        return;
+      } else {
+        this.ui.showFrame(staged.url, item.spoken_summary, state);
       }
-      this.ui.showFrame(staged.url, item.spoken_summary, state);
     } else if (item.scene.kind === "media") {
       const staged = this.staged.get(item.scene.manifest.id);
       if (!staged || staged.session.failed || typeof this.ui.showMedia !== "function") {
         this.ui.showBlank("source_unavailable", state);
-        return;
+      } else {
+        this.ui.showMedia(staged.session, item.spoken_summary, state);
       }
-      this.ui.showMedia(staged.session, item.spoken_summary, state);
     } else if (item.scene.kind === "blank") {
       this.ui.showBlank(item.scene.reason, state);
     } else {

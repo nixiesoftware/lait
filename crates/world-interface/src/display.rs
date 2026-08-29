@@ -437,6 +437,20 @@ impl DisplayProjection {
                         Failure::new("rendered display assets exceed their bound")
                     })?;
                 }
+                RenderedScene::StoredFrame(stored) => {
+                    // The bytes are bounded where they are fetched; the record
+                    // is bounded here.
+                    if !descriptor.outputs.contains(&DisplayOutputKind::Frame)
+                        || stored.width == 0
+                        || stored.height == 0
+                        || stored.width > MAX_STORED_FRAME_SIDE
+                        || stored.height > MAX_STORED_FRAME_SIDE
+                    {
+                        return Err(Failure::new(
+                            "rendered display stored frame violates its surface contract",
+                        ));
+                    }
+                }
                 RenderedScene::Media(media) => {
                     if !descriptor.outputs.contains(&DisplayOutputKind::Media) {
                         return Err(Failure::new(
@@ -518,7 +532,24 @@ pub enum DisplayPartialReason {
 pub enum RenderedScene {
     Frame(RenderedFrame),
     Media(RenderedMedia),
+    /// A still image whose bytes live in the content plane. The World has
+    /// the record — content id, type, size — and not the bytes, so it names
+    /// them here and the coordinator fetches and serves them as a frame at
+    /// the image's own size. A World that rasterises draws a `Frame`.
+    StoredFrame(StoredFrame),
     Blank(BlankReason),
+}
+
+/// The longest side a stored still may declare. A screen is drawn at its own
+/// size; a still this large is a mistake, not a picture.
+pub const MAX_STORED_FRAME_SIDE: u32 = 8_192;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFrame {
+    pub content: replica::content::ContentRef,
+    pub media_type: FrameMediaType,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

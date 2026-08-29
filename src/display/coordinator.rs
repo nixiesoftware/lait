@@ -20,7 +20,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use world_interface::display::{
-    DisplayChoice, DisplayProjection, DisplayRequest, DisplaySurfaceId, REQUIRED_WORLD_ACCESS,
+    BlankReason, DisplayChoice, DisplayProjection, DisplayRequest, DisplaySurfaceId,
+    FrameMediaType, RenderedFrame, RenderedScene, StoredFrame, MAX_RENDERED_ASSET_BYTES,
+    REQUIRED_WORLD_ACCESS,
 };
 use world_interface::{
     ClientAccess, ClientFuture, ClientHost, ClientInvocationKind, Failure, HostContentRequest,
@@ -292,6 +294,10 @@ impl DisplayCoordinator {
             ));
         }
 
+        let content_route = ControlRoute::Orbit {
+            address: resolved.address.clone(),
+        };
+        let home = resolved.home.clone();
         let route = ControlRoute::World {
             address: resolved.address,
             world: want.world.as_str().to_string(),
@@ -323,7 +329,86 @@ impl DisplayCoordinator {
         projection
             .validate_for(&surface.descriptor, &request)
             .map_err(adapter_failure)?;
+        self.resolve_stored_frames(projection, &home, &content_route)
+            .await
+    }
+
+    /// A `StoredFrame` names bytes the World has only the record of. They are
+    /// fetched here, once per render and bounded, and checked to be the still
+    /// they claim. What cannot be fetched blanks its own item with a reason —
+    /// one bad entry is one blank, not a program nobody can compile.
+    async fn resolve_stored_frames(
+        &self,
+        mut projection: DisplayProjection,
+        home: &Path,
+        route: &ControlRoute,
+    ) -> Result<DisplayProjection> {
+        for item in &mut projection.program.items {
+            let RenderedScene::StoredFrame(stored) = &item.scene else {
+                continue;
+            };
+            let resource = data_encoding::HEXLOWER.encode(stored.content.as_bytes());
+            item.scene = match self
+                .fetch_stored_frame(home, route, &resource, stored)
+                .await
+            {
+                Ok(frame) => RenderedScene::Frame(frame),
+                Err(error) => {
+                    tracing::warn!(
+                        resource = %resource,
+                        error = %format_args!("{error:#}"),
+                        "stored display frame could not be served"
+                    );
+                    RenderedScene::Blank(BlankReason::SourceUnavailable)
+                }
+            };
+        }
         Ok(projection)
+    }
+
+    async fn fetch_stored_frame(
+        &self,
+        home: &Path,
+        route: &ControlRoute,
+        resource: &str,
+        stored: &StoredFrame,
+    ) -> Result<RenderedFrame> {
+        let total = match crate::control::content_call(
+            home,
+            &crate::control::content_request(
+                route.clone(),
+                crate::control::ContentCall::Stat {
+                    content: resource.to_string(),
+                },
+            ),
+        )
+        .await
+        {
+            Ok((crate::control::ContentReply::ContentStatus { plaintext_len, .. }, _)) => {
+                plaintext_len
+            }
+            Ok((reply, _)) => return Err(anyhow!("stored frame stat refused: {reply:?}")),
+            Err(error) => return Err(error).context("stat stored frame"),
+        };
+        let bound = u64::try_from(MAX_RENDERED_ASSET_BYTES).unwrap_or(u64::MAX);
+        if total == 0 || total > bound {
+            return Err(anyhow!("stored frame is {total} bytes, outside its bound"));
+        }
+        let bytes = self.read_stored(home, route, resource, 0, total).await?;
+        let held = sniff_still(&bytes)
+            .ok_or_else(|| anyhow!("stored frame bytes are not a PNG, JPEG or WebP"))?;
+        if held != stored.media_type {
+            return Err(anyhow!(
+                "stored frame declares {:?} but holds {held:?}",
+                stored.media_type
+            ));
+        }
+        Ok(RenderedFrame {
+            media_type: held,
+            width: stored.width,
+            height: stored.height,
+            bytes,
+        })
     }
 
     /// Render a surface for a screen that is a **member of the Space**, not an
@@ -1121,6 +1206,21 @@ fn adapter_failure(error: Failure) -> anyhow::Error {
         .to_string())
 }
 
+/// The still type the bytes themselves say they are — the declaration on the
+/// record is what the uploader claimed, and a receiver checks the served
+/// content type against the bytes it gets.
+fn sniff_still(bytes: &[u8]) -> Option<FrameMediaType> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(FrameMediaType::Png)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(FrameMediaType::Jpeg)
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some(FrameMediaType::WebP)
+    } else {
+        None
+    }
+}
+
 struct QueryOnlyHost<'a> {
     router: &'a Router,
     route: ControlRoute,
@@ -1221,6 +1321,27 @@ impl ClientHost for QueryOnlyHost<'_> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_stored_still_is_known_by_its_bytes_not_its_record() {
+        use super::sniff_still;
+        use world_interface::display::FrameMediaType;
+        assert_eq!(
+            sniff_still(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            Some(FrameMediaType::Png)
+        );
+        assert_eq!(
+            sniff_still(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 16]),
+            Some(FrameMediaType::Jpeg)
+        );
+        assert_eq!(
+            sniff_still(b"RIFF\x24\0\0\0WEBPVP8 "),
+            Some(FrameMediaType::WebP)
+        );
+        // An MP4 is not a still, whatever its upload was called.
+        assert_eq!(sniff_still(b"\0\0\0\x20ftypisom"), None);
+        assert_eq!(sniff_still(b"RIFF"), None);
+    }
 
     use display_protocol::ids::{DisplayAssignmentId, DisplayProgramId};
     use display_protocol::program::{FreshnessPolicy, StaleAction};

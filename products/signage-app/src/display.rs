@@ -20,7 +20,7 @@ use world_interface::display::{
     DisplayOutputKind, DisplayProjection, DisplayRenderer, DisplayRequest, DisplayResourceId,
     DisplaySurface, DisplaySurfaceDescriptor, DisplaySurfaceId, FrameMediaType, MediaOrigin,
     MediaProtocol, ProgramCycle, RenderedFrame, RenderedMedia, RenderedProgram,
-    RenderedProgramItem, RenderedScene,
+    RenderedProgramItem, RenderedScene, StoredFrame,
 };
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
@@ -269,6 +269,24 @@ impl DisplayRenderer for SignageRenderer {
     }
 }
 
+/// The frame type a stored still is served as, by the type its upload
+/// declared; `None` for anything that is not a still this renderer serves.
+fn still_media_type(mime: &str) -> Option<FrameMediaType> {
+    match mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => Some(FrameMediaType::Png),
+        "image/jpeg" | "image/jpg" => Some(FrameMediaType::Jpeg),
+        "image/webp" => Some(FrameMediaType::WebP),
+        _ => None,
+    }
+}
+
 /// The item's own length, else its entry's, else the default — never open.
 fn item_duration_ms(item: Option<u32>, entry: Option<u32>) -> u32 {
     item.or(entry).unwrap_or(DEFAULT_ITEM_DURATION_MS)
@@ -373,11 +391,31 @@ fn scene(
             height,
             bytes: render_card(title, body, background, foreground, width, height)?,
         }))),
-        MediaSource::Stored { .. } => {
-            Ok(drawn(entry.source.content_ref().map_or(
-                RenderedScene::Blank(BlankReason::Unsupported),
-                |content| media_scene(MediaOrigin::Stored(content)),
-            )))
+        MediaSource::Stored { mime, .. } => {
+            let Some(content) = entry.source.content_ref() else {
+                return Ok(drawn(RenderedScene::Blank(BlankReason::Unsupported)));
+            };
+            // A still is named as a stored frame and a video as media: the
+            // coordinator packages media as a stream, and a PNG handed to it
+            // that way was refused as "not a readable initialization
+            // segment" — once per poll, for as long as the program ran.
+            Ok(drawn(match still_media_type(mime) {
+                Some(media_type) => match (entry.width, entry.height) {
+                    (Some(width), Some(height)) if width > 0 && height > 0 => {
+                        RenderedScene::StoredFrame(StoredFrame {
+                            content,
+                            media_type,
+                            width,
+                            height,
+                        })
+                    }
+                    _ => RenderedScene::Blank(BlankReason::Unsupported),
+                },
+                None if mime.trim().to_ascii_lowercase().starts_with("image/") => {
+                    RenderedScene::Blank(BlankReason::Unsupported)
+                }
+                None => media_scene(MediaOrigin::Stored(content)),
+            }))
         }
         MediaSource::Live { resource } => {
             Ok(drawn(DisplayResourceId::new(resource).map_or(
@@ -807,6 +845,40 @@ mod tests {
     /// A content id in the only shape the upload route writes.
     const REAL_CONTENT_ID: &str =
         "7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a7f3a";
+
+    #[test]
+    fn a_stored_still_is_a_frame_the_coordinator_fetches_and_a_video_is_media() {
+        let mut still = entry(MediaSource::Stored {
+            content: REAL_CONTENT_ID.into(),
+            size: 94_692,
+            mime: "image/png".into(),
+        });
+        still.width = Some(876);
+        still.height = Some(767);
+        let RenderedScene::StoredFrame(stored) = scene(Some(&still), 1920, 1080, 0).unwrap().scene
+        else {
+            panic!("a still is served as a frame, never packaged as a stream");
+        };
+        assert_eq!(stored.media_type, FrameMediaType::Png);
+        assert_eq!((stored.width, stored.height), (876, 767));
+        assert_eq!(Some(stored.content), still.source.content_ref());
+
+        // A still nobody measured cannot be declared; it blanks rather than
+        // being sent as a stream it is not.
+        let mut unmeasured = still.clone();
+        unmeasured.width = None;
+        assert!(matches!(
+            scene(Some(&unmeasured), 1920, 1080, 0).unwrap().scene,
+            RenderedScene::Blank(BlankReason::Unsupported)
+        ));
+        assert_eq!(still_media_type("image/jpeg"), Some(FrameMediaType::Jpeg));
+        assert_eq!(
+            still_media_type("IMAGE/PNG; charset=binary"),
+            Some(FrameMediaType::Png)
+        );
+        assert_eq!(still_media_type("video/mp4"), None);
+        assert_eq!(still_media_type("image/gif"), None);
+    }
 
     #[test]
     fn a_stored_entry_names_its_content_and_is_not_live() {

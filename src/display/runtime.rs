@@ -133,6 +133,13 @@ fn present_view(
                         RenderedScene::Media(_) => DisplayPresentationSceneView::Unsupported {
                             output: "media".into(),
                         },
+                        // Resolved into a frame by the coordinator before a
+                        // projection reaches here.
+                        RenderedScene::StoredFrame(_) => {
+                            DisplayPresentationSceneView::Unsupported {
+                                output: "stored_frame".into(),
+                            }
+                        }
                     },
                 }
             })
