@@ -94,6 +94,8 @@ export interface Failure {
   what: string;
   error: string;
   retryable: boolean;
+  /** The action key this refused, so the surface that asked can answer beside its own control; null for a read. */
+  key: string | null;
 }
 
 export interface Device {
@@ -128,7 +130,8 @@ export interface DisplayPairing { pairing: string; confirmationPhrase: string[];
 export interface IdentifierCustody { slots: string[]; portable: boolean; }
 export interface DisplayRendezvousAssignment { orbit: string; world: string; surface: string; }
 /** A code minted for a television to enter: the site it resolves the coordinator by, then the code. */
-export interface DisplayRendezvous { rendezvous: string; code: string; site: string | null; label: string; assignment: DisplayRendezvousAssignment | null; createdAtUnixMs: number; expiresAtUnixMs: number; }
+export type DisplayRendezvousState = "waiting" | "connecting" | "connected";
+export interface DisplayRendezvous { rendezvous: string; code: string; site: string | null; label: string; assignment: DisplayRendezvousAssignment | null; /** A spent code stays listed a while as the TV it became. */ state: DisplayRendezvousState; device: string | null; createdAtUnixMs: number; expiresAtUnixMs: number; }
 export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; pendingRendezvous: DisplayRendezvous[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
 /** What a code pins its television to once it connects: an assignment without the device. */
 export interface DisplayAssignmentRequest { orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null; }
@@ -917,6 +920,7 @@ function createUnavailableTransport(): ClientTransport {
       what: "Connect to local identity",
       error: "The desktop host did not provide an Astrolabe client bridge.",
       retryable: false,
+      key: null,
     }],
   };
   return {
@@ -1003,6 +1007,8 @@ export const fixtureClientView: ClientView = {
       site: "acme",
       label: "Lobby",
       assignment: { orbit: "orb_fixture", world: "com.lait.signage", surface: "signage.program" },
+      state: "waiting",
+      device: null,
       createdAtUnixMs: 1_755_000_000_000,
       expiresAtUnixMs: 1_755_000_900_000,
     }],

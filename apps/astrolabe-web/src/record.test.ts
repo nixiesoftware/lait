@@ -8,7 +8,7 @@ const settled: ClientView = { ...loadingClientView, loading: false, stale: null,
 describe("the operational bar's rules", () => {
   it("ranks the identity statuses: failures, degradation, absence, health", () => {
     expect(identityStatus({ ...settled, loading: true }).label).toBe("Connecting to local identity");
-    expect(identityStatus({ ...settled, failures: [{ what: "x", error: "y", retryable: true }] }).tone).toBe("error");
+    expect(identityStatus({ ...settled, failures: [{ what: "x", error: "y", retryable: true, key: null }] }).tone).toBe("error");
     expect(identityStatus({ ...settled, stale: { kind: "signalled", reason: "r" } }).label).toBe("Local identity degraded");
     // A degraded device degrades the identity even when nothing is stale.
     expect(identityStatus({
@@ -22,7 +22,7 @@ describe("the operational bar's rules", () => {
   it("chooses one sentence: in-flight, then refusal, then deduped notice", () => {
     expect(activityLine({ ...settled, inFlight: ["open:/"] })).toBe("Starting World…");
     expect(activityLine({ ...settled, inFlight: ["device.stop:d"] })).toBe("Updating device…");
-    expect(activityLine({ ...settled, failures: [{ what: "Stop head", error: "refused", retryable: true }] }))
+    expect(activityLine({ ...settled, failures: [{ what: "Stop head", error: "refused", retryable: true, key: null }] }))
       .toBe("Stop head: refused");
     expect(activityLine({
       ...settled,

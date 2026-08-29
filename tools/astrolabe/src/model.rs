@@ -251,6 +251,10 @@ pub enum StaleReason {
 pub struct Failure {
     pub what: String,
     pub error: ClientError,
+    /// The action this refused, when it was one. A surface that asked can
+    /// answer beside its own control; the next success of the same key
+    /// retires it, so a refusal never outlives what it was about.
+    pub key: Option<String>,
 }
 
 /// Something that worked.
@@ -304,13 +308,16 @@ impl App {
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
                 self.in_flight.remove(&key);
+                // What this key last refused is answered by what it just did.
+                self.failures
+                    .retain(|failure| failure.key.as_deref() != Some(key.as_str()));
                 self.record(outcome);
             }
             Update::Failed { key, what, error } => {
-                if let Some(key) = key {
-                    self.in_flight.remove(&key);
+                if let Some(key) = &key {
+                    self.in_flight.remove(key);
                 }
-                self.fail(what, error);
+                self.fail_keyed(key, what, error);
             }
         }
     }
@@ -602,9 +609,14 @@ impl App {
     }
 
     pub fn fail(&mut self, what: impl Into<String>, error: ClientError) {
+        self.fail_keyed(None, what, error);
+    }
+
+    pub fn fail_keyed(&mut self, key: Option<String>, what: impl Into<String>, error: ClientError) {
         self.failures.push_front(Failure {
             what: what.into(),
             error,
+            key,
         });
         self.failures.truncate(FAILURE_CAPACITY);
     }

@@ -178,7 +178,10 @@ function withDispatchFailure(view: ClientView, what: string, error: unknown, act
   return {
     ...view,
     inFlight: actionKeyToClear === undefined ? view.inFlight : view.inFlight.filter((key) => key !== actionKeyToClear),
-    failures: [{ what, error: error instanceof Error ? error.message : String(error), retryable: true }, ...view.failures],
+    failures: [
+      { what, error: error instanceof Error ? error.message : String(error), retryable: true, key: actionKeyToClear ?? null },
+      ...view.failures.filter((failure) => actionKeyToClear === undefined || failure.key !== actionKeyToClear),
+    ],
   };
 }
 

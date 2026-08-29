@@ -62,6 +62,19 @@ pub struct AssignmentIntent {
     pub expires_at_unix_ms: Option<u64>,
 }
 
+/// Where a code is in its life. A spent code is not gone: it is the
+/// television it became, and a controller watching for that television
+/// needs to see it arrive under the same name it minted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RendezvousState {
+    /// Minted, not yet entered anywhere.
+    Waiting,
+    /// A television entered it and is proving its new key.
+    Connecting { device: DisplayDeviceId },
+    /// The television enrolled.
+    Connected { device: DisplayDeviceId },
+}
+
 /// A code minted for a television to enter, as the controller sees it.
 #[derive(Debug, Clone)]
 pub struct RendezvousView {
@@ -70,6 +83,7 @@ pub struct RendezvousView {
     pub code: String,
     pub label: String,
     pub assignment: Option<AssignmentIntent>,
+    pub state: RendezvousState,
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
 }
@@ -158,6 +172,9 @@ struct PendingPairing {
     /// The assignment a rendezvous promised this receiver, carried here from
     /// the moment the code was spent until enrollment commits it.
     promised: Option<AssignmentIntent>,
+    /// The code that opened this pairing, so its enrollment can be recorded
+    /// against the code the controller is watching.
+    rendezvous: Option<String>,
 }
 
 struct PendingRendezvous {
@@ -166,6 +183,60 @@ struct PendingRendezvous {
     assignment: Option<AssignmentIntent>,
     created_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+    /// Set by the start that spent it; `enrolled` by the completion that
+    /// committed it. A spent code lingers one more lifetime so the
+    /// controller sees the television arrive, then is swept.
+    spent: Option<SpentRendezvous>,
+}
+
+struct SpentRendezvous {
+    device: DisplayDeviceId,
+    enrolled: bool,
+}
+
+impl PendingRendezvous {
+    fn state(&self) -> RendezvousState {
+        match &self.spent {
+            None => RendezvousState::Waiting,
+            Some(SpentRendezvous {
+                device,
+                enrolled: false,
+            }) => RendezvousState::Connecting {
+                device: device.clone(),
+            },
+            Some(SpentRendezvous {
+                device,
+                enrolled: true,
+            }) => RendezvousState::Connected {
+                device: device.clone(),
+            },
+        }
+    }
+
+    /// Whether the controller should still see this code: unspent until it
+    /// expires, spent for one lifetime after that.
+    fn visible(&self, now_unix_ms: u64) -> bool {
+        match self.spent {
+            None => self.expires_at_unix_ms > now_unix_ms,
+            Some(_) => {
+                self.expires_at_unix_ms
+                    .saturating_add(RENDEZVOUS_LIFETIME_MS)
+                    > now_unix_ms
+            }
+        }
+    }
+
+    fn view(&self, rendezvous: RendezvousId) -> RendezvousView {
+        RendezvousView {
+            rendezvous,
+            code: self.code.clone(),
+            label: self.label.clone(),
+            assignment: self.assignment.clone(),
+            state: self.state(),
+            created_at_unix_ms: self.created_at_unix_ms,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+        }
+    }
 }
 
 enum PairingDecision {
@@ -229,8 +300,8 @@ impl DisplayPairingService {
             .checked_add(u64::from(MAX_PAIRING_LIFETIME_MS))
             .ok_or_else(|| anyhow!("display pairing expiry overflow"))?;
         let mut state = self.lock()?;
-        let (decision, promised) = match &request.rendezvous {
-            None => (PairingDecision::Pending, None),
+        let (decision, promised, rendezvous) = match &request.rendezvous {
+            None => (PairingDecision::Pending, None, None),
             // The doorbell carried a secret the controller handed out, which
             // is the assurance the six-word compare buys the other way round.
             // Spending it here — before any answer leaves — is what makes the
@@ -240,22 +311,25 @@ impl DisplayPairingService {
                 let device = random_device_id()?;
                 let proof_key = random_proof_key()?;
                 let enrollment_challenge = random_challenge()?;
-                let held = match state.rendezvous.get(named.as_str()) {
-                    Some(held) if held.expires_at_unix_ms > now_unix_ms => {
-                        state.rendezvous.remove(named.as_str())
-                    }
-                    _ => None,
-                }
-                .ok_or_else(|| anyhow::Error::new(RendezvousRefused))?;
+                let held = state
+                    .rendezvous
+                    .get_mut(named.as_str())
+                    .filter(|held| held.spent.is_none() && held.expires_at_unix_ms > now_unix_ms)
+                    .ok_or_else(|| anyhow::Error::new(RendezvousRefused))?;
+                held.spent = Some(SpentRendezvous {
+                    device: device.clone(),
+                    enrolled: false,
+                });
                 (
                     PairingDecision::Approved {
-                        label: held.label,
+                        label: held.label.clone(),
                         device,
                         proof_key,
                         enrollment_challenge,
                         completed: false,
                     },
-                    held.assignment,
+                    held.assignment.clone(),
+                    Some(named.as_str().to_string()),
                 )
             }
         };
@@ -269,6 +343,7 @@ impl DisplayPairingService {
                 expires_at_unix_ms,
                 decision,
                 promised,
+                rendezvous,
             },
         );
         drop(state);
@@ -363,10 +438,13 @@ impl DisplayPairingService {
             .checked_add(RENDEZVOUS_LIFETIME_MS)
             .ok_or_else(|| anyhow!("display rendezvous expiry overflow"))?;
         let mut state = self.lock()?;
-        state
+        state.rendezvous.retain(|_, held| held.visible(now_unix_ms));
+        let unspent = state
             .rendezvous
-            .retain(|_, held| held.expires_at_unix_ms > now_unix_ms);
-        if state.rendezvous.len() >= MAX_OUTSTANDING_RENDEZVOUS {
+            .values()
+            .filter(|held| held.spent.is_none())
+            .count();
+        if unspent >= MAX_OUTSTANDING_RENDEZVOUS {
             return Err(anyhow!(
                 "this coordinator already holds {MAX_OUTSTANDING_RENDEZVOUS} unspent codes"
             ));
@@ -380,53 +458,41 @@ impl DisplayPairingService {
             }
         };
         let code = group_rendezvous_code(&code).context("group display rendezvous code")?;
-        state.rendezvous.insert(
-            rendezvous.as_str().to_string(),
-            PendingRendezvous {
-                code: code.clone(),
-                label: label.clone(),
-                assignment: assignment.clone(),
-                created_at_unix_ms: now_unix_ms,
-                expires_at_unix_ms,
-            },
-        );
-        Ok(RendezvousView {
-            rendezvous,
+        let held = PendingRendezvous {
             code,
             label,
             assignment,
             created_at_unix_ms: now_unix_ms,
             expires_at_unix_ms,
-        })
+            spent: None,
+        };
+        let view = held.view(rendezvous.clone());
+        state
+            .rendezvous
+            .insert(rendezvous.as_str().to_string(), held);
+        Ok(view)
     }
 
-    /// The codes still waiting to be entered.
+    /// The codes the controller can still see: waiting to be entered, or
+    /// spent and recently become a television.
     pub fn outstanding_rendezvous(&self, now_unix_ms: u64) -> Result<Vec<RendezvousView>> {
         let state = self.lock()?;
         Ok(state
             .rendezvous
             .iter()
-            .filter(|(_, held)| held.expires_at_unix_ms > now_unix_ms)
-            .filter_map(|(id, held)| {
-                Some(RendezvousView {
-                    rendezvous: RendezvousId::parse(id.clone()).ok()?,
-                    code: held.code.clone(),
-                    label: held.label.clone(),
-                    assignment: held.assignment.clone(),
-                    created_at_unix_ms: held.created_at_unix_ms,
-                    expires_at_unix_ms: held.expires_at_unix_ms,
-                })
-            })
+            .filter(|(_, held)| held.visible(now_unix_ms))
+            .filter_map(|(id, held)| Some(held.view(RendezvousId::parse(id.clone()).ok()?)))
             .collect())
     }
 
-    /// Withdraw a code before anything enters it.
+    /// Withdraw a code — before anything enters it, or from the list after
+    /// it has become a television. The television itself is unaffected.
     pub fn revoke_rendezvous(&self, rendezvous: &RendezvousId) -> Result<()> {
         self.lock()?
             .rendezvous
             .remove(rendezvous.as_str())
             .map(|_| ())
-            .ok_or_else(|| anyhow!("display rendezvous is unknown or already spent"))
+            .ok_or_else(|| anyhow!("display rendezvous is unknown"))
     }
 
     pub fn status(&self, request: PairingStatusRequest, now_unix_ms: u64) -> Result<PairingStatus> {
@@ -473,7 +539,7 @@ impl DisplayPairingService {
             return Err(anyhow!("unsupported display protocol major"));
         }
         let mut state = self.lock()?;
-        let (device, was_completed, promised) = {
+        let (device, was_completed, promised, rendezvous) = {
             let pending = state
                 .pairings
                 .get_mut(request.pairing.as_str())
@@ -530,8 +596,19 @@ impl DisplayPairingService {
             } else {
                 pending.promised.take()
             };
-            (device, was_completed, promised)
+            (device, was_completed, promised, pending.rendezvous.clone())
         };
+        // The code the controller is watching becomes the television it
+        // minted: same entry, one state on.
+        if !was_completed {
+            if let Some(spent) = rendezvous
+                .as_deref()
+                .and_then(|id| state.rendezvous.get_mut(id))
+                .and_then(|held| held.spent.as_mut())
+            {
+                spent.enrolled = true;
+            }
+        }
         let next_challenge = random_challenge()?;
         state.challenges.insert(
             device.as_str().to_string(),
@@ -1064,10 +1141,17 @@ mod tests {
         let started = service
             .start(start_request(Some(minted.rendezvous.clone())), 1_002)
             .unwrap();
-        // Spent by its first use: nothing outstanding, and nothing pending
-        // for a person to approve — approval was the code.
-        assert!(service.outstanding_rendezvous(1_003).unwrap().is_empty());
+        // Spent by its first use: nothing pending for a person to approve —
+        // approval was the code — and the code is still listed, as the
+        // television that is now connecting under it.
         assert!(service.pending(1_003).unwrap().is_empty());
+        let listed = service.outstanding_rendezvous(1_003).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(
+            matches!(listed[0].state, RendezvousState::Connecting { .. }),
+            "{:?}",
+            listed[0].state
+        );
         let poll_key = PollKey::parse("22".repeat(32)).unwrap();
         let status_proof = authenticate_pairing_status(&poll_key, &started.pairing).unwrap();
         let PairingStatus::Approved {
@@ -1110,6 +1194,19 @@ mod tests {
             PairingCompleteResponse::Enrolled { .. }
         ));
         assert_eq!(store.device(&device).unwrap().unwrap().label, "Lobby");
+        // And now it is the connected television, under the code's name,
+        // for a while — then swept, so the list is not a history.
+        let listed = service.outstanding_rendezvous(1_006).unwrap();
+        assert_eq!(
+            listed[0].state,
+            RendezvousState::Connected {
+                device: device.clone()
+            }
+        );
+        assert!(service
+            .outstanding_rendezvous(1_000 + 2 * RENDEZVOUS_LIFETIME_MS)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             kept.lock().unwrap().as_slice(),
             &[(device.clone(), "orb_lobby".to_string())]

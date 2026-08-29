@@ -41,7 +41,7 @@ pub use mediabox::{
 };
 pub use pairing::{
     AssignmentIntent, AuthorizationRefusal, AuthorizedDevice, DisplayPairingService,
-    EnrollmentHook, PendingPairingView, RendezvousRefused, RendezvousView,
+    EnrollmentHook, PendingPairingView, RendezvousRefused, RendezvousState, RendezvousView,
 };
 pub use publish::publish_route;
 pub use runtime::DisplayRuntime;

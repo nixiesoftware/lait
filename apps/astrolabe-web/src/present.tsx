@@ -305,7 +305,7 @@ function PresentationChooser({ view, dispatch }: { view: ClientView; dispatch: D
       // surface takes its package's own JSON verbatim. The daemon hands
       // whatever this is to the package's canonicalizer, which is the only
       // thing entitled to judge it.
-      input: signage ? JSON.stringify({ program: input.trim() }) : input.trim(),
+      input: signage ? JSON.stringify({ screen: input.trim() }) : input.trim(),
       title: chosen.title,
     });
   };

@@ -19,7 +19,7 @@ use world_interface::WorldClientRegistry;
 
 use super::{
     serve_display_https, AssignmentIntent, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
-    DisplayPairingService, DisplayTlsIdentity, EnrollmentHook, RendezvousView,
+    DisplayPairingService, DisplayTlsIdentity, EnrollmentHook, RendezvousState, RendezvousView,
 };
 use super::{AssignmentRecord, AssignmentSync, Custodian, SourceGrant};
 
@@ -751,6 +751,21 @@ impl DisplayRuntime {
                     surface: intent.surface,
                 }
             }),
+            state: match &minted.state {
+                RendezvousState::Waiting => crate::control::DisplayRendezvousState::Waiting,
+                RendezvousState::Connecting { .. } => {
+                    crate::control::DisplayRendezvousState::Connecting
+                }
+                RendezvousState::Connected { .. } => {
+                    crate::control::DisplayRendezvousState::Connected
+                }
+            },
+            device: match &minted.state {
+                RendezvousState::Waiting => None,
+                RendezvousState::Connecting { device } | RendezvousState::Connected { device } => {
+                    Some(device.as_str().to_string())
+                }
+            },
             created_at_unix_ms: minted.created_at_unix_ms,
             expires_at_unix_ms: minted.expires_at_unix_ms,
         }

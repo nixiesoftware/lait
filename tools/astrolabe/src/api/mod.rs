@@ -495,8 +495,20 @@ pub struct DisplayRendezvousRow {
     pub site: Option<String>,
     pub label: String,
     pub assignment: Option<DisplayRendezvousAssignmentRow>,
+    pub state: DisplayRendezvousState,
+    /// The receiver the code enrolled, once one has entered it.
+    pub device: Option<String>,
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+/// Where a code is in its life; a spent code is listed a while longer as
+/// the receiver it became.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayRendezvousState {
+    Waiting,
+    Connecting,
+    Connected,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -855,6 +867,9 @@ pub struct FailureRow {
     pub error: String,
     /// Whether asking again could plausibly work. A refusal is not a retry.
     pub retryable: bool,
+    /// The action key this refused, so the surface that asked can answer
+    /// beside its own control.
+    pub key: Option<String>,
 }
 
 /// What a person asked for.
@@ -1983,6 +1998,18 @@ fn project(app: &App) -> ClientView {
                             surface: assignment.surface.clone(),
                         }
                     }),
+                    state: match minted.state {
+                        lait::control::DisplayRendezvousState::Waiting => {
+                            DisplayRendezvousState::Waiting
+                        }
+                        lait::control::DisplayRendezvousState::Connecting => {
+                            DisplayRendezvousState::Connecting
+                        }
+                        lait::control::DisplayRendezvousState::Connected => {
+                            DisplayRendezvousState::Connected
+                        }
+                    },
+                    device: minted.device.clone(),
                     created_at_unix_ms: minted.created_at_unix_ms,
                     expires_at_unix_ms: minted.expires_at_unix_ms,
                 })
@@ -2256,6 +2283,7 @@ fn project(app: &App) -> ClientView {
                 what: failure.what.clone(),
                 error: failure.error.to_string(),
                 retryable: failure.error.retryable,
+                key: failure.key.clone(),
             })
             .collect(),
         in_flight: app.in_flight_keys(),

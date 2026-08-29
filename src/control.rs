@@ -603,8 +603,21 @@ pub struct DisplayRendezvousView {
     /// What the receiver is pinned to on enrollment, if anything. The
     /// package input stays on the daemon, as it does for an assignment.
     pub assignment: Option<DisplayRendezvousAssignmentView>,
+    /// Where the code is in its life; a spent code is listed a while longer
+    /// as the receiver it became.
+    pub state: DisplayRendezvousState,
+    /// The receiver the code enrolled, once one has entered it.
+    pub device: Option<String>,
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayRendezvousState {
+    Waiting,
+    Connecting,
+    Connected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

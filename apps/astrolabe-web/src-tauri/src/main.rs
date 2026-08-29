@@ -288,6 +288,7 @@ struct WebFailure {
     what: String,
     error: String,
     retryable: bool,
+    key: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -515,6 +516,9 @@ struct WebDisplayRendezvous {
     site: Option<String>,
     label: String,
     assignment: Option<WebDisplayRendezvousAssignment>,
+    /// `waiting`, `connecting` or `connected`.
+    state: &'static str,
+    device: Option<String>,
     created_at_unix_ms: u64,
     expires_at_unix_ms: u64,
 }
@@ -777,6 +781,12 @@ impl From<ClientView> for WebClientView {
                                 surface: assignment.surface,
                             }
                         }),
+                        state: match minted.state {
+                            api::DisplayRendezvousState::Waiting => "waiting",
+                            api::DisplayRendezvousState::Connecting => "connecting",
+                            api::DisplayRendezvousState::Connected => "connected",
+                        },
+                        device: minted.device,
                         created_at_unix_ms: minted.created_at_unix_ms,
                         expires_at_unix_ms: minted.expires_at_unix_ms,
                     })
@@ -1021,6 +1031,7 @@ impl From<ClientView> for WebClientView {
                     what: failure.what,
                     error: failure.error,
                     retryable: failure.retryable,
+                    key: failure.key,
                 })
                 .collect(),
             in_flight: in_flight,
