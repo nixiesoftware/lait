@@ -223,11 +223,7 @@
   margin-bottom: 6px;
 }
 
-/* ── The dock: transport and the filmstrip {
-  flex: 0 0 auto;
-  background: var(--ds-surface-sunken);
-  padding-bottom: max(12px, env(safe-area-inset-bottom), var(--vv-keyboard, 0px));
-}
+/* ── The dock: transport and the filmstrip ─────────────────────────────── */
 
 .pe-rail {
   display: grid;
