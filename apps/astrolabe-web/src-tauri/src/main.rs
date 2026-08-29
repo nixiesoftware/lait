@@ -201,6 +201,7 @@ struct WebStaleness {
 struct WebLibraryWorld {
     key: String,
     world_mount: String,
+    world: String,
     installed: bool,
     /// The channel this World follows by its own choice; `None` follows the
     /// node's.
@@ -633,6 +634,7 @@ impl From<ClientView> for WebClientView {
                         let api::LibraryRow {
                             key,
                             world_mount,
+                            world,
                             installed,
                             display_name,
                             opens_at,
@@ -649,6 +651,7 @@ impl From<ClientView> for WebClientView {
                         WebLibraryWorld {
                             key,
                             world_mount,
+                            world,
                             installed,
                             display_name,
                             opens_at,

@@ -16,6 +16,7 @@ function world(mount: string): LibraryWorld {
   return {
     key: mount,
     worldMount: mount,
+    world: `com.lait.${mount}`,
     installed: true,
     displayName: mount,
     opensAt: "/",

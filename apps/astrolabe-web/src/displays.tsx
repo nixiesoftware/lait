@@ -227,11 +227,14 @@ export function tvStatus(
  * shows. The screen, the program, the schedule are that World's to say.
  */
 export function heldBy(
-  assignment: DisplayAssignment | undefined, surfaces: DisplaySurface[], library: Pick<LibraryWorld, "key" | "displayName">[],
+  assignment: DisplayAssignment | undefined, surfaces: DisplaySurface[], library: Pick<LibraryWorld, "world" | "displayName">[],
 ): string {
   if (assignment === undefined) return "Not held by any World — a World can point it at something";
-  const world = library.find((row) => row.key === assignment.world)?.displayName;
-  return `Held by ${world ?? surfaceTitle(surfaces, assignment)}`;
+  const row = library.find((entry) => entry.world === assignment.world);
+  const name = row === undefined
+    ? surfaceTitle(surfaces, assignment)
+    : assignment.world.startsWith("local.") ? `${row.displayName} (local copy)` : row.displayName;
+  return `Held by ${name}`;
 }
 
 /** The surface a TV shows, by the name its World gives it. */

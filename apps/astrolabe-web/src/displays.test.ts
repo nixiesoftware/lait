@@ -58,9 +58,11 @@ describe("the displays coordination rules", () => {
   });
 
   it("says which World holds a TV, and nothing more about what it shows", () => {
-    const library = [{ key: "com.lait.signage", displayName: "Signage" }];
+    const library = [{ world: "com.lait.signage", displayName: "Signage" }, { world: "local.signage", displayName: "Signage" }];
     const assignment = { world: "com.lait.signage", surface: "signage.program" } as DisplayAssignment;
     expect(heldBy(assignment, surfaces, library)).toBe("Held by Signage");
+    // Two copies of a World are told apart, as the Library tells them apart.
+    expect(heldBy({ world: "local.signage", surface: "signage.program" } as DisplayAssignment, surfaces, library)).toBe("Held by Signage (local copy)");
     // A World the library does not name is called by its surface's title.
     expect(heldBy({ world: "com.lait.issues", surface: "issues.board.wall" } as DisplayAssignment, surfaces, library)).toBe("Held by Issues board");
     expect(heldBy(undefined, surfaces, library)).toMatch(/Not held by any World/);

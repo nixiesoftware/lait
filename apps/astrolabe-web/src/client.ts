@@ -8,6 +8,8 @@
 export interface LibraryWorld {
   key: string;
   worldMount: string;
+  /** The World's id, as an assignment or a binding names it. */
+  world: string;
   /** Catalogued does not mean installed; false offers Install, never Open. */
   installed: boolean;
   displayName: string;
@@ -951,6 +953,7 @@ export const fixtureClientView: ClientView = {
   library: [{
     key: "issues",
     worldMount: "issues",
+    world: "com.lait.issues",
     installed: true,
     displayName: "Issues",
     opensAt: "/",

@@ -193,6 +193,9 @@ pub struct LibraryRow {
     /// silently follow whatever moved into that position.
     pub key: String,
     pub world_mount: String,
+    /// The World's id — what a display assignment, an MCP binding or a
+    /// capability names it by. The mount is what a person sees in a URL.
+    pub world: String,
     /// Catalog presence is not installation. False draws Install and makes
     /// Open unavailable until a signed immutable release is selected.
     pub installed: bool,
@@ -1895,6 +1898,7 @@ fn project(app: &App) -> ClientView {
                 .map(|entry| LibraryRow {
                     key: entry.world_mount.clone(),
                     world_mount: entry.world_mount.clone(),
+                    world: entry.world.clone(),
                     installed: entry.installed,
                     display_name: entry.display_name.clone(),
                     opens_at: entry.entry_path.clone(),

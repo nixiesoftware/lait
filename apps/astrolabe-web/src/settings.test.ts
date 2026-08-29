@@ -7,6 +7,7 @@ function world(over: Partial<LibraryWorld> = {}): LibraryWorld {
   return {
     key: "issues",
     worldMount: "issues",
+    world: "com.lait.issues",
     installed: true,
     displayName: "Issues",
     opensAt: "/",
