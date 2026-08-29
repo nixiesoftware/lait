@@ -541,6 +541,19 @@ impl WorldHost {
         session.sweep_resolved_runs()
     }
 
+    /// Presume foreign in-flight Attempts dead once their deadline has elapsed
+    /// on this Station's own clock. Non-terminal: the executor can still
+    /// return. Requires the Spec's `control` demand, enforced at commit.
+    pub fn sweep_liveness(
+        &self,
+        session: &Session,
+        now_millis: u64,
+        grace_millis: u64,
+    ) -> Result<Vec<(runtime::exec::RunId, runtime::exec::AttemptId)>, runtime::world::Failure>
+    {
+        session.sweep_liveness(now_millis, grace_millis)
+    }
+
     /// Ensure the Space's primary identity has a Session for this World.
     ///
     /// Docking remains lazy: an unadmitted joiner can keep its StationHost

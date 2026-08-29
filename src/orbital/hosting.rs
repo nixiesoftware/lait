@@ -1200,6 +1200,12 @@ impl StationHost {
     /// Product submit already committed any `Started` Run. Dispatch is a
     /// separate durable step owned by this Station activation, not by the
     /// product RPC that staged the Start.
+    /// How long past a Run's own `wall_millis` a foreign in-flight Attempt is
+    /// left before this Station presumes it dead. Generous on purpose: a
+    /// presumption is a suspicion, and merely-slow honest work should overtake
+    /// it rather than be raced by it.
+    const PRESUME_GRACE_MILLIS: u64 = 30_000;
+
     fn drain_exec_session(&self, session: &Session, identity: &LocalIdentity) {
         let world = session.world_id();
         let Ok(implementation) = self.station.active_implementation(world, identity) else {
@@ -1222,6 +1228,26 @@ impl StationHost {
                 })
         }) {
             tracing::warn!(%error, world = %world, "local Exec perform did not complete");
+        }
+        // After performing our own work, presume any foreign in-flight Attempt
+        // whose deadline has passed on our clock. The `control` demand is
+        // enforced at commit, so a Station without it presumes nothing.
+        match host.sweep_liveness(
+            session,
+            mechanics::wallclock::now_millis(),
+            Self::PRESUME_GRACE_MILLIS,
+        ) {
+            Ok(presumed) if !presumed.is_empty() => {
+                tracing::info!(
+                    count = presumed.len(),
+                    world = %world,
+                    "presumed stale foreign Attempts dead",
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, world = %world, "liveness sweep did not complete");
+            }
         }
     }
 
