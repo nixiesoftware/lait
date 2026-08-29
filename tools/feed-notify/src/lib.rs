@@ -35,7 +35,9 @@
 //! - `GET /subscribe` — SSE. The newest pointer per key is replayed first, so
 //!   a daemon reconnecting after a gap catches up without a poll; then live.
 //! - `GET /latest/<key>` — the envelope the board holds, for a curl check.
-//! - `GET /healthz`.
+//! - `GET /health`. (`/healthz` specifically is intercepted by Google's
+//!   frontend on Cloud Run and never reaches a container; the Post learned
+//!   the same.)
 //!
 //! `<key>` is `stable`, `test`, or `worlds/<world id>/<stable|test>` — the
 //! same path the pointer lives at under `channels/` in the bucket, so a key
@@ -496,7 +498,7 @@ pub fn router(board: Shared) -> Router {
 pub fn router_priming(board: Shared, prime_every: Duration) -> Router {
     let subscribe_state = (board.clone(), prime_every);
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/health", get(|| async { "ok" }))
         .route(
             "/subscribe",
             get(move || {
