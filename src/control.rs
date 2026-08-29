@@ -526,6 +526,11 @@ pub struct DisplayHealthView {
     pub drift_residual_ms: i32,
     pub correction_events: u32,
     pub pipeline_unobservable: bool,
+    /// When this report arrived. The report says what the receiver saw; this
+    /// says how long ago, which is what tells a receiver that is gone from
+    /// one that last said `online`. `None` from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

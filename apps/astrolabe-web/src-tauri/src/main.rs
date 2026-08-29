@@ -496,6 +496,7 @@ struct WebDisplayHealth {
     drift_residual_ms: i32,
     correction_events: u32,
     pipeline_unobservable: bool,
+    reported_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -752,6 +753,7 @@ impl From<ClientView> for WebClientView {
                             drift_residual_ms: health.drift_residual_ms,
                             correction_events: health.correction_events,
                             pipeline_unobservable: health.pipeline_unobservable,
+                            reported_at_unix_ms: health.reported_at_unix_ms,
                         }),
                     })
                     .collect(),

@@ -608,18 +608,22 @@ impl DisplayRuntime {
                     .health(&device.device)
                     .ok()
                     .flatten()
-                    .map(|health| crate::control::DisplayHealthView {
-                        revision: health.revision.as_str().to_string(),
-                        current_item: health.current_item.as_str().to_string(),
-                        elapsed_ms: health.elapsed_ms,
-                        connection: wire_name(&health.connection),
-                        playback: wire_name(&health.playback),
-                        last_error: wire_name(&health.last_error),
-                        staged_items: health.staged_items,
-                        staged_bytes: health.staged_bytes,
-                        drift_residual_ms: health.drift_residual_ms,
-                        correction_events: health.correction_events,
-                        pipeline_unobservable: health.pipeline_unobservable,
+                    .map(|reported| {
+                        let health = reported.health;
+                        crate::control::DisplayHealthView {
+                            reported_at_unix_ms: Some(reported.reported_at_unix_ms),
+                            revision: health.revision.as_str().to_string(),
+                            current_item: health.current_item.as_str().to_string(),
+                            elapsed_ms: health.elapsed_ms,
+                            connection: wire_name(&health.connection),
+                            playback: wire_name(&health.playback),
+                            last_error: wire_name(&health.last_error),
+                            staged_items: health.staged_items,
+                            staged_bytes: health.staged_bytes,
+                            drift_residual_ms: health.drift_residual_ms,
+                            correction_events: health.correction_events,
+                            pipeline_unobservable: health.pipeline_unobservable,
+                        }
                     });
                 DisplayDeviceView {
                     device: device.device.as_str().to_string(),

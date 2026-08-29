@@ -157,9 +157,19 @@ pub struct DisplayPairingService {
 struct PairingState {
     pairings: BTreeMap<String, PendingPairing>,
     challenges: BTreeMap<String, ChallengeLease>,
-    health: BTreeMap<String, ReceiverHealth>,
+    health: BTreeMap<String, ReportedHealth>,
     /// Unspent codes, keyed by the rendezvous id each names on the wire.
     rendezvous: BTreeMap<String, PendingRendezvous>,
+}
+
+/// A receiver's last report and when it arrived. Health is held in memory
+/// only, so the time is what tells "reported a moment ago" from "reported
+/// once, hours back, and has not spoken since" — the report itself says
+/// `online` in both cases.
+#[derive(Debug, Clone)]
+pub struct ReportedHealth {
+    pub health: ReceiverHealth,
+    pub reported_at_unix_ms: u64,
 }
 
 struct PendingPairing {
@@ -759,13 +769,17 @@ impl DisplayPairingService {
 
     pub fn record_health(&self, device: &DisplayDeviceId, health: ReceiverHealth) -> Result<()> {
         display_protocol::receiver::validate_health(&health).context("validate receiver health")?;
-        self.lock()?
-            .health
-            .insert(device.as_str().to_string(), health);
+        self.lock()?.health.insert(
+            device.as_str().to_string(),
+            ReportedHealth {
+                health,
+                reported_at_unix_ms: mechanics::wallclock::now_millis(),
+            },
+        );
         Ok(())
     }
 
-    pub fn health(&self, device: &DisplayDeviceId) -> Result<Option<ReceiverHealth>> {
+    pub fn health(&self, device: &DisplayDeviceId) -> Result<Option<ReportedHealth>> {
         Ok(self.lock()?.health.get(device.as_str()).cloned())
     }
 

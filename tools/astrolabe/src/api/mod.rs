@@ -456,6 +456,8 @@ pub struct DisplayHealthRow {
     pub drift_residual_ms: i32,
     pub correction_events: u32,
     pub pipeline_unobservable: bool,
+    /// When the report arrived; `None` from a daemon that predates it.
+    pub reported_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1972,6 +1974,7 @@ fn project(app: &App) -> ClientView {
                         drift_residual_ms: health.drift_residual_ms,
                         correction_events: health.correction_events,
                         pipeline_unobservable: health.pipeline_unobservable,
+                        reported_at_unix_ms: health.reported_at_unix_ms,
                     }),
                 })
                 .collect(),

@@ -123,7 +123,8 @@ export type DisplayTheme = "light" | "dark" | "highContrast";
 export type DisplaySyncMode = "stayInSync" | "positional";
 export type DisplayStaleAction = "keepWithNativeBanner" | "blank";
 export interface DisplaySurface { world: string; surface: string; title: string; contractVersion: number; outputs: string[]; }
-export interface DisplayHealth { revision: string; currentItem: string; elapsedMs: number; connection: string; playback: string; lastError: string; stagedItems: number; stagedBytes: number; driftResidualMs: number; correctionEvents: number; pipelineUnobservable: boolean; }
+/** A receiver's last report, and when it arrived — `reportedAtUnixMs` is null from a daemon that predates it. */
+export interface DisplayHealth { revision: string; currentItem: string; elapsedMs: number; connection: string; playback: string; lastError: string; stagedItems: number; stagedBytes: number; driftResidualMs: number; correctionEvents: number; pipelineUnobservable: boolean; reportedAtUnixMs: number | null; }
 export interface DisplayReceiver { device: string; label: string; platform: string; build: string; issuedAtUnixMs: number; revokedAtUnixMs: number | null; health: DisplayHealth | null; }
 export interface DisplayAssignment { assignment: string; device: string; orbit: string; space: string; program: string; world: string; surface: string; controller: string; theme: DisplayTheme; syncGroup: string | null; syncMode: DisplaySyncMode | null; staticDelayMs: number; expiresAtUnixMs: number | null; revokedAtUnixMs: number | null; }
 export interface DisplayPairing { pairing: string; confirmationPhrase: string[]; certificateSha256: string; platform: string; build: string; createdAtUnixMs: number; expiresAtUnixMs: number; }
@@ -995,7 +996,7 @@ export const fixtureClientView: ClientView = {
       health: {
         revision: "rev_9", currentItem: "itm_standup", elapsedMs: 5_400, connection: "connected",
         playback: "playing", lastError: "none", stagedItems: 4, stagedBytes: 8_192,
-        driftResidualMs: 12, correctionEvents: 2, pipelineUnobservable: false,
+        driftResidualMs: 12, correctionEvents: 2, pipelineUnobservable: false, reportedAtUnixMs: 1_755_000_000_000,
       },
     }],
     assignments: [{

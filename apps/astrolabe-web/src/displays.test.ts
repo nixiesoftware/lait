@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Display, DisplayAssignment, DisplayChoices, DisplayReceiver, DisplaySurface } from "./client";
 import {
-  assignmentDraftValid, assignmentFor, assignmentPayload, chooser, choicesFor, codeEntry, failureOf, inputProblem, inputPrompt,
+  agoLabel, assignmentDraftValid, assignmentFor, assignmentPayload, chooser, choicesFor, codeEntry, failureOf, inputProblem, inputPrompt,
   isIssuesBoard, isSignageSurface, minutesLeft, newAssignmentDraft, platformName, receiverBootstrap, showingLine, signageInputKey,
   surfaceChoice, surfaceInput, tvStatus,
 } from "./displays";
@@ -138,19 +138,32 @@ describe("the displays coordination rules", () => {
     expect(surfaceChoice(surfaces[1])).toBe("A Signage screen");
   });
 
-  it("tells a TV's whole state in one chip", () => {
+  it("tells a TV's whole state in one chip, by the clock as much as by the report", () => {
+    const now = 1_755_000_000_000;
     const receiver = (overrides: Partial<DisplayReceiver>): DisplayReceiver => ({
-      device: "dev", label: "TV", platform: "webos", build: "1", issuedAtUnixMs: 0, revokedAtUnixMs: null, health: null, ...overrides,
+      device: "dev", label: "TV", platform: "webos", build: "1", issuedAtUnixMs: now - 10_000, revokedAtUnixMs: null, health: null,
+      ...overrides,
     });
     const health = {
       revision: "r", currentItem: "i", elapsedMs: 0, connection: "online", playback: "displaying", lastError: "none",
-      stagedItems: 0, stagedBytes: 0, driftResidualMs: 0, correctionEvents: 0, pipelineUnobservable: true,
+      stagedItems: 0, stagedBytes: 0, driftResidualMs: 0, correctionEvents: 0, pipelineUnobservable: true, reportedAtUnixMs: now - 20_000,
     };
-    expect(tvStatus(receiver({}))).toEqual({ label: "Connecting…", tone: "neutral" });
-    expect(tvStatus(receiver({ health }))).toEqual({ label: "Connected", tone: "good" });
-    expect(tvStatus(receiver({ health: { ...health, connection: "offline" } }))).toEqual({ label: "Offline", tone: "crit" });
-    expect(tvStatus(receiver({ health: { ...health, connection: "retrying" } }))).toEqual({ label: "Reconnecting…", tone: "warn" });
-    expect(tvStatus(receiver({ revokedAtUnixMs: 5 }))).toEqual({ label: "Removed", tone: "neutral" });
+    // Enrolled a moment ago and not yet heard: connecting. Enrolled long ago
+    // and not heard since this daemon started listening: say so.
+    expect(tvStatus(receiver({}), now)).toEqual({ label: "Connecting…", tone: "neutral" });
+    expect(tvStatus(receiver({ issuedAtUnixMs: now - 3 * 60_000 }), now)).toEqual({ label: "Not heard from", tone: "warn" });
+    expect(tvStatus(receiver({ health }), now)).toEqual({ label: "Connected", tone: "good" });
+    expect(tvStatus(receiver({ health: { ...health, connection: "offline" } }), now)).toEqual({ label: "Offline", tone: "crit" });
+    expect(tvStatus(receiver({ health: { ...health, connection: "retrying" } }), now)).toEqual({ label: "Reconnecting…", tone: "warn" });
+    // A TV whose last word was "online" ten minutes ago is gone, not connected.
+    expect(tvStatus(receiver({ health: { ...health, reportedAtUnixMs: now - 10 * 60_000 } }), now))
+      .toEqual({ label: "Last seen 10 min ago", tone: "warn" });
+    // A daemon that does not say when: the report is all there is.
+    expect(tvStatus(receiver({ health: { ...health, reportedAtUnixMs: null } }), now)).toEqual({ label: "Connected", tone: "good" });
+    expect(tvStatus(receiver({ revokedAtUnixMs: 5 }), now)).toEqual({ label: "Removed", tone: "neutral" });
+    expect(agoLabel(90_000)).toBe("2 min ago");
+    expect(agoLabel(5 * 3_600_000)).toBe("5 h ago");
+    expect(agoLabel(3 * 86_400_000)).toBe("3 days ago");
   });
 
   it("says what a TV shows by the World's own name for it", () => {

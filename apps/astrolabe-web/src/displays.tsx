@@ -74,6 +74,16 @@ import { AppDialog, DialogFooter, Empty, Fact, Notice, SectionTitle, words } fro
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
+/** The clock, re-read every `everyMs`, so a "last seen" line ages without a view pump. */
+function useNow(everyMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [everyMs]);
+  return now;
+}
+
 /** The pinned receiver bootstrap a self-hosted TV app's setup screen accepts. */
 export function receiverBootstrap(display: Pick<Display, "origin" | "certificateSha256" | "certificatePem">): string {
   return JSON.stringify({
@@ -285,9 +295,44 @@ export function minutesLeft(expiresAtUnixMs: number, now = Date.now()): number {
 export type Tone = "good" | "neutral" | "warn" | "crit";
 
 /** One chip carries the whole health story of a TV. */
-export function tvStatus(receiver: Pick<DisplayReceiver, "revokedAtUnixMs" | "health">): { label: string; tone: Tone } {
+/**
+ * A running receiver reports every 30–55 seconds. Three minutes of silence
+ * is a TV that is gone, whatever its last report said — the report cannot
+ * say "and then I stopped", only the clock can.
+ */
+export const silentAfterMs = 3 * 60_000;
+/** How long a fresh enrolment is "connecting" before its silence is called. */
+export const connectingGraceMs = 2 * 60_000;
+
+/** "4 min ago", "3 h ago", "2 days ago". */
+export function agoLabel(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+/**
+ * A TV's state in one chip. Health is held by the daemon in memory only, so
+ * "no report" means none since this computer started listening: a fresh
+ * enrolment is still connecting, an old one has not spoken — and a last
+ * report older than the cadence allows is a TV that is gone, however
+ * cheerful the report was.
+ */
+export function tvStatus(
+  receiver: Pick<DisplayReceiver, "revokedAtUnixMs" | "health" | "issuedAtUnixMs">, now = Date.now(),
+): { label: string; tone: Tone } {
   if (receiver.revokedAtUnixMs !== null) return { label: "Removed", tone: "neutral" };
-  if (receiver.health === null) return { label: "Connecting…", tone: "neutral" };
+  if (receiver.health === null) {
+    return now - receiver.issuedAtUnixMs < connectingGraceMs
+      ? { label: "Connecting…", tone: "neutral" }
+      : { label: "Not heard from", tone: "warn" };
+  }
+  const { reportedAtUnixMs } = receiver.health;
+  if (reportedAtUnixMs !== null && now - reportedAtUnixMs > silentAfterMs) {
+    return { label: `Last seen ${agoLabel(now - reportedAtUnixMs)}`, tone: "warn" };
+  }
   switch (receiver.health.connection) {
     case "online": return { label: "Connected", tone: "good" };
     case "retrying": return { label: "Reconnecting…", tone: "warn" };
@@ -540,7 +585,8 @@ function TvRow({ receiver, assignment, display, view, openDialog }: {
 }) {
   const styles = useStyles();
   const revoked = receiver.revokedAtUnixMs !== null;
-  const status = tvStatus(receiver);
+  const now = useNow(15_000);
+  const status = tvStatus(receiver, now);
   const assigning = view.inFlight.includes(actionKey.displayAssignmentPut(receiver.device));
   const removing = view.inFlight.includes(actionKey.displayDeviceRevoke(receiver.device));
   const cannotAssign = view.orbits.length === 0
