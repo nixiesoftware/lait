@@ -18,6 +18,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { MapPin, Monitor, Plus, Tv } from "lucide-react";
 import { screenOf, tvStatus, useTvs } from "@/utils/tv/api";
+import { UnlinkedTvs } from "./UnlinkedTvs";
 import {
   Bezel,
   ChoiceMenu,
@@ -174,6 +175,8 @@ export default function ScreenList() {
       )}
 
       <PageStatus loading={loading} error={error ?? ""} />
+
+      <UnlinkedTvs screens={screens} />
 
       {!loading && shown.length === 0 ? (
         <Empty title={screens.length === 0 ? "No screens yet" : "Nothing matches"}>

@@ -1,41 +1,35 @@
 /**
- * The televisions on one screen.
+ * The television(s) that are this screen.
  *
- * A TV belongs to a screen, so this is where one is added, named, watched
- * and taken off — in Signage's words, with no World or surface to choose.
- * Adding one is a code shown here, big, that a person types on the television;
- * the row appears the moment it connects. A TV asking to connect by words is
- * offered to this screen. A TV nobody holds can be pointed here. Everything a
- * TV shows is decided elsewhere on this page; this section is only who is
- * watching.
+ * A Signage screen is a real screen, so this section speaks only of the
+ * hardware that is it: the TV showing it — or the panels of a wall, which
+ * play in step — and a code waiting for one to connect. Nothing else appears
+ * here. A TV that is idle, or one asking to connect by words, is a fleet
+ * fact and is offered a screen on the Screens page, not on another screen's.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Tv, X } from "lucide-react";
 import { haptic, useToast } from "@/ds";
 import {
-  approveTvPairing,
-  assignTv,
   codeEntry,
   forgetTv,
   minutesLeft,
   mintTvCode,
   platformName,
-  rejectTvPairing,
   revokeTvCode,
   screenOf,
   tvStatus,
   unassignTv,
   useTvs,
   type TvCode,
-  type TvPairing,
   type TvReceiver,
 } from "@/utils/tv/api";
 
 export function TvSection({ screenId, screenName }: { screenId: string; screenName: string }) {
   const toast = useToast();
   const { fleet, error, refresh } = useTvs();
-  const [naming, setNaming] = useState<null | "tv" | string>(null);
+  const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -48,21 +42,11 @@ export function TvSection({ screenId, screenName }: { screenId: string; screenNa
     () => (fleet?.receivers ?? []).filter((tv) => screenOf(tv.assignment?.input) === screenId),
     [fleet, screenId],
   );
-  const free = useMemo(() => (fleet?.receivers ?? []).filter((tv) => tv.assignment === null), [fleet]);
-  const elsewhere = useMemo(
-    () => (fleet?.receivers ?? []).filter((tv) => tv.assignment !== null && screenOf(tv.assignment.input) !== screenId),
-    [fleet, screenId],
-  );
   const codes = useMemo(
     () => (fleet?.codes ?? []).filter((code) => screenOf(code.input) === screenId && code.state !== "connected"),
     [fleet, screenId],
   );
-  const pairings = fleet?.pairings ?? [];
 
-  const refused = (what: string) => (err: unknown) => {
-    haptic("error");
-    toast.show(what, err instanceof Error ? err.message : String(err));
-  };
   const act = async (what: string, work: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -70,7 +54,8 @@ export function TvSection({ screenId, screenName }: { screenId: string; screenNa
       haptic("save");
       await refresh();
     } catch (err) {
-      refused(what)(err);
+      haptic("error");
+      toast.show(what, err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -78,14 +63,8 @@ export function TvSection({ screenId, screenName }: { screenId: string; screenNa
 
   const mint = () =>
     act("Could not get a code", async () => {
-      await mintTvCode(screenId, name.trim() || `${screenName} TV`);
-      setNaming(null);
-      setName("");
-    });
-  const approve = (pairing: TvPairing) =>
-    act("Could not add the TV", async () => {
-      await approveTvPairing(pairing.pairing, name.trim() || `${screenName} TV`, screenId);
-      setNaming(null);
+      await mintTvCode(screenId, name.trim() || screenName);
+      setNaming(false);
       setName("");
     });
 
@@ -104,84 +83,28 @@ export function TvSection({ screenId, screenName }: { screenId: string; screenNa
           onWithdraw={() => void act("Could not withdraw the code", () => revokeTvCode(code.rendezvous))} />
       ))}
 
-      {pairings.map((pairing) => (
-        <div className="ds-tv-row is-asking" key={pairing.pairing}>
-          <span className="ds-tv-copy">
-            <strong>A {platformName(pairing.platform)} TV is asking to connect</strong>
-            <span>
-              Its screen shows these words — the same words mean it is this one:{" "}
-              <em className="ds-tv-words">{pairing.confirmation_phrase.join(" ")}</em>
-            </span>
-          </span>
-          <span className="ds-tv-acts">
-            {naming === pairing.pairing ? (
-              <NameField name={name} setName={setName} placeholder={`${screenName} TV`} busy={busy}
-                onDone={() => void approve(pairing)} onCancel={() => setNaming(null)} verb="Add here" />
-            ) : (
-              <>
-                <button type="button" className="ds-btn ds-btn-solid" disabled={busy} onClick={() => { setNaming(pairing.pairing); setName(""); }}>
-                  It's this one
-                </button>
-                <button type="button" className="ds-btn ds-btn-quiet" disabled={busy}
-                  onClick={() => void act("Could not turn the TV away", () => rejectTvPairing(pairing.pairing))}>
-                  Not mine
-                </button>
-              </>
-            )}
-          </span>
-        </div>
-      ))}
-
-      {free.map((tv) => (
-        <div className="ds-tv-row is-free" key={tv.device}>
-          <span className="ds-tv-copy">
-            <strong>{tv.label}</strong>
-            <span>{platformName(tv.platform)} · showing nothing yet</span>
-          </span>
-          <span className="ds-tv-acts">
-            <button type="button" className="ds-btn" disabled={busy}
-              onClick={() => void act("Could not point the TV here", () => assignTv(tv.device, screenId))}>
-              Point it here
-            </button>
-          </span>
-        </div>
-      ))}
-
-      {mine.length === 0 && codes.length === 0 && pairings.length === 0 && free.length === 0 && (
-        <p className="ds-hint">No TV shows this screen yet. Add one: you'll get a code to type on the TV.</p>
+      {mine.length === 0 && codes.length === 0 && (
+        <p className="ds-hint">No TV is this screen yet. Add one: you'll get a code to type on the TV.</p>
       )}
 
       <div className="ds-page-actions">
-        {naming === "tv" ? (
-          <NameField name={name} setName={setName} placeholder={`${screenName} TV`} busy={busy}
-            onDone={() => void mint()} onCancel={() => setNaming(null)} verb="Get a code" />
+        {naming ? (
+          <span className="ds-tv-name">
+            <input className="ds-input" value={name} placeholder={screenName} aria-label="TV name" autoFocus
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") void mint(); if (event.key === "Escape") setNaming(false); }} />
+            <button type="button" className="ds-btn ds-btn-solid" disabled={busy} onClick={() => void mint()}>Get a code</button>
+            <button type="button" className="ds-icon" aria-label="Cancel" onClick={() => setNaming(false)}><X size={16} /></button>
+          </span>
         ) : (
-          <button type="button" className="ds-btn ds-btn-solid" disabled={busy} onClick={() => { setNaming("tv"); setName(""); }}>
+          <button type="button" className="ds-btn ds-btn-solid" disabled={busy} onClick={() => { setNaming(true); setName(""); }}>
             <Plus size={15} />
-            Add a TV
+            {mine.length === 0 ? "Add a TV" : "Add another TV"}
           </button>
         )}
-        {elsewhere.length > 0 && (
-          <span className="ds-hint">
-            {elsewhere.length === 1 ? "1 other TV shows" : `${elsewhere.length} other TVs show`} another screen; open that screen to move it.
-          </span>
-        )}
+        {mine.length > 1 && <span className="ds-hint">These TVs play this screen in step.</span>}
       </div>
     </div>
-  );
-}
-
-function NameField({ name, setName, placeholder, busy, onDone, onCancel, verb }: {
-  name: string; setName(next: string): void; placeholder: string; busy: boolean; onDone(): void; onCancel(): void; verb: string;
-}) {
-  return (
-    <span className="ds-tv-name">
-      <input className="ds-input" value={name} placeholder={placeholder} aria-label="TV name" autoFocus
-        onChange={(event) => setName(event.target.value)}
-        onKeyDown={(event) => { if (event.key === "Enter") onDone(); if (event.key === "Escape") onCancel(); }} />
-      <button type="button" className="ds-btn ds-btn-solid" disabled={busy} onClick={onDone}>{verb}</button>
-      <button type="button" className="ds-icon" aria-label="Cancel" onClick={onCancel}><X size={16} /></button>
-    </span>
   );
 }
 
@@ -197,7 +120,7 @@ function TvRow({ tv, now, busy, onUnpoint, onForget }: {
         <span>{platformName(tv.platform)} · <span className={`ds-tv-status is-${status.tone}`}>{status.label}</span></span>
       </span>
       <span className="ds-tv-acts">
-        <button type="button" className="ds-btn ds-btn-quiet" disabled={busy} onClick={onUnpoint}>Show nothing</button>
+        <button type="button" className="ds-btn ds-btn-quiet" disabled={busy} onClick={onUnpoint}>Detach</button>
         <button type="button" className="ds-btn ds-btn-quiet is-danger" disabled={busy} onClick={onForget}>Forget</button>
       </span>
     </div>
