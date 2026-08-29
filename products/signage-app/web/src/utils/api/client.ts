@@ -7,9 +7,10 @@
  * proxy fakes that (see vite.config.ts) rather than the engine relaxing its
  * origin guard.
  *
- * One plane, one shape: `POST /api/spaces/{space}/worlds/signage/rpc` with
+ * One plane, one shape: `POST /api/spaces/{space}/worlds/{mount}/rpc` with
  * `{"cmd": "<verb>", ...}`; replies are `{"kind": "<variant>", ...}` and a
- * refusal carries the engine's own words.
+ * refusal carries the engine's own words. `{mount}` is whatever this head says
+ * it serves us at — see `mount()`.
  */
 
 /** A refusal from the engine, carrying its own words. */
@@ -42,21 +43,71 @@ interface SpaceRow {
   name?: string;
 }
 
+interface SpacesReply {
+  spaces: SpaceRow[];
+  /** The mount this head serves this World at. Absent on a head that serves exactly what the World declares. */
+  world?: string;
+}
+
+/**
+ * The mount this World publishes.
+ *
+ * `MOUNT` in `products/signage-app/src/lib.rs`: it prefixes every tool an
+ * agent has learned and is the `{world}` segment of every route a head builds.
+ */
+const DECLARED_MOUNT = 'signage';
+
 let selectedSpace: string | null = null;
+/**
+ * The mount this head serves us at, as this head last stated it.
+ *
+ * Not a guess with a default: a product request sent to the wrong mount is
+ * refused by name, and the refusal names a World the page is not. The World
+ * publishes `signage` and that is what an installed release is served as. A
+ * local World — a tree being worked on — is assigned a mount in its own
+ * namespace so it cannot answer for the release it was copied from, and the
+ * page is served from that tree with no way to know. So it asks, once, and
+ * every call after the first spends the recorded answer.
+ */
+let served: string | null = null;
 
 /**
  * The Orbit this head serves, resolved once. The URL carries the local Orbit
  * id — never the Space id.
  */
-export async function space(): Promise<string> {
-  if (selectedSpace) return selectedSpace;
-  const r = await fetch('/api/spaces', { credentials: 'same-origin' });
-  if (!r.ok) throw new LaitError('the head refused the spaces listing', r.status);
-  const reply = (await r.json()) as { spaces: SpaceRow[] };
-  const first = reply.spaces[0];
-  if (!first) throw new LaitError('this head serves no Space yet', 404, 'not_found');
-  selectedSpace = first.id;
-  return selectedSpace;
+export function space(): Promise<string> {
+  if (selectedSpace) return Promise.resolve(selectedSpace);
+  // Single-flight. A page mounts a dozen hooks that each want the Orbit before
+  // their first request, and every one of them used to send its own listing.
+  // Those duplicates filled the browser's six-connection pool and queued the
+  // requests that actually mattered behind them, which is why a page that
+  // needs seven reads took over a second to draw.
+  if (!resolving) {
+    resolving = (async () => {
+      const r = await fetch('/api/spaces', { credentials: 'same-origin' });
+      if (!r.ok) throw new LaitError('the head refused the spaces listing', r.status);
+      const reply = (await r.json()) as SpacesReply;
+      // The head restating a fact about itself; the page has no other way to learn it.
+      served = reply.world ?? DECLARED_MOUNT;
+      const first = reply.spaces[0];
+      if (!first) throw new LaitError('this head serves no Space yet', 404, 'not_found');
+      selectedSpace = first.id;
+      return selectedSpace;
+    })().catch((err: unknown) => {
+      // A refusal is not a fact worth caching: the next caller asks again.
+      resolving = null;
+      throw err;
+    });
+  }
+  return resolving;
+}
+
+let resolving: Promise<string> | null = null;
+
+/** Which mount to address this World at. Resolved by the same request that resolves the Space. */
+async function mount(): Promise<string> {
+  if (served === null) await space();
+  return served ?? DECLARED_MOUNT;
 }
 
 let knownActor: string | null = null;
@@ -89,14 +140,18 @@ export async function rpc<T = unknown>(
   opts: { confirm?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
   const orbit = await space();
+  const world = await mount();
   const qs = opts.confirm ? '?confirm=true' : '';
-  const r = await fetch(`/api/spaces/${encodeURIComponent(orbit)}/worlds/signage/rpc${qs}`, {
+  const r = await fetch(
+    `/api/spaces/${encodeURIComponent(orbit)}/worlds/${encodeURIComponent(world)}/rpc${qs}`,
+    {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(request),
     ...(opts.signal ? { signal: opts.signal } : {}),
-  });
+    },
+  );
   let body: Record<string, unknown> | null = null;
   try {
     body = (await r.json()) as Record<string, unknown>;

@@ -80,9 +80,9 @@ export function Projects({
     return (
       <ApplicationState
         kind="empty"
-        icon={<ProjectIcon className="size-icon-lg" />}
-        title="No projects yet"
-        body="Projects give issues a workflow, identity, and stable place in the space."
+        art="projects"
+        title="Projects"
+        body="Group issues around one clear outcome."
       />
     );
   }

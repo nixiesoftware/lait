@@ -157,6 +157,7 @@ h1 { margin: 0; font-size: clamp(52px, 5vw, 86px); line-height: 1.02; letter-spa
 }
 .site-entry input:focus { outline: 7px solid rgba(142, 226, 209, 0.34); outline-offset: 5px; border-color: #8ee2d1; }
 .site-preview-origin { color: #8ee2d1; }
+.entry-example { color: #d7fff4; font-size: 0.95em; letter-spacing: 0.04em; }
 
 .secondary-action {
   display: block;
@@ -202,4 +203,20 @@ h1 { margin: 0; font-size: clamp(52px, 5vw, 86px); line-height: 1.02; letter-spa
   .stage { padding: 110px 58px 44px; }
   .state-panel { padding: 46px 52px; }
   .phrase span { font-size: 27px; padding: 17px 12px; }
+}
+
+/* The chrome retires once a program is on the glass and it has nothing to
+   say, and returns for any word worth saying — see `chromeSpeaks`. */
+.trust-chrome {
+  transition: opacity 600ms ease, transform 600ms ease;
+}
+
+.receiver[data-chrome="retired"] .trust-chrome {
+  opacity: 0;
+  transform: translateY(-16px);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trust-chrome { transition: none; }
 }

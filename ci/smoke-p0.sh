@@ -213,33 +213,32 @@ has "$launch" "$ORBIT"
 TICKET="$(printf '%s' "$launch" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')"
 [ -n "$TICKET" ] || { echo "::error::no ticket in:"; echo "$launch"; exit 1; }
 
-# The exchange: a redirect that sets the session cookie and the marker saying a
-# client sent this browser. Both, appended rather than replaced — two headers of
-# the same name in an array would have the second overwrite the first, and the
-# browser would arrive holding the marker with no session behind it.
+# The exchange: a redirect that sets the session cookie — and nothing else. A
+# launch hands over a session; there is no second cookie marking the browser as
+# one the client sent, because nothing reads such a marker any more.
 redeemed="$ROOT/redeemed.txt"
-[ "$(code -D "$redeemed" "http://127.0.0.1:${PORT}/?ticket=${TICKET}")" = "303" ] \
-  || { echo "::error::a launch link did not redirect:"; cat "$redeemed"; exit 1; }
+[ "$(code -D "$redeemed" "http://127.0.0.1:${PORT}/?ticket=${TICKET}")" = "303" ]   || { echo "::error::a launch link did not redirect:"; cat "$redeemed"; exit 1; }
 cookies="$(grep -ci 'set-cookie' "$redeemed" || true)"
-[ "$cookies" = "2" ] || { echo "::error::expected a session and a client marker, got $cookies:"; cat "$redeemed"; exit 1; }
+[ "$cookies" = "1" ] || { echo "::error::expected exactly one session cookie, got $cookies:"; cat "$redeemed"; exit 1; }
+grep -qi "set-cookie: lait_token_${PORT}=" "$redeemed"   || { echo "::error::the launch cookie is not this head's session:"; cat "$redeemed"; exit 1; }
 
 # And it is worthless afterwards. A launch URL sits in browser history, in a
 # synchronised profile and in the shell's recent list; replay must fail closed.
-[ "$(code "http://127.0.0.1:${PORT}/?ticket=${TICKET}")" = "401" ] \
-  || { echo "::error::a spent launch link answered a second time"; exit 1; }
+[ "$(code "http://127.0.0.1:${PORT}/?ticket=${TICKET}")" = "401" ]   || { echo "::error::a spent launch link answered a second time"; exit 1; }
 
-# The overlay is client context, and a head somebody opened themselves has none
-# to draw. One overlay for a browser the client launched, none for anyone else.
+# The head serves a World's document and nothing else. There is no client
+# overlay composed into the page, and nothing in the document depends on how
+# the browser got here — a page reached with a bearer token and one reached
+# with the session cookie are the same bytes.
 plain="$(curl -sS "http://127.0.0.1:${PORT}/" -H "Authorization: Bearer ${TOKEN}")"
-case "$plain" in *data-lait-overlay*) echo "::error::an unlaunched head drew a client overlay"; exit 1 ;; esac
-composed="$(curl -sS "http://127.0.0.1:${PORT}/" -H "Cookie: lait_token_${PORT}_client=1; lait_token_${PORT}=${TOKEN}")"
-has "$composed" "data-lait-overlay"
+case "$plain" in *data-lait-overlay*) echo "::error::the head composed a client overlay into a document"; exit 1 ;; esac
+session="$(curl -sS "http://127.0.0.1:${PORT}/" -H "Cookie: lait_token_${PORT}=${TOKEN}")"
+[ "$plain" = "$session" ] || { echo "::error::the document differed by how the browser reached it"; exit 1; }
 
-# Assets are never composed. A script that differed by how the page was reached
-# would make the overlay a thing a World could detect and work around.
+# Assets are byte pipes on the same terms.
 a="$(curl -sS "http://127.0.0.1:${PORT}/app.js" -H "Authorization: Bearer ${TOKEN}" | wc -c)"
-b="$(curl -sS "http://127.0.0.1:${PORT}/app.js" -H "Cookie: lait_token_${PORT}_client=1; lait_token_${PORT}=${TOKEN}" | wc -c)"
-[ "$a" = "$b" ] || { echo "::error::an asset was composed differently for a launched browser ($a vs $b)"; exit 1; }
+b="$(curl -sS "http://127.0.0.1:${PORT}/app.js" -H "Cookie: lait_token_${PORT}=${TOKEN}" | wc -c)"
+[ "$a" = "$b" ] || { echo "::error::an asset was served differently for a session browser ($a vs $b)"; exit 1; }
 
 # Stopping the daemon is a request like any other, and the head survives it —
 # which is what makes a self-update take effect.

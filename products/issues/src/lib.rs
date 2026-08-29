@@ -44,5 +44,5 @@ mod test_allocation;
 pub mod views;
 pub mod workflow;
 
-pub use contract::{IssueEffect, IssueIntent, IssueQuery, PRODUCT_WORLD};
+pub use contract::{product_world, IssueEffect, IssueIntent, IssueQuery};
 pub use implementation::IssuesWorld;

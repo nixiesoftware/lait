@@ -568,6 +568,11 @@ pub fn frame_rate_milli(samples: &[Sample], timescale: u32) -> Option<u32> {
     u32::try_from(rate).ok().filter(|rate| *rate > 0)
 }
 
+/// The longest rendition name a receiver accepts (`receivers/shared/web`,
+/// `supportedLiveTracks`). The plane itself allows more; the receiver is the
+/// side that has to read it.
+const RECEIVER_RENDITION_CHARS: usize = 64;
+
 /// Build a catalog from what the container said and what this coordinator chose.
 ///
 /// The refusal that matters is [`Failure::Unpackageable`]. `Catalog::validate`
@@ -583,8 +588,25 @@ pub fn catalog(
     for (index, (trak, shape)) in trak.iter().enumerate() {
         let samples = samples(trak)?;
         let video = shape.kind == TrackKind::Video;
+        let track = format!("{}-{index}", if video { "video" } else { "audio" });
+        // A packet names its rendition and nothing else, so every track needs
+        // a name of its own. The video carries the policy's name — it is what
+        // a ticket's resource is checked against — and each other track hangs
+        // off it. Naming them all alike let an audio track overwrite the video
+        // in a receiver's catalog, and H.264 fragments met an AAC decoder.
+        //
+        // A receiver takes a rendition name of at most 64 characters, and a
+        // stored resource is already 64 — so a derived name keeps a prefix of
+        // the policy's and the track's own suffix, and fits.
+        let cmaf_rendition = if video {
+            policy.rendition.clone()
+        } else {
+            let room = RECEIVER_RENDITION_CHARS.saturating_sub(track.len() + 1);
+            let stem: String = policy.rendition.chars().take(room).collect();
+            format!("{stem}-{track}")
+        };
         tracks.push(CatalogTrack {
-            track: format!("{}-{index}", if video { "video" } else { "audio" }),
+            track,
             kind: shape.kind,
             codec: shape.codec.clone(),
             timescale: shape.timescale,
@@ -602,7 +624,7 @@ pub fn catalog(
             sample_rate: shape.sample_rate,
             channels: shape.channels,
             render_group: Some(policy.rendition.clone()),
-            cmaf_rendition: Some(policy.rendition.clone()),
+            cmaf_rendition: Some(cmaf_rendition),
             // One HLS rendition per catalog: `hls_media_playlist` refuses a
             // rendition that is not the ticket's resource, so a second one
             // would be unreachable rather than an alternative.
@@ -1264,6 +1286,84 @@ mod tests {
             find_moov(total, file_reader(over, counted)).unwrap_err(),
             Failure::Container
         );
+    }
+
+    /// Two tracks are two renditions in one group: the video wears the policy's
+    /// name and the audio hangs off it. Alike, the second overwrote the first
+    /// in a receiver's catalog and H.264 fragments met an AAC decoder.
+    #[test]
+    fn a_film_with_sound_names_its_audio_apart_from_its_video() {
+        let audio = TrackShape {
+            kind: TrackKind::Audio,
+            codec: "mp4a.40.2".into(),
+            timescale: 48_000,
+            decoder_config: vec![0x11, 0x90],
+            width: None,
+            height: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+        };
+        let built = catalog(
+            &[
+                (
+                    sampled_trak(vec![6; 12], Some(vec![1]), None),
+                    video_shape(),
+                ),
+                (sampled_trak(vec![6; 12], None, None), audio),
+            ],
+            &ingest_policy(),
+        )
+        .unwrap();
+        assert_eq!(built.tracks.len(), 2);
+        assert_eq!(built.tracks[0].cmaf_rendition.as_deref(), Some("film"));
+        assert_eq!(
+            built.tracks[1].cmaf_rendition.as_deref(),
+            Some("film-audio-1")
+        );
+        assert_eq!(built.tracks[1].render_group.as_deref(), Some("film"));
+        assert_eq!(built.tracks[1].hls_v3_rendition, None);
+        let names: std::collections::BTreeSet<_> = built
+            .tracks
+            .iter()
+            .map(|track| track.cmaf_rendition.clone())
+            .collect();
+        assert_eq!(
+            names.len(),
+            built.tracks.len(),
+            "every rendition has a name of its own"
+        );
+
+        // A stored resource is a 64-character content id, and a receiver takes
+        // no name longer than that: the derived name keeps a prefix and fits.
+        let stored = CatalogPolicy {
+            rendition: "a".repeat(64),
+            ..ingest_policy()
+        };
+        let audio = TrackShape {
+            kind: TrackKind::Audio,
+            codec: "mp4a.40.2".into(),
+            timescale: 48_000,
+            decoder_config: vec![0x11, 0x90],
+            width: None,
+            height: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+        };
+        let built = catalog(
+            &[
+                (
+                    sampled_trak(vec![6; 12], Some(vec![1]), None),
+                    video_shape(),
+                ),
+                (sampled_trak(vec![6; 12], None, None), audio),
+            ],
+            &stored,
+        )
+        .unwrap();
+        let name = built.tracks[1].cmaf_rendition.clone().unwrap();
+        assert_eq!(name.chars().count(), 64);
+        assert!(name.ends_with("-audio-1"));
+        assert_ne!(name, built.tracks[0].cmaf_rendition.clone().unwrap());
     }
 
     /// A catalog is built from the file's own numbers plus this coordinator's

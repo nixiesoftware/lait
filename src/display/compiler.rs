@@ -133,6 +133,11 @@ impl ProgramCompiler {
                         },
                     }
                 }
+                // Resolved by the coordinator before anything is compiled; one
+                // reaching here is a bug, and is said rather than blanked.
+                RenderedScene::StoredFrame(_) => {
+                    return Err(anyhow!("stored frame reached the compiler unresolved"));
+                }
                 RenderedScene::Blank(reason) => DisplayScene::Blank {
                     reason: match reason {
                         world_interface::display::BlankReason::SourceUnavailable => {

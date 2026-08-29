@@ -91,7 +91,6 @@ export function NewSpecDialog({
               label="Cancel"
               onClick={onCancel}
               variant="secondary"
-              elevation="low"
               size="md"
             />
           <Button

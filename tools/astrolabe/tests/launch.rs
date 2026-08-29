@@ -688,7 +688,7 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
                     std::path::Path::new(&store),
                     space_id,
                 ),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
             },
             call.clone(),
             None,
@@ -708,7 +708,15 @@ async fn seed_stored_film(client: &Client, home: &Path, space: &str) -> String {
     program_id
 }
 
-async fn seed_signage_program(client: &Client, store: &Path) -> (String, String) {
+/// What the durable Signage World holds once seeded: the Space, the program,
+/// and the one screen both receivers are pointed at.
+struct SeededSignage {
+    space: String,
+    program: String,
+    screen: String,
+}
+
+async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
     client
         .space_found(
             &store.to_string_lossy(),
@@ -765,7 +773,107 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
         write_signage_media(client, &orbit.space, entry.clone()).await;
     }
     write_signage_program(client, &orbit.space, program.clone()).await;
-    (orbit.space.clone(), program.id)
+    // A receiver is pointed at a screen, not a program: the screen is tuned to
+    // a channel, and the channel's base is what plays when nothing is being
+    // broadcast at it. One screen for both receivers, because a sync group is
+    // a frame-lock cohort and its members must pin the same canonical input.
+    let screen = tune_screen(client, &orbit.space, [20, 21], "Lobby", &program.id).await;
+    SeededSignage {
+        space: orbit.space.clone(),
+        program: program.id,
+        screen,
+    }
+}
+
+/// A channel whose base is `program`, and a sited-nowhere screen tuned to it.
+///
+/// Returns the screen's id — the thing a receiver is pointed at. `tags` name
+/// the channel and the screen, in that order, so two callers cannot collide.
+async fn tune_screen(
+    client: &Client,
+    space: &str,
+    tags: [u8; 2],
+    name: &str,
+    program: &str,
+) -> String {
+    let channel = signage::SignageChannel {
+        id: replica::body::BodyId::from_bytes([tags[0]; 16]).render(),
+        name: format!("{name} channel"),
+        base: Some(program.to_owned()),
+        schedule: Vec::new(),
+    };
+    write_signage_channel(client, space, channel.clone()).await;
+    let screen = signage::SignageScreen {
+        id: replica::body::BodyId::from_bytes([tags[1]; 16]).render(),
+        name: format!("{name} wall"),
+        place: None,
+        facts: std::collections::BTreeMap::new(),
+        sync: None,
+        labels: Vec::new(),
+        tuned: Some(channel.id),
+    };
+    write_signage_screen(client, space, screen.clone()).await;
+    screen.id
+}
+
+/// Put one Signage record through the real World adapter and hand back the
+/// typed answer, so a seed can assert what it was told.
+async fn signage_write(
+    client: &Client,
+    space: &str,
+    request: signage_app::SignageRequest,
+) -> signage_app::SignageResponse {
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let store = registered_store(client, space).await;
+    let call = signage_app::encode_call(&request).expect("encode Signage write");
+    let reply = client
+        .daemon()
+        .expect("identity daemon for Signage write")
+        .call_world(
+            lait::control::ControlRoute::World {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&store),
+                    space_id,
+                ),
+                world: signage::contract::product_world().into(),
+            },
+            call.clone(),
+            None,
+        )
+        .await
+        .expect("write the Signage record through its real World adapter");
+    let decoded = signage_app::decode_reply(&call, reply).expect("decode Signage write reply");
+    serde_json::from_value(decoded).expect("typed Signage write reply")
+}
+
+async fn write_signage_channel(client: &Client, space: &str, channel: signage::SignageChannel) {
+    let response = signage_write(
+        client,
+        space,
+        signage_app::SignageRequest::ChannelPut {
+            channel: channel.clone(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, signage_app::SignageResponse::ChannelSaved { channel: ref saved } if saved == &channel.id),
+        "Signage World did not save the channel: {response:?}"
+    );
+}
+
+async fn write_signage_screen(client: &Client, space: &str, screen: signage::SignageScreen) {
+    let response = signage_write(
+        client,
+        space,
+        signage_app::SignageRequest::ScreenPut {
+            screen: screen.clone(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, signage_app::SignageResponse::ScreenSaved { screen: ref saved } if saved == &screen.id),
+        "Signage World did not save the screen: {response:?}"
+    );
 }
 
 /// The store path as the daemon spelled it when it registered the Orbit.
@@ -824,7 +932,7 @@ async fn write_signage_media(client: &Client, space: &str, media: signage::Signa
                     std::path::Path::new(&store),
                     space_id,
                 ),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
             },
             call.clone(),
             None,
@@ -866,7 +974,7 @@ async fn write_signage_program(client: &Client, space: &str, program: signage::S
         .call_world(
             lait::control::ControlRoute::World {
                 address: lait::control::OrbitAddress::for_store(store, space),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
             },
             call.clone(),
             None,
@@ -1180,7 +1288,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     );
     attached.shutdown().await;
 
-    let (signage_orbit, signage_program) = seed_signage_program(&client, identity.path()).await;
+    let seeded = seed_signage_program(&client, identity.path()).await;
+    let signage_orbit = seeded.space.clone();
+    let signage_program = seeded.program.clone();
+    let signage_screen = seeded.screen.clone();
 
     // Run the real receiver binary against the real coordinator. This is the
     // restart/recovery seam: the public certificate copied by Astrolabe must
@@ -1242,9 +1353,9 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 // resolves this to the exact local Orbit id before it reaches
                 // the daemon.
                 orbit: signage_orbit,
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "program": signage_program }),
+                input: serde_json::json!({ "screen": signage_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
@@ -1329,9 +1440,9 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             .display_assignment_put(DisplayAssignmentInput {
                 device: second_device.clone(),
                 orbit: assignment.space.clone(),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "program": signage_program }),
+                input: serde_json::json!({ "screen": signage_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
@@ -1442,13 +1553,21 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         // installs the planned presentation, so this one assertion covers the
         // whole serve-side chain.
         let film_program = seed_stored_film(&client, identity.path(), &assignment.space).await;
+        let film_screen = tune_screen(
+            &client,
+            &assignment.space,
+            [22, 23],
+            "Premiere",
+            &film_program,
+        )
+        .await;
         client
             .display_assignment_put(DisplayAssignmentInput {
                 device: device.clone(),
                 orbit: assignment.space.clone(),
-                world: signage::contract::PRODUCT_WORLD.into(),
+                world: signage::contract::product_world().into(),
                 surface: "signage.program".into(),
-                input: serde_json::json!({ "program": film_program }),
+                input: serde_json::json!({ "screen": film_screen }),
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,

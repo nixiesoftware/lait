@@ -1,0 +1,571 @@
+/*
+ * Overlays.
+ *
+ * A popover, a menu, a dialog, a sheet and a toast are one kind of object: a
+ * thing held above the page, with the height that implies. They share one
+ * recipe — `--ds-material-lift` — and keep the Base UI states their motion
+ * keys on.
+ */
+
+.ds-overlay {
+  z-index: var(--ds-z-overlay);
+}
+
+.ds-pop,
+.ds-menu,
+.ds-dialog,
+.ds-sheet {
+  outline: none;
+  color: var(--ds-ink);
+  font-family: var(--ds-sans);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-lift);
+  transform-origin: var(--transform-origin);
+  transition:
+    transform var(--ds-dur-fast) var(--ds-ease),
+    opacity var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-pop[data-starting-style],
+.ds-pop[data-ending-style],
+.ds-menu[data-starting-style],
+.ds-menu[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+/* The scrim is a light one, blurred the way the header is. */
+.ds-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ds-z-scrim);
+  background: var(--ds-scrim);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: opacity var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-backdrop[data-starting-style],
+.ds-backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+.ds-pop {
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(420px, var(--available-height, 420px));
+  overflow: auto;
+  border-radius: var(--ds-r-lg);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+}
+
+.ds-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: var(--ds-weight-medium);
+  padding: 0 var(--ds-space-1);
+}
+
+.ds-pop-head h2,
+.ds-sheet-head h2 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
+}
+
+.ds-menu {
+  margin: 0;
+  padding: 6px;
+  min-width: 180px;
+  border-radius: var(--ds-r-md);
+  display: flex;
+  flex-direction: column;
+}
+
+.ds-menu-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  padding: 10px 12px;
+  border-radius: var(--ds-r-xs);
+  cursor: default;
+  outline: none;
+}
+
+.ds-menu-item[data-highlighted] {
+  background: var(--ds-hover);
+}
+
+.ds-menu-item[data-disabled] {
+  color: var(--ds-faint);
+}
+
+.ds-menu-item.is-danger {
+  color: var(--ds-alarm);
+}
+
+.ds-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: var(--ds-z-overlay);
+  transform: translate(-50%, -50%);
+  width: min(380px, calc(100% - 48px));
+  border-radius: var(--ds-r-xl);
+  padding: 22px 24px 20px;
+}
+
+.ds-dialog[data-starting-style],
+.ds-dialog[data-ending-style] {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.96);
+}
+
+.ds-dialog h2 {
+  margin: 0 0 var(--ds-space-2);
+  font-size: var(--ds-fs-heading);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
+}
+
+.ds-dialog p {
+  margin: 0 0 var(--ds-space-4);
+  color: var(--ds-muted);
+  font-size: var(--ds-fs-small);
+  line-height: 1.5;
+}
+
+.ds-dialog menu {
+  display: flex;
+  gap: var(--ds-space-2);
+  justify-content: flex-end;
+  margin: 0;
+  padding: 0;
+}
+
+.ds-leave {
+  width: min(420px, calc(100% - 48px));
+  padding: 24px 24px 20px;
+}
+
+.ds-leave h2 {
+  font-size: var(--ds-fs-heading);
+}
+
+.ds-leave p {
+  margin-bottom: 20px;
+  font-size: var(--ds-fs-body);
+  line-height: 1.45;
+}
+
+.ds-leave menu .ds-btn {
+  min-width: 7.5em;
+}
+
+@media (max-width: 719px) {
+  .ds-leave {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    transform: none;
+    width: 100%;
+    max-width: none;
+    border-radius: var(--ds-r-xl) var(--ds-r-xl) 0 0;
+    padding: 24px 20px max(20px, env(safe-area-inset-bottom));
+  }
+
+  .ds-leave[data-starting-style],
+.ds-leave[data-ending-style] {
+    opacity: 1;
+    transform: translateY(16%);
+  }
+
+  .ds-leave menu {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ds-leave menu .ds-btn {
+    width: 100%;
+    min-width: 0;
+    height: var(--ds-control-lg);
+  }
+
+  .ds-leave menu .ds-btn-solid {
+    order: -2;
+  }
+
+  .ds-leave menu .ds-btn-ghost {
+    order: -1;
+  }
+
+  .ds-leave menu .ds-btn-quiet {
+    margin-top: 4px;
+  }
+}
+
+/* A sheet rises from the bottom of a phone and sits in the middle of a desk. */
+.ds-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--ds-z-overlay);
+  width: 100%;
+  max-height: 78%;
+  border-radius: var(--ds-r-xl) var(--ds-r-xl) 0 0;
+  padding: 0 14px max(16px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transform: translateY(0);
+}
+
+.ds-sheet-grab {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 4px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.ds-sheet-grab i {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-rule-strong);
+  display: block;
+  font-style: normal;
+}
+
+.ds-sheet[data-starting-style],
+.ds-sheet[data-ending-style] {
+  transform: translateY(12%);
+  opacity: 0;
+}
+
+.ds-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--ds-space-1) var(--ds-space-1) var(--ds-space-3);
+  font-weight: var(--ds-weight-medium);
+  gap: 8px;
+}
+
+.ds-sheet-ident {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ds-sheet-ident h2 {
+  margin: 0;
+}
+
+.ds-sheet-ident > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.ds-sheet-body {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+/* ── Tiles and rows, as objects ────────────────────────────────────────── */
+
+.ds-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ds-space-2);
+}
+
+/* A tile is a card resting on the field, with a screen in it. */
+.ds-tile {
+  appearance: none;
+  border: 0;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+  color: inherit;
+  border-radius: var(--ds-r-lg);
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  transition:
+    transform var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+@media (hover: hover) {
+  .ds-tile:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      var(--ds-material-card),
+      0 8px 20px -12px var(--ds-cast);
+  }
+}
+
+.ds-tile-media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: clip;
+  isolation: isolate;
+  background: var(--ds-panel-screen);
+}
+
+.ds-tile-media .pe-thumb {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+}
+
+.ds-tile-name {
+  display: block;
+  padding: 10px 10px 2px;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A row is a line in a card. On its own, in a picker, it is a pressable line. */
+.ds-row {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  border-radius: var(--ds-r-md);
+  padding: 12px 0;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: background var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-sheet .ds-row,
+.ds-pop .ds-row {
+  padding: 10px 12px;
+}
+
+.ds-sheet .ds-row:hover,
+.ds-pop .ds-row:hover {
+  background: var(--ds-hover);
+}
+
+.ds-row-copy {
+  min-width: 0;
+}
+
+.ds-row-copy span {
+  display: block;
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+  margin-top: 2px;
+}
+
+.ds-pop-wide {
+  width: min(520px, calc(100vw - 24px));
+  max-height: min(560px, var(--available-height, 560px));
+}
+
+.ds-pop-choose {
+  width: 120px;
+  padding: 8px;
+  overflow: visible;
+  max-height: none;
+}
+
+.ds-choose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+}
+
+/* What to add: a small pressed object with a glyph and a word. */
+.ds-choose-tile {
+  appearance: none;
+  border: 0;
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  border-radius: var(--ds-r-md);
+  aspect-ratio: 1;
+  width: 100%;
+  padding: var(--ds-space-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: inherit;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease),
+    transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+@media (hover: hover) {
+  .ds-choose-tile:hover {
+    background: var(--ds-surface);
+    color: var(--ds-ink);
+    box-shadow: var(--ds-material-control);
+    transform: translateY(-1px);
+  }
+}
+
+.ds-choose-tile svg {
+  width: 22px;
+  height: 22px;
+}
+
+.ds-sheet .ds-choose {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ds-space-2);
+}
+
+.ds-sheet .ds-choose-tile {
+  width: auto;
+  aspect-ratio: 1;
+  min-height: 0;
+  max-height: 120px;
+}
+
+.ds-tile-plus {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(var(--ds-ink-rgb) / 0.28);
+  opacity: 0;
+  z-index: 2;
+  transition: opacity var(--ds-dur-fast) var(--ds-ease);
+  pointer-events: none;
+}
+
+.ds-tile-plus i {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+  display: grid;
+  place-items: center;
+  font-style: normal;
+  font-size: 22px;
+  line-height: 1;
+}
+
+@media (hover: hover) {
+  .ds-tile:hover .ds-tile-plus {
+    opacity: 1;
+  }
+}
+
+/* ── Toasts: for things you did not do ─────────────────────────────────── */
+
+.ds-toast-viewport {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 100003;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.ds-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 12px 8px 12px 16px;
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  border-radius: var(--ds-r-lg);
+  box-shadow: var(--ds-material-lift);
+  transform-origin: top right;
+  transition:
+    transform var(--ds-dur-fast) var(--ds-ease),
+    opacity var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-toast[data-starting-style],
+.ds-toast[data-ending-style] {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+}
+
+.ds-toast-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.ds-toast-title {
+  margin: 0;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+}
+
+.ds-toast-copy {
+  margin: 2px 0 0;
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+}
+
+@media (min-width: 720px) {
+  .ds-sheet {
+    left: 50%;
+    right: auto;
+    bottom: auto;
+    top: 50%;
+    width: min(440px, 92vw);
+    max-height: 70vh;
+    border-radius: var(--ds-r-xl);
+    padding: 0 18px 18px;
+    transform: translate(-50%, -50%);
+  }
+
+  .ds-sheet-grab {
+    display: none;
+  }
+
+  .ds-sheet-head {
+    padding-top: 18px;
+  }
+
+  .ds-sheet[data-starting-style],
+.ds-sheet[data-ending-style] {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+}

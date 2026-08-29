@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use display_protocol::bounds::MAX_STATIC_DELAY_MS;
 use display_protocol::ids::{
-    DisplayAssignmentId, DisplayDeviceId, DisplayPairingId, DisplayProgramId,
+    DisplayAssignmentId, DisplayDeviceId, DisplayPairingId, DisplayProgramId, RendezvousId,
 };
 use display_protocol::pairing::{CoordinatorTrust, PairingRejectionReason};
 use display_protocol::program::{
@@ -18,8 +18,8 @@ use world_interface::display::{DisplaySurfaceId, DisplayTheme};
 use world_interface::WorldClientRegistry;
 
 use super::{
-    serve_display_https, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
-    DisplayPairingService, DisplayTlsIdentity,
+    serve_display_https, AssignmentIntent, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
+    DisplayPairingService, DisplayTlsIdentity, EnrollmentHook, RendezvousState, RendezvousView,
 };
 use super::{AssignmentRecord, AssignmentSync, Custodian, SourceGrant};
 
@@ -45,6 +45,25 @@ const MIN_PASSPHRASE_CHARS: usize = 12;
 /// program and an unavailable source are different facts, and a surface that
 /// showed them the same way would be the false-disconnection defect wearing
 /// display clothes.
+/// A receiver's last report, and when it arrived, as the control plane says it.
+fn health_view(reported: super::pairing::ReportedHealth) -> crate::control::DisplayHealthView {
+    let health = reported.health;
+    crate::control::DisplayHealthView {
+        reported_at_unix_ms: Some(reported.reported_at_unix_ms),
+        revision: health.revision.as_str().to_string(),
+        current_item: health.current_item.as_str().to_string(),
+        elapsed_ms: health.elapsed_ms,
+        connection: wire_name(&health.connection),
+        playback: wire_name(&health.playback),
+        last_error: wire_name(&health.last_error),
+        staged_items: health.staged_items,
+        staged_bytes: health.staged_bytes,
+        drift_residual_ms: health.drift_residual_ms,
+        correction_events: health.correction_events,
+        pipeline_unobservable: health.pipeline_unobservable,
+    }
+}
+
 fn present_view(
     world: &str,
     surface: &str,
@@ -133,6 +152,13 @@ fn present_view(
                         RenderedScene::Media(_) => DisplayPresentationSceneView::Unsupported {
                             output: "media".into(),
                         },
+                        // Resolved into a frame by the coordinator before a
+                        // projection reaches here.
+                        RenderedScene::StoredFrame(_) => {
+                            DisplayPresentationSceneView::Unsupported {
+                                output: "stored_frame".into(),
+                            }
+                        }
                     },
                 }
             })
@@ -175,6 +201,10 @@ pub struct DisplayRuntime {
     custodian: Custodian,
     router: Arc<crate::orbits::Router>,
     registry: WorldClientRegistry,
+    /// The label this identity publishes its route under, when it does. It is
+    /// half of what a television is told: the site resolves the coordinator,
+    /// the code proves the person at the controller meant this one.
+    site: Option<String>,
 }
 
 impl DisplayRuntime {
@@ -190,6 +220,7 @@ impl DisplayRuntime {
         device_seed: &[u8; 32],
         profile: mechanics::kinship::ProfileId,
         port: u16,
+        site: Option<String>,
     ) -> Result<Self> {
         let mut identifier_key = [0u8; 32];
         getrandom::fill(&mut identifier_key).context("mint display identifier key")?;
@@ -216,11 +247,34 @@ impl DisplayRuntime {
             registry.clone(),
             root.join("package-state"),
         )?);
-        let pairing = Arc::new(DisplayPairingService::new(
-            store.clone(),
-            tls.instance().clone(),
-            tls.fingerprint().clone(),
-        )?);
+        // What a rendezvous does with the receiver it enrols: the same
+        // assignment path the controller's own request takes, with the
+        // device that now exists.
+        let keep_promise: EnrollmentHook = {
+            let store = store.clone();
+            let coordinator = coordinator.clone();
+            let router = router.clone();
+            let registry = registry.clone();
+            Arc::new(move |device: &DisplayDeviceId, intent: &AssignmentIntent| {
+                assign(
+                    &store,
+                    &coordinator,
+                    &router,
+                    &registry,
+                    device.clone(),
+                    intent.clone(),
+                )
+                .map(|_| ())
+            })
+        };
+        let pairing = Arc::new(
+            DisplayPairingService::new(
+                store.clone(),
+                tls.instance().clone(),
+                tls.fingerprint().clone(),
+            )?
+            .with_enrollment_hook(keep_promise),
+        );
         Ok(Self {
             store,
             coordinator,
@@ -230,6 +284,7 @@ impl DisplayRuntime {
             router,
             registry,
             profile,
+            site,
         })
     }
 
@@ -344,12 +399,28 @@ impl DisplayRuntime {
             return Some(rendered.unwrap_or_else(|error| Response::err(format!("{error:#}"))));
         }
 
+        if let Request::DisplaySurfaceChoices {
+            orbit,
+            world,
+            surface,
+        } = request
+        {
+            return Some(self.surface_choices(orbit, world, surface).await);
+        }
+        if let Request::DisplayWorldReceivers { world, orbit } = request {
+            return Some(
+                self.world_receivers(world, orbit)
+                    .map(|view| Response::DisplayWorldReceivers(Box::new(view)))
+                    .unwrap_or_else(|error| Response::err(format!("{error:#}"))),
+            );
+        }
+
         let result = match request {
             Request::DisplayStatus => self.status().map(|view| Response::Display(Box::new(view))),
             Request::DisplayPairingApprove { pairing, label } => self
                 .approve_pairing(pairing, label)
-                .map(|device| Response::Ok {
-                    message: Some(format!("approved display pairing for device {device}")),
+                .map(|device| Response::DisplayDevice {
+                    device: device.as_str().to_string(),
                 }),
             Request::DisplayPairingReject { pairing } => {
                 self.reject_pairing(pairing).map(|()| Response::Ok {
@@ -370,21 +441,31 @@ impl DisplayRuntime {
             } => self
                 .put_assignment(
                     device,
-                    orbit,
-                    world,
-                    surface,
-                    input.clone(),
-                    *theme,
-                    *stale_after_ms,
-                    *on_stale,
-                    sync.clone(),
-                    *expires_at_unix_ms,
+                    AssignmentIntent {
+                        orbit: orbit.clone(),
+                        world: world.clone(),
+                        surface: surface.clone(),
+                        input: input.clone(),
+                        theme: *theme,
+                        stale_after_ms: *stale_after_ms,
+                        on_stale: *on_stale,
+                        sync: sync.clone(),
+                        expires_at_unix_ms: *expires_at_unix_ms,
+                    },
                 )
                 .map(|(assignment, program)| Response::Ok {
                     message: Some(format!(
                         "assigned display {assignment} to receiver program {program}"
                     )),
                 }),
+            Request::DisplayRendezvousMint { label, assignment } => self
+                .mint_rendezvous(label, assignment.clone())
+                .map(|view| Response::DisplayRendezvous(Box::new(view))),
+            Request::DisplayRendezvousRevoke { rendezvous } => {
+                self.revoke_rendezvous(rendezvous).map(|()| Response::Ok {
+                    message: Some(format!("revoked display rendezvous {rendezvous}")),
+                })
+            }
             Request::DisplayAssignmentRevoke { assignment } => {
                 self.revoke_assignment(assignment).map(|()| Response::Ok {
                     message: Some(format!("revoked display assignment {assignment}")),
@@ -464,6 +545,153 @@ impl DisplayRuntime {
         Ok(present_view(world, surface, projection))
     }
 
+    /// One World's receivers in one Orbit: the ones it holds, with the input
+    /// each is pinned to, and the ones nobody holds. A receiver another World
+    /// holds is not listed — not marked, absent — so a World cannot learn the
+    /// fleet beyond its own.
+    fn world_receivers(
+        &self,
+        world: &str,
+        orbit: &str,
+    ) -> Result<crate::control::DisplayWorldView> {
+        use crate::control::{
+            DisplayAssignmentSyncView, DisplayPairingView, DisplayWorldAssignmentView,
+            DisplayWorldCodeView, DisplayWorldReceiverView, DisplayWorldView,
+        };
+        let state = self.store.snapshot()?;
+        let now = mechanics::wallclock::now_millis();
+        let mut receivers = Vec::new();
+        for device in state.devices.values() {
+            if device.revoked_at_unix_ms.is_some() {
+                continue;
+            }
+            let active = state.assignments.values().find(|assignment| {
+                assignment.device == device.device && assignment.revoked_at_unix_ms.is_none()
+            });
+            let assignment = match active {
+                None => None,
+                Some(held) if held.source.world == world && held.orbit == orbit => {
+                    Some(DisplayWorldAssignmentView {
+                        assignment: held.id.as_str().to_string(),
+                        surface: held.source.surface.as_str().to_string(),
+                        input: serde_json::from_slice(held.source.input.as_bytes())
+                            .unwrap_or(serde_json::Value::Null),
+                        sync: held.sync.as_ref().map(|sync| DisplayAssignmentSyncView {
+                            group: sync.group.clone(),
+                            mode: control_sync_mode(sync.mode),
+                            static_delay_ms: sync.static_delay_ms,
+                        }),
+                        expires_at_unix_ms: held.expires_at_unix_ms,
+                    })
+                }
+                Some(_) => continue,
+            };
+            receivers.push(DisplayWorldReceiverView {
+                device: device.device.as_str().to_string(),
+                label: device.label.clone(),
+                platform: wire_name(&device.capabilities.platform),
+                build: device.capabilities.build.clone(),
+                issued_at_unix_ms: device.issued_at_unix_ms,
+                health: self
+                    .pairing
+                    .health(&device.device)
+                    .ok()
+                    .flatten()
+                    .map(health_view),
+                assignment,
+            });
+        }
+        let codes = self
+            .pairing
+            .outstanding_rendezvous(now)?
+            .into_iter()
+            .filter_map(|minted| {
+                let intent = minted.assignment.as_ref()?;
+                if intent.world != world || intent.orbit != orbit {
+                    return None;
+                }
+                let view = self.rendezvous_view(minted.clone());
+                Some(DisplayWorldCodeView {
+                    rendezvous: view.rendezvous,
+                    code: view.code,
+                    site: view.site,
+                    label: view.label,
+                    surface: intent.surface.clone(),
+                    input: intent.input.clone(),
+                    state: view.state,
+                    device: view.device,
+                    created_at_unix_ms: view.created_at_unix_ms,
+                    expires_at_unix_ms: view.expires_at_unix_ms,
+                })
+            })
+            .collect();
+        let pairings = self
+            .pairing
+            .pending(now)?
+            .into_iter()
+            .map(|pairing| DisplayPairingView {
+                pairing: pairing.pairing.as_str().to_string(),
+                confirmation_phrase: pairing.confirmation_phrase,
+                certificate_sha256: pairing.coordinator_fingerprint.as_str().to_string(),
+                platform: wire_name(&pairing.capabilities.platform),
+                build: pairing.capabilities.build,
+                created_at_unix_ms: pairing.created_at_unix_ms,
+                expires_at_unix_ms: pairing.expires_at_unix_ms,
+            })
+            .collect();
+        Ok(DisplayWorldView {
+            site: self.site.clone(),
+            receivers,
+            codes,
+            pairings,
+        })
+    }
+
+    /// List what a surface can show. A World that could not be asked answers
+    /// with the reason rather than an empty list, so a controller can tell
+    /// "nothing to show" from "could not look".
+    async fn surface_choices(
+        &self,
+        orbit: &str,
+        world: &str,
+        surface: &str,
+    ) -> crate::control::Response {
+        use crate::control::{DisplayChoiceView, DisplayChoicesView, Response};
+        let listed: Result<Option<Vec<DisplayChoiceView>>> = async {
+            let world_id = WorldId::parse(world).context("parse display World")?;
+            let surface_id = DisplaySurfaceId::new(surface.to_string())
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let choices = self
+                .coordinator
+                .surface_choices(orbit, &world_id, &surface_id)
+                .await?;
+            Ok(choices.map(|choices| {
+                choices
+                    .into_iter()
+                    .map(|choice| DisplayChoiceView {
+                        id: choice.id,
+                        title: choice.title,
+                    })
+                    .collect()
+            }))
+        }
+        .await;
+        let (choices, unavailable) = match listed {
+            Ok(Some(choices)) => (Some(choices), None),
+            Ok(None) => (
+                None,
+                Some("this surface lists nothing to choose from".into()),
+            ),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        Response::DisplayChoices(Box::new(DisplayChoicesView {
+            world: world.to_string(),
+            surface: surface.to_string(),
+            choices,
+            unavailable,
+        }))
+    }
+
     /// Add a passphrase slot to the identifier envelope.
     ///
     /// The salt is fresh per slot, and the cost parameters are the module's
@@ -515,19 +743,7 @@ impl DisplayRuntime {
                     .health(&device.device)
                     .ok()
                     .flatten()
-                    .map(|health| crate::control::DisplayHealthView {
-                        revision: health.revision.as_str().to_string(),
-                        current_item: health.current_item.as_str().to_string(),
-                        elapsed_ms: health.elapsed_ms,
-                        connection: wire_name(&health.connection),
-                        playback: wire_name(&health.playback),
-                        last_error: wire_name(&health.last_error),
-                        staged_items: health.staged_items,
-                        staged_bytes: health.staged_bytes,
-                        drift_residual_ms: health.drift_residual_ms,
-                        correction_events: health.correction_events,
-                        pipeline_unobservable: health.pipeline_unobservable,
-                    });
+                    .map(health_view);
                 DisplayDeviceView {
                     device: device.device.as_str().to_string(),
                     label: device.label.clone(),
@@ -592,6 +808,12 @@ impl DisplayRuntime {
                 expires_at_unix_ms: pairing.expires_at_unix_ms,
             })
             .collect();
+        let pending_rendezvous = self
+            .pairing
+            .outstanding_rendezvous(mechanics::wallclock::now_millis())?
+            .into_iter()
+            .map(|minted| self.rendezvous_view(minted))
+            .collect();
         let custody = self.store.identifier_custody()?;
         Ok(DisplayCoordinatorView {
             instance: self.tls.instance().instance.clone(),
@@ -604,6 +826,7 @@ impl DisplayRuntime {
             devices,
             assignments,
             pending_pairings,
+            pending_rendezvous,
             identifier_custody: Some(crate::control::DisplayIdentifierCustodyView {
                 slots: custody.slots,
                 portable: custody.portable,
@@ -628,155 +851,101 @@ impl DisplayRuntime {
             .reject(&pairing, PairingRejectionReason::UserRejected)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn put_assignment(
         &self,
         device: &str,
-        orbit: &str,
-        world: &str,
-        surface: &str,
-        input: serde_json::Value,
-        theme: crate::control::DisplayThemeSetting,
-        stale_after_ms: u32,
-        on_stale: crate::control::DisplayStaleActionSetting,
-        sync: Option<crate::control::DisplayAssignmentSyncSetting>,
-        expires_at_unix_ms: Option<u64>,
+        intent: AssignmentIntent,
     ) -> Result<(DisplayAssignmentId, DisplayProgramId)> {
-        let minimum = display_protocol::bounds::MAX_LONG_POLL_WAIT_MS
-            .checked_add(display_protocol::bounds::LONG_POLL_STALE_MARGIN_MS)
-            .context("derive display stale margin")?;
-        if stale_after_ms <= minimum
-            || stale_after_ms > display_protocol::bounds::MAX_STALE_AFTER_MS
-        {
-            anyhow::bail!(
-                "display stale interval must exceed the long-poll window and remain within protocol bounds"
-            );
-        }
         let device = DisplayDeviceId::parse(device.to_string()).context("parse display device")?;
-        let enrolled = self
-            .store
-            .device(&device)?
-            .context("display device is not enrolled")?;
-        if enrolled.revoked_at_unix_ms.is_some() {
-            anyhow::bail!("display device is revoked");
-        }
-        let resolved = self
-            .router
-            .resolve(orbit)
-            .context("resolve display Orbit")?;
-        let world = WorldId::parse(world).context("parse display World")?;
-        let package = self
-            .registry
-            .package_for_world(&world)
-            .context("display World is not declared by a selected runner")?;
-        let surface_id = DisplaySurfaceId::new(surface.to_string()).map_err(|error| {
-            anyhow::anyhow!(error.diagnostic().unwrap_or("invalid surface").to_string())
-        })?;
-        let surface = package
-            .display_surface(&surface_id)
-            .context("display surface is not declared by the selected runner")?;
-        surface.descriptor.validate(&world).map_err(|error| {
-            anyhow::anyhow!(error.diagnostic().unwrap_or("invalid surface").to_string())
-        })?;
-        let reviewed = self
-            .router
-            .reviewed_world_implementation(&world)
-            .context("display World has no reviewed host implementation")?;
-        if reviewed != surface.descriptor.runtime_implementation {
-            anyhow::bail!("display surface and host implementation do not match");
-        }
-        let input = surface.canonicalize_input(input).map_err(|error| {
-            anyhow::anyhow!(error.diagnostic().unwrap_or("invalid input").to_string())
-        })?;
-        let source = SourceGrant::new(
-            world.as_str().to_string(),
-            reviewed,
-            surface_id,
-            surface.descriptor.contract_version,
-            surface.descriptor.contract_digest,
-            input,
-        );
-        let now_unix_ms = mechanics::wallclock::now_millis();
-        let sync = if let Some(setting) = sync {
-            validate_sync_group(&setting.group).context("validate display sync group")?;
-            if !(-MAX_STATIC_DELAY_MS..=MAX_STATIC_DELAY_MS).contains(&setting.static_delay_ms) {
-                anyhow::bail!("display static delay is outside its protocol bound");
-            }
-            let mode = wire_sync_mode(setting.mode);
-            let state = self.store.snapshot()?;
-            let mut epoch_unix_ms = None;
-            for existing in state.assignments.values().filter(|existing| {
-                existing.revoked_at_unix_ms.is_none()
-                    && existing
-                        .expires_at_unix_ms
-                        .is_none_or(|expires| now_unix_ms < expires)
-                    && existing
-                        .sync
-                        .as_ref()
-                        .is_some_and(|existing| existing.group == setting.group)
-            }) {
-                let existing_sync = existing
-                    .sync
-                    .as_ref()
-                    .context("display sync group member lost its policy")?;
-                if existing_sync.mode != mode {
-                    anyhow::bail!("display sync group already uses a different mode");
-                }
-                if existing.orbit != resolved.address.orbit.as_str()
-                    || existing.space != resolved.address.space.as_str()
-                    || existing.source.world != source.world
-                    || existing.source.implementation != source.implementation
-                    || existing.source.surface != source.surface
-                    || existing.source.surface_contract_version != source.surface_contract_version
-                    || existing.source.surface_contract_digest != source.surface_contract_digest
-                    || existing.source.input_sha256 != source.input_sha256
-                {
-                    anyhow::bail!(
-                        "display sync group members must pin the same surface and canonical input"
-                    );
-                }
-                epoch_unix_ms = Some(existing_sync.epoch_unix_ms);
-            }
-            Some(AssignmentSync {
-                group: setting.group,
-                mode,
-                epoch_unix_ms: epoch_unix_ms.unwrap_or(now_unix_ms.max(1)),
-                static_delay_ms: setting.static_delay_ms,
-            })
-        } else {
-            None
-        };
-        let assignment = DisplayAssignmentId::parse(random_hex::<16>()?)?;
-        let program = DisplayProgramId::parse(random_hex::<16>()?)?;
-        let record = AssignmentRecord {
-            version: 1,
-            id: assignment.clone(),
+        assign(
+            &self.store,
+            &self.coordinator,
+            &self.router,
+            &self.registry,
             device,
-            orbit: resolved.address.orbit.as_str().to_string(),
-            space: resolved.address.space.as_str().to_string(),
-            program: program.clone(),
-            source,
-            controller: "astrolabe:local-primary".into(),
-            coordinator_actor: "primary".into(),
-            protocol_major: display_protocol::PROTOCOL_MAJOR,
-            theme: package_theme(theme),
-            freshness: FreshnessPolicy {
-                stale_after_ms,
-                on_stale: match on_stale {
-                    crate::control::DisplayStaleActionSetting::KeepWithNativeBanner => {
-                        StaleAction::KeepWithNativeBanner
-                    }
-                    crate::control::DisplayStaleActionSetting::Blank => StaleAction::Blank,
-                },
+            intent,
+        )
+    }
+
+    /// Mint a code for a television to enter.
+    ///
+    /// A promised assignment is resolved *now* — Orbit, World, surface and
+    /// input — so a mistyped program id is refused at the desk where it was
+    /// typed, not minutes later on a television that can only say "nothing
+    /// to show". What is stored is the intent; the resolution is repeated
+    /// when the receiver enrols, against whatever is selected then.
+    fn mint_rendezvous(
+        &self,
+        label: &str,
+        assignment: Option<crate::control::DisplayRendezvousAssignmentSetting>,
+    ) -> Result<crate::control::DisplayRendezvousView> {
+        let intent = assignment.map(|setting| AssignmentIntent {
+            orbit: setting.orbit,
+            world: setting.world,
+            surface: setting.surface,
+            input: setting.input,
+            theme: setting.theme,
+            stale_after_ms: setting.stale_after_ms,
+            on_stale: setting.on_stale,
+            sync: setting.sync,
+            expires_at_unix_ms: setting.expires_at_unix_ms,
+        });
+        if let Some(intent) = &intent {
+            validate_freshness(intent.stale_after_ms)?;
+            resolve_source(
+                &self.router,
+                &self.registry,
+                &intent.orbit,
+                &intent.world,
+                &intent.surface,
+                intent.input.clone(),
+            )?;
+        }
+        let minted = self.pairing.mint_rendezvous(
+            label.to_string(),
+            intent,
+            mechanics::wallclock::now_millis(),
+        )?;
+        Ok(self.rendezvous_view(minted))
+    }
+
+    fn revoke_rendezvous(&self, rendezvous: &str) -> Result<()> {
+        let rendezvous =
+            RendezvousId::parse(rendezvous.to_string()).context("parse display rendezvous id")?;
+        self.pairing.revoke_rendezvous(&rendezvous)
+    }
+
+    fn rendezvous_view(&self, minted: RendezvousView) -> crate::control::DisplayRendezvousView {
+        crate::control::DisplayRendezvousView {
+            rendezvous: minted.rendezvous.as_str().to_string(),
+            code: minted.code,
+            site: self.site.clone(),
+            label: minted.label,
+            assignment: minted.assignment.map(|intent| {
+                crate::control::DisplayRendezvousAssignmentView {
+                    orbit: intent.orbit,
+                    world: intent.world,
+                    surface: intent.surface,
+                }
+            }),
+            state: match &minted.state {
+                RendezvousState::Waiting => crate::control::DisplayRendezvousState::Waiting,
+                RendezvousState::Connecting { .. } => {
+                    crate::control::DisplayRendezvousState::Connecting
+                }
+                RendezvousState::Connected { .. } => {
+                    crate::control::DisplayRendezvousState::Connected
+                }
             },
-            sync,
-            expires_at_unix_ms,
-            revoked_at_unix_ms: None,
-        };
-        self.store
-            .replace_assignment_for_device(record, now_unix_ms)?;
-        self.coordinator.notify_assignment_change();
-        Ok((assignment, program))
+            device: match &minted.state {
+                RendezvousState::Waiting => None,
+                RendezvousState::Connecting { device } | RendezvousState::Connected { device } => {
+                    Some(device.as_str().to_string())
+                }
+            },
+            created_at_unix_ms: minted.created_at_unix_ms,
+            expires_at_unix_ms: minted.expires_at_unix_ms,
+        }
     }
 
     fn revoke_assignment(&self, assignment: &str) -> Result<()> {
@@ -802,6 +971,186 @@ impl DisplayRuntime {
         self.coordinator.notify_assignment_change();
         Ok(())
     }
+}
+
+/// A surface pinned to an Orbit, with its input already canonical: everything
+/// an assignment commits that is not about the device or the policy.
+struct ResolvedSource {
+    orbit: String,
+    space: String,
+    source: SourceGrant,
+}
+
+fn validate_freshness(stale_after_ms: u32) -> Result<()> {
+    let minimum = display_protocol::bounds::MAX_LONG_POLL_WAIT_MS
+        .checked_add(display_protocol::bounds::LONG_POLL_STALE_MARGIN_MS)
+        .context("derive display stale margin")?;
+    if stale_after_ms <= minimum || stale_after_ms > display_protocol::bounds::MAX_STALE_AFTER_MS {
+        anyhow::bail!(
+            "display stale interval must exceed the long-poll window and remain within protocol bounds"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve what a controller named to what the daemon will actually serve.
+///
+/// The daemon derives Space, implementation and contract digests from its
+/// own registry rather than accepting them from the controller, and the
+/// package's canonicalizer is the only thing entitled to judge the input.
+fn resolve_source(
+    router: &crate::orbits::Router,
+    registry: &WorldClientRegistry,
+    orbit: &str,
+    world: &str,
+    surface: &str,
+    input: serde_json::Value,
+) -> Result<ResolvedSource> {
+    let resolved = router.resolve(orbit).context("resolve display Orbit")?;
+    let world = WorldId::parse(world).context("parse display World")?;
+    let package = registry
+        .package_for_world(&world)
+        .context("display World is not declared by a selected runner")?;
+    let surface_id = DisplaySurfaceId::new(surface.to_string()).map_err(|error| {
+        anyhow::anyhow!(error.diagnostic().unwrap_or("invalid surface").to_string())
+    })?;
+    let surface = package
+        .display_surface(&surface_id)
+        .context("display surface is not declared by the selected runner")?;
+    surface.descriptor.validate(&world).map_err(|error| {
+        anyhow::anyhow!(error.diagnostic().unwrap_or("invalid surface").to_string())
+    })?;
+    let reviewed = router
+        .reviewed_world_implementation(&world)
+        .context("display World has no reviewed host implementation")?;
+    if reviewed != surface.descriptor.runtime_implementation {
+        anyhow::bail!("display surface and host implementation do not match");
+    }
+    let input = surface.canonicalize_input(input).map_err(|error| {
+        anyhow::anyhow!(error.diagnostic().unwrap_or("invalid input").to_string())
+    })?;
+    Ok(ResolvedSource {
+        orbit: resolved.address.orbit.as_str().to_string(),
+        space: resolved.address.space.as_str().to_string(),
+        source: SourceGrant::new(
+            world.as_str().to_string(),
+            reviewed,
+            surface_id,
+            surface.descriptor.contract_version,
+            surface.descriptor.contract_digest,
+            input,
+        ),
+    })
+}
+
+/// Commit an assignment for an enrolled receiver. One path for both the
+/// controller's explicit assignment and the one a rendezvous promised, so
+/// there is exactly one set of rules about what may be pinned.
+fn assign(
+    store: &CoordinatorStore,
+    coordinator: &DisplayCoordinator,
+    router: &crate::orbits::Router,
+    registry: &WorldClientRegistry,
+    device: DisplayDeviceId,
+    intent: AssignmentIntent,
+) -> Result<(DisplayAssignmentId, DisplayProgramId)> {
+    validate_freshness(intent.stale_after_ms)?;
+    let enrolled = store
+        .device(&device)?
+        .context("display device is not enrolled")?;
+    if enrolled.revoked_at_unix_ms.is_some() {
+        anyhow::bail!("display device is revoked");
+    }
+    let resolved = resolve_source(
+        router,
+        registry,
+        &intent.orbit,
+        &intent.world,
+        &intent.surface,
+        intent.input,
+    )?;
+    let now_unix_ms = mechanics::wallclock::now_millis();
+    let sync = if let Some(setting) = intent.sync {
+        validate_sync_group(&setting.group).context("validate display sync group")?;
+        if !(-MAX_STATIC_DELAY_MS..=MAX_STATIC_DELAY_MS).contains(&setting.static_delay_ms) {
+            anyhow::bail!("display static delay is outside its protocol bound");
+        }
+        let mode = wire_sync_mode(setting.mode);
+        let state = store.snapshot()?;
+        let mut epoch_unix_ms = None;
+        for existing in state.assignments.values().filter(|existing| {
+            existing.revoked_at_unix_ms.is_none()
+                && existing
+                    .expires_at_unix_ms
+                    .is_none_or(|expires| now_unix_ms < expires)
+                && existing
+                    .sync
+                    .as_ref()
+                    .is_some_and(|existing| existing.group == setting.group)
+        }) {
+            let existing_sync = existing
+                .sync
+                .as_ref()
+                .context("display sync group member lost its policy")?;
+            if existing_sync.mode != mode {
+                anyhow::bail!("display sync group already uses a different mode");
+            }
+            if existing.orbit != resolved.orbit
+                || existing.space != resolved.space
+                || existing.source.world != resolved.source.world
+                || existing.source.implementation != resolved.source.implementation
+                || existing.source.surface != resolved.source.surface
+                || existing.source.surface_contract_version
+                    != resolved.source.surface_contract_version
+                || existing.source.surface_contract_digest
+                    != resolved.source.surface_contract_digest
+                || existing.source.input_sha256 != resolved.source.input_sha256
+            {
+                anyhow::bail!(
+                    "display sync group members must pin the same surface and canonical input"
+                );
+            }
+            epoch_unix_ms = Some(existing_sync.epoch_unix_ms);
+        }
+        Some(AssignmentSync {
+            group: setting.group,
+            mode,
+            epoch_unix_ms: epoch_unix_ms.unwrap_or(now_unix_ms.max(1)),
+            static_delay_ms: setting.static_delay_ms,
+        })
+    } else {
+        None
+    };
+    let assignment = DisplayAssignmentId::parse(random_hex::<16>()?)?;
+    let program = DisplayProgramId::parse(random_hex::<16>()?)?;
+    let record = AssignmentRecord {
+        version: 1,
+        id: assignment.clone(),
+        device,
+        orbit: resolved.orbit,
+        space: resolved.space,
+        program: program.clone(),
+        source: resolved.source,
+        controller: "astrolabe:local-primary".into(),
+        coordinator_actor: "primary".into(),
+        protocol_major: display_protocol::PROTOCOL_MAJOR,
+        theme: package_theme(intent.theme),
+        freshness: FreshnessPolicy {
+            stale_after_ms: intent.stale_after_ms,
+            on_stale: match intent.on_stale {
+                crate::control::DisplayStaleActionSetting::KeepWithNativeBanner => {
+                    StaleAction::KeepWithNativeBanner
+                }
+                crate::control::DisplayStaleActionSetting::Blank => StaleAction::Blank,
+            },
+        },
+        sync,
+        expires_at_unix_ms: intent.expires_at_unix_ms,
+        revoked_at_unix_ms: None,
+    };
+    store.replace_assignment_for_device(record, now_unix_ms)?;
+    coordinator.notify_assignment_change();
+    Ok((assignment, program))
 }
 
 fn package_theme(theme: crate::control::DisplayThemeSetting) -> DisplayTheme {

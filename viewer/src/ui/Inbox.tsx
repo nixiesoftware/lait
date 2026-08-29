@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AtSign, Check, CheckCheck, Circle, Inbox as InboxIcon, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
+import { AtSign, Check, CheckCheck, Circle, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
 
 import { rpc } from "../api";
 import {
-  defaultInboxPreferences,
+  inboxCauseLabel as causeLabel,
+  loadInboxPreferences as loadPreferences,
+  persistInboxPreferences as persistPreferences,
   inboxEntryKey,
   type InboxKind,
   type InboxPreferences,
@@ -142,6 +144,7 @@ export function Inbox({
       return (
         <ApplicationState
           kind="retry"
+          art="unavailable"
           title="Inbox unavailable"
           body={error}
           action={<Button
@@ -292,12 +295,11 @@ export function Inbox({
 
       {entries.length === 0 && !nextCursor ? (
         <EmptyState
-          icon={<InboxIcon className="size-icon-lg" />}
+          art="inbox"
           title="You’re all caught up"
-          body="Nothing in this local space is currently addressed to you."
         />
       ) : visible.length === 0 && !nextCursor ? (
-        <EmptyState icon={<InboxIcon className="size-icon-lg" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
+        <EmptyState kind="filtered-empty" art="filtered" title="No notifications match" />
       ) : (
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => (
@@ -421,24 +423,6 @@ export function Inbox({
       )}
     </div>
   );
-}
-
-function causeLabel(kind: string): string {
-  return { assigned: "Assignments", comment: "Comments and mentions", status: "Status changes", chronological: "Latest" }[kind] ?? "Other";
-}
-
-const preferencesKey = (spaceId: string) => `lait.inbox-preferences:${spaceId}`;
-function loadPreferences(spaceId: string): InboxPreferences {
-  try {
-    const saved = JSON.parse(localStorage.getItem(preferencesKey(spaceId)) ?? "null") as Partial<InboxPreferences> | null;
-    const defaults = defaultInboxPreferences();
-    return saved ? { ...defaults, ...saved, kinds: { ...defaults.kinds, ...saved.kinds }, snoozed: saved.snoozed ?? {} } : defaults;
-  } catch {
-    return defaultInboxPreferences();
-  }
-}
-function persistPreferences(spaceId: string, value: InboxPreferences): void {
-  try { localStorage.setItem(preferencesKey(spaceId), JSON.stringify(value)); } catch { /* memory remains authoritative */ }
 }
 
 interface InboxContext { active: string; scroll: number }

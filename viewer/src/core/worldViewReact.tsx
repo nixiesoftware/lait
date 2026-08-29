@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
@@ -39,6 +40,36 @@ export function useWorldResource<T>(
   useEffect(() => {
     if (loader) void store.ensure(key, loader).catch(() => undefined);
   }, [key, loader, store]);
+  // A load that failed is asked once more when this resource is next observed.
+  //
+  // `ensure` leaves a rejected entry stale with no promise in flight, so it is
+  // ready to be retried — and nothing retried it. The effect above depends on
+  // the key, the loader and the store, none of which change because a request
+  // failed, so a resource that lost one race stayed lost for as long as the
+  // view did. A transient failure at startup was indistinguishable from a
+  // permanent one, and the only ways out were navigating elsewhere or finding a
+  // Retry button.
+  //
+  // Once per failure. What keeps that true is mostly the dependency list: a
+  // rejection publishes a new snapshot, but `snapshot.state` is still the
+  // string "error", so this effect does not re-run and cannot spin against a
+  // daemon that is already struggling. Depending on `snapshot.error` instead
+  // would spin, because every rejection carries a fresh error object.
+  //
+  // The ref bounds the rest: any *other* reason this effect re-runs while the
+  // resource is still failing — a re-mount, a new loader identity — would
+  // otherwise spend another attempt. Cleared on a success, so a later failure
+  // is a new episode with its own attempt.
+  const retriedFor = useRef<ResourceKey | null>(null);
+  useEffect(() => {
+    if (snapshot.state === "ready") {
+      retriedFor.current = null;
+      return;
+    }
+    if (!loader || snapshot.state !== "error" || retriedFor.current === key) return;
+    retriedFor.current = key;
+    void store.ensure(key, loader).catch(() => undefined);
+  }, [key, loader, store, snapshot.state]);
   return snapshot;
 }
 

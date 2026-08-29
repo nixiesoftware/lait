@@ -18,10 +18,10 @@ use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 use lait::control::{self, ClientRequest, Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-fn home(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lait-pool-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test home");
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("pool-{tag}"))
 }
 
 /// One `ok` response, exactly as the daemon writes it.

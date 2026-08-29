@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
-import { CircleDot } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { rpc } from "../api";
 import type { Row, WorldPublicationId } from "../types";
-import { EmptyState, LoadingState } from "./AppState";
+import { ApplicationState, EmptyState, LoadingState } from "./AppState";
 import { interactiveRow } from "./primitives";
 import { Button } from "@astryxdesign/core";
 
@@ -40,6 +39,18 @@ export function MyIssues({
   onError: (message: string) => void;
 }) {
   const [rows, setRows] = useState<Row[] | null>(null);
+  /**
+   * Why there are no rows, when there are none.
+   *
+   * `rows === null` meant "not loaded", and a failed load left it null — so a
+   * read that failed drew "Loading your issues" forever, a spinner promising
+   * progress that was never coming. The error went to a toast that had already
+   * faded by the time anyone looked.
+   */
+  const [failure, setFailure] = useState<string | null>(null);
+  /** Read inside `load`, which must not re-create itself when rows change. */
+  const rowsRef = useRef<Row[] | null>(null);
+  rowsRef.current = rows;
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [publication, setPublication] = useState<WorldPublicationId | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -52,6 +63,7 @@ export function MyIssues({
       append = false,
     ) => {
       if (append) setLoadingMore(true);
+      if (!append) setFailure(null);
       try {
         const result = await rpc(spaceId, {
           cmd: "list",
@@ -68,7 +80,14 @@ export function MyIssues({
         setNextCursor(result.page.next_cursor ?? null);
         setPublication(result.page.publication);
       } catch (error) {
-        if (alive()) onError(error instanceof Error ? error.message : String(error));
+        if (!alive()) return;
+        const message = error instanceof Error ? error.message : String(error);
+        // Whoever can show it best shows it: with nothing on screen the pane
+        // owns the failure, and a toast beside it would be the same answer
+        // twice. With rows already drawn the pane keeps them, so the transient
+        // notice is the only place left to say a refresh did not land.
+        setFailure(message);
+        if (append || rowsRef.current) onError(message);
       } finally {
         if (alive() && append) setLoadingMore(false);
       }
@@ -88,15 +107,33 @@ export function MyIssues({
   }, [load, revision]);
 
   if (rows === null) {
+    if (failure) {
+      return (
+        <ApplicationState
+          kind="retry"
+          art="unavailable"
+          title="Your issues are unavailable"
+          body={failure}
+          action={
+            <Button
+              onClick={() => void load(() => true)}
+              label="Retry"
+              variant="ghost"
+              size="sm"
+            />
+          }
+        />
+      );
+    }
     return <LoadingState title="Loading your issues" body="Reading assignments across this workspace." />;
   }
   if (rows.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <EmptyState
-          icon={<CircleDot className="size-icon-lg" />}
+          art="issues"
           title="No issues assigned to you"
-          body={nextCursor ? "No active assignments are present on this page." : "Issues assigned to you across every project will appear here."}
+          body={nextCursor ? "No assignments are present on this page." : undefined}
         />
         {nextCursor && publication && (
           <Button

@@ -34,12 +34,10 @@ const JOINER_SEED: [u8; 32] = [22u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-authist-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("authist-{tag}"))
 }
 
 fn world() -> WorldId {
@@ -143,7 +141,7 @@ fn supported() -> SupportedSchemas {
 }
 
 /// Found a Space and return its mechanics handle (root stays on disk).
-fn form(tag: &str) -> (PathBuf, SpaceAuthority) {
+fn form(tag: &str) -> (crate::head::TempRoot, SpaceAuthority) {
     let root = temp_home(tag);
     let (mech, _coords) = SpaceAuthority::form(&root, &FOUNDER_SEED, "authist", vec![]).unwrap();
     // The founder product-authority bootstrap (activate impl + grant caps), so

@@ -52,6 +52,7 @@
 /// support has to answer first the moment two builds are in the field.
 pub const VERSION: &str = env!("LAIT_VERSION_LONG");
 
+pub mod agent_token;
 pub mod client_action;
 pub mod config;
 pub mod control;
@@ -63,6 +64,7 @@ pub mod dto;
 pub mod host_client;
 pub mod install;
 pub mod mcp;
+pub mod mcp_http;
 /// The product's adoption of the orbital lifecycle (hosts a World, drives
 /// Sessions through the public `runtime` API).
 pub mod orbital;

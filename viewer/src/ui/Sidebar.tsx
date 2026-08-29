@@ -256,6 +256,7 @@ export function Sidebar({
                   scoped && "text-fg",
                 )}
               >
+                <GlyphSlot />
                 <span className="min-w-0 flex-1 truncate">{candidate.name}</span>
                 <ChevronRight
                   className={cn(
@@ -331,8 +332,9 @@ export function Sidebar({
         )}
         {projectsOpen ? (
           looseProjects.length === 0 ? (
-            <p className="text-mute px-2 py-1 text-base">
-              {teams.length > 0 ? "Every project has a team." : "No projects yet."}
+            <p className="text-mute flex items-center gap-2 px-2 py-1 text-base">
+              <GlyphSlot />
+              <span>{teams.length > 0 ? "Every project has a team." : "No projects yet."}</span>
             </p>
           ) : (
             looseProjects.map(projectNode)
@@ -375,7 +377,8 @@ function SpaceSwitcher({
   onPruneSpaces: () => void;
 }) {
   const selected = spaces.find((s) => s.id === current) ?? null;
-  const title = (currentName?.trim() || selected?.name) || selected?.space || "Choose a space";
+  const title = (currentName?.trim() || selected?.name || selected?.seen?.name)
+    || selected?.space || "Choose a space";
   // A row whose store is gone. It has no remedy anywhere else in the app: the
   // registry is only ever *written* by founding and entering, so nothing else
   // clears one and it sits in the switcher for good.
@@ -473,7 +476,7 @@ function SpaceSwitcher({
                       <Folder className="size-icon-sm shrink-0" />
                     )
                   }
-                  label={space.name || space.space}
+                  label={space.name || space.seen?.name || space.space}
                   // An agent replica is a different *identity* on the same data,
                   // which is the only thing worth saying twice.
                   {...(space.identity.kind === "agent"
@@ -604,18 +607,24 @@ function ProjectRow({
           onClick={() => onPick(project.key)}
           title={`${project.name} · ${project.key}`}
           aria-current={active ? "page" : undefined}
-          className={cn(navigationItem({ selected: active }), "px-1.5")}
+          className={navigationItem({ selected: active })}
         >
-          <ProjectIcon
-            color={catalogColor(project.color)}
-            className={cn("size-icon-sm opacity-75", active && "opacity-100")}
-          />
+          <GlyphSlot>
+            <ProjectIcon
+              color={catalogColor(project.color)}
+              className={cn("size-icon-sm opacity-75", active && "opacity-100")}
+            />
+          </GlyphSlot>
           <span className="min-w-0 flex-1 truncate">{project.name}</span>
         </button>
         <IconButton
           label={favorited ? `Remove ${project.name} from favorites` : `Add ${project.name} to favorites`}
           className={cn(
-            "absolute top-0.5 right-0.5 size-ctl-sm opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100",
+            // `right-2` is the section header's `px-2`: the star over a project
+            // and the `+` on the header above it are the same control at the
+            // same inset, so the column has one trailing edge instead of two
+            // 6px apart.
+            "absolute top-0.5 right-2 size-ctl-sm opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100",
             active ? "bg-active hover:bg-hover" : "bg-hover",
           )}
           onClick={() => onToggleFavorite(project.key)}
@@ -627,6 +636,38 @@ function ProjectRow({
       </div>
     </div>
     </ContextMenu>
+  );
+}
+
+/**
+ * The column a label starts in.
+ *
+ * Six things drew their own leading edge. A row set `px-2` and let its 14px
+ * glyph size the gap; the project row set `px-1.5`, so its glyph hung 2px left
+ * of every other row's; a section header drew a 12px chevron behind a 4px gap
+ * and began its title 6px left of every label it was a heading for; a header
+ * with nothing to
+ * fold began 22px left of them; the mini labels and the empty note began at
+ * the padding. The eye reads six edges in one column as the list being
+ * crooked, not as six components.
+ *
+ * The slot is `icon-md` wide and its glyph is `icon-sm`, which is Astryx's own
+ * arrangement — its Button centres a 14px glyph in a 16px slot, and the space
+ * trigger at the top of the rail is one of those. Matching it is what puts the
+ * rail's first row in the same column as the rows under it without reaching
+ * into Astryx's compiled styles; the 2px the trigger was out was this slot.
+ *
+ * It holds nothing where there is no glyph, which is what brings a title, a
+ * mini label, a note and a team's name onto the edge their rows sit on.
+ */
+function GlyphSlot({ children, className }: { children?: React.ReactNode; className?: string }) {
+  return (
+    <span
+      className={cn("w-icon-md flex shrink-0 items-center justify-center", className)}
+      aria-hidden={!children}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -654,28 +695,32 @@ function Section({
 }) {
   const label = (
     <>
-      {onToggle && (
-        <ChevronRight
-          className={cn("size-icon-xs shrink-0 transition-transform", open && "rotate-90")}
-          aria-hidden
-        />
-      )}
-      <span className="truncate">{title}</span>
-      {count !== undefined && <span className="font-normal tabular-nums">{count}</span>}
+      <GlyphSlot>
+        {onToggle && (
+          <ChevronRight
+            className={cn("size-icon-xs shrink-0 transition-transform", open && "rotate-90")}
+            aria-hidden
+          />
+        )}
+      </GlyphSlot>
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate">{title}</span>
+        {count !== undefined && <span className="font-normal tabular-nums">{count}</span>}
+      </span>
     </>
   );
   return (
     <div className="mt-4 mb-1 flex h-ctl-xs items-center px-2">
       {onToggle ? (
         <button
-          className="text-mute hover:text-fg flex min-w-0 items-center gap-1 text-xs font-semibold tracking-[0.08em] uppercase"
+          className="text-mute hover:text-fg flex min-w-0 items-center gap-2 text-xs font-semibold tracking-[0.08em] uppercase"
           onClick={onToggle}
           aria-expanded={open}
         >
           {label}
         </button>
       ) : (
-        <h2 className="text-mute flex min-w-0 items-center gap-1 text-xs font-semibold tracking-[0.08em] uppercase">
+        <h2 className="text-mute flex min-w-0 items-center gap-2 text-xs font-semibold tracking-[0.08em] uppercase">
           {label}
         </h2>
       )}
@@ -685,7 +730,12 @@ function Section({
 }
 
 function MiniSection({ title }: { title: string }) {
-  return <p className="text-mute mt-1 px-2 text-2xs font-semibold tracking-[0.08em] uppercase">{title}</p>;
+  return (
+    <p className="text-mute mt-1 flex items-center gap-2 px-2 text-2xs font-semibold tracking-[0.08em] uppercase">
+      <GlyphSlot />
+      <span className="truncate">{title}</span>
+    </p>
+  );
 }
 
 function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React.ReactElement; label: string; active?: boolean; badge?: number; compact?: boolean; onClick: () => void }) {
@@ -700,7 +750,7 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
         }),
       )}
     >
-      <span className="text-mute [&>svg]:size-icon-sm">{icon}</span>
+      <GlyphSlot className="text-mute [&>svg]:size-icon-sm">{icon}</GlyphSlot>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {!!badge && <Badge variant="blue" label={badge} className="justify-center tabular-nums" />}
     </button>

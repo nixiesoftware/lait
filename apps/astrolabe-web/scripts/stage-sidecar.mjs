@@ -5,10 +5,15 @@
 // `tools/astrolabe/src/sidecar.rs` for why that is a rule rather than a
 // convention). Two places need it, and they are different places:
 //
-//   dev     `src-tauri/target/debug/`, beside the host binary `tauri dev`
-//           runs. Nothing else populates it, so a host launched without this
-//           comes up with no daemon to spawn and waits on a supervisor that
-//           cannot start.
+//   dev     `src-tauri/binaries/lait-<triple>`, the same place bundling uses.
+//           NOT `src-tauri/target/debug/` — that was the obvious answer and it
+//           was wrong for a reason nothing said out loud: `externalBin` makes
+//           Tauri copy `binaries/lait-<triple>` into the target directory
+//           itself, mtime and all, *after* `beforeDevCommand` has run. So
+//           anything staged there was overwritten on every launch, and the
+//           binary the client actually spawned was whatever was last bundled.
+//           It cost three launch cycles to see, because the copy is silent and
+//           this script had already printed its success line.
 //
 //   bundle  `src-tauri/binaries/lait-<target-triple>`, which is what
 //           `bundle.externalBin` expects; the bundler installs it beside the
@@ -42,10 +47,11 @@ function hostTriple() {
   return line.slice("host:".length).trim();
 }
 
-const [targetDir, targetName] = bundle
-  ? [resolve(here, "..", "src-tauri", "binaries"),
-     process.platform === "win32" ? `lait-${hostTriple()}.exe` : `lait-${hostTriple()}`]
-  : [resolve(here, "..", "src-tauri", "target", "debug"), exe];
+// One destination for both, because Tauri resolves the sidecar from exactly
+// one place and staging anywhere else only looks like it worked.
+const triple = hostTriple();
+const targetDir = resolve(here, "..", "src-tauri", "binaries");
+const targetName = process.platform === "win32" ? `lait-${triple}.exe` : `lait-${triple}`;
 const target = join(targetDir, targetName);
 
 const buildArgs = [

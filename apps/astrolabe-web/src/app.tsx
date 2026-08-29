@@ -7,12 +7,14 @@ import {
   createClientTransport,
   currentOwnedWindowSurface,
   currentWorldSettingsSnapshot,
+  type WorldSettingsSnapshot,
   keyFor,
   loadingClientView,
   setFullscreen,
   summonOwnedWindow,
   restartForUpdate,
   opensWorldsInOwnWindows,
+  pickDirectory,
   summonWorldSettings,
   updateInProgress,
   watchMenu,
@@ -30,6 +32,7 @@ import {
 import { BookSurface } from "./book";
 import { ChatSurface } from "./chat";
 import { DisplaysSurface } from "./displays";
+import { AstrolabeTheme } from "./fluent";
 import { BigPictureSurface } from "./present";
 import { WorldSettingsSurface } from "./settings";
 import { FacePlate, PersonTile, presenceLabel } from "./kit";
@@ -43,15 +46,32 @@ const heroHeight = 196;
 export function App() {
   const [platform] = useState<PlatformProfile>(() => resolvePlatform());
   const [dark, setDark] = useState(true);
-  // The settings window never attaches a transport: its snapshot arrived in
-  // the URL, complete, when the window was summoned.
+  // The settings window's *facts* arrived in the URL, complete, when it was
+  // summoned, and still do. Its Developer pane offers choices, which a
+  // snapshot cannot carry: a choice has to go somewhere and its answer has to
+  // come back. So that window attaches the transport too — a second view of
+  // the one model, never a second model. See `settings.tsx`.
   const settingsSnapshot = useMemo(() => currentWorldSettingsSnapshot(), []);
   if (settingsSnapshot !== null) {
-    return <main className="page owned-window" data-theme={settingsSnapshot.dark ? "dark" : "light"}>
-      <WorldSettingsSurface snapshot={settingsSnapshot} />
-    </main>;
+    return <AstrolabeTheme dark={settingsSnapshot.dark}><WorldSettingsWindow snapshot={settingsSnapshot} /></AstrolabeTheme>;
   }
-  return <ClientApp platform={platform} dark={dark} setDark={setDark} />;
+  return <AstrolabeTheme dark={dark}><ClientApp platform={platform} dark={dark} setDark={setDark} /></AstrolabeTheme>;
+}
+
+/**
+ * The World-settings window, attached.
+ *
+ * Deliberately not routed through `ClientApp`: that component is the client's
+ * own window — its menu watcher, its chrome, its Big Picture branch — and none
+ * of it belongs in a 560-wide settings popout. What this needs from it is the
+ * transport and nothing else.
+ */
+function WorldSettingsWindow({ snapshot }: { snapshot: WorldSettingsSnapshot }) {
+  const transport = useMemo(() => createClientTransport(), []);
+  const { view, dispatch } = useClient(transport);
+  return <main className="page owned-window" data-theme={snapshot.dark ? "dark" : "light"}>
+    <WorldSettingsSurface snapshot={snapshot} view={view} dispatch={dispatch} />
+  </main>;
 }
 
 function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dark: boolean; setDark(next: boolean): void }) {
@@ -158,7 +178,10 @@ function withDispatchFailure(view: ClientView, what: string, error: unknown, act
   return {
     ...view,
     inFlight: actionKeyToClear === undefined ? view.inFlight : view.inFlight.filter((key) => key !== actionKeyToClear),
-    failures: [{ what, error: error instanceof Error ? error.message : String(error), retryable: true }, ...view.failures],
+    failures: [
+      { what, error: error instanceof Error ? error.message : String(error), retryable: true, key: actionKeyToClear ?? null },
+      ...view.failures.filter((failure) => actionKeyToClear === undefined || failure.key !== actionKeyToClear),
+    ],
   };
 }
 
@@ -275,9 +298,51 @@ function Library({ view, showing, onSelect, dispatch, dark }: {
         {unavailable.length > 0 && <WorldSection label="UNAVAILABLE" rows={unavailable} view={view} showing={showing} onSelect={onSelect} />}
         {uninstalled.length > 0 && <WorldSection label="NOT INSTALLED" rows={uninstalled} view={view} showing={showing} onSelect={onSelect} />}
       </div>
+      <div className="library-footer"><AddLocalWorld view={view} dispatch={dispatch} /></div>
     </aside>
     {showing !== null && <WorldDetail view={view} world={showing} dispatch={dispatch} dark={dark} />}
   </section>;
+}
+
+/**
+ * Add a World this device is being used to write.
+ *
+ * At the foot of the rail because it makes an entry, and entries are what the
+ * rail lists. Deliberately not in a World's settings window: a tree being
+ * worked on is not a setting of the World it was copied from.
+ *
+ * One gesture, no form. The picker opens on the press and the pick is the
+ * whole act — what the World is called comes from the `world.json` in the
+ * tree, which already says. Asking for a name as well would be asking somebody
+ * to invent one for a thing that has one.
+ */
+function AddLocalWorld({ view, dispatch }: {
+  view: ClientView;
+  dispatch(action: ClientAction): Promise<void>;
+}) {
+  const busy = view.inFlight.some((key) => key.startsWith("world.local.add:"));
+  const add = () => {
+    void pickDirectory("Choose a built World tree").then((dir) => {
+      // A cancelled dialog is not a failure and has nothing to say about it.
+      if (dir !== null) void dispatch({ type: "registerLocalWorld", dir });
+    });
+  };
+  return <button type="button" className="library-add" onClick={add} disabled={busy}>
+    <span className="library-add-plus" aria-hidden="true">+</span>
+    <span>{busy ? "Adding…" : "Add local World"}</span>
+  </button>;
+}
+
+/**
+ * The key a local World is registered under, from the id the host assigned it.
+ *
+ * `local.issues` on the row, `local/issues` in the registry — one is a World
+ * id and the other is a filed entry, and they are spelled differently because
+ * a World id admits no `/` and that is precisely what keeps a local entry out
+ * of every installed World's namespace.
+ */
+function localKeyOf(world: LibraryWorld): string {
+  return `local/${world.key.replace(/^local\./, "")}`;
 }
 
 /**
@@ -302,11 +367,11 @@ function WorldSection({ label, rows, view, showing, onSelect }: {
 }) {
   return <section className="world-section">
     {label !== undefined && <h2>{label}</h2>}
-    {rows.map((world) => <span className="row-tip" key={world.key} title={`${world.displayName} — ${lifecycle(view, world)}`}>
+    {rows.map((world) => <span className="row-tip" key={world.key} title={`${world.displayName}${world.sourceDir === null ? "" : " (local)"} — ${lifecycle(view, world)}`}>
       <Button className="world-row" data-selected={world.key === showing?.key || undefined}
-        onPress={() => onSelect(world.key)} aria-label={`${world.displayName} — ${lifecycle(view, world)}`}>
+        onPress={() => onSelect(world.key)} aria-label={`${world.displayName}${world.sourceDir === null ? "" : " (local)"} — ${lifecycle(view, world)}`}>
         <WorldMark world={world} />
-        <span>{world.displayName}</span>
+        <span className="world-row-name">{world.displayName}</span>
       </Button>
     </span>)}
   </section>;

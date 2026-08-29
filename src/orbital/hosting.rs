@@ -26,7 +26,7 @@
 //! lifecycle concerns. There is no catch-all refusal.
 
 use runtime::poison::LockRecovering;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -239,6 +239,9 @@ pub struct StationHost {
     /// live `Subscribe` connection selects on this, so teardown is prompt and
     /// bounded instead of waiting out a poll interval per subscriber.
     stop_tx: tokio::sync::watch::Sender<bool>,
+    /// The name this process last wrote beside the store, so a commit that
+    /// touched the Catalog without renaming the Space writes nothing.
+    observed_name: std::sync::Mutex<Option<String>>,
     /// The one enriched-doorbell fan-out.
     ///
     /// Subscribers read this rather than each opening their own Observation
@@ -372,6 +375,57 @@ struct PreparedStationOpen {
     network: comms::policy::Network,
 }
 
+/// Activate any World this device now serves that this Space has not seen.
+///
+/// A Space records which Worlds it has activated and which capabilities the
+/// founder holds, and that record is written when the Space is formed or
+/// entered — over whatever this device served *then*. A World that arrives
+/// afterwards has neither, and its capabilities are namespaced by its own id,
+/// so every request against it is denied with nothing to explain why.
+///
+/// That never showed before because the only way to gain a World was to install
+/// a release the Space already knew. A tree somebody is working on is named in
+/// this host's own namespace, so it is genuinely a World this Space has never
+/// activated, and it arrives while the Space already exists.
+///
+/// Both calls below are idempotent by construction — an already-active
+/// implementation and an already-effective grant author nothing — so this is a
+/// read on every open that has already been done, and work only on the one that
+/// has not.
+///
+/// A refusal is this World's problem and not the Space's: a device without the
+/// authority to activate simply does not get that World, which is the honest
+/// outcome. Failing the open would take every other World down with it.
+fn admit_new_worlds(mechanics: &SpaceAuthority, packages: &WorldPackages) {
+    let known = mechanics.activated_worlds();
+    let policies = match packages.founder_policies() {
+        Ok(policies) => policies,
+        Err(error) => {
+            tracing::warn!(%error, "a World declaration could not be read for activation");
+            return;
+        }
+    };
+    for (world, implementation, version, grants) in policies {
+        if known.iter().any(|active| active == world.as_str()) {
+            continue;
+        }
+        if let Err(error) =
+            mechanics.activate_implementation(world.as_str(), implementation, version)
+        {
+            tracing::warn!(%world, %error, "this Space did not activate a World this device serves");
+            continue;
+        }
+        for grant in grants {
+            if let Err(error) =
+                mechanics.grant_self_capability(grant.capability, grant.resource, grant.salt)
+            {
+                tracing::warn!(%world, %error, "a World was activated without one of its founder grants");
+            }
+        }
+        tracing::info!(%world, "activated a World this Space had not seen before");
+    }
+}
+
 fn prepare_station_open(
     home: &Path,
     device_seed: [u8; 32],
@@ -382,6 +436,7 @@ fn prepare_station_open(
     }
     let space = discover_space(home)?;
     let mechanics = SpaceAuthority::open(&orbital_store_root(home), &space, &device_seed)?;
+    admit_new_worlds(&mechanics, &packages);
     let (registry, worlds) = packages
         .build()
         .map_err(|error| anyhow!("world registry: {error:?}"))?;
@@ -710,6 +765,7 @@ impl StationHost {
         advertise.dedup();
         advertise.truncate(runtime::beacon::MAX_ROUTE_HINTS);
         let activation = Activation {
+            consent: Default::default(),
             exec: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -783,6 +839,7 @@ impl StationHost {
             shutdown: Arc::new(tokio::sync::Notify::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             stop_tx: tokio::sync::watch::channel(false).0,
+            observed_name: std::sync::Mutex::new(None),
             observations: ObservationHub::new(),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(tokio::time::Instant::now()),
@@ -1143,6 +1200,12 @@ impl StationHost {
     /// Product submit already committed any `Started` Run. Dispatch is a
     /// separate durable step owned by this Station activation, not by the
     /// product RPC that staged the Start.
+    /// How long past a Run's own `wall_millis` a foreign in-flight Attempt is
+    /// left before this Station presumes it dead. Generous on purpose: a
+    /// presumption is a suspicion, and merely-slow honest work should overtake
+    /// it rather than be raced by it.
+    const PRESUME_GRACE_MILLIS: u64 = 30_000;
+
     fn drain_exec_session(&self, session: &Session, identity: &LocalIdentity) {
         let world = session.world_id();
         let Ok(implementation) = self.station.active_implementation(world, identity) else {
@@ -1165,6 +1228,26 @@ impl StationHost {
                 })
         }) {
             tracing::warn!(%error, world = %world, "local Exec perform did not complete");
+        }
+        // After performing our own work, presume any foreign in-flight Attempt
+        // whose deadline has passed on our clock. The `control` demand is
+        // enforced at commit, so a Station without it presumes nothing.
+        match host.sweep_liveness(
+            session,
+            mechanics::wallclock::now_millis(),
+            Self::PRESUME_GRACE_MILLIS,
+        ) {
+            Ok(presumed) if !presumed.is_empty() => {
+                tracing::info!(
+                    count = presumed.len(),
+                    world = %world,
+                    "presumed stale foreign Attempts dead",
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, world = %world, "liveness sweep did not complete");
+            }
         }
     }
 
@@ -1515,17 +1598,31 @@ impl StationHost {
                             return Response::err(format!("expand administrator role: {error}"))
                         }
                     };
-                administrator.push((
-                    mechanics::membership::policy_admin_capability(),
-                    mechanics::membership::policy_admin_resource(),
-                ));
-                administrator.sort();
-                administrator.dedup();
+                // The Mechanics meta-grant is part of administration whatever
+                // the Worlds say; it has no product role definition to name.
+                administrator.push(crate::orbital::worlds::MembershipAssignment {
+                    capability: mechanics::membership::policy_admin_capability(),
+                    resource: mechanics::membership::policy_admin_resource(),
+                    definition_ref: Vec::new(),
+                });
+                let same =
+                    |a: &crate::orbital::worlds::MembershipAssignment,
+                     b: &crate::orbital::worlds::MembershipAssignment| {
+                        a.capability == b.capability && a.resource == b.resource
+                    };
+                let mut deduped: Vec<crate::orbital::worlds::MembershipAssignment> = Vec::new();
+                for assignment in administrator {
+                    if !deduped.iter().any(|seen| same(seen, &assignment)) {
+                        deduped.push(assignment);
+                    }
+                }
+                let administrator = deduped;
                 let revoke: Vec<_> = administrator
                     .iter()
-                    .filter(|assignment| !contributor.contains(assignment))
-                    .cloned()
+                    .filter(|assignment| !contributor.iter().any(|c| same(c, assignment)))
+                    .map(|assignment| (assignment.capability.clone(), assignment.resource.clone()))
                     .collect();
+
                 match self.mechanics.member_set_role(
                     &who,
                     admin,
@@ -1711,10 +1808,26 @@ impl StationHost {
                     rows: self.mechanics.assignment_rows(subject.as_ref()),
                 }
             }
-            Request::AssignmentGrant { actor, assignments } => {
+            Request::AssignmentGrant {
+                actor,
+                assignments,
+                definition_ref,
+            } => {
                 let Some(subject) = self.mechanics.resolve_actor_ref(&actor) else {
                     return Response::not_found(format!("no actor matches '{actor}'"));
                 };
+                let origin = match definition_ref {
+                    None => None,
+                    Some(hex) => match data_encoding::HEXLOWER_PERMISSIVE
+                        .decode(hex.trim().as_bytes())
+                    {
+                        Ok(definition_ref) => {
+                            Some(mechanics::membership::GrantOrigin::Grant { definition_ref })
+                        }
+                        Err(_) => return Response::err("expected a hex role definition reference"),
+                    },
+                };
+
                 let assignments = assignments
                     .into_iter()
                     .map(|assignment| {
@@ -1730,7 +1843,10 @@ impl StationHost {
                         )
                     })
                     .collect::<Vec<_>>();
-                match self.mechanics.grant_assignments(&subject, &assignments) {
+                match self
+                    .mechanics
+                    .grant_assignments(&subject, &assignments, origin)
+                {
                     Ok(granted) => Response::Ok {
                         message: Some(format!(
                             "installed {} assignment(s) for {}",
@@ -1741,22 +1857,38 @@ impl StationHost {
                     Err(error) => Response::err(format!("{error}")),
                 }
             }
-            Request::AssignmentRevoke { grant_id } => {
-                let raw = match data_encoding::HEXLOWER_PERMISSIVE
-                    .decode(grant_id.trim().as_bytes())
-                    .ok()
-                    .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
-                {
-                    Some(id) => id,
-                    None => return Response::err("expected a 64-hex grant id"),
-                };
-                match self.mechanics.revoke_assignment(raw) {
+            Request::AssignmentRevoke {
+                grant_id,
+                mut grant_ids,
+            } => {
+                grant_ids.extend(grant_id);
+                if grant_ids.is_empty() {
+                    return Response::err("expected at least one grant id");
+                }
+
+                let mut raw = Vec::with_capacity(grant_ids.len());
+                for grant_id in &grant_ids {
+                    match data_encoding::HEXLOWER_PERMISSIVE
+                        .decode(grant_id.trim().as_bytes())
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+                    {
+                        Some(id) => raw.push(id),
+                        None => return Response::err("expected a 64-hex grant id"),
+                    }
+                }
+                match self.mechanics.revoke_assignments(&raw) {
                     Ok(()) => Response::Ok {
-                        message: Some("revoked the assignment".into()),
+                        message: Some(if raw.len() == 1 {
+                            "revoked the assignment".into()
+                        } else {
+                            format!("revoked {} assignments", raw.len())
+                        }),
                     },
                     Err(e) => Response::err(format!("{e}")),
                 }
             }
+
             // The production classifier routed this here; any other variant
             // reaching this arm is a routing invariant violation, not a
             // servable request.
@@ -2219,8 +2351,12 @@ impl StationHost {
             mechanics::authorization::Resource,
         )>,
     > {
-        self.worlds
-            .membership_assignments("contributor", self.station.frontier().root)
+        Ok(self
+            .worlds
+            .membership_assignments("contributor", self.station.frontier().root)?
+            .into_iter()
+            .map(|assignment| (assignment.capability, assignment.resource))
+            .collect())
     }
 
     /// The reconciled presence assembly: the persistent Neighbor registry's
@@ -3639,6 +3775,7 @@ impl StationHost {
         if let Err(error) = crate::orbits::touch(&space) {
             tracing::warn!(%error, "Orbit registry open-time update failed");
         }
+        self.observe_name(0, 0);
         let idle_window = idle_window_from_env();
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
         let mut connections = tokio::task::JoinSet::new();
@@ -3693,6 +3830,9 @@ impl StationHost {
                 }
             }
         }
+        // A last ask before the store closes, for a Station that docked too
+        // late for the first one: the next daemon lists this Space by name.
+        self.observe_name(0, 0);
         // Wake and join every task retaining the host before the runner tries
         // to consume it and return the Station to Orbit.
         self.begin_stop();
@@ -3744,6 +3884,43 @@ impl StationHost {
     /// This Space's on-disk store directory (the watchdog's liveness probe).
     fn store_dir(&self) -> PathBuf {
         orbital_store_root(&self.home).join(self.station.space_id().as_str())
+    }
+
+    /// Record what this device sees the Space named, beside its store.
+    ///
+    /// Read the way `Status` reads it -- from the docked World -- so an
+    /// undocked Station records nothing rather than a blank. Asked when the
+    /// Station starts serving, on every commit that touched the Space's own
+    /// Catalog, and once more as it stops -- and written only when the name
+    /// differs from the last one this process wrote, so the stop-time ask
+    /// writes exactly when no earlier ask could read a name. The record is
+    /// what a passive lister shows for an Orbit nobody has opened since the
+    /// daemon started (`crate::orbits::observed`).
+    fn observe_name(&self, epoch: u64, sequence: u64) {
+        let Some((_, _, name, _)) = self.counts() else {
+            return;
+        };
+        // Held across the write, so two askers cannot leave the file holding
+        // the older name; recorded only once the write landed, so a failed
+        // write is asked again next time.
+        let mut last = self
+            .observed_name
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let observed = crate::orbits::observed::Observed {
+            format: crate::orbits::observed::FORMAT,
+            name: name.clone(),
+            observed_at: mechanics::wallclock::now_secs(),
+            epoch,
+            sequence,
+        };
+        match crate::orbits::observed::write(&self.store_dir(), &observed) {
+            Ok(()) => *last = Some(name),
+            Err(error) => tracing::warn!(%error, "observed name write failed"),
+        }
     }
 
     /// Whether the idle window has elapsed with nothing to keep us alive: a
@@ -4143,7 +4320,16 @@ impl StationHost {
                         // Send even with no receivers: an `Err` here means only
                         // that nobody is listening right now, which is not a
                         // reason to stop translating or to tear the pump down.
-                        let _ = daemon.observations.fanout.send(daemon.frame_for(&record));
+                        let frame = daemon.frame_for(&record);
+                        // The Space's own Catalog moved -- its name may have.
+                        if frame.reset
+                            || frame.invalidations.iter().any(|entry| {
+                                entry.planes.iter().any(|plane| plane.plane == "space")
+                            })
+                        {
+                            daemon.observe_name(record.epoch.as_u64(), record.sequence);
+                        }
+                        let _ = daemon.observations.fanout.send(frame);
                     }
                 }
             }
@@ -4495,12 +4681,14 @@ fn agent_seed_path(home: &Path, name: &str) -> Result<PathBuf> {
 /// into a path and not only where an agent is created. Provisioning validated
 /// it; loading did not, and loading is the site a client can aim.
 fn is_plain_agent_name(name: &str) -> bool {
-    // Asked structurally rather than by substring: a plain name is exactly one
-    // ordinary path component. Spelling this as a character blocklist let "."
-    // through — it holds no separator and no "..", yet names the parent
-    // directory, so a seed path built from it escapes the agents base.
-    let mut parts = Path::new(name).components();
-    matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
+    // One validator, in `agent_token`, because there were two and they
+    // disagreed in both directions. The structural check that used to live
+    // here admitted `scribe.` — one ordinary component, no separator, no ".."
+    // — and Win32 strips trailing dots on the way to the filesystem, so a
+    // wire-supplied `act_as` of `scribe.` opened scribe's seed. It also
+    // admitted names the credential path rejected, so such an agent
+    // provisioned and could never authenticate.
+    crate::agent_token::plain_agent_name(name).is_ok()
 }
 
 const AGENT_NAME_RULE: &str =
@@ -4511,14 +4699,39 @@ const AGENT_NAME_RULE: &str =
 /// persisted outside any working-directory sandbox (§10 finding 1).
 fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
     let path = agent_seed_path(home, name)?;
+    // Owner-only, through the module that exists because `std::fs` cannot set a
+    // DACL. This seed *is* the agent: it signs as it, and a credential derived
+    // from it is how the agent reaches this device over HTTP. Written with
+    // `std::fs::write` it landed 0644 under a typical umask, so any other local
+    // account could read it — and loopback has no peer credential we check, a
+    // point `serve::auth`'s own module doc makes.
+    //
+    // Portable rather than device-bound, deliberately: the bytes stay the hex
+    // string every already-provisioned agent has on disk, so hardening does not
+    // become a migration. What changes is who may open the file.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        mechanics::secretfs::create_private_dir(parent)
+            .with_context(|| format!("make agent '{name}' private"))?;
     }
     if path.exists() {
+        // An agent provisioned before this was private stays readable until
+        // something re-writes it, so re-harden in place on the way past. A
+        // failure here is not fatal — refusing to load an agent because its
+        // permissions could not be tightened would take the identity away over
+        // a lesser problem — but it is worth saying out loud.
+        if let Err(error) = mechanics::secretfs::harden_in_place(&path) {
+            tracing::warn!(%name, %error, "could not tighten an agent seed's permissions");
+        }
         load_agent_seed(home, name)
     } else {
         let seed = mechanics::actor::random_seed().context("generate agent seed")?;
-        std::fs::write(&path, data_encoding::HEXLOWER.encode(&seed))?;
+        mechanics::secretfs::write_private(
+            &path,
+            data_encoding::HEXLOWER.encode(&seed).as_bytes(),
+            mechanics::secretfs::Create::New,
+            mechanics::secretfs::Wrap::Portable,
+        )
+        .with_context(|| format!("write agent '{name}' seed"))?;
         Ok(seed)
     }
 }

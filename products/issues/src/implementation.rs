@@ -584,6 +584,57 @@ mod package_descriptor_tests {
         }));
     }
 
+    /// The preferred implementation is pinned, and both places that declare
+    /// its version agree.
+    ///
+    /// Authority compares the `(implementation id, implementation_version)`
+    /// pair, and the id is a digest over the descriptor -- which includes
+    /// `find_schemas`. So changing a Find schema changes the implementation
+    /// WITHOUT changing the version that names it, and a Space that already
+    /// activated the old pair refuses the new one. Activation is idempotent by
+    /// World id, so nothing re-activates it: the World answers "unavailable" to
+    /// every call, forever, with no log line naming why.
+    ///
+    /// That is not hypothetical. Adding `edge::MEMBER` did exactly this to a
+    /// registered local World, and the only route back was removing it from the
+    /// Library and adding it again under a fresh handle. The migrator's id was
+    /// pinned and caught nothing, because the migrator is not what changed.
+    ///
+    /// **If this fails, you changed the implementation.** Bump
+    /// `implementation_version` in BOTH declarations -- the descriptor below
+    /// and `products/issues-runner/world.json.template` -- and update this pin.
+    /// Shipping a changed implementation under an unchanged version is what
+    /// strands an activated Space.
+    #[test]
+    fn the_preferred_implementation_is_pinned_to_the_version_that_names_it() {
+        let preferred = IssuesWorld::implementation_descriptor();
+        assert_eq!(
+            data_encoding::HEXLOWER.encode(preferred.id().unwrap().as_ref()),
+            "57d034261c84c80cf5173f0a44798c572f1d7577dd4ab2afb81e663cc114ae5e"
+        );
+
+        // The runner's manifest and the served descriptor are two declarations
+        // of one number. A Space reads the manifest; authority compares the
+        // descriptor. They must not drift.
+        let template = include_str!("../../issues-runner/world.json.template");
+        let declared: serde_json::Value = serde_json::from_str(
+            &template
+                .replace("${VERSION}", "0.0.0")
+                .replace("${EXE}", ""),
+        )
+        .expect("world.json.template is JSON");
+        assert_eq!(
+            declared["implementation_version"].as_u64(),
+            Some(u64::from(
+                IssuesWorld::preferred()
+                    .descriptor()
+                    .implementation_version
+                    .0
+            )),
+            "world.json.template and the served descriptor disagree about the version"
+        );
+    }
+
     #[test]
     fn migrator_has_a_distinct_identity_and_the_historical_decoders() {
         // The identity is the historical one: the exact id the live pre-v4
@@ -3610,7 +3661,7 @@ fn spec_summary_row(row: &runtime::find::ResultRow) -> Result<crate::spec::SpecS
             .ok_or(Rejection::StateCorrupt)?,
         heads,
         issued,
-        view: None,
+        head: None,
     })
 }
 
@@ -3626,7 +3677,73 @@ fn baseline_summary_row(
             .ok_or(Rejection::StateCorrupt)?,
         heads,
         issued,
-        view: None,
+        head: None,
+    })
+}
+
+/// The corpus row of one exact revision, if it can be read and belongs to
+/// the document that claims it.
+///
+/// Hydration degrades per row and never refuses the page. A register is the
+/// page; a row that cannot be read -- a head the corpus has not posted yet, a
+/// seek that hit its bound, a heads set naming a revision this document does
+/// not own -- is drawn as a row with no head, which the register lists by id.
+/// The old assembly had the same posture, and the alternative is one bad
+/// revision id in one replicated heads set taking every reader's register
+/// down. `None` is an absence, never a default.
+fn head_row(
+    ctx: &Context<'_>,
+    kind: &str,
+    source: &str,
+    revision: &str,
+) -> Option<runtime::find::ResultRow> {
+    let row = unique_find_row(ctx, crate::find::field::ID, revision, kind, None)
+        .ok()
+        .flatten()?;
+    (result_text(&row, crate::find::field::SOURCE_ID).as_deref() == Some(source)).then_some(row)
+}
+
+/// A register row's head, from the corpus row its revision posts.
+///
+/// The register used to assemble every row through `spec_state`: the heads
+/// Body, a seek per revision, a Body read and a decode each, to show a title
+/// and a state the revision's own row already carries packed. One bounded seek
+/// on the head's id is the whole read now. Only a row with exactly one head is
+/// hydrated: two heads is concurrent intent, and choosing one would invent a
+/// current title.
+fn spec_head(
+    ctx: &Context<'_>,
+    summary: &crate::spec::SpecSummary,
+) -> Option<crate::spec::SpecHead> {
+    let [revision] = summary.heads.as_slice() else {
+        return None;
+    };
+    let row = head_row(ctx, summary.kind.as_str(), &summary.spec, revision)?;
+    Some(crate::spec::SpecHead {
+        revision: revision.clone(),
+        title: result_text(&row, crate::find::field::TITLE)?,
+        state: crate::spec::State::parse(&result_text(&row, crate::find::field::STATE)?)?,
+        author: result_text(&row, crate::find::field::AUTHOR)?,
+        ts: result_u64(&row, crate::find::field::CREATED_AT)?,
+    })
+}
+
+/// A Baseline register row's head. Same read as [`spec_head`]; a Baseline
+/// revision posts its name as the row's title.
+fn baseline_head(
+    ctx: &Context<'_>,
+    summary: &crate::spec::BaselineSummary,
+) -> Option<crate::spec::BaselineHead> {
+    let [revision] = summary.heads.as_slice() else {
+        return None;
+    };
+    let row = head_row(ctx, "baseline_revision", &summary.baseline, revision)?;
+    Some(crate::spec::BaselineHead {
+        revision: revision.clone(),
+        name: result_text(&row, crate::find::field::TITLE)?,
+        state: crate::spec::State::parse(&result_text(&row, crate::find::field::STATE)?)?,
+        author: result_text(&row, crate::find::field::AUTHOR)?,
+        ts: result_u64(&row, crate::find::field::CREATED_AT)?,
     })
 }
 
@@ -3882,10 +3999,64 @@ fn activity_page_row(
     })
 }
 
+/// One page of inbox entries, with the per-row lookups hoisted out of the row.
+///
+/// This was three storage round trips and a digest per entry. `inbox_page_row`
+/// called `unique_find_row` for the Issue, `issue_coordinate_for` for the
+/// placement and alias -- itself an identity seek, a placement probe, a
+/// transition-head query, a Body read and a re-hash of those bytes -- and
+/// `unique_find_row` again for the project. A fifty-row inbox spent about four
+/// hundred operations to draw fifty lines.
+///
+/// None of it needed to be per row. Titles and projects come from one batched
+/// `Seek::Ids`, alias ordinals from another, and a page holds a handful of
+/// distinct projects however many entries it has. What remains per row is the
+/// activity Body read, which is irreducible: the entry *is* that record.
+///
+/// The one row that still takes the old path is an Issue the batch could not
+/// resolve -- an unconverged placement, which `find_issue_rows_by_ids`
+/// deliberately excludes. Falling back rather than skipping keeps the old
+/// behaviour exactly: such an entry refuses the page instead of vanishing from
+/// it, which is the difference between a reader knowing something is wrong and
+/// a reader being quietly shown less than there is.
+fn inbox_page_rows(
+    ctx: &Context<'_>,
+    rows: &[&runtime::find::ResultRow],
+    recipient: &ActorId,
+) -> Result<Vec<crate::dto::InboxEntry>, Rejection> {
+    let mut docs = rows
+        .iter()
+        .filter_map(|row| result_text(row, crate::find::field::SOURCE_ID))
+        .collect::<Vec<_>>();
+    docs.sort();
+    docs.dedup();
+    let issues = find_issue_rows_by_ids(ctx, docs.clone())?;
+    let ordinals = page_alias_ordinals(ctx, &docs)?;
+    let mut catalog = CatalogState::default();
+    let mut asked = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(inbox_page_row(
+            ctx,
+            row,
+            recipient,
+            &issues,
+            &ordinals,
+            &mut catalog,
+            &mut asked,
+        )?);
+    }
+    Ok(out)
+}
+
 fn inbox_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
     recipient: &ActorId,
+    issues: &std::collections::BTreeMap<String, crate::dto::Row>,
+    ordinals: &std::collections::BTreeMap<String, u64>,
+    catalog: &mut CatalogState,
+    asked: &mut std::collections::BTreeSet<String>,
 ) -> Result<crate::dto::InboxEntry, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
     let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
@@ -3904,26 +4075,37 @@ fn inbox_page_row(
     {
         return Err(Rejection::StateCorrupt);
     }
-    let issue = unique_find_row(ctx, crate::find::field::ID, &doc, "issue", None)?
-        .ok_or(Rejection::StateCorrupt)?;
-    let title = result_text(&issue, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?;
-    let coordinate =
-        crate::record_store::issue_coordinate_for(ctx, &doc)?.ok_or(Rejection::StateCorrupt)?;
-    let project = unique_find_row(
-        ctx,
-        crate::find::field::ID,
-        &coordinate.placement.project,
-        "project",
-        None,
-    )?
-    .ok_or(Rejection::StateCorrupt)?;
-    let project_key =
-        result_text(&project, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?;
-    let reff = coordinate
-        .identity
-        .alias
-        .render(&project_key)
-        .map_err(|_| Rejection::StateCorrupt)?;
+    let (title, reff) = match (issues.get(&doc), ordinals.get(&doc)) {
+        (Some(issue), Some(&ordinal)) => {
+            let key = inbox_project_key(ctx, catalog, asked, issue.project_id.as_str())?;
+            // `render_short`, matching the Issue's own page and its rows. The
+            // full form names the disambiguator, which resolves an ambiguous
+            // reference and is not what a person reads a list by -- and an
+            // inbox line beside a list saying `ENG-12` must not say
+            // `ENG-12-9f3a1c…` about the same Issue.
+            let reff = crate::records::IssueAliasCoordinate::for_issue(ordinal, &issue.doc_id)
+                .and_then(|alias| alias.render_short(&key))
+                .map_err(|_| Rejection::StateCorrupt)?;
+            (issue.title.clone(), reff)
+        }
+        // The batch could not name it. Resolve this one the long way so the
+        // page refuses for the same reasons it always did.
+        _ => {
+            let issue = unique_find_row(ctx, crate::find::field::ID, &doc, "issue", None)?
+                .ok_or(Rejection::StateCorrupt)?;
+            let title =
+                result_text(&issue, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?;
+            let coordinate = crate::record_store::issue_coordinate_for(ctx, &doc)?
+                .ok_or(Rejection::StateCorrupt)?;
+            let key = inbox_project_key(ctx, catalog, asked, &coordinate.placement.project)?;
+            let reff = coordinate
+                .identity
+                .alias
+                .render_short(&key)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            (title, reff)
+        }
+    };
     Ok(crate::dto::InboxEntry {
         ts: record.event.t,
         kind,
@@ -3934,6 +4116,23 @@ fn inbox_page_row(
         actor: Some(record.event.a),
         actor_nick: None,
     })
+}
+
+/// One project's KEY, read once per page rather than once per entry.
+fn inbox_project_key(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    asked: &mut std::collections::BTreeSet<String>,
+    project: &str,
+) -> Result<String, Rejection> {
+    if asked.insert(project.to_string()) {
+        crate::record_store::apply_project(ctx, catalog, project)?;
+    }
+    catalog
+        .projects
+        .get(project)
+        .map(|meta| meta.key.clone())
+        .ok_or(Rejection::StateCorrupt)
 }
 
 fn immutable_record_bytes(
@@ -4977,6 +5176,698 @@ fn project_issue_counts(
     )))
 }
 
+/// Every page row's alias ordinal, in one query.
+///
+/// The ordinal is already indexed. `extract_issue_identity` posts
+/// `ALIAS_ORDINAL` on a node whose id is `issue-identity:<doc>`, so a whole
+/// page of them is one `Seek::Ids` over ids this function can spell without
+/// reading anything first.
+///
+/// The alternative was `aliases_for_issue` per row, which is what the single
+/// Issue paths call. That reaches `issue_coordinate_for`: an exact record
+/// seek, a placement probe, a transition-head query, a Body read, a re-hash
+/// of those bytes to verify the key, and a meta lookup -- five storage
+/// operations and a digest, per row, to end up using one field. This packs
+/// that field directly.
+///
+/// An Issue with no identity record is simply absent from the answer. That is
+/// the v3 store before its migration, and the correct degradation is the one
+/// `canonical_for` already performs: no `key_alias`, and a short `reff` a
+/// person can still type.
+fn page_alias_ordinals(
+    ctx: &Context<'_>,
+    docs: &[String],
+) -> Result<std::collections::BTreeMap<String, u64>, Rejection> {
+    use runtime::find as find_api;
+    let mut out = std::collections::BTreeMap::new();
+    if docs.is_empty() {
+        return Ok(out);
+    }
+    if docs.len() > ID_RESOLUTION_CHUNK {
+        for chunk in docs.chunks(ID_RESOLUTION_CHUNK) {
+            out.extend(page_alias_ordinals(ctx, chunk)?);
+        }
+        return Ok(out);
+    }
+    let count = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: count.saturating_mul(16),
+        edges_visited: 1,
+        nodes_visited: count.saturating_mul(2),
+        paths_retained: 1,
+        candidates_per_branch: count.saturating_mul(2),
+        score_evaluations: 1,
+        // An ordinal and the id it belongs to. Nothing here is text somebody
+        // wrote, so this claims a kilobyte a row rather than the sixteen
+        // `find_issue_rows_by_ids` needs for one carrying a title -- and the
+        // declared budget is what Find refuses on, before it evaluates.
+        projected_bytes: count.saturating_mul(1_024),
+        packed_tokens: count.saturating_mul(64),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    // Pack takes a canonical set; see `find_issue_rows_by_ids` for what an
+    // unsorted literal costs.
+    let mut fields = [
+        crate::find::field::SOURCE_ID,
+        crate::find::field::ALIAS_ORDINAL,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(
+                        docs.iter()
+                            .map(|doc| {
+                                find_api::NodeId::new(format!("issue-identity:{doc}").into_bytes())
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|_| Rejection::InvalidRequest)?,
+                    )),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: u32::try_from(docs.len()).map_err(|_| Rejection::LimitExceeded)?,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    for row in answer.rows() {
+        let (Some(doc), Some(ordinal)) = (
+            result_text(row, crate::find::field::SOURCE_ID),
+            result_u64(row, crate::find::field::ALIAS_ORDINAL),
+        ) else {
+            return Err(Rejection::StateCorrupt);
+        };
+        out.insert(doc, ordinal);
+    }
+    Ok(out)
+}
+
+/// Give a page of rows the reference a person reads and types.
+///
+/// `issue_page_row` leaves `key_alias` absent and `reff` a bare 26-character
+/// doc id, and nothing downstream filled either in -- so every list and board
+/// row said `iss_02CHGHRS442UPH0SM62KRP894N` where the Issue's own detail page
+/// said `ENG-12`. The two spellings of one Issue were both wrong at once: the
+/// long one is not a reference somebody can use, and it is not even the
+/// canonical short handle `canonical_for` renders.
+///
+/// `render_short` rather than `render`, matching `aliases_for_issue`: the
+/// disambiguator is what settles an ambiguous lookup, not what a row shows.
+fn apply_page_aliases(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    rows: &mut [crate::dto::Row],
+) -> Result<(), Rejection> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut docs = rows
+        .iter()
+        .map(|row| row.doc_id.to_string())
+        .collect::<Vec<_>>();
+    docs.sort();
+    docs.dedup();
+    let ordinals = page_alias_ordinals(ctx, &docs)?;
+    let mut asked = std::collections::BTreeSet::new();
+    for row in rows.iter_mut() {
+        let doc = row.doc_id.to_string();
+        // `reff` is deliberately left whole.
+        //
+        // It reads like the other half of this fix -- `views::canonical_for`
+        // renders `iss_02CHGHR`, so why not here. Because that function does
+        // not render a fixed width: it takes the shortest prefix at or above
+        // `CANONICAL_MIN` that is *unshared with its neighbours*, and the
+        // neighbours are the whole catalog, which a page does not hold.
+        //
+        // A fixed seven would be ambiguous constantly. `mint_ulid` puts a
+        // 48-bit millisecond timestamp in the high bits, and seven characters
+        // reach only the top 32 of them -- so two Issues created within about
+        // sixty-five seconds of each other share that prefix. The resolver
+        // refuses an ambiguous short reference rather than guessing, so the
+        // rows would have looked tidier and stopped opening.
+        //
+        // `key_alias` is what a person reads; `reff` is what resolves. Making
+        // the second one prettier at the cost of the first one working is the
+        // trade this deliberately does not make.
+        let project = row.project_id.as_str();
+        // Asked once per project, not once per row, and tracked separately
+        // from the catalog because a *tombstoned* project is removed from it
+        // rather than stored -- so `contains_key` stays false however many
+        // times it is loaded, and a page of rows from a deleted project would
+        // read its Body once each.
+        if asked.insert(project.to_string()) && !catalog.projects.contains_key(project) {
+            crate::record_store::apply_project(ctx, catalog, project)?;
+        }
+        let (Some(&ordinal), Some(meta)) = (ordinals.get(&doc), catalog.projects.get(project))
+        else {
+            continue;
+        };
+        let Some(alias) = crate::records::IssueAliasCoordinate::for_issue(ordinal, &row.doc_id)
+            .ok()
+            .and_then(|alias| alias.render_short(&meta.key).ok())
+        else {
+            continue;
+        };
+        row.key_alias = Some(alias);
+    }
+    Ok(())
+}
+
+/// Facet branches one query may carry, and matches one branch may hold.
+///
+/// These are the two numbers that keep a faceted query inside Find's ceilings,
+/// and they are chosen together. `Merge` demands `Flow::Ranked` inputs, and
+/// `Rank` reads every candidate in its branch -- so unlike a linear seek, a
+/// merged query materialises each branch WHOLE rather than streaming a page out
+/// of it. Its cost is the size of what matches, not the size of what is asked
+/// for.
+///
+/// `nodes_visited` is charged once per candidate ranked and once more when
+/// `Pack` reads a survivor back, so the binding arithmetic is
+/// `branches x matches x 2 <= 100_000`. Twelve and four thousand sit just
+/// inside it, and leave `paths_retained` and `candidates_per_branch` (10_000
+/// each) with room.
+///
+/// A thousand rather than more, because `projected_bytes` binds before any of
+/// the work dimensions do: a title may be `MAX_TITLE_BYTES` (4 KiB), so eight
+/// KiB a row against the 8 MiB ceiling is a thousand rows and no more. It is
+/// the same number as the product's own `MAX_PAGE_SIZE`, which is the right
+/// coincidence -- a filtered answer that will not fit one page is one the
+/// caller should narrow.
+///
+/// The cliff is deliberate: a facet matching more than that is REFUSED, not
+/// truncated. A filter that quietly dropped matches past a limit would be the
+/// "3 of 100" defect wearing a server-side coat.
+const MAX_FACET_BRANCHES: usize = 12;
+const MAX_FACET_MATCHES: u64 = 1_000;
+
+/// One facet axis, as the seek that answers it.
+enum FacetSeek {
+    /// An exact field on the Issue node itself.
+    Direct {
+        field: &'static str,
+        value: runtime::find::Atom,
+    },
+    /// A membership posting, which answers with RELATION nodes and therefore
+    /// needs one hop along `edge::MEMBER` to become the Issues it is about.
+    /// That is the same edge row enrichment walks inbound; here it is walked
+    /// outbound, relation to Issue.
+    Membership { kind: &'static str, target: String },
+}
+
+/// Turn the facets into seeks, one per value.
+fn facet_seeks(
+    project: Option<&str>,
+    facets: &contract::IssueFacets,
+) -> Result<Vec<Vec<FacetSeek>>, Rejection> {
+    use runtime::find as find_api;
+    let mut axes: Vec<Vec<FacetSeek>> = Vec::new();
+    if !facets.statuses.is_empty() {
+        axes.push(
+            facets
+                .statuses
+                .iter()
+                .map(|state| match project {
+                    // Scoped by project the posting is one exact tuple; without
+                    // a project it is the bare state across the Space, which is
+                    // what the caller asked for.
+                    Some(project) => FacetSeek::Direct {
+                        field: crate::find::field::KIND_PROJECT_STATE,
+                        value: find_api::Atom::Bytes(crate::find::composite_key([
+                            "issue", project, state,
+                        ])),
+                    },
+                    None => FacetSeek::Direct {
+                        field: crate::find::field::STATE,
+                        value: find_api::Atom::Text(state.clone()),
+                    },
+                })
+                .collect(),
+        );
+    }
+    if !facets.priorities.is_empty() {
+        axes.push(
+            facets
+                .priorities
+                .iter()
+                .map(|priority| FacetSeek::Direct {
+                    field: crate::find::field::PRIORITY,
+                    value: find_api::Atom::Text(priority.clone()),
+                })
+                .collect(),
+        );
+    }
+    for (kind, values) in [
+        ("label", &facets.labels),
+        ("assignee", &facets.assignees),
+        ("milestone", &facets.milestones),
+    ] {
+        if values.is_empty() {
+            continue;
+        }
+        axes.push(
+            values
+                .iter()
+                .map(|target| FacetSeek::Membership {
+                    kind,
+                    target: target.clone(),
+                })
+                .collect(),
+        );
+    }
+    let branches = axes.iter().map(Vec::len).sum::<usize>();
+    if branches > MAX_FACET_BRANCHES {
+        return Err(Rejection::LimitExceeded);
+    }
+    Ok(axes)
+}
+
+/// The work one faceted query declares, for `branches` ranked inputs.
+///
+/// Lifted out of the planner so it can be checked against the ceiling it has
+/// to fit inside. The first version of this claimed 16 KiB a row against an
+/// 8 MiB projection and every faceted query was refused as `InvalidRequest` --
+/// a failure that names the request and not the number in it. A test now
+/// proves the declaration fits before anybody has to read that error.
+fn facet_bound(branches: u64) -> runtime::find::Bound {
+    let reach = branches.saturating_mul(MAX_FACET_MATCHES);
+    runtime::find::Bound {
+        decoded_bodies: 1,
+        postings_read: reach.saturating_mul(4),
+        edges_visited: reach,
+        // Ranked once per branch candidate, read again by Pack for survivors.
+        nodes_visited: reach.saturating_mul(2),
+        paths_retained: MAX_FACET_MATCHES,
+        candidates_per_branch: MAX_FACET_MATCHES,
+        score_evaluations: reach.saturating_mul(2),
+        // A title may be MAX_TITLE_BYTES; eight KiB a row is the ceiling
+        // divided by MAX_FACET_MATCHES, which is what sets that constant.
+        projected_bytes: MAX_FACET_MATCHES.saturating_mul(8 * 1_024),
+        packed_tokens: MAX_FACET_MATCHES.saturating_mul(4_096),
+        wall_millis: 5_000,
+    }
+}
+
+/// One faceted page: the whole filtered set, or a refusal.
+///
+/// A Query carrying `Merge` is not a linear plan, so Find hands back no
+/// continuation for it. That sounds like a limitation and is the property this
+/// wanted: a faceted answer is COMPLETE or it is refused, never a partial page
+/// that a caller might count. `exact_total` is then the row count itself rather
+/// than a posting estimate, and "3 of 12" is finally a true sentence.
+///
+/// The unfaceted path is untouched and still streams through `find_kind_page`
+/// with a real cursor. Only a filter pays merge's price, and only a filter
+/// needs merge's exactness.
+fn find_faceted_issue_page(
+    ctx: &Context<'_>,
+    project: Option<&str>,
+    axes: &[Vec<FacetSeek>],
+    all: bool,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let branches = u64::try_from(axes.iter().map(Vec::len).sum::<usize>())
+        .map_err(|_| Rejection::LimitExceeded)?
+        .saturating_add(1);
+    let bound = facet_bound(branches);
+    let mut steps: Vec<find_api::Step> = Vec::new();
+    let mut next_id = 1u32;
+    let mut alloc = || -> Result<find_api::StepId, Rejection> {
+        let id = find_api::StepId::new(next_id).ok_or(Rejection::StateCorrupt)?;
+        next_id = next_id.saturating_add(1);
+        Ok(id)
+    };
+    let position = crate::find::field_ref(crate::find::field::KIND_PROJECT_POSITION);
+    let rank_by_position = || {
+        find_api::Op::Rank(find_api::Rank {
+            by: vec![find_api::RankBy::Field(position.clone())],
+        })
+    };
+
+    // The base: every live Issue, scoped to the project when there is one.
+    let base_seek = alloc()?;
+    steps.push(find_api::Step {
+        id: base_seek,
+        input: Vec::new(),
+        op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+            field: crate::find::field_ref(if project.is_some() {
+                crate::find::field::KIND_PROJECT
+            } else {
+                crate::find::field::KIND
+            }),
+            test: find_api::Test::Equal,
+            value: project.map_or_else(
+                || find_api::Atom::Text("issue".into()),
+                |project| find_api::Atom::Bytes(crate::find::composite_key(["issue", project])),
+            ),
+        })),
+        bound,
+    });
+    let base_ranked = alloc()?;
+    steps.push(find_api::Step {
+        id: base_ranked,
+        input: vec![base_seek],
+        op: rank_by_position(),
+        bound,
+    });
+
+    let mut axis_outputs = vec![base_ranked];
+    for axis in axes {
+        let mut ranked = Vec::new();
+        for facet in axis {
+            let seek_id = alloc()?;
+            let (field, value) = match facet {
+                FacetSeek::Direct { field, value } => (*field, value.clone()),
+                FacetSeek::Membership { kind, target } => (
+                    crate::find::field::RELATION_TARGET_KIND,
+                    find_api::Atom::Bytes(crate::find::composite_key([kind, target.as_str()])),
+                ),
+            };
+            steps.push(find_api::Step {
+                id: seek_id,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(field),
+                    test: find_api::Test::Equal,
+                    value,
+                })),
+                bound,
+            });
+            // A membership posting answers with relation nodes. One hop
+            // outbound along `edge::MEMBER` turns them into the Issues they are
+            // about -- the same edge row enrichment walks inbound, and for the
+            // same reason: it reaches memberships and never board history.
+            let issues = match facet {
+                FacetSeek::Direct { .. } => seek_id,
+                FacetSeek::Membership { .. } => {
+                    let hop = alloc()?;
+                    steps.push(find_api::Step {
+                        id: hop,
+                        input: vec![seek_id],
+                        op: find_api::Op::Walk(find_api::Walk {
+                            edges: vec![crate::find::edge_ref(crate::find::edge::MEMBER)],
+                            direction: find_api::Direction::Out,
+                            min_hops: 1,
+                            max_hops: 1,
+                            unique: find_api::Unique::Walk,
+                            order: find_api::WalkOrder::Breadth,
+                            emit: find_api::Emit::Nodes,
+                            gate: crate::find::gate_ref(),
+                        }),
+                        bound,
+                    });
+                    hop
+                }
+            };
+            // Merge takes ranked branches only; Seek and Walk both answer with
+            // plain nodes, so each branch is ranked before it can be combined.
+            let ranked_id = alloc()?;
+            steps.push(find_api::Step {
+                id: ranked_id,
+                input: vec![issues],
+                op: rank_by_position(),
+                bound,
+            });
+            ranked.push(ranked_id);
+        }
+        // Within one axis the values union: two labels means either.
+        let axis_out = if ranked.len() == 1 {
+            ranked[0]
+        } else {
+            let union = alloc()?;
+            steps.push(find_api::Step {
+                id: union,
+                input: ranked,
+                op: find_api::Op::Merge(find_api::Merge {
+                    method: find_api::MergeMethod::Union,
+                }),
+                bound,
+            });
+            union
+        };
+        axis_outputs.push(axis_out);
+    }
+
+    // Across axes they intersect: a status and a label means both.
+    let combined = if axis_outputs.len() == 1 {
+        axis_outputs[0]
+    } else {
+        let intersect = alloc()?;
+        steps.push(find_api::Step {
+            id: intersect,
+            input: axis_outputs,
+            op: find_api::Op::Merge(find_api::Merge {
+                method: find_api::MergeMethod::Intersection,
+            }),
+            bound,
+        });
+        intersect
+    };
+
+    let mut predicates = vec![find_api::Predicate {
+        field: crate::find::field_ref(crate::find::field::CONFLICTED),
+        test: find_api::Test::Equal,
+        value: find_api::Atom::Bool(false),
+    }];
+    if !all {
+        predicates.push(find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::TOMBSTONE),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Bool(false),
+        });
+    }
+    let keep = alloc()?;
+    steps.push(find_api::Step {
+        id: keep,
+        input: vec![combined],
+        op: find_api::Op::Keep(find_api::Keep { predicates }),
+        bound,
+    });
+    // Merge sorts by its own score and then by node key, which is doc-id order
+    // and not the order anybody dragged these into. Put the board's own
+    // ordering back before packing.
+    let ordered = alloc()?;
+    steps.push(find_api::Step {
+        id: ordered,
+        input: vec![keep],
+        op: rank_by_position(),
+        bound,
+    });
+    let mut fields = [
+        crate::find::field::TITLE,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::PRIORITY,
+        crate::find::field::TOMBSTONE,
+        crate::find::field::DUE_AT,
+        crate::find::field::ESTIMATE,
+        crate::find::field::ID,
+        crate::find::field::KIND,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    let pack = alloc()?;
+    steps.push(find_api::Step {
+        id: pack,
+        input: vec![ordered],
+        op: find_api::Op::Pack(find_api::Pack { fields }),
+        bound,
+    });
+    if steps.len() > find_api::MAX_QUERY_STEPS {
+        return Err(Rejection::LimitExceeded);
+    }
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps,
+        output: pack,
+        bound,
+        page_size: u32::try_from(MAX_FACET_MATCHES).unwrap_or(find_api::MAX_PAGE_SIZE),
+        cursor: None,
+    })
+    .map_err(find_rejection)
+}
+
+/// Issues whose memberships one Walk resolves.
+///
+/// Sixteen, and the binding ceiling is `paths_retained`, not the projection.
+/// Find's policy allows 100,000 nodes visited and 8 MiB projected but only
+/// 10,000 paths retained and 10,000 candidates per branch, so the arithmetic
+/// that matters is `chunk x MAX_MEMBERSHIPS_PER_ISSUE <= 10,000` -- which caps
+/// the chunk at 25. Sixteen leaves room rather than sitting on the edge.
+///
+/// The previous attempt at this declared against `projected_bytes` alone and
+/// was wrong twice over: it walked `edge::SOURCE`, which reaches every
+/// relation including the board history, and it under-declared
+/// `nodes_visited`, which Find charges TWICE per emitted node -- once for the
+/// incoming posting during the walk, once again when `Pack` reads the node
+/// back. Both are accounted for below.
+const MEMBERSHIP_WALK_CHUNK: usize = 16;
+
+/// The memberships one Issue may hold, from the caps the write path enforces.
+///
+/// Derived rather than written down, because a bound that restates a constant
+/// is a bound that stops agreeing with it. The three singletons are milestone,
+/// cycle and baseline -- `IssueRelationRecord::identity` omits the target for
+/// exactly those, so an Issue holds at most one of each.
+const MAX_MEMBERSHIPS_PER_ISSUE: u64 = (contract::MAX_ISSUE_ASSIGNEES
+    + contract::MAX_ISSUE_FOLLOWERS
+    + contract::MAX_ISSUE_LABELS
+    + 3) as u64;
+
+/// Every page row's memberships, in one traversal per chunk.
+///
+/// A membership relation carries `edge::MEMBER` to the Issue it is about, so a
+/// page's memberships are the nodes one inbound hop away along that edge. It
+/// is deliberately not `edge::SOURCE`: that one is carried by every relation
+/// kind, `issue_transition` included, and an Issue's transitions accumulate
+/// forever as its card is dragged. `edge::MEMBER` is posted for
+/// `MEMBERSHIP_KINDS` and nothing else, so what this reaches is bounded by
+/// what the write path caps rather than by how much the board has been used.
+///
+/// This replaces three exact seeks per row. What it cannot do is ask for only
+/// the three kinds a row draws -- `Keep` predicates conjoin and Find has no set
+/// test -- so followers, cycle and baseline come back too and are discarded.
+/// That waste is now bounded and small; it was the unbounded version that made
+/// the traversal a hazard, not the waste itself.
+fn page_memberships(
+    ctx: &Context<'_>,
+    docs: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<(String, String)>>, Rejection> {
+    use runtime::find as find_api;
+    let mut out: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    if docs.is_empty() {
+        return Ok(out);
+    }
+    if docs.len() > MEMBERSHIP_WALK_CHUNK {
+        for chunk in docs.chunks(MEMBERSHIP_WALK_CHUNK) {
+            for (doc, found) in page_memberships(ctx, chunk)? {
+                out.entry(doc).or_default().extend(found);
+            }
+        }
+        return Ok(out);
+    }
+    let count = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+    let reachable = count.saturating_mul(MAX_MEMBERSHIPS_PER_ISSUE);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: reachable.saturating_mul(8),
+        edges_visited: reachable,
+        paths_retained: reachable,
+        candidates_per_branch: reachable,
+        // Charged once per incoming posting in the walk and once more when
+        // `Pack` reads each emitted node back, plus one per seed.
+        nodes_visited: reachable.saturating_mul(2).saturating_add(count),
+        score_evaluations: reachable,
+        // A kind and two ids. Half a kilobyte a row is generous for that.
+        projected_bytes: reachable.saturating_mul(512),
+        packed_tokens: reachable.saturating_mul(64),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let walk = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::RELATION_KIND,
+        crate::find::field::SOURCE_ID,
+        crate::find::field::TARGET_ID,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(
+                        docs.iter()
+                            .map(|doc| find_api::NodeId::new(doc.as_bytes().to_vec()))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|_| Rejection::InvalidRequest)?,
+                    )),
+                    bound,
+                },
+                find_api::Step {
+                    id: walk,
+                    input: vec![seek],
+                    op: find_api::Op::Walk(find_api::Walk {
+                        edges: vec![crate::find::edge_ref(crate::find::edge::MEMBER)],
+                        // The edge points membership -> Issue, so the Issues
+                        // are where it lands and the memberships are the catch.
+                        direction: find_api::Direction::In,
+                        min_hops: 1,
+                        max_hops: 1,
+                        unique: find_api::Unique::Walk,
+                        order: find_api::WalkOrder::Breadth,
+                        emit: find_api::Emit::Nodes,
+                        gate: crate::find::gate_ref(),
+                    }),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![walk],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: u32::try_from(reachable).unwrap_or(find_api::MAX_PAGE_SIZE),
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    // No continuation guard here on purpose. A Query carrying a Walk is not a
+    // linear plan, so Find hard-codes its next position to none and overflow
+    // arrives as a refusal rather than as a short answer -- the runtime will
+    // not hand back a truncated page for this shape. A guard on `next_cursor`
+    // would read as the safety and be dead code.
+    for row in answer.rows() {
+        let (Some(kind), Some(source), Some(target)) = (
+            result_text(row, crate::find::field::RELATION_KIND),
+            result_text(row, crate::find::field::SOURCE_ID),
+            result_text(row, crate::find::field::TARGET_ID),
+        ) else {
+            return Err(Rejection::StateCorrupt);
+        };
+        out.entry(source).or_default().push((kind, target));
+    }
+    Ok(out)
+}
+
 /// Put the relation-held facts a list row shows onto one row.
 ///
 /// `issue_page_row` builds from one Find row, which carries the Issue's own
@@ -4988,36 +5879,85 @@ fn project_issue_counts(
 /// Three bounded exact seeks per row, on the membership posting that exists
 /// for exactly this. They are index lookups returning a handful of rows each,
 /// not scans, and the page that calls this is already bounded.
-fn enrich_issue_row(
+fn enrich_issue_page(
     ctx: &Context<'_>,
     catalog: &mut CatalogState,
-    row: &mut crate::dto::Row,
+    rows: &mut [crate::dto::Row],
     me: Option<&ActorId>,
 ) -> Result<(), Rejection> {
-    let doc = row.doc_id.to_string();
-    row.assignees = issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?
-        .into_iter()
-        .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
-        .collect::<Result<Vec<_>, _>>()?;
-    row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
-    // A row carries label NAMES, so an id that has no registry entry renders
-    // as itself rather than disappearing -- the same rule the assembled view
-    // applies.
-    let mut names = Vec::new();
-    for label in issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)? {
-        crate::record_store::apply_label(ctx, catalog, &label)?;
-        names.push(
-            catalog
-                .labels
-                .get(&label)
-                .map_or_else(|| label.clone(), |meta| meta.name.clone()),
-        );
+    if rows.is_empty() {
+        return Ok(());
     }
-    row.label_names = names;
-    row.milestone = crate::record_store::read_issue_relation(ctx, &doc, "milestone", "")?
-        .filter(|record| record.present)
-        .map(|record| record.target);
-    row.enrichment_complete = true;
+    let mut docs = rows
+        .iter()
+        .map(|row| row.doc_id.to_string())
+        .collect::<Vec<_>>();
+    docs.sort();
+    docs.dedup();
+    let memberships = page_memberships(ctx, &docs)?;
+    for row in rows.iter_mut() {
+        // Sets, because the seeks this replaced answered from `BTreeSet`s: a
+        // row's assignees were sorted and deduplicated, and taking whatever
+        // order the index returned would silently reorder every facepile.
+        let mut assignees = std::collections::BTreeSet::new();
+        let mut labels = std::collections::BTreeSet::new();
+        // Singleton, and provably so: `IssueRelationRecord::identity` omits
+        // the target for `milestone`, `cycle` and `baseline`, so one Issue
+        // holds exactly one Body -- and therefore one node -- per kind.
+        let mut milestone = None;
+        for (kind, target) in memberships
+            .get(&row.doc_id.to_string())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            match kind.as_str() {
+                "assignee" => {
+                    assignees.insert(target.clone());
+                }
+                "label" => {
+                    labels.insert(target.clone());
+                }
+                "milestone" => milestone = Some(target.clone()),
+                // follower, cycle and baseline ride the same edge and are not
+                // drawn on a row. Bounded by the write caps, so the cost of
+                // carrying them is small and known.
+                _ => {}
+            }
+        }
+        // The seeks refused a set larger than its cap rather than truncating
+        // it. Keep refusing: a row that quietly showed the first hundred and
+        // twenty-eight of more is wrong without saying so.
+        if assignees.len() > contract::MAX_ISSUE_ASSIGNEES
+            || labels.len() > contract::MAX_ISSUE_LABELS
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        row.assignees = assignees
+            .iter()
+            .map(|target| ActorId::parse(target).ok_or(Rejection::StateCorrupt))
+            .collect::<Result<Vec<_>, _>>()?;
+        row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
+        // A row carries label NAMES, so an id that has no registry entry renders
+        // as itself rather than disappearing -- the same rule the assembled view
+        // applies.
+        let mut names = Vec::new();
+        for label in &labels {
+            crate::record_store::apply_label(ctx, catalog, label)?;
+            names.push(
+                catalog
+                    .labels
+                    .get(label)
+                    .map_or_else(|| label.clone(), |meta| meta.name.clone()),
+            );
+        }
+        row.label_names = names;
+        // `extract_issue_relation` posts no node for a cleared relation, so
+        // absence here is the same fact the `present` flag used to carry -- and
+        // it now comes from the pinned publication like the rest of the row,
+        // rather than from a live Body read beside it.
+        row.milestone = milestone;
+        row.enrichment_complete = true;
+    }
     Ok(())
 }
 
@@ -5154,32 +6094,79 @@ fn issue_write_state(
     Ok((catalog, issue))
 }
 
-fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
+/// A Spec's heads Body, if it exists and names this Spec.
+fn spec_heads(ctx: &Context<'_>, spec: &str) -> Option<runtime::world::CollaborativeBody> {
     let spec_id = crate::ids::SpecId::parse(spec)?;
     let heads = ctx
         .read_collaborative(&crate::records::spec_heads_key(&spec_id))
         .ok()??;
-    if heads
+    heads
         .registers
         .get(crate::records::roots::IDENTITY)
-        .is_none_or(|identity| identity.as_slice() != spec.as_bytes())
-    {
+        .is_some_and(|identity| identity.as_slice() == spec.as_bytes())
+        .then_some(heads)
+}
+
+/// The kind a Spec was created as, from its heads Body.
+///
+/// A revision is posted to the corpus under its Spec's kind
+/// (`find::extract_spec_revision`), and the kind is invariant across a
+/// Spec's revisions: `SpecRevise` clones the head's body and `SpecResolve`
+/// refuses a body whose kind differs from the first revision's. The heads
+/// Body records it beside the head sets, so it names the exact seek. This
+/// replaced a hunt across a hand-written kind list that had stopped
+/// agreeing with `Kind::ALL` -- six kinds could be created and never read.
+fn spec_kind(heads: &runtime::world::CollaborativeBody) -> Option<crate::spec::Kind> {
+    heads
+        .registers
+        .get(crate::records::roots::KIND)
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(crate::spec::Kind::parse)
+}
+
+/// One exact revision of a Spec, whether or not it is still a head or issued.
+///
+/// A revision is immutable and stays readable after a successor supersedes
+/// it; a Baseline pins one, and an incorporation names one, precisely so that
+/// later drafting cannot move what governs. So this reads by id rather than
+/// through the head sets, and answers `None` only for a revision this replica
+/// has not received or one that does not belong to `spec`.
+fn spec_revision_at(
+    ctx: &Context<'_>,
+    spec: &str,
+    kind: crate::spec::Kind,
+    revision: &str,
+) -> Option<crate::spec::Revision> {
+    let row =
+        unique_find_row(ctx, crate::find::field::ID, revision, kind.as_str(), None).ok()??;
+    if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(spec) {
         return None;
     }
-    let decode_set = |path: &str| -> Option<Vec<String>> {
-        let mut values = heads
-            .sets
-            .get(path)
-            .into_iter()
-            .flatten()
-            .map(|value| String::from_utf8(value.clone()).ok())
-            .collect::<Option<Vec<_>>>()?;
-        values.sort();
-        values.dedup();
-        Some(values)
-    };
-    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
-    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
+    let bytes = ctx.read_body(&row.source).ok()??;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+    let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
+    let found = record.revision;
+    (found.revision == revision && found.body.spec == spec && found.body.kind == kind)
+        .then_some(found)
+}
+
+fn decode_head_set(heads: &runtime::world::CollaborativeBody, path: &str) -> Option<Vec<String>> {
+    let mut values = heads
+        .sets
+        .get(path)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).ok())
+        .collect::<Option<Vec<_>>>()?;
+    values.sort();
+    values.dedup();
+    Some(values)
+}
+
+fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
+    let heads = spec_heads(ctx, spec)?;
+    let explicit_heads = decode_head_set(&heads, crate::records::roots::HEADS)?;
+    let explicit_issued = decode_head_set(&heads, crate::records::roots::ISSUED_HEADS)?;
     if explicit_heads.is_empty() {
         return None;
     }
@@ -5190,31 +6177,10 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
         .collect::<Vec<_>>();
     wanted.sort();
     wanted.dedup();
+    let kind = spec_kind(&heads)?;
     let mut revisions = Vec::with_capacity(wanted.len());
     for revision in wanted {
-        let mut matching = None;
-        for kind in ["requirement", "design", "proof", "runbook", "plan"] {
-            let row = match unique_find_row(ctx, crate::find::field::ID, &revision, kind, None) {
-                Ok(row) => row,
-                Err(_) => return None,
-            };
-            let Some(row) = row else { continue };
-            if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(spec)
-                || matching.replace(row).is_some()
-            {
-                return None;
-            }
-        }
-        let Some(row) = matching else {
-            return None;
-        };
-        let bytes = ctx.read_body(&row.source).ok()??;
-        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
-        let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
-        if record.revision.revision != revision || record.revision.body.spec != spec {
-            return None;
-        }
-        revisions.push(record.revision);
+        revisions.push(spec_revision_at(ctx, spec, kind, &revision)?);
     }
     revisions.sort_by(|left, right| left.revision.cmp(&right.revision));
     Some(crate::spec::Spec {
@@ -5225,32 +6191,49 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
     })
 }
 
-fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
+/// A Baseline's heads Body, if it exists and names this Baseline.
+fn baseline_heads(ctx: &Context<'_>, baseline: &str) -> Option<runtime::world::CollaborativeBody> {
     let baseline_id = crate::ids::BaselineId::parse(baseline)?;
     let heads = ctx
         .read_collaborative(&crate::records::baseline_heads_key(&baseline_id))
         .ok()??;
-    if heads
+    heads
         .registers
         .get(crate::records::roots::IDENTITY)
-        .is_none_or(|identity| identity.as_slice() != baseline.as_bytes())
-    {
+        .is_some_and(|identity| identity.as_slice() == baseline.as_bytes())
+        .then_some(heads)
+}
+
+/// One exact revision of a Baseline, by id. Same reasoning as
+/// [`spec_revision_at`]: an Issue binds to an exact revision, and the binding
+/// must survive the Baseline being revised.
+fn baseline_revision_at(
+    ctx: &Context<'_>,
+    baseline: &str,
+    revision: &str,
+) -> Option<crate::spec::BaselineRevision> {
+    let row = unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        revision,
+        "baseline_revision",
+        None,
+    )
+    .ok()??;
+    if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(baseline) {
         return None;
     }
-    let decode_set = |path: &str| -> Option<Vec<String>> {
-        let mut values = heads
-            .sets
-            .get(path)
-            .into_iter()
-            .flatten()
-            .map(|value| String::from_utf8(value.clone()).ok())
-            .collect::<Option<Vec<_>>>()?;
-        values.sort();
-        values.dedup();
-        Some(values)
-    };
-    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
-    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
+    let bytes = ctx.read_body(&row.source).ok()??;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+    let record = crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
+    let found = record.revision;
+    (found.revision == revision && found.body.baseline == baseline).then_some(found)
+}
+
+fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
+    let heads = baseline_heads(ctx, baseline)?;
+    let explicit_heads = decode_head_set(&heads, crate::records::roots::HEADS)?;
+    let explicit_issued = decode_head_set(&heads, crate::records::roots::ISSUED_HEADS)?;
     if explicit_heads.is_empty() {
         return None;
     }
@@ -5263,25 +6246,7 @@ fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Base
     wanted.dedup();
     let mut revisions = Vec::with_capacity(wanted.len());
     for revision in wanted {
-        let row = unique_find_row(
-            ctx,
-            crate::find::field::ID,
-            &revision,
-            "baseline_revision",
-            None,
-        )
-        .ok()??;
-        if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(baseline) {
-            return None;
-        }
-        let bytes = ctx.read_body(&row.source).ok()??;
-        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
-        let record =
-            crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
-        if record.revision.revision != revision || record.revision.body.baseline != baseline {
-            return None;
-        }
-        revisions.push(record.revision);
+        revisions.push(baseline_revision_at(ctx, baseline, &revision)?);
     }
     revisions.sort_by(|left, right| left.revision.cmp(&right.revision));
     Some(crate::spec::Baseline {
@@ -6133,6 +7098,96 @@ fn validate_plan(
     Ok(())
 }
 
+/// How much history a Packet will read to find what governs one Issue.
+///
+/// Every link a revision asserts is a `spec_reference` relation keyed by its
+/// target, so a seek on the Issue finds every revision that has *ever*
+/// governed it -- a set that grows with revisions of governing Specs, not
+/// with the Space. Paged and capped rather than read whole: past the cap the
+/// Packet is refused, never quietly short.
+const PACKET_REFERENCE_PAGE: u32 = 128;
+const PACKET_REFERENCE_PAGES: u32 = 32;
+
+/// The Spec a revision id belongs to, from the revision's own corpus row.
+fn revision_owner(ctx: &Context<'_>, revision: &str) -> Result<Option<String>, Rejection> {
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::ID,
+        runtime::find::Atom::Text(revision.into()),
+        &contract::PageRequest {
+            limit: 1,
+            cursor: None,
+        },
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+            test: runtime::find::Test::Equal,
+            value: runtime::find::Atom::Text("spec_revision".into()),
+        }],
+        vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
+    )?;
+    Ok(answer
+        .rows()
+        .first()
+        .and_then(|row| result_text(row, crate::find::field::SOURCE_ID)))
+}
+
+/// The Specs that may govern `doc` directly: every Spec one of whose
+/// revisions asserts `governs` on it.
+///
+/// This is what `all_specs` stood in for. Which of them govern *now* is the
+/// issued revision's question, and `spec_state` answers it per candidate --
+/// a set bounded by what has ever named this Issue rather than by the Space.
+fn governing_candidates(ctx: &Context<'_>, doc: &str) -> Result<BTreeSet<String>, Rejection> {
+    let mut revisions = BTreeSet::new();
+    let mut request = contract::PageRequest {
+        limit: PACKET_REFERENCE_PAGE,
+        cursor: None,
+    };
+    let mut pages = 0u32;
+    loop {
+        // The composite posting, not the bare target: `TARGET_ID` is shared by
+        // every comment, reaction and child that names the Issue, and Find
+        // charges every posting it scans before a Keep can drop it. A busy
+        // Issue would have its Packet refused for being busy.
+        let answer = find_field_page(
+            ctx,
+            crate::find::field::RELATION_TARGET_KIND,
+            runtime::find::Atom::Bytes(crate::find::composite_key([
+                crate::spec::Rel::Governs.as_str(),
+                doc,
+            ])),
+            &request,
+            vec![runtime::find::Predicate {
+                field: crate::find::field_ref(crate::find::field::ENTITY_KEY),
+                test: runtime::find::Test::Equal,
+                value: runtime::find::Atom::Text("spec_reference".into()),
+            }],
+            vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
+        )?;
+        revisions.extend(
+            answer
+                .rows()
+                .iter()
+                .filter_map(|row| result_text(row, crate::find::field::SOURCE_ID)),
+        );
+        let Some(cursor) = page_from_answer(&answer, Vec::<()>::new()).next_cursor else {
+            break;
+        };
+        pages += 1;
+        if pages >= PACKET_REFERENCE_PAGES {
+            return Err(Rejection::LimitExceeded);
+        }
+        request.cursor = Some(cursor);
+    }
+    let mut specs = BTreeSet::new();
+    for revision in revisions {
+        if let Some(spec) = revision_owner(ctx, &revision)? {
+            specs.insert(spec);
+        }
+    }
+    Ok(specs)
+}
+
 fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection> {
     let mut issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
     // A Packet is built around the issue's baseline binding, which is one of
@@ -6140,15 +7195,20 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
     // it back, but by scanning every record that names this doc; this needs
     // one bounded read of one singleton relation.
     enrich_issue_relations(ctx, &mut issue, doc)?;
-    let specs = all_specs(ctx);
     let mut exact: BTreeMap<
         (String, String),
-        (&crate::spec::Revision, crate::spec::PacketSource, bool),
+        (crate::spec::Revision, crate::spec::PacketSource, bool),
     > = BTreeMap::new();
     let mut conflicts = Vec::new();
+    let governs = |revision: &crate::spec::Revision| {
+        revision.body.links.iter().any(|link| {
+            link.rel == crate::spec::Rel::Governs
+                && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
+        })
+    };
 
     if let Some(binding) = &issue.baseline {
-        let Some(baseline) = baseline_state(ctx, &binding.baseline) else {
+        if baseline_heads(ctx, &binding.baseline).is_none() {
             conflicts.push(crate::spec::PacketConflict::MissingBaseline {
                 baseline: binding.baseline.clone(),
             });
@@ -6161,8 +7221,11 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                 record: vec![],
                 conflicts,
             });
-        };
-        let Some(revision) = baseline.revision(&binding.revision) else {
+        }
+        // The exact pinned revision, whether or not the Baseline has moved on
+        // since: the pin is the agreement, and a successor draft or issuance
+        // does not unmake it.
+        let Some(revision) = baseline_revision_at(ctx, &binding.baseline, &binding.revision) else {
             conflicts.push(crate::spec::PacketConflict::MissingBaselineRevision {
                 baseline: binding.baseline.clone(),
                 revision: binding.revision.clone(),
@@ -6184,19 +7247,14 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
             });
         }
         for member in &revision.body.members {
-            let Some(spec) = specs.iter().find(|candidate| {
-                candidate
-                    .revisions
-                    .first()
-                    .is_some_and(|revision| revision.body.spec == member.spec)
-            }) else {
+            let Some(kind) = spec_heads(ctx, &member.spec).as_ref().and_then(spec_kind) else {
                 conflicts.push(crate::spec::PacketConflict::MissingSpec {
                     spec: member.spec.clone(),
                 });
                 continue;
             };
             let canonical = canonical_spec_revision(ctx, &member.spec, &member.revision)?;
-            let Some(revision) = spec.revision(&canonical) else {
+            let Some(revision) = spec_revision_at(ctx, &member.spec, kind, &canonical) else {
                 conflicts.push(crate::spec::PacketConflict::MissingSpecRevision {
                     spec: member.spec.clone(),
                     revision: member.revision.clone(),
@@ -6218,31 +7276,22 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
 
     // Issued Specs may supplement one Issue directly. Concurrent controlling
     // revisions remain a visible conflict; no timestamp winner is selected.
-    for spec in &specs {
-        match spec.issued() {
+    for spec in governing_candidates(ctx, doc)? {
+        let Some(state) = spec_state(ctx, &spec) else {
+            continue;
+        };
+        match state.issued() {
             crate::spec::Issued::One(revision) => {
-                if revision.body.links.iter().any(|link| {
-                    link.rel == crate::spec::Rel::Governs
-                        && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
-                }) {
+                if governs(revision) {
                     exact.insert(
-                        (revision.body.spec.clone(), revision.revision.clone()),
-                        (revision, crate::spec::PacketSource::Direct, false),
+                        (spec.clone(), revision.revision.clone()),
+                        (revision.clone(), crate::spec::PacketSource::Direct, false),
                     );
                 }
             }
             crate::spec::Issued::Conflict(revisions) => {
-                if revisions.iter().any(|revision| {
-                    revision.body.links.iter().any(|link| {
-                        link.rel == crate::spec::Rel::Governs
-                            && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
-                    })
-                }) {
-                    let id = revisions
-                        .first()
-                        .map(|revision| revision.body.spec.clone())
-                        .unwrap_or_else(|| "unknown".into());
-                    conflicts.push(crate::spec::PacketConflict::IssuedSpecConflict { spec: id });
+                if revisions.iter().any(|revision| governs(revision)) {
+                    conflicts.push(crate::spec::PacketConflict::IssuedSpecConflict { spec });
                 }
             }
             crate::spec::Issued::None => {}
@@ -6251,43 +7300,55 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
 
     // Incorporation, unlike reference, pulls the exact target into the
     // governing set. Traverse to a fixed point over exact revisions.
+    let mut missing = BTreeSet::new();
     loop {
         let mut added = false;
-        let snapshot: Vec<_> = exact.values().map(|(revision, _, _)| *revision).collect();
-        for revision in snapshot {
-            for link in &revision.body.links {
+        let snapshot = exact
+            .values()
+            .map(|(revision, _, _)| {
+                (
+                    revision.body.spec.clone(),
+                    revision.revision.clone(),
+                    revision.body.links.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (from_spec, from_revision, links) in snapshot {
+            for link in links {
                 if link.rel != crate::spec::Rel::Incorporates {
                     continue;
                 }
                 let crate::spec::Target::Spec {
                     spec,
                     revision: target_revision,
-                } = &link.target
+                } = link.target
                 else {
                     continue;
                 };
-                let canonical = canonical_spec_revision(ctx, spec, target_revision)?;
+                let canonical = canonical_spec_revision(ctx, &spec, &target_revision)?;
                 if exact.contains_key(&(spec.clone(), canonical.clone())) {
                     continue;
                 }
-                let Some(target) = specs
-                    .iter()
-                    .find_map(|candidate| candidate.revision(&canonical))
-                    .filter(|candidate| candidate.body.spec == *spec)
-                else {
-                    conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
-                        spec: spec.clone(),
-                        revision: target_revision.clone(),
-                    });
+                let target = spec_heads(ctx, &spec)
+                    .as_ref()
+                    .and_then(spec_kind)
+                    .and_then(|kind| spec_revision_at(ctx, &spec, kind, &canonical));
+                let Some(target) = target else {
+                    if missing.insert((spec.clone(), target_revision.clone())) {
+                        conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
+                            spec,
+                            revision: target_revision,
+                        });
+                    }
                     continue;
                 };
                 exact.insert(
-                    (spec.clone(), canonical),
+                    (spec, canonical),
                     (
                         target,
                         crate::spec::PacketSource::Incorporated {
-                            spec: revision.body.spec.clone(),
-                            revision: revision.revision.clone(),
+                            spec: from_spec.clone(),
+                            revision: from_revision.clone(),
                         },
                         true,
                     ),
@@ -6305,19 +7366,20 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
     let mut proof = Vec::new();
     let mut record = Vec::new();
     for (_, (revision, source, incorporated)) in exact {
+        let kind = revision.body.kind;
         let item = crate::spec::PacketSpec {
-            spec: revision.body.spec.clone(),
-            revision: revision.revision.clone(),
-            kind: revision.body.kind,
-            title: revision.body.title.clone(),
+            spec: revision.body.spec,
+            revision: revision.revision,
+            kind,
+            title: revision.body.title,
             state: revision.body.state,
             source,
-            links: revision.body.links.clone(),
+            links: revision.body.links,
         };
-        if incorporated || revision.body.kind.governs() {
+        if incorporated || kind.governs() {
             governing.push(item);
         } else {
-            match revision.body.kind {
+            match kind {
                 crate::spec::Kind::Goal | crate::spec::Kind::Plan | crate::spec::Kind::Guide => {
                     guidance.push(item)
                 }
@@ -8088,7 +9150,7 @@ impl World for IssuesWorld {
         runtime::world::Descriptor {
             id: self.id.clone(),
             implementation_version: runtime::world::Version(match self.package {
-                IssuesPackage::Preferred => 4,
+                IssuesPackage::Preferred => 6,
                 IssuesPackage::Migrator => Self::MIGRATOR_IMPLEMENTATION_VERSION,
             }),
             schemas: self.schemas.clone(),
@@ -9655,6 +10717,7 @@ impl World for IssuesWorld {
                         resources: Vec::new(),
                         limits: contract::verify_limits(),
                         queries: Vec::new(),
+                        target: None,
                     }),
                 );
                 Ok(staging.into_effect(Some(doc)))
@@ -11677,8 +12740,61 @@ impl World for IssuesWorld {
                 mine,
                 all,
                 me,
+                mut facets,
                 page,
             } => {
+                // The singular arguments are one spelling of the plural ones.
+                // Fold rather than branch: two code paths answering the same
+                // question is how they come to disagree about it.
+                for (axis, value) in [
+                    (&mut facets.labels, &label),
+                    (&mut facets.statuses, &status),
+                    (&mut facets.milestones, &milestone),
+                    (&mut facets.assignees, &mine),
+                ] {
+                    if let Some(value) = value {
+                        axis.push(value.clone());
+                    }
+                }
+                facets
+                    .canonicalize()
+                    .map_err(|()| Rejection::InvalidRequest)?;
+                if !facets.is_empty() {
+                    let axes = facet_seeks(project.as_deref(), &facets)?;
+                    let answer = find_faceted_issue_page(ctx, project.as_deref(), &axes, all)?;
+                    let mut catalog = CatalogState::default();
+                    let mut loaded_workflows = std::collections::BTreeSet::new();
+                    let mut rows = Vec::new();
+                    for result in answer.rows() {
+                        let row = issue_page_row(result)?;
+                        let project_id = row.project_id.as_str();
+                        if !all {
+                            if loaded_workflows.insert(project_id.to_string()) {
+                                apply_project_workflow(ctx, &mut catalog, project_id)?;
+                            }
+                            if issue_status_category(&catalog, project_id, &row.status)?
+                                == StatusCategory::Done
+                            {
+                                continue;
+                            }
+                        }
+                        rows.push(row);
+                    }
+                    let me_actor = me.as_deref().and_then(ActorId::parse);
+                    apply_page_aliases(ctx, &mut catalog, &mut rows)?;
+                    enrich_issue_page(ctx, &mut catalog, &mut rows, me_actor.as_ref())?;
+                    // The merged answer is the WHOLE filtered set -- Find hands
+                    // back no continuation for a non-linear plan, so there is no
+                    // partial page to miscount. This total is the count itself,
+                    // and it is exact.
+                    let exact = u64::try_from(rows.len()).ok();
+                    let mut page_out = page_from_answer(&answer, rows);
+                    page_out.exact_total = exact;
+                    page_out.next_cursor = None;
+                    return Ok(projection(
+                        serde_json::to_vec(&page_out).expect("faceted rows page json"),
+                    ));
+                }
                 // A relation filter asks the reverse membership question --
                 // "which issues carry this label" -- so it is seeked on the
                 // reverse coordinate rather than post-filtered out of a page
@@ -11782,6 +12898,8 @@ impl World for IssuesWorld {
                     }
                 };
                 let mut catalog = CatalogState::default();
+                let mut loaded_projects = std::collections::BTreeSet::new();
+                let mut loaded_workflows = std::collections::BTreeSet::new();
                 let mut rows = Vec::new();
                 for row in candidates {
                     let project_id = row.project_id.as_str();
@@ -11810,18 +12928,29 @@ impl World for IssuesWorld {
                             continue;
                         }
                     }
-                    if project.is_none() {
+                    // Both of these were per ROW, and neither memoises itself:
+                    // `apply_project` re-reads the project Body on every call,
+                    // and `apply_project_workflow` re-runs `workflow_projection`
+                    // before deduplicating into the catalog it was already in.
+                    // A hundred-row cross-project list therefore did a hundred
+                    // project reads and a hundred workflow resolutions to learn
+                    // the same handful of facts. A page holds few distinct
+                    // projects; ask once each.
+                    if project.is_none() && loaded_projects.insert(project_id.to_string()) {
                         crate::record_store::apply_project(ctx, &mut catalog, project_id)?;
-                        if catalog
+                    }
+                    if project.is_none()
+                        && catalog
                             .projects
                             .get(project_id)
                             .is_some_and(|meta| meta.archived)
-                        {
-                            continue;
-                        }
+                    {
+                        continue;
                     }
                     if !all {
-                        apply_project_workflow(ctx, &mut catalog, project_id)?;
+                        if loaded_workflows.insert(project_id.to_string()) {
+                            apply_project_workflow(ctx, &mut catalog, project_id)?;
+                        }
                         if issue_status_category(&catalog, project_id, &row.status)?
                             == StatusCategory::Done
                         {
@@ -11831,9 +12960,8 @@ impl World for IssuesWorld {
                     rows.push(row);
                 }
                 let me_actor = me.as_deref().and_then(ActorId::parse);
-                for row in &mut rows {
-                    enrich_issue_row(ctx, &mut catalog, row, me_actor.as_ref())?;
-                }
+                apply_page_aliases(ctx, &mut catalog, &mut rows)?;
+                enrich_issue_page(ctx, &mut catalog, &mut rows, me_actor.as_ref())?;
                 let mut page = page_from_answer(&answer, rows);
                 if !all || project.is_none() || lead.is_some() {
                     // Post-filtered totals are not the source posting total.
@@ -11871,14 +12999,29 @@ impl World for IssuesWorld {
                         })
                     })
                     .collect::<Result<Vec<_>, Rejection>>()?;
-                let rows = find_board_page(ctx, &project, &workflow, &page)?;
+                let mut rows = find_board_page(ctx, &project, &workflow, &page)?;
+                // The board never enriched at all -- not the alias, and not
+                // the memberships the list has been enriching since
+                // `enrich_issue_page` landed. A card with no assignee is the
+                // same defect as a list row with none, one surface over.
+                apply_page_aliases(ctx, &mut catalog, &mut rows.items)?;
+                let me_actor = me.as_deref().and_then(ActorId::parse);
+                enrich_issue_page(ctx, &mut catalog, &mut rows.items, me_actor.as_ref())?;
+                // The board page walks the block posting and cannot count what
+                // it did not visit, so it declined to. But the live count per
+                // state is a posting that exists for exactly this, and the
+                // viewer needs it: it draws every list from this one answer,
+                // and without a total it counted the rows it held and called
+                // that the project. `None` stays `None` -- an unmeasured
+                // state makes the sum unmeasured, never smaller.
+                rows.exact_total = project_issue_counts(ctx, &mut catalog, &project)?
+                    .map(|(total, _done)| u64::from(total));
                 let view = crate::dto::BoardPage {
                     schema_version: VIEW_SCHEMA_VERSION,
                     project: project_view,
                     workflow,
                     rows,
                 };
-                let _ = me;
                 Ok(projection(
                     serde_json::to_vec(&view).expect("board page json"),
                 ))
@@ -11992,15 +13135,15 @@ impl World for IssuesWorld {
                     .map(crate::find::field_ref)
                     .collect(),
                 )?;
-                let items = answer
+                let visible = answer
                     .rows()
                     .iter()
                     .filter(|row| {
                         exclude_device.as_deref()
                             != result_text(row, crate::find::field::DEVICE).as_deref()
                     })
-                    .map(|row| inbox_page_row(ctx, row, &actor))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Vec<_>>();
+                let items = inbox_page_rows(ctx, &visible, &actor)?;
                 let page = contract::Page {
                     publication: answer.coordinates().world_publication(),
                     items,
@@ -12187,11 +13330,7 @@ impl World for IssuesWorld {
                     .map(spec_summary_row)
                     .collect::<Result<Vec<_>, _>>()?;
                 for item in &mut items {
-                    if !item.conflicted {
-                        item.view = spec_state(ctx, &item.spec)
-                            .and_then(|spec| spec_view(&spec))
-                            .map(Box::new);
-                    }
+                    item.head = spec_head(ctx, item);
                 }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items)).expect("specs page json"),
@@ -12362,11 +13501,7 @@ impl World for IssuesWorld {
                     .map(baseline_summary_row)
                     .collect::<Result<Vec<_>, _>>()?;
                 for item in &mut items {
-                    if !item.conflicted {
-                        item.view = baseline_state(ctx, &item.baseline)
-                            .and_then(|baseline| baseline_view(&baseline))
-                            .map(Box::new);
-                    }
+                    item.head = baseline_head(ctx, item);
                 }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
@@ -12501,6 +13636,14 @@ impl World for IssuesWorld {
                     .collect(),
                 )?;
                 let mut catalog = CatalogState::default();
+                // One project's facts, asked once per page rather than once per
+                // initiative that names it. Both calls below were per (initiative
+                // x project) with no memo: `apply_project` re-reads the Body every
+                // time, and `project_issue_counts` re-resolves the workflow and
+                // seeks a count per state. A project in three initiatives was
+                // read three times and counted three times to say one thing.
+                let mut counted: std::collections::BTreeMap<String, Option<(u32, u32)>> =
+                    std::collections::BTreeMap::new();
                 let mut items = Vec::with_capacity(answer.rows().len());
                 for row in answer.rows() {
                     let mut item = initiative_page_row(row)?;
@@ -12512,11 +13655,15 @@ impl World for IssuesWorld {
                     let mut done = 0u32;
                     let mut measured = true;
                     for project in &members {
-                        crate::record_store::apply_project(ctx, &mut catalog, project)?;
+                        if !counted.contains_key(project) {
+                            crate::record_store::apply_project(ctx, &mut catalog, project)?;
+                            let counts = project_issue_counts(ctx, &mut catalog, project)?;
+                            counted.insert(project.clone(), counts);
+                        }
                         if let Some(meta) = catalog.projects.get(project) {
                             item.projects.push(meta.key.clone());
                         }
-                        match project_issue_counts(ctx, &mut catalog, project)? {
+                        match counted.get(project).copied().flatten() {
                             Some((project_total, project_done)) => {
                                 total = total.saturating_add(project_total);
                                 done = done.saturating_add(project_done);
@@ -12755,6 +13902,67 @@ mod check_demand_tests {
             .collect::<Vec<_>>();
         assert!(encoded.contains(&verification));
         assert!(encoded.contains(&transition));
+    }
+}
+
+#[cfg(test)]
+mod facet_bound_tests {
+    use super::*;
+
+    /// The declaration fits the ceiling it will be measured against.
+    ///
+    /// Find refuses on the DECLARATION, before it evaluates anything, and the
+    /// refusal is `Invalid` -- which reaches a caller as `InvalidRequest` and
+    /// names the request rather than the dimension that overflowed. The first
+    /// version of `facet_bound` claimed 16 KiB a row against an 8 MiB
+    /// projection and every faceted query in the product failed that way.
+    ///
+    /// Checked against the World's own declared schema bound rather than a
+    /// copy of the numbers, so tightening the schema tightens this too.
+    #[test]
+    fn a_faceted_declaration_fits_the_schema_it_runs_under() {
+        let schemas = crate::find::preferred_schemas();
+        let ceiling = schemas.first().expect("the entity schema").bound;
+        for branches in 1..=(MAX_FACET_BRANCHES as u64 + 1) {
+            let bound = facet_bound(branches);
+            for (name, claimed, allowed) in [
+                (
+                    "decoded_bodies",
+                    bound.decoded_bodies,
+                    ceiling.decoded_bodies,
+                ),
+                ("postings_read", bound.postings_read, ceiling.postings_read),
+                ("edges_visited", bound.edges_visited, ceiling.edges_visited),
+                ("nodes_visited", bound.nodes_visited, ceiling.nodes_visited),
+                (
+                    "paths_retained",
+                    bound.paths_retained,
+                    ceiling.paths_retained,
+                ),
+                (
+                    "candidates_per_branch",
+                    bound.candidates_per_branch,
+                    ceiling.candidates_per_branch,
+                ),
+                (
+                    "score_evaluations",
+                    bound.score_evaluations,
+                    ceiling.score_evaluations,
+                ),
+                (
+                    "projected_bytes",
+                    bound.projected_bytes,
+                    ceiling.projected_bytes,
+                ),
+                ("packed_tokens", bound.packed_tokens, ceiling.packed_tokens),
+                ("wall_millis", bound.wall_millis, ceiling.wall_millis),
+            ] {
+                assert!(
+                    claimed <= allowed,
+                    "{branches} branches claim {claimed} {name}, ceiling is {allowed}"
+                );
+            }
+        }
     }
 }
 

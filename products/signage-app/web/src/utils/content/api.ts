@@ -88,13 +88,16 @@ async function uploadOne(file: File): Promise<SignageMedia> {
   const written = await uploadBytes(file);
   let width: number | null = null;
   let height: number | null = null;
+  let duration_ms: number | null = null;
   try {
-    const dimensions = await getFileDimensions(file);
-    width = dimensions?.width ?? null;
-    height = dimensions?.height ?? null;
+    const probed = await getFileDimensions(file);
+    width = probed?.width ?? null;
+    height = probed?.height ?? null;
+    duration_ms = probed?.duration_ms ?? null;
   } catch {
     width = null;
     height = null;
+    duration_ms = null;
   }
   const media: SignageMedia = {
     id: mintBodyId(),
@@ -103,7 +106,7 @@ async function uploadOne(file: File): Promise<SignageMedia> {
     content: written.content,
     size: written.size,
     mime: file.type,
-    duration_ms: null,
+    duration_ms,
     width,
     height,
     catalog: null,

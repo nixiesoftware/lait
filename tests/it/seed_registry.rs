@@ -45,12 +45,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-seed-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("seed-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -108,7 +106,7 @@ fn seed_pin_lists_structured_and_survives_restart() {
     let net = MemNet::new();
     let home = temp_home("pin");
     crate::world_fixture::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -170,7 +168,7 @@ fn seed_pin_lists_structured_and_survives_restart() {
     // Cold restart: stop the daemon and bring a fresh one up on the SAME home.
     let _ = req(&rt, &home, Request::Stop);
     let _ = handle.join();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
     wait_online(&rt, &home);
 
     // The pin is reloaded from seeds.json alone — the registry is sticky.
@@ -194,7 +192,7 @@ fn seed_add_and_remove_by_device_id() {
     let net = MemNet::new();
     let home = temp_home("byid");
     crate::world_fixture::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);

@@ -67,3 +67,25 @@ test("Android TV uses the granted MSE decoder path", async () => {
   assert.match(html, /connect-src wss:\/\/nixiesoftware\.com/);
   assert.match(html, /program-media/);
 });
+
+test("the bundled runtime exactly matches the shared conformance-tested runtime", async () => {
+  // webOS and Tizen copy the shared runtime by script and pin the copy by
+  // test; Android copied by hand and pinned nothing, which is how it kept a
+  // client that could not pair. Pinned the same way now: every module this
+  // bundle carries is byte-for-byte the shared one, and the modules the
+  // client imports are all present.
+  const { readdir } = await import("node:fs/promises");
+  const bundled = path.join(root, "app", "src", "main", "assets", "runtime");
+  const shared = path.resolve(root, "..", "shared", "web");
+  const modules = (await readdir(bundled)).filter((name) => name.endsWith(".mjs")).sort();
+  for (const name of ["client.mjs", "protocol.mjs", "transport.mjs", "vault.mjs"]) {
+    assert.ok(modules.includes(name), `${name} is bundled`);
+  }
+  for (const name of modules) {
+    assert.deepEqual(
+      await readFile(path.join(bundled, name)),
+      await readFile(path.join(shared, name)),
+      `${name} is synchronized with receivers/shared/web`,
+    );
+  }
+});

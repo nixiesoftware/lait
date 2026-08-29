@@ -19,6 +19,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use replica::body::WorldId;
 
 use crate::{
     client_action::ClientAction,
@@ -93,7 +94,7 @@ fn exit_code_for_error(e: &anyhow::Error) -> i32 {
 ///
 /// Under `--json` the failure is the versioned `Response::Error` DTO on
 /// **stdout**, because that is where the readiness line would have gone:
-/// `viewer/scripts/dev.mjs` reads the first stdout line and checks
+/// `ci/smoke-p0.sh` reads the first stdout line and checks
 /// `kind === "error"` before it looks for `{token, port}`. Prose on stderr and
 /// an empty stdout would leave it waiting for a line that never comes.
 pub fn report_error(e: &anyhow::Error, json: bool) -> std::process::ExitCode {
@@ -594,6 +595,10 @@ pub struct PackageClientHost {
     act_as: Option<String>,
     /// Which identity's daemon this invocation talks to.
     selection: crate::config::Selection,
+    /// The World this host serves, when it serves one. The display family
+    /// is scoped to it by the host, never named by the caller; a host that
+    /// serves no World refuses that family.
+    world: Option<WorldId>,
 }
 
 impl PackageClientHost {
@@ -603,6 +608,7 @@ impl PackageClientHost {
         scope: ClientScope,
         act_as: Option<String>,
         selection: crate::config::Selection,
+        world: Option<WorldId>,
     ) -> Self {
         Self {
             home: home.into(),
@@ -610,6 +616,7 @@ impl PackageClientHost {
             scope,
             act_as,
             selection,
+            world,
         }
     }
 
@@ -626,6 +633,7 @@ impl PackageClientHost {
             scope_for_home(home),
             act_as,
             selection,
+            None,
         ))
     }
 }
@@ -721,30 +729,52 @@ impl world_interface::ClientHost for PackageClientHost {
         request: world_interface::HostControlRequest,
     ) -> world_interface::ClientFuture<'a, serde_json::Value> {
         Box::pin(async move {
+            if is_display_request(&request) {
+                return self.call_display(request).await;
+            }
             let request = match request {
                 world_interface::HostControlRequest::AssignmentList { actor } => {
                     Request::AssignmentList { actor }
                 }
-                world_interface::HostControlRequest::AssignmentGrant { actor, assignments } => {
-                    Request::AssignmentGrant {
-                        actor,
-                        assignments: assignments
-                            .into_iter()
-                            .map(|assignment| crate::control::AssignmentSpec {
-                                world: assignment.world,
-                                capability: assignment.capability,
-                                resource: assignment.resource,
-                            })
-                            .collect(),
+                world_interface::HostControlRequest::AssignmentGrant {
+                    actor,
+                    assignments,
+                    definition_ref,
+                } => Request::AssignmentGrant {
+                    actor,
+                    assignments: assignments
+                        .into_iter()
+                        .map(|assignment| crate::control::AssignmentSpec {
+                            world: assignment.world,
+                            capability: assignment.capability,
+                            resource: assignment.resource,
+                        })
+                        .collect(),
+                    definition_ref,
+                },
+                world_interface::HostControlRequest::AssignmentRevoke { grant_ids } => {
+                    Request::AssignmentRevoke {
+                        grant_id: None,
+                        grant_ids,
                     }
                 }
-                world_interface::HostControlRequest::AssignmentRevoke { grant_id } => {
-                    Request::AssignmentRevoke { grant_id }
-                }
+
                 world_interface::HostControlRequest::WorldActivate { world } => {
                     Request::WorldActivate {
                         world: world.as_str().to_string(),
                     }
+                }
+                display @ (world_interface::HostControlRequest::DisplayReceivers
+                | world_interface::HostControlRequest::DisplayCodeMint { .. }
+                | world_interface::HostControlRequest::DisplayCodeRevoke { .. }
+                | world_interface::HostControlRequest::DisplayAssign { .. }
+                | world_interface::HostControlRequest::DisplayUnassign { .. }
+                | world_interface::HostControlRequest::DisplayForget { .. }
+                | world_interface::HostControlRequest::DisplayPairingApprove {
+                    ..
+                }
+                | world_interface::HostControlRequest::DisplayPairingReject { .. }) => {
+                    return self.call_display(display).await;
                 }
             };
             let response = client_as_scoped(
@@ -1277,5 +1307,220 @@ mod tests {
             &sidecar,
             &theirs("not-a-version", &managed, u64::MAX)
         ));
+    }
+}
+
+/// The display family of [`world_interface::HostControlRequest`]: what a World
+/// may do with receivers, all of it scoped by this host to the World it serves.
+fn is_display_request(request: &world_interface::HostControlRequest) -> bool {
+    use world_interface::HostControlRequest as R;
+    matches!(
+        request,
+        R::DisplayReceivers
+            | R::DisplayCodeMint { .. }
+            | R::DisplayCodeRevoke { .. }
+            | R::DisplayAssign { .. }
+            | R::DisplayUnassign { .. }
+            | R::DisplayForget { .. }
+            | R::DisplayPairingApprove { .. }
+            | R::DisplayPairingReject { .. }
+    )
+}
+
+/// How a World's receivers are shown until the World says otherwise: a dark
+/// theme, and two minutes of silence before a screen says so and keeps the
+/// last picture. The World may not choose these yet; a World that needs to
+/// will say so in the request, and this is where that lands.
+const WORLD_RECEIVER_STALE_AFTER_MS: u32 = 120_000;
+
+fn world_sync_setting(
+    sync: Option<world_interface::HostDisplaySync>,
+) -> Option<crate::control::DisplayAssignmentSyncSetting> {
+    sync.map(|sync| crate::control::DisplayAssignmentSyncSetting {
+        group: sync.group,
+        mode: match sync.mode {
+            world_interface::HostDisplaySyncMode::StayInSync => {
+                crate::control::DisplaySyncModeSetting::StayInSync
+            }
+            world_interface::HostDisplaySyncMode::Positional => {
+                crate::control::DisplaySyncModeSetting::Positional
+            }
+        },
+        static_delay_ms: sync.static_delay_ms,
+    })
+}
+
+/// Whether a World may act on a receiver: one it holds, or one nobody holds.
+/// The view is already scoped, so a receiver absent from it is another
+/// World's — or nobody's to know.
+fn world_may_touch<'a>(
+    view: &'a crate::control::DisplayWorldView,
+    device: &str,
+) -> Result<&'a crate::control::DisplayWorldReceiverView, world_interface::Failure> {
+    view.receivers
+        .iter()
+        .find(|receiver| receiver.device == device)
+        .ok_or_else(|| {
+            world_interface::Failure::new(
+                "that receiver is not this World's to change — another World holds it, or it is not enrolled",
+            )
+        })
+}
+
+impl PackageClientHost {
+    async fn display_daemon(&self) -> Result<crate::daemon::Client, world_interface::Failure> {
+        crate::daemon::Client::for_selection(&self.selection)
+            .map_err(|error| world_interface::Failure::new(format!("reach the daemon: {error:#}")))
+    }
+
+    async fn display_request(
+        &self,
+        request: Request,
+    ) -> Result<Response, world_interface::Failure> {
+        let daemon = self.display_daemon().await?;
+        let response = host_request(&daemon, &self.selection, request)
+            .await
+            .map_err(|error| world_interface::Failure::new(format!("{error:#}")))?;
+        if let Response::Error { message, .. } = &response {
+            return Err(world_interface::Failure::new(message.clone()));
+        }
+        Ok(response)
+    }
+
+    async fn world_receivers(
+        &self,
+        world: &str,
+    ) -> Result<crate::control::DisplayWorldView, world_interface::Failure> {
+        match self
+            .display_request(Request::DisplayWorldReceivers {
+                world: world.to_string(),
+                orbit: self.address.orbit.to_string(),
+            })
+            .await?
+        {
+            Response::DisplayWorldReceivers(view) => Ok(*view),
+            other => Err(world_interface::Failure::new(format!(
+                "unexpected receivers reply: {other:?}"
+            ))),
+        }
+    }
+
+    async fn call_display(
+        &self,
+        request: world_interface::HostControlRequest,
+    ) -> Result<serde_json::Value, world_interface::Failure> {
+        use world_interface::HostControlRequest as R;
+        let Some(world) = self.world.as_ref() else {
+            return Err(world_interface::Failure::new(
+                "this host serves no World, so there are no receivers to manage",
+            ));
+        };
+        let world_name = world.as_str().to_string();
+        let orbit = self.address.orbit.to_string();
+        let encode = |response: Response| {
+            serde_json::to_value(response).map_err(|error| {
+                world_interface::Failure::new(format!("encode display reply: {error}"))
+            })
+        };
+        match request {
+            R::DisplayReceivers => encode(Response::DisplayWorldReceivers(Box::new(
+                self.world_receivers(&world_name).await?,
+            ))),
+            R::DisplayCodeMint {
+                label,
+                surface,
+                input,
+                sync,
+            } => {
+                let response = self
+                    .display_request(Request::DisplayRendezvousMint {
+                        label,
+                        assignment: Some(crate::control::DisplayRendezvousAssignmentSetting {
+                            orbit,
+                            world: world_name,
+                            surface: surface.as_str().to_string(),
+                            input,
+                            theme: crate::control::DisplayThemeSetting::Dark,
+                            stale_after_ms: WORLD_RECEIVER_STALE_AFTER_MS,
+                            on_stale:
+                                crate::control::DisplayStaleActionSetting::KeepWithNativeBanner,
+                            sync: world_sync_setting(sync),
+                            expires_at_unix_ms: None,
+                        }),
+                    })
+                    .await?;
+                encode(response)
+            }
+            R::DisplayCodeRevoke { rendezvous } => {
+                let view = self.world_receivers(&world_name).await?;
+                if !view.codes.iter().any(|code| code.rendezvous == rendezvous) {
+                    return Err(world_interface::Failure::new(
+                        "that code is not this World's to withdraw",
+                    ));
+                }
+                encode(
+                    self.display_request(Request::DisplayRendezvousRevoke { rendezvous })
+                        .await?,
+                )
+            }
+            R::DisplayAssign {
+                device,
+                surface,
+                input,
+                sync,
+            } => {
+                let view = self.world_receivers(&world_name).await?;
+                world_may_touch(&view, &device)?;
+                encode(
+                    self.display_request(Request::DisplayAssignmentPut {
+                        device,
+                        orbit,
+                        world: world_name,
+                        surface: surface.as_str().to_string(),
+                        input,
+                        theme: crate::control::DisplayThemeSetting::Dark,
+                        stale_after_ms: WORLD_RECEIVER_STALE_AFTER_MS,
+                        on_stale: crate::control::DisplayStaleActionSetting::KeepWithNativeBanner,
+                        sync: world_sync_setting(sync),
+                        expires_at_unix_ms: None,
+                    })
+                    .await?,
+                )
+            }
+            R::DisplayUnassign { device } => {
+                let view = self.world_receivers(&world_name).await?;
+                let receiver = world_may_touch(&view, &device)?;
+                let Some(held) = receiver.assignment.as_ref() else {
+                    return encode(Response::Ok {
+                        message: Some("that receiver already shows nothing".into()),
+                    });
+                };
+                encode(
+                    self.display_request(Request::DisplayAssignmentRevoke {
+                        assignment: held.assignment.clone(),
+                    })
+                    .await?,
+                )
+            }
+            R::DisplayForget { device } => {
+                let view = self.world_receivers(&world_name).await?;
+                world_may_touch(&view, &device)?;
+                encode(
+                    self.display_request(Request::DisplayDeviceRevoke { device })
+                        .await?,
+                )
+            }
+            R::DisplayPairingApprove { pairing, label } => encode(
+                self.display_request(Request::DisplayPairingApprove { pairing, label })
+                    .await?,
+            ),
+            R::DisplayPairingReject { pairing } => encode(
+                self.display_request(Request::DisplayPairingReject { pairing })
+                    .await?,
+            ),
+            other => Err(world_interface::Failure::new(format!(
+                "not a display request: {other:?}"
+            ))),
+        }
     }
 }

@@ -216,6 +216,53 @@ impl Refusal {
     }
 }
 
+/// The one rule, so a policy and a guard cannot answer differently.
+fn check_origin_against(
+    authorities: &[String],
+    host: Option<&str>,
+    origin: Option<&str>,
+) -> Result<(), Refusal> {
+    let Some(host) = host else {
+        return Err(Refusal::MissingHost);
+    };
+    if !authorities.iter().any(|a| a == host) {
+        return Err(Refusal::ForeignHost);
+    }
+    if let Some(origin) = origin {
+        let ok = authorities.iter().any(|a| origin == format!("http://{a}"));
+        if !ok {
+            return Err(Refusal::ForeignOrigin);
+        }
+    }
+    Ok(())
+}
+
+/// The origin half of a [`Guard`], without its credential.
+///
+/// Split out so a surface that needs the rebinding allowlist does not have to
+/// hold a live head token it never checks. The agent endpoint is exactly that:
+/// it authenticates an agent, not the person who opened this window, and a
+/// struct holding a credential it never uses is an invitation to start using
+/// it.
+#[derive(Clone)]
+pub struct OriginPolicy {
+    authorities: Vec<String>,
+}
+
+impl OriginPolicy {
+    /// Whether a request's `Host`/`Origin` pair is addressed to us.
+    ///
+    /// The same rule [`Guard::check_origin`] applies, because it is this.
+    pub fn check(&self, host: Option<&str>, origin: Option<&str>) -> Result<(), Refusal> {
+        check_origin_against(&self.authorities, host, origin)
+    }
+
+    /// Every authority this policy answers to.
+    pub fn authorities(&self) -> &[String] {
+        &self.authorities
+    }
+}
+
 /// The per-run loopback credential and origin policy.
 pub struct Guard {
     token: String,
@@ -248,6 +295,13 @@ impl Guard {
         &self.authorities
     }
 
+    /// This guard's allowlist, without its credential.
+    pub fn origin_policy(&self) -> OriginPolicy {
+        OriginPolicy {
+            authorities: self.authorities.clone(),
+        }
+    }
+
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -267,22 +321,7 @@ impl Guard {
     /// attacker cannot launder, because the browser fills it in from the URL
     /// they were forced to navigate to.
     pub fn check_origin(&self, host: Option<&str>, origin: Option<&str>) -> Result<(), Refusal> {
-        let Some(host) = host else {
-            return Err(Refusal::MissingHost);
-        };
-        if !self.authorities.iter().any(|a| a == host) {
-            return Err(Refusal::ForeignHost);
-        }
-        if let Some(origin) = origin {
-            let ok = self
-                .authorities
-                .iter()
-                .any(|a| origin == format!("http://{a}"));
-            if !ok {
-                return Err(Refusal::ForeignOrigin);
-            }
-        }
-        Ok(())
+        check_origin_against(&self.authorities, host, origin)
     }
 
     /// The stricter Origin check a WebSocket upgrade needs.

@@ -156,11 +156,26 @@ function order(rows: Row[], by: OrderBy): Row[] {
  * notice exists to fix. A function can be held to it by a test; a condition
  * buried in JSX cannot.
  *
+ * Two different absences, and they used to be one number. `hidden` is what the
+ * filter excluded from the rows in hand. `unloaded` is what the engine counted
+ * that the client never fetched — the rest of a 500-Issue project behind a
+ * 100-row page. Folding them together produced "3 hidden by filters" over a
+ * page, which was true of the page and false of the project, and said neither.
+ *
+ * `unloaded` is `null` when the engine did not measure — an unmeasured total is
+ * absent, never zero, and this passes that through rather than inventing a
+ * number where the engine declined to.
+ *
  * `show` is false at zero survivors ON PURPOSE. The surfaces already draw a
  * whole filtered-empty state there, with the same escape hatch in it, and two
  * answers to one question is worse than either alone.
  */
-export function filterNotice(total: number, shown: number): { hidden: number; show: boolean } {
-  const hidden = Math.max(0, total - shown);
-  return { hidden, show: hidden > 0 && shown > 0 };
+export function filterNotice(
+  loaded: number,
+  shown: number,
+  measured: number | null = null,
+): { hidden: number; unloaded: number | null; show: boolean } {
+  const hidden = Math.max(0, loaded - shown);
+  const unloaded = measured === null ? null : Math.max(0, measured - loaded);
+  return { hidden, unloaded, show: (hidden > 0 || (unloaded ?? 0) > 0) && shown > 0 };
 }

@@ -42,6 +42,8 @@ describe("Board filtered-empty state", () => {
       { state: { id: "backlog", name: "Backlog", category: "backlog", color: "gray" }, rows: [] },
       { state: { id: "done", name: "Done", category: "done", color: "green" }, rows: [] },
     ],
+    total: 0,
+    complete: true,
   };
 
   function mount(props: Partial<Parameters<typeof Board>[0]>) {

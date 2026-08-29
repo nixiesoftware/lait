@@ -46,12 +46,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home() -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-live-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home() -> crate::head::TempRoot {
+    crate::head::temp_root("live")
 }
 
 fn write_identity(home: &Path, seed: &[u8; 32]) {
@@ -89,7 +87,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
     write_identity(&home, &FOUNDER_SEED);
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Live Space").unwrap();
 
-    let daemon_home = home.clone();
+    let daemon_home = home.to_path_buf();
     let daemon_net = net.clone();
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -112,7 +110,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             since_generation: None,
             body: None,
         },
@@ -136,7 +134,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             since_generation: Some(generation),
             body: None,
         },
@@ -154,7 +152,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Live {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             since_generation: None,
             body: Some(
                 issues::contract::issue_body_id("iss_01jz0000000000000000000000").as_bytes(),
@@ -193,7 +191,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             bodies: vec![
                 issues::contract::issue_body_id("iss_01jz0000000000000000000000").as_bytes(),
             ],
@@ -217,7 +215,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             bodies: vec![[1; 16], [2; 16]],
             carets: Vec::new(),
             typing: Vec::new(),
@@ -236,7 +234,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &client,
         &home,
         Request::Watching {
-            world: issues::PRODUCT_WORLD.into(),
+            world: issues::product_world().into(),
             bodies: Vec::new(),
             carets: Vec::new(),
             typing: Vec::new(),

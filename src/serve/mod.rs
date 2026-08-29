@@ -129,7 +129,7 @@ enum ViewerEvent {
 ///
 /// It exists because tooling needs the token and the only alternative was scraping
 /// it out of a sentence with a regex — which makes prose written for a human into an
-/// API, so improving the wording becomes a breaking change. `viewer/scripts/dev.mjs`
+/// API, so improving the wording becomes a breaking change. `ci/smoke-p0.sh`
 /// is the first caller; an editor plugin that wants to embed the client is the next.
 /// The line is emitted **before** the server starts accepting, so a parent process
 /// can read one line and know it is safe to connect.
@@ -167,7 +167,7 @@ pub async fn run(
 /// itself, and the bound port.
 ///
 /// [`run`] prints it — stdout is the launcher's readiness contract, and
-/// `viewer/scripts/dev.mjs` and `ci/smoke-p0.sh` both read that line. An
+/// `ci/smoke-p0.sh` reads that line. An
 /// embedder that has no stdout to scrape — the iOS client is one process, and
 /// a phone cannot read its own console — receives the same fact through
 /// [`run_announced`]'s callback instead. Same moment, same guarantee: the
@@ -222,7 +222,25 @@ pub async fn run_until(
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
     let worlds = head::installations_root(&identity);
-    let registry = Arc::new(crate::world::installed::load(&worlds)?.clients);
+    let installation = crate::world::installed::load(&worlds)?;
+    // Local Worlds are admitted beside the installed ones, never in place of
+    // them. Each carries the mount the host assigns it, so neither answers for
+    // the other's tools or URLs.
+    //
+    // It does *not* carry an id of its own: the World id is hashed into every
+    // Body id, so re-keying the package would move what the World is called
+    // without moving where its data lives. A tree declaring a World this
+    // identity already has installed is therefore refused — see
+    // `world::local::register`, which says so at the moment somebody adds one.
+    //
+    // A registration that cannot be loaded is named and skipped: one broken
+    // working tree must not stop this device serving what it has installed.
+    let (_packages, clients, refused) =
+        crate::world::installed::load_local(&identity, installation.packages, installation.clients);
+    for reason in &refused {
+        tracing::warn!(%reason, "a local World was not loaded");
+    }
+    let registry = Arc::new(clients);
     run_until_with_registry(
         port,
         open,
@@ -603,7 +621,67 @@ fn router(app: Arc<App>) -> Router {
         // fetch is a worse experience than an honest refusal.
         .fallback(get(static_asset))
         .layer(axum::middleware::from_fn_with_state(app.clone(), gate))
-        .with_state(app)
+        .with_state(app.clone())
+        // Merged *after* the gate is applied, because the agent surface is not
+        // gated by the head's credential. A head token belongs to whoever
+        // opened this window; an agent presents its own, and conflating them
+        // would mean the viewer's origin could act as any sponsored agent.
+        // Its own gate is in `agent_endpoint`.
+        .merge(agent_endpoint(app))
+}
+
+/// The agent surface, mounted on the head that already answers for this World.
+///
+/// On this router rather than a listener of its own, and that is the point: the
+/// origin allowlist an endpoint like this needs is `Guard`'s, and a `Guard` is
+/// built with the port it guards. A second listener would have meant a second
+/// port and an allowlist that had to be kept in step with it — an unproven seam
+/// of exactly the kind this repository has been bitten by twice.
+///
+/// The registry is `App`'s, built once when the head came up. It is not
+/// rebuilt per request, deliberately: rmcp calls its service factory on request
+/// paths — a schema read for header validation, a session restore — and a
+/// factory that loaded Worlds would spawn every runner on this device, each
+/// with a twenty-second readiness budget, on an HTTP request.
+fn agent_endpoint(app: Arc<App>) -> Router {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let Some(home) = app.selection.identity_dir().ok() else {
+        // No identity, no agents to authenticate, nothing to offer. An empty
+        // router is the honest shape: the route simply is not there, rather
+        // than there and refusing everything.
+        return Router::new();
+    };
+    let access = crate::mcp_http::Access {
+        home: home.clone(),
+        guard: app.guard.origin_policy(),
+    };
+    let sessions = crate::mcp_http::Sessions::new();
+    let registry = app.registry.clone();
+    let selection = app.selection.clone();
+    let service = StreamableHttpService::new(
+        move || {
+            // Cloned, never loaded. See this function's doc.
+            crate::mcp::LaitMcp::attached(
+                home.clone(),
+                selection.clone(),
+                registry.clone(),
+                crate::mcp_http::current_agent(),
+            )
+            .map_err(std::io::Error::other)
+        },
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let access = access.clone();
+            let sessions = sessions.clone();
+            crate::mcp_http::admit_request(access, sessions, req, next)
+        }))
 }
 
 /// The gate every request passes: rebinding guard first, credential second.
@@ -798,15 +876,10 @@ async fn index(
             app.cookie,
             app.guard.token()
         );
-        let launched = format!(
-            "{}=1; Path=/; HttpOnly; SameSite=Strict",
-            client_cookie(&app.cookie)
-        );
-        // Appended, not inserted: two `Set-Cookie` headers with the same name
-        // in an array would have the second replace the first, and the browser
-        // would arrive holding the marker with no session to go with it.
+        // One cookie now. There used to be a second marking the browser as
+        // client-launched, read by nothing but the overlay, and it went with it.
         let mut cookies = axum::http::HeaderMap::new();
-        for value in [session, launched] {
+        for value in [session] {
             match axum::http::HeaderValue::from_str(&value) {
                 Ok(value) => {
                     cookies.append(header::SET_COOKIE, value);
@@ -829,7 +902,7 @@ async fn index(
         let cookie = format!("{}={token}; Path=/; HttpOnly; SameSite=Strict", app.cookie);
         return ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response();
     }
-    shell::index(launched_by_client(&app, &headers), &app.head)
+    shell::index(&app.head)
 }
 
 /// Any non-`/api` path: an asset from the selected World release, or its SPA entry.
@@ -838,7 +911,7 @@ async fn static_asset(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    shell::asset(uri.path(), launched_by_client(&app, &headers), &app.head)
+    shell::asset(uri.path(), &app.head)
 }
 
 /// What a client asks for when it wants to open a World.
@@ -894,28 +967,6 @@ async fn mint_launch(State(app): State<Arc<App>>, Json(request): Json<LaunchRequ
     }
 }
 
-/// The cookie that says "the client sent this browser here".
-///
-/// Derived from the session cookie's name so it is scoped to the same run and
-/// the same port, and two heads on one machine cannot read each other's.
-fn client_cookie(session: &str) -> String {
-    format!("{session}_client")
-}
-
-/// Whether this request belongs to a browser the client launched.
-///
-/// The overlay is *client context*. A head a person opened themselves has none
-/// to draw, and an overlay offering a route back to a client that is not there
-/// is a control that cannot work — worse than absent, because it looks like a
-/// feature.
-fn launched_by_client(app: &App, headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| auth::cookie_value(value, &client_cookie(&app.cookie)))
-        .is_some_and(|value| value == "1")
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -924,9 +975,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The spaces this head can reach, and the World it serves them through.
+///
+/// `world` is the mount, and it is here because a page cannot work it out and
+/// must not assume it. A head answers for exactly one World and refuses every
+/// other mount by name; a World's page is served from a tree that knows only
+/// the mount it *declares*, which is not the mount a local World is assigned.
+/// So the page hardcoded `issues`, and every request a local World's page made
+/// was refused with the name of a World it was not.
+///
+/// Stated in this reply rather than through a route of its own because this is
+/// already the first request the page makes and the last one it can proceed
+/// without. A second endpoint would be a second round trip that every product
+/// call has to wait behind, to learn a fact this answer was always in a
+/// position to carry.
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
     Json(serde_json::json!({
-        "spaces": orbits::list(&app.directory, &app.daemon).await
+        "spaces": orbits::list(&app.directory, &app.daemon).await,
+        "world": app.world,
     }))
     .into_response()
 }
@@ -1043,6 +1109,7 @@ async fn world_rpc(
         scope,
         None,
         app.selection.clone(),
+        Some(package.world().clone()),
     );
     if !q.confirm {
         // The package-resolved question, resolved once, so no two surfaces
@@ -1504,9 +1571,13 @@ mod tests {
             cookies.iter().any(|cookie| cookie.contains("run-token")),
             "the launch did not hand over a session: {cookies:?}"
         );
-        assert!(
-            cookies.iter().any(|cookie| cookie.contains("_client=1")),
-            "the launch did not mark this browser as one the client sent: {cookies:?}"
+        // The launch used to set a second cookie marking this browser as one the
+        // client sent. Nothing but the overlay ever read it, and the overlay is
+        // gone, so the session is the only thing a launch hands over now.
+        assert_eq!(
+            cookies.len(),
+            1,
+            "a launch hands over a session and nothing else: {cookies:?}"
         );
 
         // Replay from history, which is exactly where a launch URL ends up.

@@ -5,7 +5,7 @@
   "mount": "issues",
   "name": "Issues",
   "tagline": "Plans, issues, and the Specs that govern them",
-  "implementation_version": 4,
+  "implementation_version": 6,
   "mark": "art/mark.png",
   "hero": "art/hero.png",
   "accent": 5009141,
@@ -19,6 +19,11 @@
     { "preferred": false, "program": "bin/lait-world-issues${EXE}", "args": ["--migrator"] }
   ],
   "launch": [
-    { "id": "app", "present": "primary", "target": { "type": "web", "path": "/" } }
+    {
+      "id": "app",
+      "present": "primary",
+      "target": { "type": "web", "path": "/" },
+      "chrome": "world"
+    }
   ]
 }

@@ -30,8 +30,11 @@ use crate::protocol::SignageRequest;
 const COMMANDS: &str = "program_get, program_list, program_put, program_delete, \
      media_get, media_list, media_put, media_delete, media_used_by, \
      screen_get, screen_list, screen_put, screen_delete, screen_showing, screen_plays, \
-     group_get, group_list, group_put, group_delete, \
-     config_get, config_list, config_put, config_delete";
+     channel_get, channel_list, channel_put, channel_delete, \
+     audience_get, audience_list, audience_put, audience_delete, audience_reaches, \
+     broadcast_get, broadcast_list, broadcast_put, broadcast_delete, \
+     preset_get, preset_list, preset_put, preset_delete, \
+     as_run_get, as_run_record";
 
 /// The one local operation this package owns.
 ///
@@ -49,6 +52,11 @@ pub fn execute<'a>(
     local: LocalInvocation,
 ) -> world_interface::ClientFuture<'a, Value> {
     Box::pin(async move {
+        if local.operation == crate::tv::LOCAL_TV {
+            let request: crate::tv::TvRequest = serde_json::from_value(local.input)
+                .map_err(|error| Failure::new(format!("decode Signage TV request: {error}")))?;
+            return crate::tv::run(host, request).await;
+        }
         if local.operation != LOCAL_MEDIA_INGEST {
             return Err(Failure::new(format!(
                 "unsupported Signage local operation '{}'",
@@ -226,6 +234,25 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
         .and_then(Value::as_str)
         .ok_or_else(|| Failure::new("Signage request is missing string field 'cmd'"))?
         .to_owned();
+    // Televisions are this World's to manage, but the acts are the host's —
+    // they ride as local operations and never reach the World's own store.
+    if crate::tv::TvRequest::is_tv_command(&command) {
+        let request: crate::tv::TvRequest = serde_json::from_value(input).map_err(|error| {
+            Failure::new(format!(
+                "Signage TV request '{command}' could not be read: {error}"
+            ))
+        })?;
+        let access = request.access();
+        let input = serde_json::to_value(&request)
+            .map_err(|error| Failure::new(format!("encode Signage TV request: {error}")))?;
+        return Ok(ClientInvocation::local(
+            signage::contract::world_id(),
+            crate::tv::LOCAL_TV,
+            input,
+            access,
+            None,
+        ));
+    }
     match serde_json::from_value::<SignageRequest>(input) {
         Ok(request) => world_invocation(request),
         Err(error) => Err(Failure::new(format!(
@@ -451,7 +478,7 @@ mod tests {
             );
             assert!(question.contains(&target), "got: {question}");
         }
-        assert_eq!(deletes, 5, "one delete per document type");
+        assert_eq!(deletes, 7, "one delete per document type");
     }
 
     #[test]

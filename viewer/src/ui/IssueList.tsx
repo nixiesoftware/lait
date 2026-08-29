@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarPlus, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { CalendarPlus, ChevronRight, FilterX, Plus, Trash2 } from "lucide-react";
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
@@ -29,17 +29,32 @@ import { dueLabel, dueTone } from "./time";
  * their glyph centres an invariant rather than a pair of matching literals.
  */
 const ISSUE_LIST_INSET = "px-4";
+/**
+ * The horizontal band both a group header and its rows sit in.
+ *
+ * They are one column, not two that happen to agree. The header carried `mx-2`
+ * and the rows carried nothing, so every row's content box was 8px wider on
+ * each side than the header above it -- which put the trailing assignee 8px
+ * to the right of the `+` it should have lined up under, and let a selected
+ * row's fill overhang the header card it belongs to.
+ *
+ * Named once for the same reason `ISSUE_LIST_INSET` is: a shared edge that
+ * lives in two literals is a shared edge that stops being shared.
+ */
+const ISSUE_BAND_INSET = "mx-2";
 const ISSUE_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
 
 /** Issue groups are quiet raised bands, not table headings. The rounded fill
  * provides the separation, so a rule beneath them would duplicate the boundary
  * the surface already draws. Adjacent bands keep only a 4px breathing gap. */
 const ISSUE_GROUP_HEADER = cn(
-  "mx-2 mt-1 rounded-row border-b-0 bg-raised",
+  "mt-1 rounded-row border-b-0 bg-raised",
+  ISSUE_BAND_INSET,
   ISSUE_LIST_INSET,
 );
 const ISSUE_ROW_LAYOUT = cn(
   "group/row flex items-center gap-2 py-2",
+  ISSUE_BAND_INSET,
   ISSUE_LIST_INSET,
 );
 
@@ -75,6 +90,7 @@ export function IssueList({
   mutators,
   readOnly,
   filtered,
+  onClearFilter,
   hasMore = false,
   loadingMore = false,
   onLoadMore = () => undefined,
@@ -104,6 +120,9 @@ export function IssueList({
   mutators: IssueMutators;
   readOnly: boolean;
   filtered: boolean;
+  /** Reset that filter. A list emptied by a leftover filter is a dead end
+   *  without it — the same trap the board already answers. */
+  onClearFilter: () => void;
   /** A publication-pinned continuation exists beyond the rows rendered here. */
   hasMore?: boolean;
   loadingMore?: boolean;
@@ -172,7 +191,15 @@ export function IssueList({
       {/* `@container`: the row's trailing cluster adapts to the width of this
           pane (which halves when the detail opens), not the viewport. */}
       <div className="@container min-h-0 flex-1 overflow-y-auto">
-        {!deletedMode && groups.map((group) => (
+        {/* The scaffold survives an emptied group but not an empty project.
+            A status that exists is a column that exists — that rule is right,
+            and it is why `Group` keeps a zero-count status while dropping a
+            zero-count derived group. It stops making sense at zero: four
+            columns all reading `0`, stacked above an empty state that says the
+            same thing in words, is the page telling you nothing four times and
+            then once more. Linear drops the whole scaffold here and shows only
+            the empty state. */}
+        {!deletedMode && total > 0 && groups.map((group) => (
           <Group
             key={group.key}
             group={group}
@@ -240,16 +267,28 @@ export function IssueList({
         {total === 0 && (
           <ApplicationState
             kind={deletedMode ? "empty" : filtered ? "filtered-empty" : "empty"}
-            title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "No issues yet"}
-            body={deletedMode ? "Deleted issues will appear here so they can be inspected or restored." : filtered ? "Clear or adjust the current filters to see more." : "Create the first issue in this project."}
-            action={!deletedMode && !filtered && !readOnly && states[0] ? <Button
-                                                                            onClick={() => onCreate(states[0]!.id)}
-                                                                            icon={<Plus className="size-icon-sm" />}
-                                                                            label="New issue"
-                                                                            variant="primary"
-                                                                            size="sm"
-                                                                          /> : undefined}
-            className="min-h-60"
+            art={deletedMode ? "archive" : filtered ? "filtered" : "issues"}
+            title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "Issues"}
+            body={deletedMode || filtered ? undefined : "One unit of work, from the first note to done."}
+            action={
+              filtered ? (
+                <Button
+                  onClick={onClearFilter}
+                  icon={<FilterX className="size-icon-sm" />}
+                  label="Clear filter"
+                  variant="ghost"
+                  size="sm"
+                />
+              ) : !deletedMode && !readOnly && states[0] ? (
+                <Button
+                  onClick={() => onCreate(states[0]!.id)}
+                  icon={<Plus className="size-icon-sm" />}
+                  label="New issue"
+                  variant="primary"
+                  size="sm"
+                />
+              ) : undefined
+            }
           />
         )}
       </div>

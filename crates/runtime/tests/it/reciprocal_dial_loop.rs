@@ -298,6 +298,7 @@ fn activate(
     rt.materialize(coords)
         .unwrap()
         .open(Activation {
+            consent: Default::default(),
             exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),

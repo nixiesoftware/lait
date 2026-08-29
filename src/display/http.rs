@@ -33,6 +33,7 @@ use display_protocol::pairing::{
 };
 use display_protocol::program::{
     DisplayAssetMediaType, DisplayPlayback, DisplayScene, MediaProtocol, ProgramChange,
+    ProgramCycle,
 };
 use display_protocol::receiver::{
     ApiRefusal, ApiRefusalCode, ChallengeRequest, LiveTicketRequest, LiveTicketResponse,
@@ -50,7 +51,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use super::{
     AuthorizationRefusal, DisplayCoordinator, DisplayPairingService, DisplayTlsIdentity,
-    LiveMediaPacket, LiveTransport,
+    LiveMediaPacket, LiveTransport, RendezvousRefused,
 };
 
 #[derive(Clone)]
@@ -265,6 +266,12 @@ async fn pairing_start(State(state): State<DisplayHttpState>, body: Bytes) -> Re
     };
     match state.pairing.start(request, now()) {
         Ok(response) => json(StatusCode::OK, &response),
+        // A code the coordinator does not hold is a credential that failed,
+        // not a request it could not read: the television should say "that
+        // code is not one to enter here", not "something is wrong with me".
+        Err(error) if error.is::<RendezvousRefused>() => {
+            public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::AuthenticationFailed)
+        }
         Err(_) => public_refusal(StatusCode::BAD_REQUEST, ApiRefusalCode::InvalidRequest),
     }
 }
@@ -401,7 +408,7 @@ async fn program_snapshot(
         Err(error) => {
             tracing::warn!(
                 device = %authorized.record.device,
-                %error,
+                error = %format_args!("{error:#}"),
                 "display program snapshot compilation failed"
             );
             consumed_refusal(
@@ -437,6 +444,10 @@ async fn program_changes(
         Ok(authorized) => authorized,
         Err(error) => return authorization_refusal(error),
     };
+    // The cursor in the request is as of now; by the time a long poll answers
+    // it is as old as the wait, and an answer that echoed it rewound the
+    // receiver. What was waited is added back before it is echoed.
+    let opened_at = now();
     // Arm both controller and World doorbells before reading the assignment or
     // compiling. A mutation in the gap is then either reflected in that read
     // or waiting in one of these receivers; it cannot become a lost wakeup.
@@ -465,7 +476,7 @@ async fn program_changes(
         Err(error) => {
             tracing::warn!(
                 device = %authorized.record.device,
-                %error,
+                error = %format_args!("{error:#}"),
                 "display program change compilation failed"
             );
             return consumed_refusal(
@@ -522,7 +533,7 @@ async fn program_changes(
                 Err(error) => {
                     tracing::warn!(
                         device = %authorized.record.device,
-                        %error,
+                        error = %format_args!("{error:#}"),
                         "refreshed display program compilation failed"
                     );
                     return consumed_refusal(
@@ -541,7 +552,7 @@ async fn program_changes(
                 Err(error) => {
                     tracing::warn!(
                         device = %authorized.record.device,
-                        %error,
+                        error = %format_args!("{error:#}"),
                         "display playback realignment failed"
                     );
                     return consumed_refusal(
@@ -585,9 +596,22 @@ async fn program_changes(
         let playback = if compiled.program.playback.sync.is_some() {
             aligned_playback.unwrap_or_else(|| compiled.program.playback.clone())
         } else {
+            let durations: Vec<Option<u32>> = compiled
+                .program
+                .items
+                .iter()
+                .map(|item| item.duration_ms)
+                .collect();
+            let (current_index, elapsed_ms) = advance_cursor(
+                &durations,
+                compiled.program.playback.cycle,
+                index,
+                parsed.elapsed_ms.unwrap_or(0),
+                now().saturating_sub(opened_at),
+            );
             DisplayPlayback {
-                current_index: index,
-                elapsed_ms: parsed.elapsed_ms.unwrap_or(0),
+                current_index,
+                elapsed_ms,
                 cycle: compiled.program.playback.cycle,
                 sync: None,
             }
@@ -633,12 +657,17 @@ async fn asset(
         .await
     {
         Ok(compiled) => compiled,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                error = %format_args!("{error:#}"),
+                "display asset request compilation failed"
+            );
             return consumed_refusal(
                 ApiRefusalCode::TemporarilyUnavailable,
                 authorized.next_challenge,
                 StatusCode::SERVICE_UNAVAILABLE,
-            )
+            );
         }
     };
     if parsed.assignment.as_ref() != Some(&compiled.program.assignment)
@@ -843,12 +872,19 @@ async fn live_ticket(
         .await
     {
         Ok(compiled) => compiled,
-        Err(_) => {
+        Err(error) => {
+            // The receiver hears "temporarily unavailable" and retries; the
+            // operator's log is the only place the reason can go.
+            tracing::warn!(
+                device = %authorized.record.device,
+                error = %format_args!("{error:#}"),
+                "display live ticket compilation failed"
+            );
             return consumed_refusal(
                 ApiRefusalCode::TemporarilyUnavailable,
                 authorized.next_challenge,
                 StatusCode::SERVICE_UNAVAILABLE,
-            )
+            );
         }
     };
     let Some(current_item) = parsed.current_item.as_ref() else {
@@ -891,12 +927,18 @@ async fn live_ticket(
         .await
     {
         Ok(grant) => grant,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(
+                device = %authorized.record.device,
+                item = %current_item,
+                error = %format_args!("{error:#}"),
+                "display live ticket refused"
+            );
             return consumed_refusal(
                 ApiRefusalCode::TemporarilyUnavailable,
                 authorized.next_challenge,
                 StatusCode::SERVICE_UNAVAILABLE,
-            )
+            );
         }
     };
     let suffix = match transport {
@@ -1049,7 +1091,13 @@ async fn serve_live_socket(
                     return;
                 }
                 Err(error) => {
-                    tracing::debug!(%error, sequence, "planned MSE segment failed");
+                    // The receiver sees a closed socket and blanks the clip;
+                    // the reason has nowhere else to go.
+                    tracing::warn!(
+                        error = %format_args!("{error:#}"),
+                        sequence,
+                        "planned MSE segment failed"
+                    );
                     return;
                 }
             }
@@ -1364,6 +1412,57 @@ fn now() -> u64 {
     mechanics::wallclock::now_millis()
 }
 
+/// Where a program's cursor is `waited_ms` after it stood at `index` /
+/// `elapsed_ms`, by the items' own lengths and the program's cycle.
+///
+/// A loop wraps; a program that holds, blanks or polls at its end stays on
+/// its last item, inside it, since a cursor at or past an item's end is not
+/// a place a receiver can be told to stand. An open-ended last item — the
+/// held frame — just keeps counting.
+fn advance_cursor(
+    durations: &[Option<u32>],
+    cycle: ProgramCycle,
+    index: u16,
+    elapsed_ms: u32,
+    waited_ms: u64,
+) -> (u16, u32) {
+    let Some(_) = durations.get(usize::from(index)) else {
+        return (0, 0);
+    };
+    let before: u64 = durations[..usize::from(index)]
+        .iter()
+        .map(|duration| u64::from(duration.unwrap_or(0)))
+        .sum();
+    let mut offset = before
+        .saturating_add(u64::from(elapsed_ms))
+        .saturating_add(waited_ms);
+    let closed: u64 = durations
+        .iter()
+        .map(|duration| u64::from(duration.unwrap_or(0)))
+        .sum();
+    let open_ended_last = durations.last().is_some_and(Option::is_none);
+    if cycle == ProgramCycle::Loop && closed > 0 && !open_ended_last {
+        offset %= closed;
+    }
+    let mut at = 0u64;
+    for (position, duration) in durations.iter().enumerate() {
+        let position = u16::try_from(position).unwrap_or(u16::MAX);
+        let Some(duration) = duration else {
+            // Open-ended: the cursor lands here and keeps counting.
+            return (position, u32::try_from(offset - at).unwrap_or(u32::MAX));
+        };
+        let end = at.saturating_add(u64::from(*duration));
+        if offset < end {
+            return (position, u32::try_from(offset - at).unwrap_or(u32::MAX));
+        }
+        at = end;
+    }
+    // Past the end of a program that does not loop: the last item, inside it.
+    let last = u16::try_from(durations.len().saturating_sub(1)).unwrap_or(u16::MAX);
+    let last_duration = durations.last().copied().flatten().unwrap_or(1);
+    (last, last_duration.saturating_sub(1))
+}
+
 fn accepted(challenge: Challenge) -> Response<Body> {
     with_challenge(
         json(StatusCode::OK, &serde_json::json!({"kind": "accepted"})),
@@ -1578,6 +1677,44 @@ fn media_content_type(media_type: DisplayAssetMediaType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_polled_cursor_is_advanced_by_the_wait_and_never_rewinds() {
+        let three = [Some(10_000), Some(10_000), Some(10_000)];
+        // The receiver said "item 0, just started" and the poll waited 25 s:
+        // it is five seconds into the last item, not at the start again.
+        assert_eq!(
+            advance_cursor(&three, ProgramCycle::Loop, 0, 0, 25_000),
+            (2, 5_000)
+        );
+        // A loop wraps as many times as the wait needs.
+        assert_eq!(
+            advance_cursor(&three, ProgramCycle::Loop, 1, 2_000, 65_000),
+            (1, 7_000)
+        );
+        // No wait, no movement.
+        assert_eq!(
+            advance_cursor(&three, ProgramCycle::Loop, 2, 4_000, 0),
+            (2, 4_000)
+        );
+        // A program that holds at its end stays on its last item, inside it.
+        assert_eq!(
+            advance_cursor(&three, ProgramCycle::HoldLast, 1, 0, 60_000),
+            (2, 9_999)
+        );
+        assert_eq!(
+            advance_cursor(&three, ProgramCycle::BlankAtEnd, 2, 5_000, 60_000),
+            (2, 9_999)
+        );
+        // An open-ended held frame keeps counting.
+        let held = [Some(10_000), None];
+        assert_eq!(
+            advance_cursor(&held, ProgramCycle::HoldLast, 0, 0, 25_000),
+            (1, 15_000)
+        );
+        // A cursor naming an item the program does not have starts over.
+        assert_eq!(advance_cursor(&three, ProgramCycle::Loop, 9, 0, 0), (0, 0));
+    }
 
     #[test]
     fn every_display_route_is_a_pattern_the_router_accepts() {

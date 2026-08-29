@@ -193,6 +193,9 @@ pub struct LibraryRow {
     /// silently follow whatever moved into that position.
     pub key: String,
     pub world_mount: String,
+    /// The World's id — what a display assignment, an MCP binding or a
+    /// capability names it by. The mount is what a person sees in a URL.
+    pub world: String,
     /// Catalog presence is not installation. False draws Install and makes
     /// Open unavailable until a signed immutable release is selected.
     pub installed: bool,
@@ -220,6 +223,19 @@ pub struct LibraryRow {
     /// Live first-install progress. Separate from `update`: there is no serving
     /// release to update until this operation completes.
     pub install: Option<WorldInstallRow>,
+    /// The channel this World follows by its own choice. `None` follows the
+    /// node's — a different fact, and it must not draw as though the World
+    /// had chosen what the node happens to be on.
+    pub channel: Option<String>,
+    /// The directory this World is read from, when it is a local one.
+    ///
+    /// `None` is a released World. A row carrying this is a tree somebody on
+    /// this device is working on — unsealed, with an id and mount the host
+    /// assigned it, and not the World it may have been copied from.
+    pub source_dir: Option<String>,
+    /// Whether a local World's tree still holds the bytes somebody agreed to.
+    /// `None` for a released World, which is not the same question.
+    pub source_standing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +333,11 @@ pub struct DisplayFacts {
     pub devices: Vec<DisplayReceiverRow>,
     pub assignments: Vec<DisplayAssignmentRow>,
     pub pending_pairings: Vec<DisplayPairingRow>,
+    /// Codes minted for televisions to enter, not yet spent or expired.
+    pub pending_rendezvous: Vec<DisplayRendezvousRow>,
+    /// What each surface can show, per Orbit, as last listed. Absent until
+    /// asked (`ActionRequest::DisplaySurfaceChoices`).
+    pub choices: Vec<DisplayChoicesRow>,
     /// `None` from a daemon that predates the custody split — not reported, as
     /// distinct from reported-as-none.
     pub identifier_custody: Option<DisplayIdentifierCustodyRow>,
@@ -438,6 +459,8 @@ pub struct DisplayHealthRow {
     pub drift_residual_ms: i32,
     pub correction_events: u32,
     pub pipeline_unobservable: bool,
+    /// When the report arrived; `None` from a daemon that predates it.
+    pub reported_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -467,6 +490,79 @@ pub struct DisplayPairingRow {
     pub build: String,
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+/// A code minted for a television to enter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayRendezvousRow {
+    pub rendezvous: String,
+    /// Grouped for reading: `XXXX-XXXX`.
+    pub code: String,
+    /// The site the television resolves this coordinator by, when the
+    /// identity publishes one.
+    pub site: Option<String>,
+    pub label: String,
+    pub assignment: Option<DisplayRendezvousAssignmentRow>,
+    pub state: DisplayRendezvousState,
+    /// The receiver the code enrolled, once one has entered it.
+    pub device: Option<String>,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+/// What one surface can show in one Orbit, as the World listed it.
+///
+/// `choices` is `None` when the list could not be taken and `unavailable`
+/// says why; an empty list is a Space with nothing to show. Distinct on
+/// purpose — a control offers a typed field for one and an empty picker for
+/// the other.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayChoicesRow {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    pub choices: Option<Vec<DisplayChoiceRow>>,
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayChoiceRow {
+    /// What the surface's input takes: a screen id, a project key.
+    pub id: String,
+    pub title: String,
+}
+
+/// Where a code is in its life; a spent code is listed a while longer as
+/// the receiver it became.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayRendezvousState {
+    Waiting,
+    Connecting,
+    Connected,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayRendezvousAssignmentRow {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+}
+
+/// What a code pins its television to once it connects: an assignment with
+/// everything but the device, which does not exist until then.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayRendezvousAssignment {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    pub input_json: String,
+    pub theme: DisplayTheme,
+    pub stale_after_ms: u32,
+    pub on_stale: DisplayStaleAction,
+    pub sync_group: Option<String>,
+    pub sync_mode: DisplaySyncMode,
+    pub static_delay_ms: i32,
+    pub expires_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -801,6 +897,9 @@ pub struct FailureRow {
     pub error: String,
     /// Whether asking again could plausibly work. A refusal is not a retry.
     pub retryable: bool,
+    /// The action key this refused, so the surface that asked can answer
+    /// beside its own control.
+    pub key: Option<String>,
 }
 
 /// What a person asked for.
@@ -846,6 +945,24 @@ pub enum ActionRequest {
     /// Install a World that is already visible in the Library catalog.
     InstallWorld {
         world: String,
+    },
+    /// Follow a channel for this World alone, or (`None`) follow the node's.
+    FollowWorldChannel {
+        world: String,
+        channel: Option<String>,
+    },
+    /// Register a tree on this device as a local World of its own.
+    ///
+    /// The directory is the whole ask. What it is called is derived from what
+    /// the tree already declares — asking for a name would be asking somebody
+    /// to invent one for a thing that has one.
+    RegisterLocalWorld {
+        dir: String,
+    },
+    /// Forget one, by the key it was registered under. The tree is untouched:
+    /// this device stops carrying a row for it, and nothing is deleted.
+    ForgetLocalWorld {
+        key: String,
     },
     StartDevice {
         id: String,
@@ -1003,6 +1120,24 @@ pub enum ActionRequest {
     DisplayPairingReject {
         pairing: String,
     },
+    /// Mint a code a television enters to enrol without the two-screen
+    /// ceremony — and, with an `assignment`, to show something the moment it
+    /// does. The code works once and lasts minutes.
+    DisplayRendezvousMint {
+        label: String,
+        assignment: Option<DisplayRendezvousAssignment>,
+    },
+    /// Withdraw a code before anything enters it.
+    DisplayRendezvousRevoke {
+        rendezvous: String,
+    },
+    /// Ask a World what one of its display surfaces can show in one Orbit.
+    /// The answer lands in `DisplayFacts::choices`.
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
+    },
     /// Assign one exact World display surface to an enrolled receiver. The
     /// input remains JSON here because each package owns its own input schema;
     /// the daemon canonicalizes and validates it before committing the pin.
@@ -1065,6 +1200,11 @@ impl ActionRequest {
         Ok(match self {
             Self::Refresh => Action::Refresh,
             Self::UpdateWorld { world } => Action::UpdateWorld { world },
+            Self::FollowWorldChannel { world, channel } => {
+                Action::FollowWorldChannel { world, channel }
+            }
+            Self::RegisterLocalWorld { dir } => Action::RegisterLocalWorld { dir },
+            Self::ForgetLocalWorld { key } => Action::ForgetLocalWorld { key },
             Self::InstallWorld { world } => Action::InstallWorld { world },
             Self::Reload => Action::Reload,
             Self::Exit { go_offline } => Action::Exit(if go_offline {
@@ -1131,6 +1271,65 @@ impl ActionRequest {
                 Action::DisplayPairingApprove { pairing, label }
             }
             Self::DisplayPairingReject { pairing } => Action::DisplayPairingReject(pairing),
+            Self::DisplayRendezvousMint { label, assignment } => {
+                let assignment = assignment
+                    .map(|assignment| -> Result<_, String> {
+                        Ok(crate::client::display::DisplayRendezvousAssignmentInput {
+                            orbit: assignment.orbit,
+                            world: assignment.world,
+                            surface: assignment.surface,
+                            input: serde_json::from_str(&assignment.input_json)
+                                .map_err(|error| format!("invalid display input JSON: {error}"))?,
+                            theme: match assignment.theme {
+                                DisplayTheme::Light => lait::control::DisplayThemeSetting::Light,
+                                DisplayTheme::Dark => lait::control::DisplayThemeSetting::Dark,
+                                DisplayTheme::HighContrast => {
+                                    lait::control::DisplayThemeSetting::HighContrast
+                                }
+                            },
+                            stale_after_ms: assignment.stale_after_ms,
+                            on_stale: match assignment.on_stale {
+                                DisplayStaleAction::KeepWithNativeBanner => {
+                                    lait::control::DisplayStaleActionSetting::KeepWithNativeBanner
+                                }
+                                DisplayStaleAction::Blank => {
+                                    lait::control::DisplayStaleActionSetting::Blank
+                                }
+                            },
+                            sync: assignment.sync_group.map(|group| {
+                                lait::control::DisplayAssignmentSyncSetting {
+                                    group,
+                                    mode: match assignment.sync_mode {
+                                        DisplaySyncMode::StayInSync => {
+                                            lait::control::DisplaySyncModeSetting::StayInSync
+                                        }
+                                        DisplaySyncMode::Positional => {
+                                            lait::control::DisplaySyncModeSetting::Positional
+                                        }
+                                    },
+                                    static_delay_ms: assignment.static_delay_ms,
+                                }
+                            }),
+                            expires_at_unix_ms: assignment.expires_at_unix_ms,
+                        })
+                    })
+                    .transpose()?;
+                Action::DisplayRendezvousMint(Box::new(
+                    crate::client::display::DisplayRendezvousInput { label, assignment },
+                ))
+            }
+            Self::DisplayRendezvousRevoke { rendezvous } => {
+                Action::DisplayRendezvousRevoke(rendezvous)
+            }
+            Self::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => Action::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            },
             Self::DisplayAssignmentPut {
                 device,
                 orbit,
@@ -1699,6 +1898,7 @@ fn project(app: &App) -> ClientView {
                 .map(|entry| LibraryRow {
                     key: entry.world_mount.clone(),
                     world_mount: entry.world_mount.clone(),
+                    world: entry.world.clone(),
                     installed: entry.installed,
                     display_name: entry.display_name.clone(),
                     opens_at: entry.entry_path.clone(),
@@ -1725,6 +1925,11 @@ fn project(app: &App) -> ClientView {
                             total: progress.total,
                         }
                     }),
+                    channel: app
+                        .world_standing(&entry.world)
+                        .and_then(|standing| standing.channel.clone()),
+                    source_dir: entry.source_dir.clone(),
+                    source_standing: entry.source_standing.clone(),
                 })
                 .collect()
         }),
@@ -1773,6 +1978,7 @@ fn project(app: &App) -> ClientView {
                         drift_residual_ms: health.drift_residual_ms,
                         correction_events: health.correction_events,
                         pipeline_unobservable: health.pipeline_unobservable,
+                        reported_at_unix_ms: health.reported_at_unix_ms,
                     }),
                 })
                 .collect(),
@@ -1825,12 +2031,61 @@ fn project(app: &App) -> ClientView {
                     expires_at_unix_ms: pairing.expires_at_unix_ms,
                 })
                 .collect(),
+            pending_rendezvous: display
+                .pending_rendezvous
+                .iter()
+                .map(|minted| DisplayRendezvousRow {
+                    rendezvous: minted.rendezvous.clone(),
+                    code: minted.code.clone(),
+                    site: minted.site.clone(),
+                    label: minted.label.clone(),
+                    assignment: minted.assignment.as_ref().map(|assignment| {
+                        DisplayRendezvousAssignmentRow {
+                            orbit: assignment.orbit.clone(),
+                            world: assignment.world.clone(),
+                            surface: assignment.surface.clone(),
+                        }
+                    }),
+                    state: match minted.state {
+                        lait::control::DisplayRendezvousState::Waiting => {
+                            DisplayRendezvousState::Waiting
+                        }
+                        lait::control::DisplayRendezvousState::Connecting => {
+                            DisplayRendezvousState::Connecting
+                        }
+                        lait::control::DisplayRendezvousState::Connected => {
+                            DisplayRendezvousState::Connected
+                        }
+                    },
+                    device: minted.device.clone(),
+                    created_at_unix_ms: minted.created_at_unix_ms,
+                    expires_at_unix_ms: minted.expires_at_unix_ms,
+                })
+                .collect(),
             identifier_custody: display.identifier_custody.as_ref().map(|custody| {
                 DisplayIdentifierCustodyRow {
                     slots: custody.slots.clone(),
                     portable: custody.portable,
                 }
             }),
+            choices: app
+                .display_choices()
+                .map(|((orbit, _, _), listed)| DisplayChoicesRow {
+                    orbit: orbit.clone(),
+                    world: listed.world.clone(),
+                    surface: listed.surface.clone(),
+                    choices: listed.choices.as_ref().map(|choices| {
+                        choices
+                            .iter()
+                            .map(|choice| DisplayChoiceRow {
+                                id: choice.id.clone(),
+                                title: choice.title.clone(),
+                            })
+                            .collect()
+                    }),
+                    unavailable: listed.unavailable.clone(),
+                })
+                .collect(),
         }),
         presentation: app.presentation().map(|presenting| PresentationFacts {
             chosen: presenting
@@ -2094,6 +2349,7 @@ fn project(app: &App) -> ClientView {
                 what: failure.what.clone(),
                 error: failure.error.to_string(),
                 retryable: failure.error.retryable,
+                key: failure.key.clone(),
             })
             .collect(),
         in_flight: app.in_flight_keys(),
@@ -2363,9 +2619,12 @@ mod tests {
                 installed: true,
                 display_name: "Issues".into(),
                 entry_path: Some("/".into()),
+                chrome: Default::default(),
                 tagline: Some("Track the work".into()),
                 accent: Some(0x00AA_66FF),
                 version: Some(7),
+                source_dir: None,
+                source_standing: None,
             },
             LibraryEntry {
                 world_mount: "notes".into(),
@@ -2373,9 +2632,12 @@ mod tests {
                 installed: false,
                 display_name: "Notes".into(),
                 entry_path: None,
+                chrome: Default::default(),
                 tagline: None,
                 accent: None,
                 version: None,
+                source_dir: None,
+                source_standing: None,
             },
         ]);
 

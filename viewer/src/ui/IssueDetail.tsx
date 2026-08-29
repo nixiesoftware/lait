@@ -37,8 +37,9 @@ import {
 
 import { rpc } from "../api";
 import { downloadUrl, upload as uploadContent } from "../content";
-import { useIssueDetail, useProjectBaselines, useProjectViewerStore } from "../projectStore";
+import { useIssueDetail, usePacket, useProjectBaselines, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
+import { usePreferences } from "../core/preferences";
 import {
   describeEventRich,
   EDIT_KINDS,
@@ -79,12 +80,11 @@ import {
   type IssueView,
   type LabelDto,
   type MemberDto,
-  type Packet,
   type PacketSpec,
   type ProjectDto,
   type WorkflowState,
 } from "../types";
-import { conflictPhrase, sourcePhrase } from "../core/specs";
+import { baselineCards, conflictPhrase, sourcePhrase } from "../core/specs";
 import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { avatarColor, catalogColor } from "./colors";
@@ -102,7 +102,7 @@ import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
 import { Button, Divider, DropdownMenu, DropdownMenuItem, IconButton, Popover, TextInput } from "@astryxdesign/core";
-import { ChipButton, LabelChip, cn, interactiveRow } from "./primitives";
+import { ChipButton, LabelChip, cn, interactiveRow, titleText } from "./primitives";
 import { Disclosure, EmptyValue, HeaderActions, RailRow, RailSection, Toast } from "./layout";
 import * as ask from "./dialogs";
 import { dueToInput, dueTone, short, when } from "./time";
@@ -200,6 +200,7 @@ export function IssueDetail({
   } | null>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
+  const { commentSubmit } = usePreferences();
 
   useEffect(
     () => saveDraft(canonicalSpaceId, reff, "comment", comment),
@@ -526,7 +527,7 @@ export function IssueDetail({
           // over a 13px body — barely three points of hierarchy for the most
           // important string on the page. `text-2xl` against the 15px body is
           // the ratio Hashnode and Mintlify give an article's h1.
-          className="issue-detail-title resize-none overflow-hidden bg-transparent text-2xl leading-tight font-semibold tracking-tight outline-none"
+          className={cn(titleText({ level: "document" }), "issue-detail-title resize-none overflow-hidden bg-transparent outline-none")}
           aria-label="Title"
         />
 
@@ -1110,7 +1111,12 @@ export function IssueDetail({
                 setCommentError(null);
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && comment.trim()) {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  (commentSubmit === "enter" || e.metaKey || e.ctrlKey) &&
+                  comment.trim()
+                ) {
                   e.preventDefault();
                   void submitComment();
                 }
@@ -1146,7 +1152,7 @@ export function IssueDetail({
                 onClick={() => void submitComment()}
                 variant="ghost"
                 size="sm"
-                tooltip={`${commentError ? "Retry comment" : "Comment"}  ${"Ctrl/⌘ ↵"}`}
+                tooltip={`${commentError ? "Retry comment" : "Comment"}  ${commentSubmit === "enter" ? "↵" : "Ctrl/⌘ ↵"}`}
                 icon={<ArrowUp className="size-icon-sm" />}
               />
             </div>
@@ -1205,37 +1211,31 @@ function SpecPacket({
   onOpenSpec?: ((spec: string) => void) | undefined;
 }) {
   const store = useProjectViewerStore();
-  const [packet, setPacket] = useState<Packet | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
+  // A live resource, so a Spec issued elsewhere -- or this Issue's binding
+  // changing under another window -- redraws the brief through the doorbell.
+  const resource = usePacket(spaceId, reff);
+  const packet = resource.data ?? null;
+  const [bindError, setBindError] = useState<string | null>(null);
   const [binding, setBinding] = useState(false);
-  const baselines = (useProjectBaselines(spaceId, projectId).data ?? [])
-    .flatMap((summary) => summary.view ? [summary.view] : []);
-
-  useEffect(() => {
-    let alive = true;
-    setPacket(null);
-    setError(null);
-    void rpc(spaceId, { cmd: "packet", reff })
-      .then((response) => {
-        if (alive && response.kind === "packet") setPacket(response);
-      })
-      .catch((reason) => {
-        if (alive) setError(reason instanceof Error ? reason.message : String(reason));
-      });
-    return () => { alive = false; };
-  }, [spaceId, reff, reload]);
+  const baselines = baselineCards(useProjectBaselines(spaceId, projectId).data ?? []);
+  const error =
+    bindError ??
+    (resource.error
+      ? resource.error instanceof Error
+        ? resource.error.message
+        : String(resource.error)
+      : null);
 
   // Only issued sets can be pinned: binding to a draft would pin something
   // nobody has agreed to, and the pin is the agreement.
   const issuedBaselines = baselines.filter((candidate) => candidate.issued.length === 1);
   const bind = (baseline: { baseline: string; revision: string } | null) => {
     setBinding(false);
+    setBindError(null);
     void store
       .bindBaseline(spaceId, reff, baseline)
-      .then(() => setReload((n) => n + 1))
       .catch((reason: unknown) =>
-        setError(reason instanceof Error ? reason.message : String(reason)),
+        setBindError(reason instanceof Error ? reason.message : String(reason)),
       );
   };
 
@@ -1269,7 +1269,7 @@ function SpecPacket({
             className="text-mute text-2xs"
             title={`${packet.baseline.baseline}@${packet.baseline.revision}`}
           >
-            {baselines.find((row) => row.baseline === packet.baseline!.baseline)?.body.name ??
+            {baselines.find((row) => row.baseline === packet.baseline!.baseline)?.name ??
               packet.baseline.baseline}{" "}
             · {short(packet.baseline.revision)}
           </code>
@@ -1290,7 +1290,7 @@ function SpecPacket({
             {issuedBaselines.map((candidate) => (
               <DropdownMenuItem
                 key={candidate.baseline}
-                label={candidate.body.name}
+                label={candidate.name}
                 // The same stamp the Spec lifecycle uses for `issued` — these
                 // candidates are exactly the issued baselines, so the glyph is
                 // already spoken for.

@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use world_runner::Provenance;
 use world_runner::{Instance, Release};
 use world_sdk::{RemoteClient, RemoteWorld};
 
@@ -11,9 +12,9 @@ fn the_shipped_signage_process_exposes_its_host_adapters() {
     let program = executable.file_name().expect("runner executable name");
     let release = Release::under(
         root,
-        signage::PRODUCT_WORLD,
+        signage::product_world(),
         env!("CARGO_PKG_VERSION"),
-        [0x92; 32],
+        Provenance::Sealed([0x92; 32]),
         Path::new(program),
         Vec::new(),
         None::<&Path>,

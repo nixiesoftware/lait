@@ -26,6 +26,37 @@ import { catalogColor, labelSurface } from "./colors";
  */
 
 /**
+ * The button surface, in three rules, because all three had already drifted.
+ *
+ * **One height.** Every button in the app stands at `size="sm"` (28px), which
+ * is the rung the inputs, selects and chips beside it stand at. `md` (32px) is
+ * for a modal's committing action and nothing else. Fifteen page-chrome buttons
+ * in Specs and Settings were a head taller than the controls next to them, for
+ * no reason anyone had written down; Linear runs one height through its whole
+ * settings surface, Save and Cancel included.
+ *
+ * **The surface belongs to the variant, not to the call site.** A filled
+ * button is a pill with a lit top rim and a shaded bottom one, so the face
+ * reads with a slight crown; `active` runs the same rim backwards — shaded at
+ * the top, lit along the bottom, no lift — so a pressed control sits into the
+ * page rather than on it. All of that is `laitTheme.ts`, which is why
+ * `elevation` is gone from every call site: twenty-nine buttons spelled
+ * `elevation="low"` by hand and one forgot, and six more paired
+ * `variant={on ? "active" : "secondary"}` with an elevation toggle that said
+ * the same thing a second time. A variant that needs a second prop to look
+ * like itself will eventually be written without it.
+ *
+ * **An icon-only button is an `IconButton`.** Not a `Button` with an icon for
+ * its children: that renders correctly (`children ?? label`, with `label`
+ * demoted to the accessible name) which is exactly why it survives review and
+ * then diverges on padding and hit area.
+ *
+ * `danger` is for destroying something. An emphasised control inside an
+ * already-alarmed banner is not automatically destructive — "Copy details" was
+ * wearing it, and read as the equal of the Retry beside it.
+ */
+
+/**
  * Our named ladders are invisible to `tailwind-merge` out of the box.
  *
  * It resolves conflicts by knowing which classes belong to the same group, and
@@ -463,6 +494,35 @@ export type ControlSize = NonNullable<VariantProps<typeof controlTrigger>["size"
 
 /** Shared list interaction states. Content layout remains the caller's concern;
  * hover, selection, focus and dividers do not. */
+/**
+ * The two title rungs, spelled once.
+ *
+ * There were four spellings of these two levels — `text-xl font-semibold
+ * tracking-tight`, the same without `tracking-tight`, `text-2xl leading-tight
+ * font-semibold tracking-tight`, and that one without `leading-tight` — across
+ * six files, which is what happens when a heading is assembled at its call site
+ * rather than named. All four also sat off the type ramp: `text-xl` and
+ * `text-2xl` were Tailwind's stock 20px and 24px until `styles.css` gave them
+ * rungs, so a title was the one thing on the page that did not grow when
+ * somebody chose Comfortable.
+ *
+ * `document` is what a thing calls itself — an issue, a spec, a project. It is
+ * usually editable in place, which is why the line height is set here rather
+ * than left to the textarea. `page` is where you are: Settings, Teams, Welcome.
+ * Two levels is what the reference carries and it is what we have; a third
+ * would be a section heading, and a section heading is `text-sm font-semibold`
+ * like everything else.
+ */
+export const titleText = cva("font-semibold tracking-tight", {
+  variants: {
+    level: {
+      document: "text-2xl leading-tight",
+      page: "text-xl",
+    },
+  },
+  defaultVariants: { level: "page" },
+});
+
 export const interactiveRow = cva(
   "group cursor-default outline-none transition-colors focus-visible:bg-hover focus-visible:ring-accent/50 focus-visible:ring-1 focus-visible:ring-inset",
   {

@@ -86,7 +86,6 @@ export function ProjectTabs({
             // are on. The fill difference stays underneath doing what it can;
             // it is no longer being asked to do all of it.
             variant={current ? "active" : "secondary"}
-            elevation={current ? "none" : "low"}
             size="sm"
             // And a real border, which the strip never had. The comment above
             // used to credit "the edge" for saying these are controls — but

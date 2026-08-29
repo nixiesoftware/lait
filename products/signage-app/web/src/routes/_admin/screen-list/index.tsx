@@ -1,12 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { ScreenList } from '@/app/(admin)/(pages)/screen-list/ScreenList';
+import ScreenList from '@/app/(admin)/(pages)/screen-list/ScreenList';
 
 interface ScreenListSearch {
   q?: string;
 }
 
 function ScreenListPage() {
-  document.title = 'Screens | AD2SP';
+  document.title = 'Screens | Signage';
   return <ScreenList />;
 }
 

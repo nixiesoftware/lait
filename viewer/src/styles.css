@@ -295,6 +295,15 @@
   --text-base--line-height: 20px;
   --text-lg: 15px;
   --text-lg--line-height: 22px;
+  /* The two title rungs. They exist here because they did not: every page and
+     document title in the app was reaching for Tailwind's stock `text-xl` /
+     `text-2xl`, which are 20px and 24px flat and — the part that actually bites
+     — do not move when somebody switches to Comfortable. The heading stayed put
+     while every label under it grew. */
+  --text-xl: 17px;
+  --text-xl--line-height: 24px;
+  --text-2xl: 20px;
+  --text-2xl--line-height: 28px;
 
   --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
   /* `light-dark()` returns a *colour*, so it wraps the colour and nothing else.
@@ -449,6 +458,22 @@
   --radius-12: 12px;
   --radius-16: 16px;
 
+  /* The frame's claim on this page, in raw pixels — the app's own surface runs
+     to the top edge of the window and the window's controls sit in it, so the
+     shell owes them room. `0px` is the ordinary case and the one every surface
+     that never thinks about the window keeps reading; `main.tsx` writes the
+     other case onto this element once, from what the host declared.
+
+     Outside `--scale` on purpose: this describes buttons the operating system
+     drew, and scaling them with the app's density would move the content off
+     the very controls it is clearing. See `core/windowControls.ts`.
+
+     The band's height and nothing else. The host also declares how much to keep
+     clear at its leading edge, which matters to a surface that draws *inside*
+     the band; this shell clears the whole band instead, so it has nothing to
+     inset and carries no property for it. */
+  --window-controls-top: 0px;
+
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -482,6 +507,10 @@
   --text-base--line-height: 21px;
   --text-lg: 16px;
   --text-lg--line-height: 23px;
+  --text-xl: 18px;
+  --text-xl--line-height: 26px;
+  --text-2xl: 22px;
+  --text-2xl--line-height: 30px;
 }
 
 @media (forced-colors: active) {

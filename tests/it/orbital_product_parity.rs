@@ -42,12 +42,10 @@ const EPOCH_KEY: [u8; 32] = [21u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root(tag: &str) -> std::path::PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-parity-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_root(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("parity-{tag}"))
 }
 
 fn first_page() -> contract::PageRequest {
@@ -951,6 +949,336 @@ fn an_observation_never_governs_and_never_becomes_a_link() {
     assert_eq!(trail.items.len(), before.items.len());
 }
 
+/// A filter is answered where the whole set is, and it counts truthfully.
+///
+/// The viewer used to filter status, priority, assignee and milestone in the
+/// browser, over the rows it happened to have loaded -- 100 by default. So on a
+/// five-hundred-Issue project "priority: urgent" showed the urgent Issues among
+/// the first hundred, and the "N of M" beside it counted the same partial set.
+/// Both numbers were wrong and neither said so.
+///
+/// Facets move that question to the engine, which is on the same machine and
+/// holds the whole project. Within an axis the values union, across axes they
+/// intersect, and because a Query carrying `Merge` gets no continuation from
+/// Find, the answer is the COMPLETE filtered set -- so `exact_total` is a count
+/// of rows rather than an estimate of postings.
+#[test]
+fn a_faceted_list_answers_over_the_whole_project_and_counts_exactly() {
+    let root = temp_root("faceted-list");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _alias) = seed_space(&mut driver);
+    // seed_space's Issue is `high` and assigned; these two are `none` and not.
+    let plain = create_board_issue(&mut driver, &project, "Plain".into());
+    let _other = create_board_issue(&mut driver, &project, "Other".into());
+
+    let label_id = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::Label {
+            doc: doc.clone(),
+            add: vec![],
+            new_labels: vec![contract::NewLabel {
+                id: label_id.clone(),
+                name: "bug".into(),
+                color: "red".into(),
+            }],
+            remove: vec![],
+            device: my_device().as_str().to_string(),
+            ts,
+        })
+        .unwrap();
+
+    let ask = |driver: &mut Driver, facets: contract::IssueFacets| -> contract::Page<Row> {
+        driver.query(&IssueQuery::List {
+            project: Some(project.clone()),
+            label: None,
+            status: None,
+            milestone: None,
+            mine: None,
+            all: false,
+            me: Some(my_actor().as_str().to_string()),
+            facets,
+            page: first_page(),
+        })
+    };
+    let titles = |page: &contract::Page<Row>| {
+        page.items
+            .iter()
+            .map(|row| row.title.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // One axis, one value.
+    let high = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["high".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(titles(&high), vec!["First issue".to_string()]);
+    assert_eq!(
+        high.exact_total,
+        Some(1),
+        "the total is the filtered count, not the project's"
+    );
+
+    // A membership axis reaches Issues through the member edge.
+    let bugs = ask(
+        &mut driver,
+        contract::IssueFacets {
+            labels: vec![label_id.clone()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(titles(&bugs), vec!["First issue".to_string()]);
+    assert_eq!(bugs.exact_total, Some(1));
+
+    // Within an axis, values union.
+    let either = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["high".into(), "none".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(either.items.len(), 3, "two priorities means either");
+    assert_eq!(either.exact_total, Some(3));
+
+    // Across axes, they intersect.
+    let both = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["high".into()],
+            labels: vec![label_id.clone()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(titles(&both), vec!["First issue".to_string()]);
+
+    // An intersection that nothing satisfies is an exact zero, not an absence.
+    let neither = ask(
+        &mut driver,
+        contract::IssueFacets {
+            priorities: vec!["none".into()],
+            labels: vec![label_id],
+            ..Default::default()
+        },
+    );
+    assert!(neither.items.is_empty());
+    assert_eq!(
+        neither.exact_total,
+        Some(0),
+        "nothing matched is a measured zero"
+    );
+
+    // A faceted answer is whole, so there is nothing to continue.
+    assert!(high.next_cursor.is_none());
+    let _ = plain;
+}
+
+/// A card that has been dragged a lot is still a card.
+///
+/// `stage_issue_move` writes an `issue_transition` record on every move --
+/// including a rank-only reposition inside one column -- and those records are
+/// immutable and never pruned. `extract_issue_transition` posts each one as a
+/// relation node carrying `edge::SOURCE` to the Issue, which is the same edge
+/// every membership rides.
+///
+/// So anything that reaches an Issue's memberships by traversing that edge
+/// sweeps its entire board history too, and the history only grows. A page-wide
+/// inbound Walk was written here and did exactly that: after roughly two
+/// hundred moves of a SINGLE issue the traversal exceeded its declared bound
+/// and Find refused, which `?` propagated out of the query arm -- so the whole
+/// list and the whole board became permanently un-renderable for that project,
+/// with no way back.
+///
+/// Three hundred moves takes about a minute and is the cheapest possible guard
+/// against re-introducing it. If this test starts failing with
+/// `LimitExceeded`, something is walking `edge::SOURCE` again.
+#[test]
+fn a_heavily_moved_issue_does_not_break_its_own_list() {
+    let root = temp_root("moved-issue");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _alias) = seed_space(&mut driver);
+    let other = create_board_issue(&mut driver, &project, "Neighbour".into());
+
+    for round in 0..300 {
+        let ts = driver.ts();
+        let pos = if round % 2 == 0 {
+            Pos::Before { doc: other.clone() }
+        } else {
+            Pos::After { doc: other.clone() }
+        };
+        driver
+            .submit(&IssueIntent::IssueMove {
+                doc: doc.clone(),
+                project: None,
+                pos: Some(pos),
+                device: my_device().as_str().to_string(),
+                ts,
+            })
+            .unwrap();
+    }
+
+    // Both collection surfaces, because both enrich and both would fail.
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
+        project: Some(project.clone()),
+        label: None,
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
+        page: first_page(),
+    });
+    assert_eq!(rows.items.len(), 2, "the list still draws after 300 moves");
+    let moved = rows
+        .items
+        .iter()
+        .find(|row| row.doc_id.as_str() == doc)
+        .expect("the moved issue");
+    assert_eq!(moved.assignees, vec![my_actor()]);
+    assert!(moved.enrichment_complete);
+
+    let board: BoardPage = driver.query(&IssueQuery::Board {
+        project,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    assert_eq!(board.rows.items.len(), 2, "the board still draws too");
+}
+
+/// The memberships a row draws come back from one traversal.
+///
+/// Milestone is pinned in `product_features` rather than here: this harness
+/// drives `IssueIntent::MilestoneSet` directly and that intent answers
+/// `StateCorrupt` from it, which is a gap in the harness and not in the read
+/// path these assertions cover.
+///
+/// `enrich_issue_page` replaced three exact seeks per row with a single
+/// inbound Walk, and nothing pinned what those seeks produced: no test in this
+/// file read `label_names` or `milestone` off a Row at all, so a Walk that
+/// returned nothing for either would have passed the whole suite.
+///
+/// The bare Issue is half the test. A Walk emits deduplicated endpoints and
+/// loses which start each came from -- the relations are re-attributed by
+/// their own `SOURCE_ID` -- so a mistake there hands every row the same
+/// memberships, which only a row that should have none can catch.
+#[test]
+fn a_collection_row_carries_its_labels_and_assignees() {
+    let root = temp_root("collection-memberships");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _alias) = seed_space(&mut driver);
+    let bare = create_board_issue(&mut driver, &project, "Bare".into());
+
+    let label_id = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::Label {
+            doc: doc.clone(),
+            add: vec![],
+            new_labels: vec![contract::NewLabel {
+                id: label_id,
+                name: "bug".into(),
+                color: "red".into(),
+            }],
+            remove: vec![],
+            device: my_device().as_str().to_string(),
+            ts,
+        })
+        .unwrap();
+
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
+        project: Some(project),
+        label: None,
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
+        page: first_page(),
+    });
+    let carried = rows
+        .items
+        .iter()
+        .find(|row| row.doc_id.as_str() == doc)
+        .expect("the seeded issue");
+    // A row carries label NAMES, never ids.
+    assert_eq!(carried.label_names, vec!["bug".to_string()]);
+    assert_eq!(carried.assignees, vec![my_actor()]);
+    assert!(carried.enrichment_complete);
+
+    let untouched = rows
+        .items
+        .iter()
+        .find(|row| row.doc_id.as_str() == bare)
+        .expect("the bare issue");
+    assert!(untouched.label_names.is_empty());
+    assert_eq!(untouched.milestone, None);
+    assert!(untouched.assignees.is_empty());
+    assert!(untouched.enrichment_complete);
+}
+
+/// A row in a collection says the same thing the Issue's own page says.
+///
+/// It did not. `issue_page_row` left `key_alias` absent and `reff` a bare
+/// 26-character doc id, and nothing downstream filled either in -- so a list
+/// and a board both drew `iss_02CHGHRS442UPH0SM62KRP894N` where `View` drew
+/// `ENG-1`. Two spellings of one Issue, and the one a person was shown was
+/// neither typeable nor the canonical short handle.
+///
+/// The board carried a second half of the same defect: it never enriched at
+/// all, so a card knew nothing about who it was assigned to.
+#[test]
+fn a_collection_row_carries_the_reference_a_person_reads() {
+    let root = temp_root("collection-reference");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, alias) = seed_space(&mut driver);
+
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
+        project: Some(project.clone()),
+        label: None,
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
+        page: first_page(),
+    });
+    let row = rows.items.first().expect("the seeded issue");
+    assert_eq!(row.key_alias.as_deref(), Some(alias.as_str()));
+    // `reff` stays whole on purpose -- it is what resolves, and a fixed-width
+    // prefix of a time-ordered ULID is ambiguous between Issues minted close
+    // together. The alias is the half a person reads.
+    assert_eq!(row.reff, doc);
+
+    let board: BoardPage = driver.query(&IssueQuery::Board {
+        project,
+        me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
+    });
+    let card = board.rows.items.first().expect("the seeded issue");
+    assert_eq!(card.key_alias.as_deref(), Some(alias.as_str()));
+    assert_eq!(card.reff, doc);
+    // The membership the board never asked for.
+    assert_eq!(card.assignees, vec![my_actor()]);
+    assert_eq!(card.assignee_summary, "you");
+    // The count the board never gave. The viewer renders every list off this
+    // one answer, and with no total it counted the rows in hand and called
+    // that the project -- "3 of 100" about five hundred Issues. One live
+    // Issue, so the measured total is one, and it is a measurement rather
+    // than a row count: the two agree here only because the page is whole.
+    assert_eq!(board.rows.exact_total, Some(1));
+}
+
 #[test]
 fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     let root = temp_root("surface");
@@ -1006,6 +1334,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: Some(my_actor().as_str().to_string()),
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(rows.items.len(), 2);
@@ -1072,6 +1401,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(rows.items.len(), 1);
@@ -1216,6 +1546,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert!(rows.items.iter().all(|r| r.title != "Second issue"));
@@ -1227,6 +1558,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: true,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert!(all_rows
@@ -1375,6 +1707,7 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert_eq!(
@@ -1390,6 +1723,7 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
         mine: None,
         all: false,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     assert!(rows.items.is_empty(), "the rival id was never applied");
@@ -1476,6 +1810,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            consent: Default::default(),
             exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
@@ -1492,6 +1827,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            consent: Default::default(),
             exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
@@ -1670,6 +2006,7 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         mine: None,
         all: true,
         me: None,
+        facets: contract::IssueFacets::default(),
         page: first_page(),
     });
     let row = rows
@@ -1858,4 +2195,656 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         refused,
         Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
     ));
+}
+
+/// Every kind a Spec can be created as can be read back, listed with its
+/// view, and moved through its lifecycle.
+///
+/// `spec_state` used to seek a revision across a hand-written kind list that
+/// had not been kept level with `Kind::ALL`: six of the ten kinds could be
+/// created and then never opened, revised, issued or found by a Packet. The
+/// lookup now takes the kind from the heads Body, and this holds the whole
+/// enum rather than the three kinds the other tests happen to use -- a Waiver
+/// is the one exercised end to end because it governs, so it is the kind
+/// whose absence from a Packet would matter most.
+#[test]
+fn every_spec_kind_reads_back_as_itself() {
+    let root = temp_root("spec-every-kind");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _) = seed_space(&mut driver);
+
+    let mut created = BTreeMap::new();
+    for kind in issues::spec::Kind::ALL {
+        let spec = SpecId::mint(&SystemUlidSource).as_str().to_string();
+        let ts = driver.ts();
+        driver
+            .submit(&IssueIntent::SpecCreate {
+                spec: spec.clone(),
+                project: project.clone(),
+                kind,
+                title: format!("A {}", kind.as_str()),
+                text: String::new(),
+                links: vec![],
+                actor: my_actor().as_str().into(),
+                device: my_device().as_str().into(),
+                ts,
+            })
+            .unwrap();
+        let view: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+        assert_eq!(view.kind, kind, "{} reads back as itself", kind.as_str());
+        assert_eq!(view.title, format!("A {}", kind.as_str()));
+        assert_eq!(view.state, issues::spec::State::Draft);
+        created.insert(spec, kind);
+    }
+
+    let page: contract::Page<issues::spec::SpecSummary> = driver.query(&IssueQuery::Specs {
+        project: Some(project.clone()),
+        page: contract::PageRequest {
+            limit: 100,
+            cursor: None,
+        },
+    });
+    assert_eq!(page.items.len(), issues::spec::Kind::ALL.len());
+    for item in &page.items {
+        assert_eq!(created.get(&item.spec), Some(&item.kind));
+        let head = item
+            .head
+            .as_ref()
+            .unwrap_or_else(|| panic!("a {} row carries its head", item.kind.as_str()));
+        assert_eq!(head.title, format!("A {}", item.kind.as_str()));
+        assert_eq!(head.state, issues::spec::State::Draft);
+        assert_eq!(item.heads, vec![head.revision.clone()]);
+    }
+
+    // A Waiver governs once issued, so it is the kind a Packet must find.
+    let (waiver, _) = created
+        .iter()
+        .find(|(_, kind)| **kind == issues::spec::Kind::Waiver)
+        .map(|(spec, kind)| (spec.clone(), *kind))
+        .expect("a waiver was created");
+    let draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: waiver.clone(),
+    });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: waiver.clone(),
+            expected: draft.revision,
+            title: None,
+            text: Some("Released from the login budget for this issue.".into()),
+            links: Some(vec![issues::spec::Link {
+                rel: issues::spec::Rel::Governs,
+                target: issues::spec::Target::Issue { issue: doc.clone() },
+            }]),
+            plan: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let revised: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: waiver.clone(),
+    });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: waiver.clone(),
+            expected: revised.revision.clone(),
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    // A transition mints a successor revision, so the issued id is the new
+    // head, not the draft that was revised.
+    let issued: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: waiver });
+    assert_eq!(issued.state, issues::spec::State::Issued);
+    assert_ne!(issued.revision, revised.revision);
+    assert_eq!(issued.issued, vec![issued.revision.clone()]);
+
+    let packet: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
+    assert!(packet.conflicts.is_empty(), "{:?}", packet.conflicts);
+    assert_eq!(packet.governing.len(), 1);
+    assert_eq!(packet.governing[0].revision, issued.revision);
+    assert_eq!(packet.governing[0].kind, issues::spec::Kind::Waiver);
+
+    // A draft successor puts two revisions in the head sets -- the issued one
+    // and the head -- so the lookup runs twice under the one kind.
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: issued.spec.clone(),
+            expected: issued.revision.clone(),
+            title: Some("A waiver, narrowed".into()),
+            text: None,
+            links: None,
+            plan: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let ahead: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: issued.spec.clone(),
+    });
+    assert_eq!(ahead.state, issues::spec::State::Draft);
+    assert_eq!(ahead.title, "A waiver, narrowed");
+    assert_eq!(ahead.issued, vec![issued.revision.clone()]);
+    assert_ne!(ahead.revision, issued.revision);
+    let page: contract::Page<issues::spec::SpecSummary> = driver.query(&IssueQuery::Specs {
+        project: Some(project.clone()),
+        page: contract::PageRequest {
+            limit: 100,
+            cursor: None,
+        },
+    });
+    let row = page
+        .items
+        .iter()
+        .find(|item| item.spec == ahead.spec)
+        .expect("the waiver is still listed");
+    let head = row
+        .head
+        .as_ref()
+        .expect("a draft-ahead row carries its head");
+    assert_eq!(head.revision, ahead.revision);
+    assert_eq!(head.title, "A waiver, narrowed");
+    assert_eq!(head.state, issues::spec::State::Draft);
+    assert_eq!(row.issued, vec![issued.revision.clone()]);
+
+    // A Baseline register row is read the same way, and its name is the title
+    // its revision posts.
+    let baseline = BaselineId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineCreate {
+            baseline: baseline.clone(),
+            project: project.clone(),
+            name: "Waivers in force".into(),
+            members: vec![issues::spec::SpecRef {
+                spec: ahead.spec.clone(),
+                revision: issued.revision,
+            }],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let baselines: contract::Page<issues::spec::BaselineSummary> =
+        driver.query(&IssueQuery::Baselines {
+            project: Some(project),
+            page: contract::PageRequest {
+                limit: 100,
+                cursor: None,
+            },
+        });
+    assert_eq!(baselines.items.len(), 1);
+    let row = &baselines.items[0];
+    assert_eq!(row.baseline, baseline);
+    let head = row.head.as_ref().expect("a baseline row carries its head");
+    assert_eq!(head.name, "Waivers in force");
+    assert_eq!(head.state, issues::spec::State::Draft);
+    assert_eq!(row.heads, vec![head.revision.clone()]);
+}
+
+/// A Baseline pins an exact revision, and the pin outlives the Spec moving
+/// on: a successor may be drafted *and issued* without the bound Issue's
+/// Packet changing.
+///
+/// The Packet used to resolve a pinned member through the Spec's head sets,
+/// which hold only the current heads and the currently issued revision. Once
+/// a successor was issued the pinned revision was in neither set, and the
+/// Packet reported it as "has not arrived here yet" -- a wrong answer wearing
+/// a right one's clothes, on exactly the day the pin was meant to hold.
+#[test]
+fn a_pinned_revision_outlives_its_successor_being_issued() {
+    let root = temp_root("spec-pin-outlives");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _) = seed_space(&mut driver);
+    let spec = SpecId::mint(&SystemUlidSource).as_str().to_string();
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecCreate {
+            spec: spec.clone(),
+            project: project.clone(),
+            kind: issues::spec::Kind::Requirement,
+            title: "Login is race-free".into(),
+            text: "A login creates at most one active session.".into(),
+            links: vec![],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: draft.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let pinned: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+
+    let baseline = BaselineId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineCreate {
+            baseline: baseline.clone(),
+            project: project.clone(),
+            name: "Login v1".into(),
+            members: vec![issues::spec::SpecRef {
+                spec: spec.clone(),
+                revision: pinned.revision.clone(),
+            }],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let draft_baseline: issues::spec::BaselineView = driver.query(&IssueQuery::Baseline {
+        baseline: baseline.clone(),
+    });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineState {
+            baseline: baseline.clone(),
+            expected: draft_baseline.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let issued_baseline: issues::spec::BaselineView = driver.query(&IssueQuery::Baseline {
+        baseline: baseline.clone(),
+    });
+    let binding = issues::spec::BaselineRef {
+        baseline,
+        revision: issued_baseline.revision,
+    };
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::IssueBaseline {
+            doc: doc.clone(),
+            baseline: Some(binding.clone()),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+
+    // Draft a successor, then issue it: the Spec's issued revision moves on.
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: spec.clone(),
+            expected: pinned.revision.clone(),
+            title: None,
+            text: Some("A login creates exactly one active session.".into()),
+            links: None,
+            plan: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let successor: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: successor.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let current: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    assert_ne!(current.issued, vec![pinned.revision.clone()]);
+
+    // And the Baseline moves on to the successor: a new revision, issued. The
+    // Issue is bound to the exact revision it was bound to.
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineRevise {
+            baseline: binding.baseline.clone(),
+            expected: binding.revision.clone(),
+            name: None,
+            members: Some(vec![issues::spec::SpecRef {
+                spec,
+                revision: current.issued[0].clone(),
+            }]),
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let baseline_successor: issues::spec::BaselineView = driver.query(&IssueQuery::Baseline {
+        baseline: binding.baseline.clone(),
+    });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineState {
+            baseline: binding.baseline.clone(),
+            expected: baseline_successor.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let baseline_now: issues::spec::BaselineView = driver.query(&IssueQuery::Baseline {
+        baseline: binding.baseline.clone(),
+    });
+    assert_ne!(baseline_now.issued, vec![binding.revision.clone()]);
+
+    let packet: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
+    assert!(packet.conflicts.is_empty(), "{:?}", packet.conflicts);
+    assert_eq!(packet.baseline, Some(binding));
+    assert_eq!(packet.governing.len(), 1);
+    assert_eq!(packet.governing[0].revision, pinned.revision);
+    assert!(matches!(
+        packet.governing[0].source,
+        issues::spec::PacketSource::Baseline { .. }
+    ));
+}
+
+/// Incorporation pulls the exact target into the governing set whatever its
+/// kind: a Guide never governs on its own, and does here only because an
+/// issued Design named an exact revision of it.
+///
+/// The Packet used to look the incorporated revision up in a list of every
+/// Spec in the Space assembled through a kind list that did not include
+/// Guides, so the incorporation read as "has not arrived here yet".
+#[test]
+fn an_incorporated_guide_governs_through_the_design_that_names_it() {
+    let root = temp_root("spec-incorporation");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _) = seed_space(&mut driver);
+
+    let guide = SpecId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecCreate {
+            spec: guide.clone(),
+            project: project.clone(),
+            kind: issues::spec::Kind::Guide,
+            title: "How the session table is read".into(),
+            text: "Read it under the row lock.".into(),
+            links: vec![],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let guide_draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: guide.clone(),
+    });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: guide.clone(),
+            expected: guide_draft.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let guide_issued: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: guide.clone(),
+    });
+
+    let design = SpecId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecCreate {
+            spec: design.clone(),
+            project,
+            kind: issues::spec::Kind::Design,
+            title: "Session table".into(),
+            text: "One row per session.".into(),
+            links: vec![
+                issues::spec::Link {
+                    rel: issues::spec::Rel::Incorporates,
+                    target: issues::spec::Target::Spec {
+                        spec: guide.clone(),
+                        revision: guide_issued.revision.clone(),
+                    },
+                },
+                issues::spec::Link {
+                    rel: issues::spec::Rel::Governs,
+                    target: issues::spec::Target::Issue { issue: doc.clone() },
+                },
+            ],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let design_draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: design.clone(),
+    });
+
+    // Not yet issued: nothing governs, and the incorporation is not in force.
+    let before: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc: doc.clone() });
+    assert!(before.governing.is_empty(), "{:?}", before.governing);
+    assert!(before.conflicts.is_empty(), "{:?}", before.conflicts);
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: design.clone(),
+            expected: design_draft.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let design_issued: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: design });
+
+    // Move the Guide on -- a successor drafted and issued -- so the
+    // incorporated revision is in neither of its head sets. The Design named
+    // an exact revision, and that is the one in force.
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: guide.clone(),
+            expected: guide_issued.revision.clone(),
+            title: None,
+            text: Some("Read it under the row lock, then release.".into()),
+            links: None,
+            plan: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let guide_successor: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: guide.clone(),
+    });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: guide.clone(),
+            expected: guide_successor.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let guide_now: issues::spec::SpecView = driver.query(&IssueQuery::Spec {
+        spec: guide.clone(),
+    });
+    assert_ne!(guide_now.issued, vec![guide_issued.revision.clone()]);
+
+    let after: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
+    assert!(after.conflicts.is_empty(), "{:?}", after.conflicts);
+    assert!(
+        after.guidance.is_empty(),
+        "an incorporated Guide governs: {:?}",
+        after.guidance
+    );
+    let mut governing = after.governing;
+    governing.sort_by(|left, right| left.spec.cmp(&right.spec));
+    assert_eq!(governing.len(), 2, "{governing:?}");
+    let by_spec = |spec: &str| {
+        governing
+            .iter()
+            .find(|item| item.spec == spec)
+            .unwrap_or_else(|| panic!("{spec} governs: {governing:?}"))
+    };
+    let direct = by_spec(&design_issued.spec);
+    assert_eq!(direct.revision, design_issued.revision);
+    assert!(matches!(direct.source, issues::spec::PacketSource::Direct));
+    let incorporated = by_spec(&guide);
+    assert_eq!(incorporated.revision, guide_issued.revision);
+    assert_eq!(incorporated.kind, issues::spec::Kind::Guide);
+    assert!(matches!(
+        &incorporated.source,
+        issues::spec::PacketSource::Incorporated { spec, revision }
+            if *spec == design_issued.spec && *revision == design_issued.revision
+    ));
+}
+
+/// What governs an Issue is decided by the revision in force now, not by any
+/// revision that ever named it.
+///
+/// The Packet finds its candidates through every `governs` a revision ever
+/// asserted on the Issue -- a set shaped by history, since revisions are
+/// immutable -- and then asks each candidate's currently issued revision. A
+/// Spec that governed once and no longer does must be absent, and a withdrawn
+/// one likewise.
+#[test]
+fn a_spec_that_stopped_governing_is_not_in_the_packet() {
+    let root = temp_root("spec-stopped-governing");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _) = seed_space(&mut driver);
+    let spec = SpecId::mint(&SystemUlidSource).as_str().to_string();
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecCreate {
+            spec: spec.clone(),
+            project,
+            kind: issues::spec::Kind::Requirement,
+            title: "Login is race-free".into(),
+            text: String::new(),
+            links: vec![issues::spec::Link {
+                rel: issues::spec::Rel::Governs,
+                target: issues::spec::Target::Issue { issue: doc.clone() },
+            }],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: draft.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let governing: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc: doc.clone() });
+    assert_eq!(governing.governing.len(), 1);
+
+    // The successor drops the link, and is issued.
+    let issued: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: spec.clone(),
+            expected: issued.revision,
+            title: None,
+            text: None,
+            links: Some(vec![]),
+            plan: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let unlinked: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: unlinked.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let released: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc: doc.clone() });
+    assert!(released.governing.is_empty(), "{:?}", released.governing);
+    assert!(released.conflicts.is_empty(), "{:?}", released.conflicts);
+
+    // Governing again, then withdrawn: withdrawal ends it too.
+    let current: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: spec.clone(),
+            expected: current.revision,
+            title: None,
+            text: None,
+            links: Some(vec![issues::spec::Link {
+                rel: issues::spec::Rel::Governs,
+                target: issues::spec::Target::Issue { issue: doc.clone() },
+            }]),
+            plan: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let relinked: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: relinked.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let again: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc: doc.clone() });
+    assert_eq!(again.governing.len(), 1, "{:?}", again.governing);
+    let reissued: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec,
+            expected: reissued.revision,
+            state: issues::spec::State::Withdrawn,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let withdrawn: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
+    assert!(withdrawn.governing.is_empty(), "{:?}", withdrawn.governing);
+    assert!(withdrawn.conflicts.is_empty(), "{:?}", withdrawn.conflicts);
 }

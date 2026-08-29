@@ -1,0 +1,634 @@
+/*
+ * The editor, in daylight.
+ *
+ * The desk goes to paper: the bar, the source rail and the inspector are
+ * surface, the filmstrip sits in a well, and each clip is a small pressed
+ * object. The stage stays a screen — dark in every room — and the kinds a
+ * program can carry keep their own night inside it, because they are what the
+ * panel shows, not chrome.
+ */
+
+.pe {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  flex-direction: column;
+  color-scheme: light;
+  background: var(--ds-paper);
+  color: var(--ds-ink);
+  font-family: var(--ds-sans);
+  font-size: var(--ds-fs-body);
+  line-height: 1.3;
+  letter-spacing: var(--ds-track-body);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pe * {
+  box-sizing: border-box;
+}
+
+.pe-haptic-host {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  padding: 0;
+  pointer-events: none;
+}
+
+.pe-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  min-height: 56px;
+  padding: var(--ds-space-2) var(--ds-space-3);
+  padding-top: max(8px, env(safe-area-inset-top));
+  background: var(--ds-surface);
+  border-bottom: 1px solid var(--ds-rule);
+}
+
+.pe-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--ds-space-4) var(--ds-space-5);
+  overflow: clip;
+}
+
+/* The media's own colour, washed across the field behind the screen. */
+.pe-bleed {
+  position: absolute;
+  inset: -12%;
+  pointer-events: none;
+  transform: scale(1.08);
+  filter: blur(40px) saturate(1.1);
+  opacity: 0.28;
+  transition:
+    background-color var(--ds-dur-medium) var(--ds-ease),
+    opacity var(--ds-dur-medium) var(--ds-ease);
+}
+
+/* The screen. A lit panel on a wall. */
+.pe-frame {
+  width: 100%;
+  max-width: 920px;
+  aspect-ratio: 16 / 9;
+  max-height: 100%;
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  border-radius: var(--ds-r-md);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  position: relative;
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    var(--ds-material-lift);
+}
+
+.pe-trim-flag {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 12px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-chrome);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-float);
+  backdrop-filter: var(--ds-chrome-blur);
+  -webkit-backdrop-filter: var(--ds-chrome-blur);
+  font-size: var(--ds-fs-small);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.pe-trim-flag b {
+  font-weight: var(--ds-weight-medium);
+}
+
+.pe-trim-flag span {
+  font-variant-numeric: tabular-nums;
+  color: var(--ds-muted);
+}
+
+.pe-frame img,
+.pe-frame video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.pe-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: var(--ds-space-5);
+  text-align: center;
+}
+
+.pe-card h1 {
+  margin: 0;
+  font-size: clamp(22px, 4vw, 42px);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
+}
+
+.pe-card p {
+  margin: 12px 0 0;
+  opacity: 0.8;
+}
+
+/* Athan is what the screen shows. Its colours are the kind's, not ours. */
+.pe-athan {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 8% 10%;
+  background: #120e0a;
+  color: #f3c07a;
+}
+
+.pe-athan header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6%;
+  font-size: clamp(16px, 3vw, 28px);
+  font-weight: var(--ds-weight-medium);
+}
+
+.pe-athan header span {
+  color: #b4a082;
+  font-size: 0.7em;
+  font-weight: var(--ds-weight-regular);
+}
+
+.pe-athan ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45em;
+}
+
+.pe-athan li {
+  display: flex;
+  justify-content: space-between;
+  font-size: clamp(14px, 2.6vw, 24px);
+}
+
+.pe-athan li.is-next {
+  font-weight: var(--ds-weight-medium);
+}
+
+.pe-athan-times {
+  display: flex;
+  gap: 1.2em;
+  font-variant-numeric: tabular-nums;
+}
+
+.pe-athan-times em {
+  font-style: normal;
+  min-width: 4.5ch;
+  text-align: right;
+}
+
+.pe-placeholder {
+  text-align: center;
+  padding: var(--ds-space-5);
+  color: rgb(var(--ds-panel-screen-ink) / 0.6);
+}
+
+.pe-placeholder strong {
+  display: block;
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  font-weight: var(--ds-weight-medium);
+  margin-bottom: 6px;
+}
+
+/* ── The dock: transport and the filmstrip ─────────────────────────────── */
+
+.pe-rail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 2px;
+  min-height: 48px;
+}
+
+.pe-rail-time {
+  justify-self: start;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.pe-rail-time span {
+  color: var(--ds-muted);
+  font-weight: var(--ds-weight-regular);
+}
+
+.pe-rail-play {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pe-play, .pe-skip {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-muted);
+  border-radius: var(--ds-r-pill);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),     color var(--ds-dur-fast) var(--ds-ease);
+}
+
+.pe-skip {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+/* Play is the act, so play is the one filled control in the dock. */
+.pe-play {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.pe-play:hover:not(:disabled) {
+  color: var(--ds-ink);
+}
+
+.pe-skip:hover:not(:disabled) {
+  background: var(--ds-hover);
+  color: var(--ds-ink);
+}
+
+.pe-play:disabled,
+.pe-skip:disabled {
+  opacity: 0.35;
+}
+
+.pe-strip-wrap {
+  display: flex;
+  align-items: flex-end;
+}
+
+.pe-ruler {
+  height: 28px;
+  position: relative;
+  touch-action: none;
+  user-select: none;
+  cursor: ew-resize;
+}
+
+.pe-tick {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  font-size: 0.625rem;
+  line-height: 1;
+  color: var(--ds-faint);
+  border-left: 1px solid var(--ds-rule-strong);
+  padding-left: 4px;
+  height: 22px;
+  pointer-events: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pe-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
+}
+
+.pe-track {
+  position: relative;
+  height: 104px;
+  display: block;
+}
+
+.pe-clip-slot {
+  position: absolute;
+  top: 8px;
+  height: 88px;
+  border-radius: var(--ds-r-md);
+  overflow: visible;
+}
+
+/* A clip is a small object in the well. Selected is ringed in the action. */
+.pe-clip {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  border-radius: inherit;
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.92);
+  box-shadow: var(--ds-material-card);
+  overflow: clip;
+  isolation: isolate;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  transition: box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.pe-clip-fill {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  border-radius: inherit;
+  background-clip: padding-box;
+}
+
+.pe-clip.is-selected {
+  box-shadow:
+    var(--ds-material-card),
+    0 0 0 2px var(--ds-paper),
+    0 0 0 4px var(--ds-accent);
+  z-index: 1;
+}
+
+.pe-clip.is-moving,
+.pe-clip.is-lifting {
+  cursor: grabbing;
+  opacity: 0.96;
+  box-shadow: var(--ds-material-lift);
+  z-index: 4;
+}
+
+.pe-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+.pe-thumb-card,
+.pe-thumb-empty {
+  display: grid;
+  place-items: center;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  padding: var(--ds-space-2);
+  text-align: center;
+}
+
+.pe-thumb-empty {
+  background: var(--ds-panel-screen);
+  color: rgb(var(--ds-panel-screen-ink) / 0.55);
+}
+
+.pe-clip-ghost {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  border: 1px dashed var(--ds-rule-strong);
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.pe-clip-body {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 18px 28px 8px 28px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  pointer-events: none;
+  background: linear-gradient(to top, rgb(0 0 0 / 0.72), transparent);
+}
+
+.pe-clip-body strong {
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pe-clip-body span {
+  font-size: var(--ds-fs-label);
+  color: rgb(var(--ds-panel-screen-ink) / 0.7);
+  font-variant-numeric: tabular-nums;
+}
+
+.pe-handle {
+  position: absolute;
+  top: 0;
+  width: 44px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ds-ink);
+  padding: 0;
+  touch-action: none;
+  z-index: 2;
+}
+
+.pe-handle-start {
+  left: -14px;
+}
+
+.pe-handle-end {
+  right: -14px;
+}
+
+.pe-handle::after {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 32px;
+  margin: 0 auto;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface);
+  box-shadow:
+    0 0 0 1px rgb(var(--ds-ink-rgb) / 0.2),
+    0 1px 3px rgb(var(--ds-ink-rgb) / 0.3);
+}
+
+/* The playhead is the act of scrubbing, so it is blue. */
+.pe-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--ds-accent);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.pe-playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-accent);
+  box-shadow: 0 0 0 2px var(--ds-surface-sunken);
+}
+
+.pe-gap {
+  position: absolute;
+  top: 8px;
+  width: 18px;
+  height: 88px;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: var(--ds-r-md);
+  border: 1px dashed var(--ds-accent);
+  background: var(--ds-accent-soft);
+}
+
+.pe-add {
+  position: absolute;
+  top: 8px;
+  appearance: none;
+  border: 0;
+  width: 80px;
+  height: 88px;
+  margin: 0;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
+  color: var(--ds-muted);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+  transition:
+    color var(--ds-dur-fast) var(--ds-ease),
+    transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+@media (hover: hover) {
+  .pe-add:hover {
+    color: var(--ds-ink);
+    transform: translateY(-1px);
+  }
+}
+
+.pe-add[data-popup-open] {
+  color: var(--ds-accent);
+}
+
+.pe-hint,
+.pe-error {
+  padding: 0 var(--ds-space-4) var(--ds-space-2);
+}
+
+.pe-lib-row .pe-thumb {
+  position: relative;
+  inset: auto;
+  width: 64px;
+  height: 40px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+
+@media (pointer: coarse) {
+  .pe-clip,
+.pe-clip-slot {
+    touch-action: pan-x;
+    cursor: default;
+  }
+
+  .pe-handle {
+    touch-action: none;
+  }
+
+  .pe-skip,
+.pe-play {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.pe-rail.is-narrow {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "play play"
+    "time clip";
+  padding: 2px 8px 4px;
+  gap: 0 8px;
+}
+
+.pe-rail.is-narrow .pe-rail-play {
+  grid-area: play;
+  justify-self: center;
+}
+
+.pe-rail.is-narrow .pe-rail-time {
+  grid-area: time;
+  font-size: var(--ds-fs-label);
+  align-self: center;
+}
+
+@media (max-width: 719px) {
+  .pe-stage {
+    padding: var(--ds-space-3);
+  }
+}
+
+@media (min-width: 720px) {
+  .pe-bar {
+    padding: var(--ds-space-3) 20px;
+  }
+
+  .pe-strip-wrap {
+    padding-left: var(--ds-space-3);
+    padding-right: var(--ds-space-3);
+  }
+}

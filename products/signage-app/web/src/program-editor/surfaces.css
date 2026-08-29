@@ -1,0 +1,641 @@
+/*
+ * The two surfaces.
+ *
+ * Nothing here is shared between them beyond tokens and the field controls.
+ * `.pe-desk` is a three-column workspace; `.pe-mobile` is a vertical stack with
+ * a sheet. They are separate rule sets on purpose — the old file expressed both
+ * as one layout plus overrides at 719px, which is why neither could be changed
+ * without reading the other.
+ */
+
+/* ── Fields, shared by both surfaces ───────────────────────────────────── */
+
+.pe-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.pe-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+}
+
+.pe-field-label small {
+  font-weight: var(--ds-weight-regular);
+  font-size: var(--ds-fs-label);
+  opacity: 0.8;
+}
+
+.pe-field.is-desktop {
+  gap: 6px;
+}
+
+.pe-field.is-mobile .ds-input {
+  min-height: 44px;
+  font-size: 16px; /* iOS zooms anything smaller on focus. */
+}
+
+.pe-field.is-toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pe-field-error {
+  font-size: var(--ds-fs-label);
+  color: var(--ds-alarm);
+}
+
+/* A switch is a pill with a pressed knob; on, the pill is the action. */
+.pe-switch {
+  appearance: none;
+  border: 0;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
+  padding: 3px;
+  cursor: pointer;
+  transition: background var(--ds-dur-fast) var(--ds-ease);
+}
+
+.pe-switch span {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
+  transition: transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+.pe-switch.is-on {
+  background: var(--ds-accent);
+  box-shadow: var(--ds-material-accent);
+}
+
+.pe-switch.is-on span {
+  transform: translateX(18px);
+}
+
+.pe-stepper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pe-stepper .ds-input {
+  min-width: 0;
+}
+
+.pe-unit {
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+}
+
+.pe-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pe-swatch {
+  appearance: none;
+  border: 0;
+  border-radius: var(--ds-r-md);
+  height: 46px;
+  font: inherit;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  text-transform: capitalize;
+  cursor: pointer;
+  box-shadow: var(--ds-material-card);
+}
+
+.pe-swatch.is-on {
+  outline: 2px solid var(--ds-accent);
+  outline-offset: 2px;
+}
+
+.pe-matrix {
+  display: grid;
+  gap: 6px 8px;
+  align-items: center;
+}
+
+.pe-matrix-head,
+.pe-matrix-row {
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  color: var(--ds-faint);
+}
+
+/* Both doors fit on one line, or the manual one reads as the fallback. */
+.pe-place-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pe-place-actions .ds-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+  gap: 6px;
+  padding-inline: 8px;
+  font-size: var(--ds-fs-label);
+  white-space: nowrap;
+}
+
+.pe-place-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.pe-place-search {
+  padding: 12px;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-sunken);
+}
+
+/* The one thing worth saying out loud on both surfaces: a note, tinted with
+   the action colour and lit along its top edge, which marks it without
+   claiming something has gone wrong. */
+.pe-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--ds-r-sm);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 0 var(--ds-accent-rim);
+  font-size: var(--ds-fs-label);
+  line-height: 1.45;
+  color: var(--ds-muted);
+}
+
+.pe-scope strong {
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  color: var(--ds-ink);
+}
+
+.pe-scope.is-compact {
+  border-radius: 0;
+}
+
+/* ── Desktop ───────────────────────────────────────────────────────────── */
+
+.pe-desk {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) 336px;
+}
+
+.pe-desk.has-source {
+  grid-template-columns: 76px 272px minmax(0, 1fr) 336px;
+}
+
+.pe-source-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 8px;
+  background: var(--ds-surface);
+  border-right: 1px solid var(--ds-rule);
+}
+
+.pe-source-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 4px;
+  border-radius: var(--ds-r-md);
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.pe-source-tab:hover {
+  background: var(--ds-hover);
+  color: var(--ds-ink);
+}
+
+.pe-source-tab.is-on {
+  background: var(--ds-surface-sunken);
+  color: var(--ds-ink);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
+}
+
+.pe-source-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--ds-surface);
+  border-right: 1px solid var(--ds-rule);
+}
+
+.pe-source-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 12px 8px;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+}
+
+.pe-source-panel > *:not(header) {
+  overflow: auto;
+  padding: 0 12px 12px;
+  min-height: 0;
+}
+
+.pe-source-upload,
+.pe-source-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pe-centre {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pe-transport {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--ds-surface-sunken);
+}
+
+.pe-transport > :last-child {
+  justify-self: end;
+}
+
+.pe-inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  border-left: 1px solid var(--ds-rule);
+  background: var(--ds-surface);
+}
+
+.pe-insp-section {
+  border-bottom: 1px solid var(--ds-rule);
+}
+
+.pe-insp-head {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-ink);
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-body);
+  text-transform: none;
+  cursor: pointer;
+}
+
+.pe-insp-head > span:first-child {
+  flex: 1;
+  text-align: left;
+}
+
+.pe-insp-chevron {
+  color: var(--ds-faint);
+  transition: transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+.pe-insp-section.is-open .pe-insp-chevron {
+  transform: rotate(180deg);
+}
+
+.pe-insp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 16px 18px;
+}
+
+.pe-insp-subject {
+  margin: 0;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A screen is 16:9, so the panel preview is too. It is a screen: dark. */
+.pe-insp-preview {
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-panel-screen);
+  box-shadow: var(--ds-material-card);
+}
+
+.pe-insp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ds-rule);
+}
+
+.pe-insp-group h4 {
+  margin: 0;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+}
+
+.pe-insp-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────────────── */
+
+.pe-mobile {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.pe-transport.is-mobile {
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px;
+}
+
+.pe-actionbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 8px 10px max(10px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--ds-rule);
+  background: var(--ds-surface);
+}
+
+.pe-actionbar::-webkit-scrollbar {
+  display: none;
+}
+
+.pe-action {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-muted);
+  flex: 0 0 auto;
+  min-width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 6px;
+  border-radius: var(--ds-r-md);
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  cursor: pointer;
+}
+
+.pe-action:hover {
+  color: var(--ds-ink);
+}
+
+.pe-action.is-danger {
+  color: var(--ds-alarm);
+}
+
+/* The sheet rises over the timeline and stops short of the stage: the reason
+   to configure from here is watching the card change while you type. */
+.pe-sheet {
+  position: absolute;
+  inset: auto 0 0 0;
+  max-height: 62%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  z-index: 5;
+  border-radius: var(--ds-r-xl) var(--ds-r-xl) 0 0;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-lift);
+  padding-bottom: var(--vv-keyboard, 0px);
+}
+
+.pe-sheet.is-short {
+  max-height: 40%;
+}
+
+.pe-sheet-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 14px 8px;
+}
+
+.pe-sheet-head strong {
+  flex: 1;
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
+}
+
+.pe-sheet-grip {
+  position: absolute;
+  top: 7px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 4px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-rule-strong);
+}
+
+.pe-sheet-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 4px 14px 12px;
+  border-bottom: 1px solid var(--ds-rule);
+}
+
+.pe-sheet-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* A tab is a chip: resting in its well, or lifted out of it. */
+.pe-sheet-tab {
+  appearance: none;
+  border: 0;
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--ds-r-pill);
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  cursor: pointer;
+}
+
+.pe-sheet-tab.is-on {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.pe-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 14px 16px;
+}
+
+.pe-sheet-foot {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 10px 14px max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--ds-rule);
+}
+
+/* ── The kind preview, at three sizes ──────────────────────────────────── */
+
+.pe-athan.is-thumb {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  text-align: center;
+}
+
+.pe-athan.is-panel {
+  height: 100%;
+  padding: 8px 10px;
+  font-size: var(--ds-fs-label);
+  line-height: 1.25;
+}
+
+.pe-athan.is-panel header {
+  flex: 0 0 auto;
+  font-size: var(--ds-fs-label);
+  margin-bottom: 4px;
+}
+
+.pe-athan.is-panel ol {
+  gap: 1px;
+}
+
+.pe-athan.is-panel li {
+  font-size: var(--ds-fs-label);
+}
+
+.pe-athan.is-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+  color: rgb(var(--ds-panel-screen-ink) / 0.6);
+  font-size: var(--ds-fs-small);
+  text-align: center;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+
+.pe-title {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: var(--ds-weight-medium);
+  font-size: var(--ds-fs-heading);
+  letter-spacing: var(--ds-track-heading);
+  padding: var(--ds-space-2) var(--ds-space-1);
+}
+
+.pe-title:focus {
+  outline: none;
+}
+
+.pe-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+/* A duration is three characters, not a paragraph. */
+.pe-stepper .ds-input {
+  width: 100%;
+  max-width: 7rem;
+}
+
+.pe-field.is-mobile .pe-stepper .ds-input {
+  max-width: 9rem;
+}

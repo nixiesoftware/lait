@@ -30,6 +30,8 @@ const board = (rows: Row[]): BoardView => ({
       rows: rows.filter((r) => r.status === "done"),
     },
   ],
+  total: null,
+  complete: true,
 });
 
 describe("the overlay", () => {

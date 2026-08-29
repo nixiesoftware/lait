@@ -1,0 +1,24 @@
+[package]
+name = "netstack"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "lait's L3 packet layer: a virtual IPv6 interface addressed by device key, carried over lait's own transport. Composes comms; names no iroh type. Linux-first."
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The transport the carry rides — lait's sole iroh seam. This crate names
+# comms and never iroh, exactly as `lait-relay` fronts `comms::relay`.
+comms = { path = "../comms" }
+# Identity: a device's tunnel address and its PeerId are one ed25519 key.
+mechanics = { path = "../mechanics" }
+blake3 = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -8,15 +8,19 @@ import {
   bytesToHex,
   canonicalProgramRevision,
   confirmationPhrase,
+  groupRendezvousCode,
+  normalizeRendezvousCode,
   ProtocolError,
+  rendezvousFromCode,
   requestTranscript,
   validateProgram,
   verifyProgram,
 } from "../shared/web/protocol.mjs";
-import { DisplayReceiverClient, parseLiveMediaPacket } from "../shared/web/client.mjs";
+import { DisplayReceiverClient, chromeSpeaks, parseLiveMediaPacket } from "../shared/web/client.mjs";
 import {
   deploymentRoot,
   normalizeSiteCode,
+  parseEntry,
   siteOrigin,
   validSiteCode,
   webPkiBootstrap,
@@ -169,6 +173,20 @@ test("web adapters reproduce the human confirmation phrase", async () => {
   );
 });
 
+test("web adapters read a rendezvous code the way Rust does, and name the same rendezvous", async () => {
+  const code = fixture.rendezvous_code;
+  assert.equal(normalizeRendezvousCode(code.entered), code.normalized);
+  assert.equal(groupRendezvousCode(code.entered), code.grouped);
+  assert.equal(await rendezvousFromCode(code.entered), code.rendezvous);
+  for (const bad of ["7K3Q011", "7K3Q01111", "7K3Q-0U11", "", null]) {
+    assert.throws(
+      () => normalizeRendezvousCode(bad),
+      (error) => error instanceof ProtocolError && error.code === "invalid_identifier",
+      `${JSON.stringify(bad)} is not a code`,
+    );
+  }
+});
+
 test("unknown receiver-facing fields fail closed", async () => {
   const injected = { ...structuredClone(fixture.program), world: "forbidden" };
   await assert.rejects(() => verifyProgram(injected), (error) => {
@@ -268,6 +286,40 @@ test("API errors reject unknown fields before changing receiver state", () => {
   assert.equal(receiver.credential.mode, "paired");
 });
 
+test("an unaligned program keeps its own clock across a no-change answer", async () => {
+  // Three ten-second frames, looping, no sync group; the receiver is five
+  // seconds into the last one when a poll that opened at the first answers.
+  const program = structuredClone(fixture.program);
+  program.playback = { current_index: 2, elapsed_ms: 0, cycle: "loop", sync: null };
+  program.items = [0, 1, 2].map((index) => ({
+    ...structuredClone(fixture.program.items[0]),
+    id: String(index).repeat(64),
+    duration_ms: 10_000,
+  }));
+  const { receiver, events } = receiverHarness(program);
+  receiver.elapsedBase = 5_000;
+  receiver.itemStartedAt = performance.now();
+  await receiver.handleProgramResponse({
+    kind: "no_change",
+    revision: program.revision,
+    playback: { current_index: 0, elapsed_ms: 0, cycle: "loop", sync: null },
+  });
+  assert.equal(receiver.program.playback.current_index, 2, "still on the item it was showing");
+  assert.ok(receiver.currentPlayback().elapsedMs >= 5_000, "and not rewound within it");
+  assert.ok(receiver.lastProgramDeliveryAt > 0, "the delivery still counts as fresh");
+  assert.equal(events.length, 0, "nothing is redrawn for an answer that changes nothing");
+  // A malformed cursor is still refused, even one that would not be adopted.
+  await assert.rejects(
+    () => receiver.handleProgramResponse({
+      kind: "no_change",
+      revision: program.revision,
+      playback: { current_index: 7, elapsed_ms: 0, cycle: "loop", sync: null },
+    }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_cursor",
+  );
+  clearTimeout(receiver.playbackTimer);
+});
+
 test("fresh delivery atomically replaces a stale-sensitive blank", async () => {
   const program = structuredClone(fixture.program);
   program.freshness.on_stale = "blank";
@@ -326,6 +378,20 @@ test("an invalid site code never becomes an origin", () => {
   assert.throws(() => siteOrigin("", "foundation.pub"), ProtocolError);
 });
 
+test("what a person types is a site, and a code if Astrolabe gave one", () => {
+  // Case, spacing and the grouping hyphens are theirs; the code is always
+  // the last eight symbols, so a hyphenated site survives in front of it.
+  assert.deepEqual(parseEntry(" Acme-Lobby-7k3q-oi1l "), { site: "acme-lobby", code: "7K3Q0111" });
+  assert.deepEqual(parseEntry("acme 7K3Q 0111"), { site: "acme", code: "7K3Q0111" });
+  assert.deepEqual(parseEntry("acme-7k3q0111"), { site: "acme", code: "7K3Q0111" });
+  // A site alone is the long way, not a mistake.
+  assert.deepEqual(parseEntry("acme-lobby"), { site: "acme-lobby", code: null });
+  assert.deepEqual(parseEntry("acme-lobby-abcd"), { site: "acme-lobby-abcd", code: null });
+  // A tail that is not a code — U is not in the alphabet — is part of the site.
+  assert.deepEqual(parseEntry("acme-7k3q-0u11"), { site: "acme-7k3q-0u11", code: null });
+  assert.deepEqual(parseEntry(""), { site: "", code: null });
+});
+
 test("the provisioned bootstrap is Web-PKI and carries no pinned material", () => {
   const bootstrap = webPkiBootstrap("https://acme.foundation.pub");
   assert.deepEqual(bootstrap, {
@@ -334,6 +400,8 @@ test("the provisioned bootstrap is Web-PKI and carries no pinned material", () =
     certificate_pem: null,
     rendezvous: null,
   });
+  // A code rides in the slot the protocol reserved for it, as the wire id.
+  assert.equal(webPkiBootstrap("https://acme.foundation.pub", "ab".repeat(16)).rendezvous, "ab".repeat(16));
   // The client is the authority on bootstrap shape; this is what it accepts.
   assert.doesNotThrow(() => new DisplayReceiverClient({
     bootstrap,
@@ -341,4 +409,247 @@ test("the provisioned bootstrap is Web-PKI and carries no pinned material", () =
     ui: {},
     vaultFactory: async () => ({}),
   }));
+});
+
+// ─── Pairing against a real offer ───────────────────────────────────────────
+//
+// The fixture proves the phrase function; nothing above drove `startPairing`
+// itself, which is how the client kept accepting a five-field offer from a
+// coordinator that had been sending six. These run the whole first exchange
+// — instance, then offer — over the native-transport seam the Android bridge
+// uses, so no XHR and no television are needed.
+
+function fakeCoordinator(routes) {
+  const encoder = new TextEncoder();
+  const requests = [];
+  globalThis.AstrolabeNativeTransport = {
+    request(requestId, payload) {
+      const request = JSON.parse(payload);
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      const handler = routes[`${request.method} ${path}`]
+        ?? (() => { throw new Error(`no fake route for ${request.method} ${path}`); });
+      Promise.resolve()
+        .then(() => handler(request.body === null ? null : JSON.parse(request.body)))
+        .then(
+          (reply) => ({
+            status: reply.status ?? 200,
+            body_base64: Buffer.from(encoder.encode(JSON.stringify(reply.body))).toString("base64"),
+            content_type: "application/json",
+            next_challenge: reply.nextChallenge ?? "",
+          }),
+          (error) => ({ error: String(error) }),
+        )
+        .then((response) => globalThis.__astrolabeNativeTransportResolve(requestId, JSON.stringify(response)));
+    },
+  };
+  return { requests, dispose: () => { delete globalThis.AstrolabeNativeTransport; } };
+}
+
+function recordingUi() {
+  const events = [];
+  return {
+    events,
+    showBooting: () => events.push(["booting"]),
+    showPairing: (pairing) => events.push(["pairing", pairing]),
+    showPairingWaiting: () => events.push(["waiting"]),
+    showPairingNetworkError: () => events.push(["network"]),
+    showPairingRejected: (kind, reason) => events.push(["rejected", kind, reason]),
+    showFailure: (code, detail) => events.push(["failure", code, detail]),
+    showConnecting: () => events.push(["connecting"]),
+    showUnassigned: (device) => events.push(["unassigned", device]),
+    showRecovering: (code) => events.push(["recovering", code]),
+    setTransportState: () => {},
+    setStaleState: () => {},
+    setSourceState: () => {},
+  };
+}
+
+async function waitFor(condition, what) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+function memoryVault() {
+  const saved = [];
+  return {
+    saved,
+    factory: async () => ({
+      load: async () => null,
+      save: async (state) => { saved.push(structuredClone(state)); },
+      clear: async () => {},
+      close: () => {},
+    }),
+  };
+}
+
+const ORIGIN = "https://acme.foundation.pub";
+const PROFILE = fixture.confirmation_phrase.profile;
+const OTHER_PROFILE = "prf_00000000000000000000000000";
+const FINGERPRINT = "c".repeat(64);
+const PAIRING = "d".repeat(32);
+const RENDEZVOUS = await rendezvousFromCode("7K3Q-0111");
+
+/**
+ * What a real daemon answers: it describes the placement that listens — a
+ * pinned certificate at a LAN origin — and names the identity it answers
+ * for. A receiver that arrived by site through a route sees exactly this,
+ * and holds the coordinator to the profile, not the placement.
+ */
+function instanceRoute() {
+  return {
+    body: {
+      protocol_major: 1,
+      instance: "e".repeat(32),
+      label: "Home Astrolabe",
+      profile: PROFILE,
+      trust: { kind: "pinned_certificate", origin: "https://192.168.1.20:7443", sha256: FINGERPRINT },
+    },
+  };
+}
+
+function refusalRoute(status, code) {
+  return { status, body: { protocol_major: 1, code, retry_after_ms: null, next_challenge: null } };
+}
+
+/** What the coordinator sends since it anchored on its identity. */
+async function identityOffer(request, { profile = PROFILE, phraseProfile = profile, shape = null } = {}) {
+  const words = await confirmationPhrase(phraseProfile, PAIRING, request.receiver_nonce);
+  const offer = {
+    protocol_major: 1,
+    pairing: PAIRING,
+    expires_in_ms: 600_000,
+    confirmation_phrase: words,
+    coordinator_fingerprint: FINGERPRINT,
+    coordinator_profile: profile,
+  };
+  return { body: shape ? shape(offer) : offer };
+}
+
+async function pair(t, offerOptions, { rendezvous = null, holds = null } = {}) {
+  const ui = recordingUi();
+  const vault = memoryVault();
+  const coordinator = fakeCoordinator({
+    "GET /head/v1/instance": () => instanceRoute(),
+    "POST /head/v1/pairings": (request) => {
+      if (request.rendezvous !== null && request.rendezvous !== holds) {
+        return refusalRoute(403, "authentication_failed");
+      }
+      return identityOffer(request, offerOptions);
+    },
+    "POST /head/v1/pairings/status": () => ({ body: { kind: "pending", retry_after_ms: 1000 } }),
+  });
+  t.after(coordinator.dispose);
+  const receiver = new DisplayReceiverClient({
+    bootstrap: webPkiBootstrap(ORIGIN, rendezvous),
+    capabilities: { protocol_major: 1, platform: "webos", build: "test/0" },
+    ui,
+    vaultFactory: vault.factory,
+  });
+  t.after(() => receiver.stop());
+  await receiver.start();
+  return { receiver, ui, vault, requests: coordinator.requests };
+}
+
+test("the receiver pairs with a coordinator that anchors on its identity", async (t) => {
+  const { ui, vault, requests } = await pair(t);
+
+  const failure = ui.events.find(([kind]) => kind === "failure");
+  assert.equal(failure, undefined, `pairing refused: ${JSON.stringify(failure)}`);
+  const shown = ui.events.find(([kind]) => kind === "pairing")?.[1];
+  assert.ok(shown, "the pairing screen was shown");
+
+  // The words the television shows are the words the coordinator derived
+  // from its identity and this receiver's nonce — the ones Astrolabe shows.
+  const start = requests.find((request) => request.url.endsWith("/head/v1/pairings"));
+  const started = JSON.parse(start.body);
+  assert.deepEqual(shown.phrase, await confirmationPhrase(PROFILE, PAIRING, started.receiver_nonce));
+  assert.equal(shown.fingerprint, FINGERPRINT);
+  assert.equal(shown.confirmed, false);
+
+  // And the credential written before anything is proven records which
+  // identity those words belong to, beside the certificate that carried them.
+  assert.equal(vault.saved.length, 1);
+  assert.equal(vault.saved[0].mode, "pairing");
+  assert.equal(vault.saved[0].profile, PROFILE);
+  assert.equal(vault.saved[0].fingerprint, FINGERPRINT);
+  assert.equal(vault.saved[0].receiverNonce, started.receiver_nonce);
+  assert.equal(vault.saved[0].pollKey, started.poll_key);
+});
+
+test("an offer that does not name the coordinator's identity is refused", async (t) => {
+  // The pre-identity shape: five fields, phrase from the certificate. A
+  // receiver that accepted it would show words no current Astrolabe shows.
+  const { ui, vault } = await pair(t, {
+    shape: ({ coordinator_profile: _dropped, ...rest }) => rest,
+  });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "unknown_field"]);
+  assert.equal(vault.saved.length, 0, "nothing is written for a refused offer");
+});
+
+test("words derived from a different identity than the one named are refused", async (t) => {
+  const { ui, vault } = await pair(t, { phraseProfile: OTHER_PROFILE });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "pairing_integrity"]);
+  assert.equal(vault.saved.length, 0);
+});
+
+test("a coordinator profile that is not a profile id is refused before the phrase is checked", async (t) => {
+  const { ui, vault } = await pair(t, { profile: FINGERPRINT, phraseProfile: PROFILE });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "invalid_pairing"]);
+  assert.equal(vault.saved.length, 0);
+});
+
+test("an offer from an identity other than the one the instance named is refused", async (t) => {
+  // Self-consistent words for the wrong identity: the route answered as one
+  // coordinator and the offer came from another.
+  const { ui, vault } = await pair(t, { profile: OTHER_PROFILE, phraseProfile: OTHER_PROFILE });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "pairing_integrity"]);
+  assert.equal(vault.saved.length, 0);
+});
+
+test("a code from the controller rides the pairing start and needs no press", async (t) => {
+  const { receiver, ui, vault, requests } = await pair(t, {}, { rendezvous: RENDEZVOUS, holds: RENDEZVOUS });
+
+  const start = JSON.parse(requests.find((request) => request.url.endsWith("/head/v1/pairings")).body);
+  assert.equal(start.rendezvous, RENDEZVOUS, "the code names its rendezvous on the wire");
+
+  // Nobody compares words and nobody presses OK: the code was the
+  // confirmation, made at the controller. The screen says so, and the
+  // receiver is already asking whether it was approved.
+  const shown = ui.events.filter(([kind]) => kind === "pairing").map(([, pairing]) => pairing);
+  assert.ok(shown.every((pairing) => pairing.viaCode === true), JSON.stringify(shown));
+  assert.equal(shown.at(-1).confirmed, true);
+  assert.equal(vault.saved.at(-1).userConfirmed, true);
+  await waitFor(
+    () => requests.some((request) => request.url.endsWith("/head/v1/pairings/status")),
+    "the receiver to poll for approval on its own",
+  );
+  assert.equal(receiver.rendezvous, null, "a code is spent by the start that carried it");
+  assert.equal(ui.events.find(([kind]) => kind === "failure"), undefined);
+});
+
+test("a code the coordinator does not hold is refused as a code, and nothing is written", async (t) => {
+  const other = await rendezvousFromCode("ABCD-EFGH");
+  const { ui, vault } = await pair(t, {}, { rendezvous: RENDEZVOUS, holds: other });
+  assert.deepEqual(ui.events.at(-1).slice(0, 2), ["failure", "rendezvous_refused"]);
+  assert.equal(vault.saved.length, 0);
+});
+
+test("the chrome retires over a program that is fine, and speaks for anything else", () => {
+  const fine = { panel: "media-panel", transport: "online", source: "program", stale: false, details: false };
+  assert.equal(chromeSpeaks(fine), false);
+  assert.equal(chromeSpeaks({ ...fine, panel: "frame-panel" }), false);
+  // A state panel is the page, and the chrome is its header.
+  assert.equal(chromeSpeaks({ ...fine, panel: "provisioning-panel" }), true);
+  assert.equal(chromeSpeaks({ ...fine, panel: "unassigned-panel" }), true);
+  // Every word the chrome has is worth showing when it is not "fine".
+  assert.equal(chromeSpeaks({ ...fine, transport: "connecting" }), true);
+  assert.equal(chromeSpeaks({ ...fine, transport: "offline" }), true);
+  assert.equal(chromeSpeaks({ ...fine, source: "none" }), true);
+  assert.equal(chromeSpeaks({ ...fine, stale: true }), true);
+  // Asking is always answered.
+  assert.equal(chromeSpeaks({ ...fine, details: true }), true);
 });

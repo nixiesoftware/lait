@@ -1,0 +1,292 @@
+/* ---------------------------------------------------------------------------
+   CommunityKit tokens
+
+   The system is built on four commitments, in this order:
+
+   1. One quiet field. A single soft grey canvas; content sits on white.
+   2. Real material. Surfaces are lit from above — a rim of light on the top
+      edge, a hairline of shade on the bottom, and only as much cast shadow as
+      the object's height would actually throw.
+   3. One voice. One typeface, two weights, negative tracking that tightens as
+      type grows. No small caps, no letterspaced labels, no decorative serif.
+   4. One accent. Blue means "this is the action". Everything else is ink.
+
+   Dawn (light) is the default. Night is its honest inverse, not a dimmer.
+--------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("/fonts/satoshi-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("/fonts/satoshi-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("/fonts/satoshi-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* IBM Plex Sans Arabic, Arabic subset only. Chosen to sit with Satoshi rather
+   than beside it: the same low stroke contrast, the same open counters, and it
+   was drawn to pair with a Latin sans, so the weights and vertical rhythm
+   already agree. Only the Arabic block is shipped — the Latin never loads. */
+@font-face {
+  font-family: "IBM Plex Sans Arabic";
+  src: url("/fonts/ibm-plex-sans-arabic-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans Arabic";
+  src: url("/fonts/ibm-plex-sans-arabic-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
+
+:root,
+[data-theme="dawn"] {
+  color-scheme: light;
+
+  /* --- Surfaces -----------------------------------------------------------
+     Three steps and no more: the field, the thing on it, the well inside it. */
+  --ds-paper-rgb: 242 242 242;
+  --ds-paper: rgb(var(--ds-paper-rgb));
+  --ds-surface: #ffffff;
+  --ds-surface-sunken: #ebebeb;
+  --ds-surface-inverse: #171a1d;
+
+  /* A physical display panel is dark in every theme — the light in the room
+     doesn't change what the hardware is. Deliberately not themed. */
+  --ds-panel-screen: #171a1d;
+  --ds-panel-screen-ink: 255 255 255;
+
+  /* --- Ink ---------------------------------------------------------------- */
+  --ds-ink-rgb: 23 26 29;
+  --ds-ink: rgb(var(--ds-ink-rgb));
+  --ds-muted: rgb(var(--ds-ink-rgb) / 0.62);
+  --ds-faint: rgb(var(--ds-ink-rgb) / 0.42);
+  --ds-ink-inverse: #ffffff;
+
+  --ds-rule: rgb(var(--ds-ink-rgb) / 0.08);
+  --ds-rule-strong: rgb(var(--ds-ink-rgb) / 0.14);
+
+  /* --- Accent -------------------------------------------------------------
+     One blue for action, one green for state. Nothing else is coloured. */
+  --ds-accent: #0071e3;
+  --ds-accent-hover: #005ec1;
+  --ds-accent-ink: #ffffff;
+  --ds-accent-soft: rgb(0 113 227 / 0.1);
+  --ds-accent-rim: rgb(120 186 255 / 0.55);
+  --ds-positive: #35cb91;
+  --ds-positive-soft: rgb(53 203 145 / 0.14);
+
+  /* --- Light ---------------------------------------------------------------
+     The primitives every material recipe below is assembled from. Change these
+     four values and every surface in the product relights consistently. */
+  --ds-rim-light: rgb(255 255 255 / 0.4);
+  --ds-rim-shade-top: rgb(var(--ds-ink-rgb) / 0.12);
+  --ds-rim-shade-bottom: rgb(var(--ds-ink-rgb) / 0.16);
+  --ds-cast: rgb(var(--ds-ink-rgb) / 0.2);
+
+  /* --- Material -----------------------------------------------------------
+     A control is a small pressed object: shaded on both edges, glowing just
+     inside them, throwing almost nothing. */
+  --ds-material-control:
+    inset 0 0.5px 0.25px var(--ds-rim-shade-top),
+    inset 0 -0.5px 0.25px var(--ds-rim-shade-bottom),
+    inset 0 2px 4px var(--ds-rim-light),
+    inset 0 -2px 4px var(--ds-rim-light),
+    0 5px 12px -10px var(--ds-cast);
+
+  /* A card rests on the field. One highlight, one hairline of contact. */
+  --ds-material-card:
+    inset 0 1px 1px rgb(255 255 255 / 0.2),
+    0 1px 2px -0.5px rgb(var(--ds-ink-rgb) / 0.1);
+
+  /* A floating bar is held above the page: rimmed on all four sides. */
+  --ds-material-float:
+    inset 0.5px 0 0 rgb(var(--ds-ink-rgb) / 0.1),
+    inset -0.5px 0 0 rgb(var(--ds-ink-rgb) / 0.1),
+    inset 0 1.25px 0 -0.5px rgb(255 255 255 / 0.3),
+    inset 0 -1.25px 0 -0.5px rgb(255 255 255 / 0.3),
+    0 1px 8px -3px var(--ds-cast);
+
+  /* A lifted object — a device, a dialog — is the only thing allowed depth. */
+  --ds-material-lift:
+    0 1px 2px -1px rgb(var(--ds-ink-rgb) / 0.1),
+    0 12px 28px -12px rgb(var(--ds-ink-rgb) / 0.18),
+    0 40px 80px -40px rgb(var(--ds-ink-rgb) / 0.22);
+
+  /* A filled accent control is the same object, lit by its own colour. */
+  --ds-material-accent:
+    inset 0 1px 1px var(--ds-accent-rim),
+    inset 0 -4px 20px -4px rgb(var(--ds-ink-rgb) / 0.2),
+    0 3px 6px -1px rgb(var(--ds-ink-rgb) / 0.1);
+
+  /* --- Type ----------------------------------------------------------------
+     One family. --ds-display is an alias, not a second voice. */
+  --ds-sans:
+    "Satoshi", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    Inter, system-ui, sans-serif;
+  --ds-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --ds-arabic: "IBM Plex Sans Arabic", "SF Arabic", "Geeza Pro", "Noto Sans Arabic", sans-serif;
+  --ds-display: var(--ds-sans);
+
+  --ds-weight-regular: 400;
+  --ds-weight-medium: 500;
+
+  --ds-fs-display: clamp(2.5rem, 5.4vw, 4.25rem);
+  --ds-fs-title: clamp(1.75rem, 3.2vw, 2.625rem);
+  --ds-fs-heading: clamp(1.125rem, 1.5vw, 1.375rem);
+  --ds-fs-body: 1rem;
+  --ds-fs-small: 0.875rem;
+  --ds-fs-label: 0.75rem;
+
+  /* Tracking tightens as size grows — the single strongest signal of the
+     Warmwind voice. Never positive. */
+  --ds-track-display: -0.04em;
+  --ds-track-title: -0.035em;
+  --ds-track-heading: -0.03em;
+  --ds-track-body: -0.011em;
+  --ds-track-label: -0.01em;
+
+  --ds-lh-display: 1.12;
+  --ds-lh-title: 1.15;
+  --ds-lh-heading: 1.25;
+  --ds-lh-body: 1.55;
+
+  /* --- Shape ---------------------------------------------------------------
+     Nothing is square. Interactive things are fully round. */
+  --ds-r-xs: 8px;
+  --ds-r-sm: 10px;
+  --ds-r-md: 12px;
+  --ds-r-lg: 20px;
+  --ds-r-xl: 30px;
+  --ds-r-pill: 1000px;
+  --ds-r-round: 50%;
+
+  /* --- Space --------------------------------------------------------------- */
+  --ds-gutter: clamp(16px, 3.4vw, 40px);
+  --ds-inset: clamp(8px, 1vw, 16px);
+  --ds-edge: calc(var(--ds-gutter) + var(--ds-inset));
+  --ds-content-max: 1200px;
+  --ds-header-h: 56px;
+  --ds-header-gap: 14px;
+  --ds-card-pad: clamp(24px, 3.4vw, 48px);
+  --ds-band-y: clamp(40px, 5vw, 80px);
+  --ds-band-y-tight: clamp(32px, 4vw, 56px);
+
+  /* --- Motion --------------------------------------------------------------
+     Decelerating, never bouncy. Objects settle; they don't perform. */
+  --ds-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --ds-ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ds-dur-fast: 140ms;
+  --ds-dur-medium: 240ms;
+  --ds-dur-slow: 420ms;
+
+  /* --- Chrome (header, overlays) ------------------------------------------- */
+  --ds-chrome: rgb(255 255 255 / 0.72);
+  --ds-chrome-ink: var(--ds-ink);
+  --ds-chrome-muted: var(--ds-muted);
+  --ds-chrome-rule: var(--ds-rule);
+  --ds-chrome-rule-strong: var(--ds-rule-strong);
+  --ds-chrome-blur: blur(20px) saturate(180%);
+
+  --ds-focus: var(--ds-accent);
+
+  /* --- Compatibility aliases (Astrolabe ports) ----------------------------- */
+  --ds-surface-strong: var(--ds-surface-sunken);
+  --paper-rgb: var(--ds-paper-rgb);
+  --paper: var(--ds-paper);
+  --ink: var(--ds-ink);
+  --muted: var(--ds-muted);
+  --faint: var(--ds-faint);
+  --gold: var(--ds-accent);
+  --rule: var(--ds-rule);
+  --rule-strong: var(--ds-rule-strong);
+  --display: var(--ds-display);
+  --mono: var(--ds-mono);
+  --gutter: var(--ds-gutter);
+  --inset: var(--ds-inset);
+  --edge: var(--ds-edge);
+}
+
+[data-theme="night"] {
+  color-scheme: dark;
+
+  --ds-paper-rgb: 16 18 20;
+  --ds-paper: rgb(var(--ds-paper-rgb));
+  --ds-surface: #1d2126;
+  --ds-surface-sunken: #131619;
+  --ds-surface-inverse: #f2f2f2;
+
+  --ds-ink-rgb: 242 243 244;
+  --ds-ink: rgb(var(--ds-ink-rgb));
+  --ds-muted: rgb(var(--ds-ink-rgb) / 0.62);
+  --ds-faint: rgb(var(--ds-ink-rgb) / 0.42);
+  --ds-ink-inverse: #101214;
+
+  --ds-rule: rgb(var(--ds-ink-rgb) / 0.1);
+  --ds-rule-strong: rgb(var(--ds-ink-rgb) / 0.18);
+
+  --ds-accent: #3b96f2;
+  --ds-accent-hover: #5aa8f6;
+  --ds-accent-ink: #06121f;
+  --ds-accent-soft: rgb(59 150 242 / 0.16);
+  --ds-accent-rim: rgb(160 208 255 / 0.4);
+  --ds-positive: #45d69e;
+  --ds-positive-soft: rgb(69 214 158 / 0.16);
+
+  /* In the dark the rim light comes from the surface itself, and cast shadow
+     does more work because there is less contrast to carry the edge. */
+  --ds-rim-light: rgb(255 255 255 / 0.07);
+  --ds-rim-shade-top: rgb(0 0 0 / 0.4);
+  --ds-rim-shade-bottom: rgb(0 0 0 / 0.5);
+  --ds-cast: rgb(0 0 0 / 0.6);
+
+  --ds-material-card:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 1px 2px -0.5px rgb(0 0 0 / 0.5);
+
+  --ds-material-float:
+    inset 0.5px 0 0 rgb(255 255 255 / 0.06),
+    inset -0.5px 0 0 rgb(255 255 255 / 0.06),
+    inset 0 1.25px 0 -0.5px rgb(255 255 255 / 0.12),
+    inset 0 -1.25px 0 -0.5px rgb(255 255 255 / 0.06),
+    0 1px 8px -3px rgb(0 0 0 / 0.7);
+
+  --ds-material-lift:
+    0 1px 2px -1px rgb(0 0 0 / 0.5),
+    0 12px 28px -12px rgb(0 0 0 / 0.6),
+    0 40px 80px -40px rgb(0 0 0 / 0.7);
+
+  --ds-chrome: rgb(29 33 38 / 0.72);
+  --ds-chrome-blur: blur(20px) saturate(160%);
+}
+
+@media (max-width: 760px) {
+  :root,
+  [data-theme] {
+    --ds-header-h: 52px;
+    --ds-header-gap: 10px;
+    --ds-gutter: 14px;
+    --ds-inset: 6px;
+  }
+}

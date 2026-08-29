@@ -161,6 +161,23 @@ export interface BoardView {
   schema_version: number;
   project: ProjectDto;
   columns: BoardColumn[];
+  /**
+   * How many rows match, as the engine counted them — not how many are loaded.
+   *
+   * `null` is *unmeasured*, never zero. The engine returns `exact_total: None`
+   * when a page was post-filtered after its source posting was counted, and a
+   * client that read that absence as a number would be inventing one. This is
+   * the same distinction `Row.enrichment_complete` draws one level down.
+   *
+   * It existed on the wire all along and `boardView` dropped it, so every
+   * surface counted the rows it happened to hold and called that the total.
+   * That is how a filter came to report "3 of 100" about a project holding
+   * five hundred Issues.
+   */
+  total: number | null;
+  /** Whether every matching row is loaded. False while a continuation remains,
+   *  which is what makes a count over these rows a count of a page. */
+  complete: boolean;
 }
 
 /** One bounded board page; clients group rows through the pinned workflow. */
@@ -326,6 +343,10 @@ export interface SpecView {
   spec: string; project: string; kind: SpecKind; title: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: SpecBody;
 }
+/** The one head of a register row, as its corpus row states it. */
+export interface SpecHead {
+  revision: string; title: string; state: SpecState; author: string; ts: number;
+}
 export interface SpecSummary {
   spec: string;
   project: string;
@@ -333,7 +354,8 @@ export interface SpecSummary {
   heads: string[];
   issued: string[];
   conflicted: boolean;
-  view?: SpecView | null;
+  /** Present only with exactly one head; absent until the corpus posts it. */
+  head?: SpecHead | null;
 }
 export interface BaselineBody {
   baseline: string; project: string; name: string; state: SpecState;
@@ -343,13 +365,16 @@ export interface BaselineView {
   baseline: string; project: string; name: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: BaselineBody;
 }
+export interface BaselineHead {
+  revision: string; name: string; state: SpecState; author: string; ts: number;
+}
 export interface BaselineSummary {
   baseline: string;
   project: string;
   heads: string[];
   issued: string[];
   conflicted: boolean;
-  view?: BaselineView | null;
+  head?: BaselineHead | null;
 }
 
 export type GeometryRole = "constraint" | "containment" | "equivalence" | "association";
@@ -751,7 +776,29 @@ export interface AssignmentDto {
   world: string;
   capability: string;
   resource: string[];
+  /** Why the assignment exists, when its grant op said. Absent means *not
+   *  recorded* — a grant authored before origins were — and is not any kind
+   *  in particular: never fold it into membership, never into "granted here". */
+  origin?: AssignmentOrigin;
 }
+
+/** `founder`, `admission`, `membership` and `sponsorship` all mean "came with
+ *  being a member" — the base role, expanded. `grant` is the one kind that is
+ *  an extra on top of it, and the only one a surface may offer to revoke as
+ *  such. */
+export type AssignmentOriginKind = "founder" | "admission" | "membership" | "grant" | "sponsorship";
+
+/** `mechanics::assignment::AssignmentOrigin`. */
+export interface AssignmentOrigin {
+  kind: AssignmentOriginKind;
+  /** The opaque role reference (hex) the expansion came from, for the kinds
+   *  that carry one. Only the owning World can read it. */
+  definition_ref?: string;
+  /** The role id the World resolved `definition_ref` to — filled in by the
+   *  Issues product on its own rows, absent on another World's. */
+  role?: string;
+}
+
 
 /** One project status update — `dto.rs` `ProjectUpdateDto` (SCOPE-1). */
 export interface ProjectUpdateDto {
@@ -993,6 +1040,12 @@ export interface SpaceRow {
   name: string | null;
   /** Why `name` is null. Absent when a name was read. */
   unnamed?: "store-missing" | "not-probed" | "unreachable" | "not-docked";
+  /**
+   * What this device last saw the Space named, and when (unix seconds) --
+   * written by the Station that held its store. A past reading beside the
+   * live one, never in its place: draw it with its time.
+   */
+  seen?: { name: string; observed_at: number };
   path: string;
   origin: string;
   last_opened: number;
@@ -1004,6 +1057,19 @@ export interface SpaceRow {
 
 export interface SpacesReply {
   spaces: SpaceRow[];
+  /**
+   * The mount this head serves this World at.
+   *
+   * A head answers for exactly one World and refuses every other mount by name.
+   * The mount is the World's own published API — `issues` — right up until the
+   * host assigns one, which it does for a local World so a tree being worked on
+   * can sit beside the release it was copied from. Then it is `local_issues`,
+   * and nothing in the page can tell.
+   *
+   * Optional because a head older than this field simply does not say, and the
+   * name the World publishes is the right thing to fall back to.
+   */
+  world?: string;
 }
 
 /**
@@ -1181,10 +1247,12 @@ export interface RoleProjection {
     role_id: string;
     built_in: boolean;
     revision?: string | null;
-    conflict_heads: string[];
+    /** Omitted by the runner when empty — read it as none, not as a crash. */
+    conflict_heads?: string[];
   };
   revision?: RoleRevision | null;
 }
+
 
 export interface IssueDetailPages {
   comments: PageRequest;
@@ -1568,8 +1636,10 @@ export type Request =
   /** Expand a role's pinned caps and install them for an actor (Space- or
    *  project-scoped). All-or-nothing; authority-first. */
   | { cmd: "access_grant"; actor: string; role: string; project?: string | null }
-  /** Revoke one effective capability assignment by its 64-hex grant id. */
-  | { cmd: "access_revoke"; grant_id: string }
+  /** Revoke effective assignments by 64-hex grant id, as one all-or-nothing
+   *  set — a role grant's whole expansion, the way it was granted. */
+  | { cmd: "access_revoke"; grant_ids: string[] }
+
   | { cmd: "join"; ticket: string }
   | { cmd: "seed_list" }
   | { cmd: "log"; since: number }

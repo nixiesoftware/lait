@@ -216,6 +216,8 @@ fn seek_body_facts(
         issues::find::field::PROJECT,
         issues::find::field::SOURCE_ID,
         issues::find::field::TARGET_ID,
+        issues::find::field::RELATION_KIND,
+        issues::find::field::ENTITY_KEY,
     ]
     .into_iter()
     .map(issues::find::field_ref)
@@ -282,18 +284,25 @@ fn classify_body_facts(
             let kind = text_field(row, issues::find::field::KIND).unwrap_or_default();
             let project = text_field(row, issues::find::field::PROJECT);
             let id = text_field(row, issues::find::field::ID);
+            // A project is dirty when one of its Issues is. Every row that
+            // carries a project used to open its scope, with or without a
+            // doc, and an empty scope reads as "an Issue in this project
+            // moved" to everything derived from the project's Issues -- so a
+            // Spec edit refetched every board in the project.
             if let Some(project) = project {
-                let docs = dirty_docs.entry(project.into()).or_default();
-                if kind == "issue" {
-                    if let Some(id) = id {
-                        docs.insert(id.into());
-                    }
+                let doc = if kind == "issue" {
+                    id
                 } else if kind == "relation" {
-                    if let Some(source) = text_field(row, issues::find::field::SOURCE_ID) {
-                        if source.starts_with("iss_") {
-                            docs.insert(source.into());
-                        }
-                    }
+                    text_field(row, issues::find::field::SOURCE_ID)
+                        .filter(|source| source.starts_with("iss_"))
+                } else {
+                    None
+                };
+                if let Some(doc) = doc {
+                    dirty_docs
+                        .entry(project.into())
+                        .or_default()
+                        .insert(doc.into());
                 }
             }
             match kind {
@@ -320,8 +329,29 @@ fn classify_body_facts(
                 "project_update" => {
                     planes.insert(("updates".into(), project.map(str::to_owned)));
                 }
+                // A Spec's own relations -- revision, predecessor, reference,
+                // plan root, and a Baseline's -- are the document's structure,
+                // not an Issue's. Ringing the Issue relations plane for them
+                // refetched every graph in the project on every Spec edit.
                 "relation" => {
-                    planes.insert(("relations".into(), project.map(str::to_owned)));
+                    let relation_kind =
+                        text_field(row, issues::find::field::RELATION_KIND).unwrap_or_default();
+                    let entity_key =
+                        text_field(row, issues::find::field::ENTITY_KEY).unwrap_or_default();
+                    let plane = if entity_key == "spec_reference"
+                        || matches!(
+                            relation_kind,
+                            "spec_revision"
+                                | "predecessor"
+                                | "plan_root"
+                                | "baseline_revision"
+                                | "baseline_member"
+                        ) {
+                        "specs"
+                    } else {
+                        "relations"
+                    };
+                    planes.insert((plane.into(), project.map(str::to_owned)));
                 }
                 "initiative" => {
                     planes.insert(("initiatives".into(), None));
@@ -332,7 +362,23 @@ fn classify_body_facts(
                 "triage" | "triage_decision" | "triage_resolution" => {
                     planes.insert(("triage".into(), None));
                 }
-                "spec" | "baseline" => {
+                // Every node a Spec or Baseline posts: the document rows, the
+                // per-revision head and issued markers, the revisions
+                // themselves -- which are posted under their Spec *kind*, so
+                // the enum is asked rather than a list kept -- and the notes.
+                // Before the kinds were named here a revision fell through to
+                // `missed`, and every Spec edit rang all fifteen planes.
+                "spec"
+                | "baseline"
+                | "spec_head"
+                | "spec_issued"
+                | "baseline_head"
+                | "baseline_issued"
+                | "baseline_revision"
+                | "spec_observation_fact" => {
+                    planes.insert(("specs".into(), project.map(str::to_owned)));
+                }
+                kind if issues::spec::Kind::parse(kind).is_some() => {
                     planes.insert(("specs".into(), project.map(str::to_owned)));
                 }
                 "comment" | "reaction" | "activity" => {

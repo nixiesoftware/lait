@@ -104,6 +104,23 @@
         "resource": [],
         "world": "com.lait.issues"
       }
+    },
+    {
+      "def": "AssignmentDto",
+      "value": {
+        "actor": "act_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "capability": "issue.assign",
+        "grant_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "origin": {
+          "definition_ref": "efefefefefefefef",
+          "kind": "grant",
+          "role": "lait.contributor"
+        },
+        "resource": [
+          "prj_x"
+        ],
+        "world": "com.lait.issues"
+      }
     }
   ]
 }

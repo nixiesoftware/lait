@@ -1,0 +1,384 @@
+/*
+ * The vocabulary the four rules need. Everything here is either a way of
+ * saying "that took", a way of saying "this is moving on its own", or a way of
+ * saying "here is who this reaches — and who it misses".
+ *
+ * Four meanings, four hues. Blue is the action, and a change taking is the
+ * action taking. Green is now. Alarm is reach. Ochre is the miss.
+ */
+
+/* ── Commit ───────────────────────────────────────────────────────────────
+ *
+ * The sweep is the whole motion language of this product: a hairline that
+ * travels once under the thing that changed. It is not a spinner — a spinner
+ * says "wait", and nobody is waiting; the write already happened locally and
+ * the field is usable throughout.
+ */
+
+.ds-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  position: relative;
+}
+
+.ds-field-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 16px;
+}
+
+.ds-field-label,
+.ds-field > span:first-child {
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+}
+
+.ds-field-hint {
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  line-height: 1.45;
+}
+
+/* A label is a quiet sentence, not a specimen tag. */
+.ds-commit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+}
+
+.ds-commit.is-refused {
+  color: var(--ds-alarm);
+  font-weight: var(--ds-weight-regular);
+}
+
+.ds-commit.is-refused button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ds-ink);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ds-commit-sweep {
+  position: relative;
+  display: block;
+  width: 22px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.ds-commit-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--ds-accent), transparent);
+  animation: ds-sweep var(--ds-duration-commit) var(--ds-ease) infinite;
+}
+
+@keyframes ds-sweep {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* ── Alive ────────────────────────────────────────────────────────────────
+ *
+ * Green means *now*. It is never on something a person presses, so a glance
+ * can tell what is moving from what is waiting to be operated.
+ */
+
+.ds-onair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px 4px 9px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-positive-soft);
+  color: var(--ds-positive);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.ds-onair.is-quiet {
+  color: var(--ds-muted);
+  background: var(--ds-surface-sunken);
+}
+
+.ds-onair.is-quiet .ds-onair-dot {
+  background: var(--ds-muted);
+  animation: none;
+}
+
+.ds-onair.is-alarm {
+  background: var(--ds-alarm-soft);
+  color: var(--ds-alarm);
+}
+
+.ds-onair em {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.ds-onair-dot,
+.ds-livevalue-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--ds-r-round);
+  background: currentColor;
+  animation: ds-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes ds-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ds-livevalue {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ds-positive);
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-livevalue-dot {
+  align-self: center;
+}
+
+.ds-ago {
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ds-ago.is-now {
+  color: var(--ds-positive);
+}
+
+.ds-ago.is-never {
+  color: var(--ds-miss);
+}
+
+/* Whop's move: the nav carries live state, so nobody has to navigate to
+   discover that something is interrupting their fleet. */
+.ds-nav-live {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--ds-r-round);
+  background: var(--ds-alarm);
+  animation: ds-breathe 2.4s ease-in-out infinite;
+}
+
+/* Not being told is not the same as nothing happening. */
+.ds-detached {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ds-miss);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+}
+
+/* ── Reach ────────────────────────────────────────────────────────────────
+ *
+ * Every reference shows who a message reaches. For an evacuation the question
+ * is the other one — who does it *miss* — because under-reach is the failure
+ * and over-reach is merely noise. So both are stated, and the miss is not an
+ * error colour, because missing somebody may well be intended.
+ */
+
+.ds-reach {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+}
+
+.ds-reach-count {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 1.375rem;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-reach-count small {
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-regular);
+  letter-spacing: var(--ds-track-body);
+  color: var(--ds-muted);
+}
+
+.ds-reach-bar {
+  height: 8px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
+  overflow: hidden;
+}
+
+.ds-reach-bar span {
+  display: block;
+  height: 100%;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-positive);
+  transition: width var(--ds-dur-slow) var(--ds-ease-enter);
+}
+
+.ds-reach-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ds-reach-miss {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ds-rule);
+}
+
+.ds-reach-miss > strong {
+  color: var(--ds-miss);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+}
+
+/* ── Surfaces ─────────────────────────────────────────────────────────── */
+
+/* A panel is a white card resting on the field. Its heading is a label. */
+.ds-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+  padding: 18px 20px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+}
+
+.ds-panel > h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ds-faint);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  text-transform: none;
+}
+
+.ds-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+}
+
+.ds-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--ds-space-3);
+}
+
+.ds-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+}
+
+/* A screen, a channel, a broadcast — one row shape, live state on the left.
+   On air is the one row that keeps an edge, because that edge is information. */
+.ds-unit {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-3);
+  padding: 12px 14px;
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+  transition: box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-unit.is-onair {
+  box-shadow: var(--ds-material-onair);
+}
+
+.ds-unit-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ds-unit-copy > strong {
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-weight-medium);
+}
+
+.ds-unit-copy > span {
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+}
+
+.ds-title-input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--ds-fs-title);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-title);
+  padding: 4px 2px;
+}
+
+.ds-title-input:focus {
+  outline: none;
+}

@@ -48,12 +48,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-ctrl-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("ctrl-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -96,7 +94,7 @@ fn planes(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::contro
     frame
         .invalidations
         .iter()
-        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+        .filter(|entry| entry.world.as_str() == issues::contract::product_world())
         .flat_map(|entry| &entry.planes)
 }
 
@@ -142,7 +140,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
     let space = lait::orbital::discover_space(&home).single().unwrap();
     let address = OrbitAddress::for_store(&home, space.clone());
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net);
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
 
@@ -310,7 +308,7 @@ fn stale_since_after_restart_yields_reset() {
     let net = MemNet::new();
     let home = temp_home("stale");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -391,7 +389,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
     let net = MemNet::new();
     let home = temp_home("dirty");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -496,6 +494,31 @@ fn doorbell_names_the_dirty_project_and_doc() {
             planes(&ring).any(|p| p.plane == "specs"),
             "a spec write must ring its own plane, got {ring:?}"
         );
+        // And only its own plane, scoped to its project. A Spec revision is
+        // posted under its kind, and until the translation named the kinds it
+        // fell through to "something changed that I cannot name" -- which
+        // rang all fifteen planes, unscoped, on every Spec edit. The register
+        // that was meant to be the only thing refreshed was one of fifteen.
+        assert!(
+            planes(&ring).all(|p| p.plane == "specs"),
+            "a spec write rings no plane but its own, got {ring:?}"
+        );
+        let scopes = planes(&ring)
+            .map(|p| p.scope.as_ref().map(|scope| scope.id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            scopes.len() == 1 && !scopes.contains(&None),
+            "a spec write names its one project, got {ring:?}"
+        );
+        // And it moves no Issue: a project whose Spec changed is not a
+        // project whose Issues did, and saying so refetched every board.
+        assert!(
+            ring.invalidations
+                .iter()
+                .filter(|entry| entry.world.as_str() == issues::contract::product_world())
+                .all(|entry| entry.dirty.is_empty()),
+            "a spec write dirties no Issue, got {ring:?}"
+        );
         // Auxiliary immutable/head Bodies are deliberately not projected as
         // public rows. Their presence may conservatively fan out the bounded
         // plane vocabulary, but the required semantic plane must never be
@@ -521,7 +544,7 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
     let net = MemNet::new();
     let home = temp_home("fanout");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
@@ -578,7 +601,7 @@ fn validate_then_commit_rings_no_doorbell() {
     let net = MemNet::new();
     let home = temp_home("reject");
     crate::world_fixture::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
-    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let handle = spawn_daemon(home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);

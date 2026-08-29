@@ -3,6 +3,7 @@
 
 pub mod installed;
 pub mod lifecycle;
+pub mod local;
 
 #[cfg(test)]
 mod test;

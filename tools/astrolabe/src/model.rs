@@ -179,6 +179,9 @@ pub struct App {
     transitions: Option<ConnectionHistoryPage>,
     /// The Space somebody is administering, as it last answered.
     space: Option<SpaceView>,
+    /// What each display surface can show, per Orbit, as last listed. Keyed
+    /// by (orbit, world, surface); a fresh listing replaces the last.
+    display_choices: BTreeMap<(String, String, String), lait::control::DisplayChoicesView>,
     /// The identity's address book. `None` until the first successful read.
     book: Option<BookSnapshot>,
     /// This identity's correspondence, once read. `None` before the first read —
@@ -251,6 +254,10 @@ pub enum StaleReason {
 pub struct Failure {
     pub what: String,
     pub error: ClientError,
+    /// The action this refused, when it was one. A surface that asked can
+    /// answer beside its own control; the next success of the same key
+    /// retires it, so a refusal never outlives what it was about.
+    pub key: Option<String>,
 }
 
 /// Something that worked.
@@ -304,13 +311,16 @@ impl App {
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
                 self.in_flight.remove(&key);
+                // What this key last refused is answered by what it just did.
+                self.failures
+                    .retain(|failure| failure.key.as_deref() != Some(key.as_str()));
                 self.record(outcome);
             }
             Update::Failed { key, what, error } => {
-                if let Some(key) = key {
-                    self.in_flight.remove(&key);
+                if let Some(key) = &key {
+                    self.in_flight.remove(key);
                 }
-                self.fail(what, error);
+                self.fail_keyed(key, what, error);
             }
         }
     }
@@ -350,6 +360,10 @@ impl App {
                     Read::Events(page) => self.events = Some(*page),
                     Read::Transitions(page) => self.transitions = Some(*page),
                     Read::Space(view) => self.space = Some(*view),
+                    Read::DisplayChoices { orbit, view } => {
+                        self.display_choices
+                            .insert((orbit, view.world.clone(), view.surface.clone()), *view);
+                    }
                 }
                 return;
             }
@@ -492,6 +506,18 @@ impl App {
         self.display.as_ref()
     }
 
+    /// Every listing taken so far: `(orbit, world, surface)` and its answer.
+    pub fn display_choices(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &(String, String, String),
+            &lait::control::DisplayChoicesView,
+        ),
+    > {
+        self.display_choices.iter()
+    }
+
     pub fn presentation(&self) -> Option<&Presentation> {
         self.presentation.as_ref()
     }
@@ -602,9 +628,14 @@ impl App {
     }
 
     pub fn fail(&mut self, what: impl Into<String>, error: ClientError) {
+        self.fail_keyed(None, what, error);
+    }
+
+    pub fn fail_keyed(&mut self, key: Option<String>, what: impl Into<String>, error: ClientError) {
         self.failures.push_front(Failure {
             what: what.into(),
             error,
+            key,
         });
         self.failures.truncate(FAILURE_CAPACITY);
     }

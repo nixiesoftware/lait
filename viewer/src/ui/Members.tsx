@@ -18,7 +18,8 @@ import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
 import { Combobox } from "./Picker";
 import { Button, IconButton, TextInput } from "@astryxdesign/core";
-import { EmptyState, InlineError, LoadingState } from "./AppState";
+import { ApplicationState, EmptyState, InlineError, LoadingState } from "./AppState";
+import { Badge } from "./primitives";
 import { SettingsPageHeader } from "./settingsLayout";
 
 /**
@@ -44,9 +45,18 @@ export function Members({
   embedded?: boolean;
 }) {
   const [members, setMembers] = useState<MemberDto[] | null>(null);
+  /**
+   * Why there is no roster, when there is none.
+   *
+   * `members === null` meant "not loaded", and the catch below returned without
+   * setting it — so a failed read drew "Loading members" forever, a spinner
+   * promising progress that was never coming.
+   */
+  const [failure, setFailure] = useState<string | null>(null);
   const [log, setLog] = useState<MemberLogEntry[]>([]);
   const [logError, setLogError] = useState("");
   const [ticket, setTicket] = useState<string | null>(null);
+  const [inviting, setInviting] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
@@ -54,8 +64,13 @@ export function Members({
     try {
       const m = await rpc(spaceId, { cmd: "members" });
       if (m.kind === "members") setMembers(m.members);
+      setFailure(null);
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      // The pane owns it when there is no roster to keep showing; otherwise the
+      // roster stays and the transient notice says the refresh did not land.
+      setFailure(message);
+      if (members) onError(message);
       return;
     }
     try {
@@ -104,194 +119,243 @@ export function Members({
   };
 
   if (!members) {
+    if (failure) {
+      return (
+        <ApplicationState
+          kind="retry"
+          art="unavailable"
+          title="Members are unavailable"
+          body={failure}
+          action={<Button onClick={() => void load()} label="Retry" variant="ghost" size="sm" />}
+        />
+      );
+    }
     return <LoadingState title="Loading members" body="Verifying this space’s signed access graph." />;
   }
 
+  const people = shownMembers.filter((m) => !m.sponsor);
+  const agents = shownMembers.filter((m) => Boolean(m.sponsor));
+  const grid = "grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_10rem_4.5rem] items-center gap-4";
+
   return (
     <div className={embedded ? undefined : "min-h-0 flex-1 overflow-y-auto"}>
-      <div className={embedded ? "flex flex-col gap-6" : "mx-auto flex max-w-2xl flex-col gap-6 p-6"}>
+      <div className={embedded ? "flex flex-col gap-6" : "mx-auto flex max-w-4xl flex-col gap-6 p-6"}>
         <SettingsPageHeader
-          title={`Members · ${members.length}`}
+          title="Members"
           description="People and agents with verified access to this encrypted space. Names are private labels on this device."
           className="mb-0"
-        />
-        <div className="max-w-md">
-          <TextInput
-            label="Filter members"
-            isLabelHidden
-            value={query}
-            onChange={setQuery}
-            placeholder="Search by name or identity…"
-            size="sm"
-            width="100%"
-          />
-        </div>
-        <section>
-          {members.length === 0 ? (
-            <EmptyState title="No verified members" body="The local replica does not currently contain a readable membership graph." />
-          ) : shownMembers.length === 0 ? (
-            <div className="text-mute flex min-h-40 items-center justify-center text-sm">
-              Nothing matches “{query}”.
-            </div>
-          ) : <ul className="border-line divide-line divide-y rounded-surface border">
-            {shownMembers.map((m) => (
-              <li key={m.key} className="flex items-center gap-3 p-3">
-                <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-avatar-lg" />
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-2">
-                    <span className="font-medium">
-                      {m.alias || <span className="text-mute italic">unnamed</span>}
-                    </span>
-                    {m.me && <span className="text-mute text-2xs">you</span>}
-                    {m.role === "admin" && (
-                      <span
-                        className="text-accent flex items-center gap-1 text-2xs"
-                        title="From the signed ACL graph"
-                      >
-                        <ShieldCheck className="size-icon-xs" />
-                        admin
-                      </span>
-                    )}
-                    {m.role !== "admin" && <span className="text-mute text-2xs">{roleLabel(m.role)}</span>}
-                    {m.sponsor && (
-                      <span
-                        className="text-mute flex items-center gap-1 text-2xs"
-                        title={`Sponsored agent — standing dies with ${sponsorName(m, members)}`}
-                      >
-                        <Bot className="size-icon-xs" />
-                        sponsored · {sponsorName(m, members)}
-                      </span>
-                    )}
-                  </span>
-                  <code className="text-mute block truncate text-xs" title={m.did ?? m.key}>
-                    {m.did ?? m.key}
-                  </code>
-                </span>
-                {isAdmin && !readOnly && (
-                  <span className="flex shrink-0 gap-1">
-                    <IconButton
-                      label="Name in your address book"
-                      isDisabled={busy === m.key}
-                      onClick={() =>
-                        void act(m.key, async () => {
-                          const name = await ask.prompt({
-                            title: "Name in your address book",
-                            body: "Authors a Card in your identity's book — private to you, never synced. Manage Cards in the address book.",
-                            label: "Name",
-                            defaultValue: m.alias,
-                          });
-                          if (name === null || !name.trim()) return;
-                          // The book is the one namer: find the Card this
-                          // member's handle is on, or author one and link it.
-                          const who = await rpc(spaceId, { cmd: "whoami" });
-                          if (who.kind !== "whoami" || !who.space) return;
-                          const handle = `actor:${who.space}:${m.key}`;
-                          const found = await hostRpc({ cmd: "book_lookup", handle });
-                          const existing =
-                            found.kind === "book" ? found.cards[0]?.card : undefined;
-                          if (existing) {
-                            await hostRpc({ cmd: "book_put", card: existing, name: name.trim() });
-                          } else {
-                            const put = await hostRpc({ cmd: "book_put", name: name.trim() });
-                            const card =
-                              put.kind === "book"
-                                ? put.cards.find(
-                                    (c) => c.name === name.trim() && c.handles.length === 0,
-                                  )?.card
-                                : undefined;
-                            if (card) await hostRpc({ cmd: "book_link", card, handle });
-                          }
-                        })
-                      }
-                      variant="ghost"
-                      size="sm"
-                      tooltip="Name in your address book"
-                      icon={<Pencil className="size-icon-sm" />}
-                    />
-                    {!m.me && (
-                      <IconButton
-                        label="Remove (rotates the space key)"
-                        tooltip="Remove (rotates the space key)"
-                        variant="danger"
-                        size="sm"
-                        icon={<X className="size-icon-sm" />}
-                        isDisabled={busy === m.key}
-                        onClick={() =>
-                          void act(m.key, async () => {
-                            try {
-                              await rpc(spaceId, { cmd: "member_remove", who: m.key });
-                            } catch (e) {
-                              // The engine hands back its own question — removing
-                              // rotates the space key, and it says so.
-                              if (e instanceof ConfirmRequired) {
-                                if (
-                                  await ask.confirm({
-                                    title: `Remove ${memberName(m.key, m)} from this space?`,
-                                    body: `${e.question} They will lose future access and the space encryption key will rotate. This does not erase copies they already received.`,
-                                    confirmText: "Remove",
-                                    danger: true,
-                                  })
-                                ) {
-                                  await rpc(
-                                    spaceId,
-                                    { cmd: "member_remove", who: m.key },
-                                    { confirm: true },
-                                  );
-                                }
-                                return;
-                              }
-                              throw e;
-                            }
-                          })
-                        }
-                      />
-                    )}
-                  </span>
+          actions={
+            !readOnly ? (
+              <>
+                <Button
+                  isDisabled={busy === SPONSOR}
+                  onClick={() =>
+                    void act(SPONSOR, async () => {
+                      const name = await ask.prompt({
+                        title: "Sponsor an agent",
+                        body: "An agent is a member with its own key. Sponsoring one mints that key on this machine and gives it write access, so its work is signed as itself and never as you. Its standing ends when yours does. This is the local name its identity is kept under, and the one an MCP client passes as LAIT_AGENT.",
+                        label: "Name",
+                        defaultValue: "claude",
+                      });
+                      if (!name?.trim()) return;
+                      await rpc(spaceId, { cmd: "agent_provision", name: name.trim() });
+                    })
+                  }
+                  icon={<Bot className="size-icon-sm" />}
+                  label="Sponsor an agent"
+                  variant="secondary"
+                  size="sm"
+                />
+                {isAdmin && (
+                  <Button
+                    label="Invite"
+                    variant="primary"
+                    size="sm"
+                    icon={<UserPlus className="size-icon-sm" />}
+                    aria-expanded={inviting}
+                    onClick={() => setInviting((open) => !open)}
+                  />
                 )}
-              </li>
-            ))}
-          </ul>}
-        </section>
+              </>
+            ) : undefined
+          }
+        />
 
-        {/* Any member may sponsor — sponsorship is not an admin power, and the
-            engine refuses it only for someone whose own admission has not
-            landed. `install_mcp` writes "sponsor it once from the members view"
-            into an agent's config file, so this is the view it names. */}
-        {!readOnly && (
-          <section>
-            <h2 className="text-base font-semibold">
-              Agents
-            </h2>
-            <p className="text-mute mt-0.5 mb-3 text-sm">
-              An agent is a member with its own key. Sponsoring one here mints that key on this
-              machine and gives it write access, so its work is signed as itself and never as you.
-              Its standing ends when yours does.
-            </p>
-            <Button
-              isDisabled={busy === SPONSOR}
-              onClick={() =>
-                void act(SPONSOR, async () => {
-                  const name = await ask.prompt({
-                    title: "Sponsor an agent",
-                    body: "The local name its identity is kept under, and the one an MCP client passes as LAIT_AGENT.",
-                    label: "Name",
-                    defaultValue: "claude",
-                  });
-                  if (!name?.trim()) return;
-                  await rpc(spaceId, { cmd: "agent_provision", name: name.trim() });
-                })
-              }
-              icon={<Bot className="size-icon-sm" />}
-              label="Sponsor an agent"
-              variant="ghost"
-              size="sm"
-            />
-          </section>
-        )}
-
-        {isAdmin && !readOnly && (
+        {isAdmin && !readOnly && inviting && (
           <Invite spaceId={spaceId} ticket={ticket} setTicket={setTicket} onError={onError} />
         )}
+
+        {members.length > 0 && (
+          <div className="flex items-center gap-3">
+            <div className="w-full max-w-xs">
+              <TextInput
+                label="Filter members"
+                isLabelHidden
+                value={query}
+                onChange={setQuery}
+                placeholder="Search by name or identity…"
+                size="sm"
+                width="100%"
+              />
+            </div>
+            <span className="text-mute ml-auto text-xs tabular-nums">
+              {members.length} {members.length === 1 ? "member" : "members"}
+            </span>
+          </div>
+        )}
+
+        <section>
+          {members.length === 0 ? (
+            <EmptyState art="people" title="Members" body="People and agents with verified access to this space appear here." />
+          ) : (
+            <div className="border-line overflow-hidden rounded-surface border">
+              <div className={`${grid} text-mute border-line border-b px-3 py-2 text-2xs`}>
+                <span>Name</span>
+                <span>Identity</span>
+                <span>Role</span>
+                <span aria-hidden />
+              </div>
+              {shownMembers.length === 0 && (
+                <p className="text-mute px-3 py-6 text-center text-sm">Nothing matches “{query}”.</p>
+              )}
+              {(
+                [
+                  ["People", people],
+                  ["Agents", agents],
+                ] as const
+              )
+                .filter(([, rows]) => rows.length > 0)
+                .map(([heading, rows]) => (
+                  <div key={heading}>
+                    <div className="bg-sunken text-mute flex items-center gap-2 px-3 py-1.5 text-2xs">
+                      <span className="font-semibold tracking-wider uppercase">{heading}</span>
+                      <span className="tabular-nums">{rows.length}</span>
+                    </div>
+                    <ul className="divide-line divide-y">
+                      {rows.map((m) => (
+                        <li key={m.key} className={`${grid} group/member hover:bg-hover min-h-ctl-xl px-3 py-2`}>
+                          <span className="flex min-w-0 items-center gap-2.5">
+                            <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-avatar-lg" />
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-medium">
+                                {m.alias || <span className="text-mute italic">unnamed</span>}
+                                {m.me && <span className="text-mute ml-1.5 text-2xs font-normal">you</span>}
+                              </span>
+                              <span className="text-mute block truncate text-xs">
+                                {m.sponsor
+                                  ? `Sponsored by ${sponsorName(m, members)}`
+                                  : m.me
+                                    ? "This device"
+                                    : "Member"}
+                              </span>
+                            </span>
+                          </span>
+                          <code className="text-mute truncate font-mono text-xs" title={m.did ?? m.key}>
+                            {m.did ?? m.key}
+                          </code>
+                          <span>
+                            {m.role === "admin" ? (
+                              <Badge tone="accent" className="rounded-mark border-0">
+                                <ShieldCheck className="size-icon-xs" />
+                                Admin
+                              </Badge>
+                            ) : (
+                              <Badge tone="neutral" className="rounded-mark border-0">
+                                {roleLabel(m.role)}
+                              </Badge>
+                            )}
+                          </span>
+                          <span className="flex justify-end gap-0.5 opacity-0 group-hover/member:opacity-100 focus-within:opacity-100">
+                            {isAdmin && !readOnly && (
+                              <>
+                                <IconButton
+                                  label="Name in your address book"
+                                  isDisabled={busy === m.key}
+                                  onClick={() =>
+                                    void act(m.key, async () => {
+                                      const name = await ask.prompt({
+                                        title: "Name in your address book",
+                                        body: "Authors a Card in your identity's book — private to you, never synced. Manage Cards in the address book.",
+                                        label: "Name",
+                                        defaultValue: m.alias,
+                                      });
+                                      if (name === null || !name.trim()) return;
+                                      // The book is the one namer: find the Card this
+                                      // member's handle is on, or author one and link it.
+                                      const who = await rpc(spaceId, { cmd: "whoami" });
+                                      if (who.kind !== "whoami" || !who.space) return;
+                                      const handle = `actor:${who.space}:${m.key}`;
+                                      const found = await hostRpc({ cmd: "book_lookup", handle });
+                                      const existing =
+                                        found.kind === "book" ? found.cards[0]?.card : undefined;
+                                      if (existing) {
+                                        await hostRpc({ cmd: "book_put", card: existing, name: name.trim() });
+                                      } else {
+                                        const put = await hostRpc({ cmd: "book_put", name: name.trim() });
+                                        const card =
+                                          put.kind === "book"
+                                            ? put.cards.find(
+                                                (c) => c.name === name.trim() && c.handles.length === 0,
+                                              )?.card
+                                            : undefined;
+                                        if (card) await hostRpc({ cmd: "book_link", card, handle });
+                                      }
+                                    })
+                                  }
+                                  variant="ghost"
+                                  size="sm"
+                                  tooltip="Name in your address book"
+                                  icon={<Pencil className="size-icon-sm" />}
+                                />
+                                {!m.me && (
+                                  <IconButton
+                                    label="Remove (rotates the space key)"
+                                    tooltip="Remove (rotates the space key)"
+                                    variant="ghost"
+                                    size="sm"
+                                    icon={<X className="size-icon-sm" />}
+                                    isDisabled={busy === m.key}
+                                    onClick={() =>
+                                      void act(m.key, async () => {
+                                        try {
+                                          await rpc(spaceId, { cmd: "member_remove", who: m.key });
+                                        } catch (e) {
+                                          // The engine hands back its own question — removing
+                                          // rotates the space key, and it says so.
+                                          if (e instanceof ConfirmRequired) {
+                                            if (
+                                              await ask.confirm({
+                                                title: `Remove ${memberName(m.key, m)} from this space?`,
+                                                body: `${e.question} They will lose future access and the space encryption key will rotate. This does not erase copies they already received.`,
+                                                confirmText: "Remove",
+                                                danger: true,
+                                              })
+                                            ) {
+                                              await rpc(
+                                                spaceId,
+                                                { cmd: "member_remove", who: m.key },
+                                                { confirm: true },
+                                              );
+                                            }
+                                            return;
+                                          }
+                                          throw e;
+                                        }
+                                      })
+                                    }
+                                  />
+                                )}
+                              </>
+                            )}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+            </div>
+          )}
+        </section>
 
         {logError && <InlineError message={logError} onRetry={() => void load()} />}
         {log.length > 0 && <MemberLog entries={log} members={members} />}
@@ -301,7 +365,12 @@ export function Members({
 }
 
 function roleLabel(role: string): string {
-  return ({ viewer: "Viewer · read only", contributor: "Contributor · can edit", member: "Member · can edit", administrator: "Administrator · full control" } as Record<string, string>)[role] ?? role;
+  return (
+    { viewer: "Viewer", contributor: "Contributor", member: "Member", administrator: "Admin" } as Record<
+      string,
+      string
+    >
+  )[role] ?? role;
 }
 
 /** The display name of an agent's sponsor, resolved through the same local
@@ -497,7 +566,6 @@ function Invite({
               icon={<UserPlus className="size-icon-sm" />}
               label="Create invite link"
               variant="secondary"
-              elevation="low"
               size="md"
             />
           </>
@@ -523,7 +591,6 @@ function Invite({
                 <div className="flex gap-2">
                   <Button
                     variant="secondary"
-                    elevation="low"
                     size="sm"
                     onClick={() => {
                       void navigator.clipboard.writeText(link).then(() => {

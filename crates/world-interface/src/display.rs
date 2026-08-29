@@ -215,6 +215,31 @@ impl DisplayRequest {
 
 pub type DisplayPrepare = fn(&DisplayRequest) -> Result<ClientInvocation, Failure>;
 pub type DisplayCanonicalizeInput = fn(Value) -> Result<CanonicalDisplayInput, Failure>;
+
+/// One thing a surface can be pointed at, as the World names it.
+///
+/// `id` is what the surface's input takes — a Signage screen id, an Issues
+/// project key — and `title` is what a person picks it by. A surface that
+/// lists these lets a controller offer a choice instead of asking for an id
+/// to be typed; a surface that does not is asked for the id, as before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayChoice {
+    pub id: String,
+    pub title: String,
+}
+
+/// The read-only World query that lists a surface's choices, and the reading
+/// of its answer. Two halves for the same reason `prepare` and `project` are:
+/// the coordinator runs the query under its own query-only host, so a surface
+/// never holds the reach to run one itself.
+pub type DisplayChoicesPrepare = fn(&DisplaySurfaceId) -> Result<ClientInvocation, Failure>;
+pub type DisplayChoicesProject = fn(Value) -> Result<Vec<DisplayChoice>, Failure>;
+
+#[derive(Clone, Copy)]
+pub struct DisplayChoices {
+    pub prepare: DisplayChoicesPrepare,
+    pub project: DisplayChoicesProject,
+}
 pub type DisplayProjectFuture<'a> =
     Pin<Box<dyn Future<Output = Result<DisplayProjection, Failure>> + Send + 'a>>;
 
@@ -237,6 +262,18 @@ pub trait DisplayAdapter: Send + Sync {
     fn prepare(&self, request: &DisplayRequest) -> Result<ClientInvocation, Failure>;
     fn project<'a>(&'a self, value: Value, request: &'a DisplayRequest)
         -> DisplayProjectFuture<'a>;
+    /// The query that lists what this surface can show, or `None` when the
+    /// surface offers no list — a real answer, distinct from a query that
+    /// could not be prepared.
+    fn choices_prepare(
+        &self,
+        surface: &DisplaySurfaceId,
+    ) -> Result<Option<ClientInvocation>, Failure>;
+    fn choices_project(
+        &self,
+        surface: &DisplaySurfaceId,
+        value: Value,
+    ) -> Result<Vec<DisplayChoice>, Failure>;
 }
 
 #[derive(Clone)]
@@ -245,6 +282,7 @@ enum DisplayBackend {
         canonicalize_input: DisplayCanonicalizeInput,
         prepare: DisplayPrepare,
         renderer: Arc<dyn DisplayRenderer>,
+        choices: Option<DisplayChoices>,
     },
     Remote(Arc<dyn DisplayAdapter>),
 }
@@ -268,8 +306,20 @@ impl DisplaySurface {
                 canonicalize_input,
                 prepare,
                 renderer,
+                choices: None,
             },
         }
+    }
+
+    /// Let a local surface list what it can show. A remote surface's list
+    /// comes from its own runner, so this is a no-op there rather than a
+    /// second answer disagreeing with the first.
+    #[must_use]
+    pub fn with_choices(mut self, listing: DisplayChoices) -> Self {
+        if let DisplayBackend::Local { choices, .. } = &mut self.backend {
+            *choices = Some(listing);
+        }
+        self
     }
 
     pub fn remote(descriptor: DisplaySurfaceDescriptor, adapter: Arc<dyn DisplayAdapter>) -> Self {
@@ -305,6 +355,28 @@ impl DisplaySurface {
         match &self.backend {
             DisplayBackend::Local { renderer, .. } => renderer.project(value, request),
             DisplayBackend::Remote(adapter) => adapter.project(value, request),
+        }
+    }
+
+    /// The read-only query listing what this surface can show; `None` when it
+    /// offers no list.
+    pub fn choices_prepare(&self) -> Result<Option<ClientInvocation>, Failure> {
+        match &self.backend {
+            DisplayBackend::Local { choices, .. } => choices
+                .map(|listing| (listing.prepare)(&self.descriptor.id))
+                .transpose(),
+            DisplayBackend::Remote(adapter) => adapter.choices_prepare(&self.descriptor.id),
+        }
+    }
+
+    /// The answer to `choices_prepare`, read as choices.
+    pub fn choices_project(&self, value: Value) -> Result<Vec<DisplayChoice>, Failure> {
+        match &self.backend {
+            DisplayBackend::Local { choices, .. } => match choices {
+                Some(listing) => (listing.project)(value),
+                None => Err(Failure::new("this display surface lists no choices")),
+            },
+            DisplayBackend::Remote(adapter) => adapter.choices_project(&self.descriptor.id, value),
         }
     }
 }
@@ -364,6 +436,20 @@ impl DisplayProjection {
                     staged = staged.checked_add(frame.bytes.len()).ok_or_else(|| {
                         Failure::new("rendered display assets exceed their bound")
                     })?;
+                }
+                RenderedScene::StoredFrame(stored) => {
+                    // The bytes are bounded where they are fetched; the record
+                    // is bounded here.
+                    if !descriptor.outputs.contains(&DisplayOutputKind::Frame)
+                        || stored.width == 0
+                        || stored.height == 0
+                        || stored.width > MAX_STORED_FRAME_SIDE
+                        || stored.height > MAX_STORED_FRAME_SIDE
+                    {
+                        return Err(Failure::new(
+                            "rendered display stored frame violates its surface contract",
+                        ));
+                    }
                 }
                 RenderedScene::Media(media) => {
                     if !descriptor.outputs.contains(&DisplayOutputKind::Media) {
@@ -446,7 +532,24 @@ pub enum DisplayPartialReason {
 pub enum RenderedScene {
     Frame(RenderedFrame),
     Media(RenderedMedia),
+    /// A still image whose bytes live in the content plane. The World has
+    /// the record — content id, type, size — and not the bytes, so it names
+    /// them here and the coordinator fetches and serves them as a frame at
+    /// the image's own size. A World that rasterises draws a `Frame`.
+    StoredFrame(StoredFrame),
     Blank(BlankReason),
+}
+
+/// The longest side a stored still may declare. A screen is drawn at its own
+/// size; a still this large is a mistake, not a picture.
+pub const MAX_STORED_FRAME_SIDE: u32 = 8_192;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFrame {
+    pub content: replica::content::ContentRef,
+    pub media_type: FrameMediaType,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

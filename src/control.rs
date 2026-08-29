@@ -146,6 +146,14 @@ impl Endpoint {
 ///
 /// v15: native World update consent/progress is daemon-owned and durable;
 /// Busy/Capacity are typed so a client never guesses whether retry is safe.
+///
+/// Additive within v15 — an installed World declares `lait.control >=15, <16`,
+/// so a change a v15 World can still speak must not move this number: an
+/// assignment says why it exists. `AssignmentGrant` may carry the role
+/// reference its expansion came from, `AssignmentList` rows may carry an
+/// `origin`, and `AssignmentRevoke` accepts `grant_ids` — the set a role
+/// expanded into, revoked all-or-nothing — beside the single `grant_id` a
+/// v15 World still sends.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 15;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
@@ -378,6 +386,12 @@ pub struct DisplayCoordinatorView {
     /// an alarm about a coordinator nobody has examined.
     #[serde(default)]
     pub identifier_custody: Option<DisplayIdentifierCustodyView>,
+    /// Codes minted for televisions to enter, not yet spent or expired.
+    ///
+    /// Additive and optional, per `docs/COMPATIBILITY.md`: an older daemon
+    /// mints none and reports none, which is the same fact as an empty list.
+    #[serde(default)]
+    pub pending_rendezvous: Vec<DisplayRendezvousView>,
 }
 
 /// One rendered surface, for a member screen to present.
@@ -466,6 +480,75 @@ pub struct DisplaySurfaceView {
     pub outputs: Vec<String>,
 }
 
+/// One thing a surface can show, as the World names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayChoiceView {
+    /// What the surface's input takes: a screen id, a project key.
+    pub id: String,
+    pub title: String,
+}
+
+/// The answer to [`Request::DisplaySurfaceChoices`].
+///
+/// `choices` is `None` when the list could not be taken, and `unavailable`
+/// says why — a runner that predates listing, a World that could not be
+/// asked. An empty list is a Space with nothing to show, which is a different
+/// fact from one that could not be asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayChoicesView {
+    pub world: String,
+    pub surface: String,
+    pub choices: Option<Vec<DisplayChoiceView>>,
+    pub unavailable: Option<String>,
+}
+
+/// One World's receivers: what it holds, what it may take, and the codes and
+/// word-pairings waiting. The input a receiver is pinned to travels here and
+/// nowhere else on this plane — it is the World's own and only the World can
+/// read it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldView {
+    pub site: Option<String>,
+    pub receivers: Vec<DisplayWorldReceiverView>,
+    pub codes: Vec<DisplayWorldCodeView>,
+    pub pairings: Vec<DisplayPairingView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldReceiverView {
+    pub device: String,
+    pub label: String,
+    pub platform: String,
+    pub build: String,
+    pub issued_at_unix_ms: u64,
+    pub health: Option<DisplayHealthView>,
+    /// `None` is a receiver nobody holds, which this World may take.
+    pub assignment: Option<DisplayWorldAssignmentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldAssignmentView {
+    pub assignment: String,
+    pub surface: String,
+    pub input: serde_json::Value,
+    pub sync: Option<DisplayAssignmentSyncView>,
+    pub expires_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldCodeView {
+    pub rendezvous: String,
+    pub code: String,
+    pub site: Option<String>,
+    pub label: String,
+    pub surface: String,
+    pub input: serde_json::Value,
+    pub state: DisplayRendezvousState,
+    pub device: Option<String>,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DisplayDeviceView {
     pub device: String,
@@ -490,6 +573,11 @@ pub struct DisplayHealthView {
     pub drift_residual_ms: i32,
     pub correction_events: u32,
     pub pipeline_unobservable: bool,
+    /// When this report arrived. The report says what the receiver saw; this
+    /// says how long ago, which is what tells a receiver that is gone from
+    /// one that last said `online`. `None` from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -555,6 +643,64 @@ pub struct DisplayAssignmentSyncSetting {
     pub static_delay_ms: i32,
 }
 
+/// What a rendezvous pins its television to once it has enrolled: the facts
+/// an assignment takes, without the device — which does not exist yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayRendezvousAssignmentSetting {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    #[schemars(with = "serde_json::Value")]
+    pub input: serde_json::Value,
+    pub theme: DisplayThemeSetting,
+    pub stale_after_ms: u32,
+    pub on_stale: DisplayStaleActionSetting,
+    #[serde(default)]
+    pub sync: Option<DisplayAssignmentSyncSetting>,
+    #[serde(default)]
+    pub expires_at_unix_ms: Option<u64>,
+}
+
+/// A code minted for a television to enter, as the controller sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayRendezvousView {
+    /// The rendezvous the code names on the wire.
+    pub rendezvous: String,
+    /// The code itself, grouped for reading: `XXXX-XXXX`.
+    pub code: String,
+    /// The site label a television resolves this coordinator by, when the
+    /// identity publishes one. `None` for a coordinator reachable only where
+    /// its bootstrap was copied.
+    pub site: Option<String>,
+    /// The name the receiver will enrol under.
+    pub label: String,
+    /// What the receiver is pinned to on enrollment, if anything. The
+    /// package input stays on the daemon, as it does for an assignment.
+    pub assignment: Option<DisplayRendezvousAssignmentView>,
+    /// Where the code is in its life; a spent code is listed a while longer
+    /// as the receiver it became.
+    pub state: DisplayRendezvousState,
+    /// The receiver the code enrolled, once one has entered it.
+    pub device: Option<String>,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayRendezvousState {
+    Waiting,
+    Connecting,
+    Connected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayRendezvousAssignmentView {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -567,6 +713,39 @@ pub enum Request {
     },
     DisplayPairingReject {
         pairing: String,
+    },
+    /// Mint a code a television enters to enrol without the two-screen
+    /// ceremony. The controller that mints it is the one that would have
+    /// compared six words; handing the television a secret from that
+    /// controller is the same trust decision, made once and in advance. A
+    /// code is spent by the first pairing that names it and dies on its own
+    /// in minutes.
+    ///
+    /// With an `assignment`, the receiver is pinned to it the moment it
+    /// enrols — "connect this screen to the lobby loop" as one act.
+    DisplayRendezvousMint {
+        label: String,
+        #[serde(default)]
+        assignment: Option<DisplayRendezvousAssignmentSetting>,
+    },
+    /// Withdraw a code before anything enters it.
+    DisplayRendezvousRevoke {
+        rendezvous: String,
+    },
+    /// What one surface can show in one Orbit — Signage screens, Issues
+    /// projects — asked of the World itself, read-only, so a controller can
+    /// offer a choice instead of asking for an id to be typed.
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
+    },
+    /// The receivers one World holds in one Orbit, with the input each is
+    /// pinned to — which only that World can read — and the receivers nobody
+    /// holds yet, which it may take. Another World's receivers are absent.
+    DisplayWorldReceivers {
+        world: String,
+        orbit: String,
     },
     /// Commit an exact package display pin for one enrolled receiver. The
     /// daemon derives Space, implementation and contract digests from its
@@ -867,11 +1046,23 @@ pub enum Request {
     AssignmentGrant {
         actor: String,
         assignments: Vec<AssignmentSpec>,
+        /// The package's opaque reference (hex) to the role definition these
+        /// assignments expand — recorded on every grant as its origin. Absent
+        /// leaves the origin unrecorded; the daemon never guesses one.
+        #[serde(default)]
+        definition_ref: Option<String>,
     },
-    /// Revoke one effective assignment by its grant id (64-hex).
+    /// Revoke effective assignments by grant id (64-hex each), as one
+    /// all-or-nothing authority batch — a role's expansion is revoked the way
+    /// it was granted, as a set. `grant_id` is the single-id spelling a v15
+    /// World sends; both are honoured, together, at least one required.
     AssignmentRevoke {
-        grant_id: String,
+        #[serde(default)]
+        grant_id: Option<String>,
+        #[serde(default)]
+        grant_ids: Vec<String>,
     },
+
     /// Activate the selected runner's reviewed implementation for one World
     /// (admin-authored ACL action; idempotent when already active).
     /// The activation is what receipts pin — a runner whose descriptor differs
@@ -1762,6 +1953,10 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::DisplayStatus
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
+        | Request::DisplayRendezvousMint { .. }
+        | Request::DisplayRendezvousRevoke { .. }
+        | Request::DisplaySurfaceChoices { .. }
+        | Request::DisplayWorldReceivers { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
@@ -1858,6 +2053,30 @@ pub fn representative_requests() -> Vec<Request> {
             label: s(),
         },
         Request::DisplayPairingReject { pairing: s() },
+        Request::DisplayRendezvousMint {
+            label: s(),
+            assignment: Some(DisplayRendezvousAssignmentSetting {
+                orbit: s(),
+                world: s(),
+                surface: s(),
+                input: serde_json::Value::Null,
+                theme: DisplayThemeSetting::Dark,
+                stale_after_ms: 0,
+                on_stale: DisplayStaleActionSetting::Blank,
+                sync: None,
+                expires_at_unix_ms: None,
+            }),
+        },
+        Request::DisplayRendezvousRevoke { rendezvous: s() },
+        Request::DisplaySurfaceChoices {
+            orbit: s(),
+            world: s(),
+            surface: s(),
+        },
+        Request::DisplayWorldReceivers {
+            world: s(),
+            orbit: s(),
+        },
         Request::DisplayAssignmentPut {
             device: s(),
             orbit: s(),
@@ -1888,8 +2107,12 @@ pub fn representative_requests() -> Vec<Request> {
         Request::AssignmentGrant {
             actor: s(),
             assignments: vec![],
+            definition_ref: None,
         },
-        Request::AssignmentRevoke { grant_id: s() },
+        Request::AssignmentRevoke {
+            grant_id: None,
+            grant_ids: vec![s()],
+        },
         Request::WorldActivate { world: s() },
         Request::Work {
             request: runtime::exec::WorkRequest::Inspect {
@@ -2293,6 +2516,16 @@ pub enum Response {
     Display(Box<DisplayCoordinatorView>),
     /// One rendered surface for a member screen to present.
     DisplayPresentation(Box<DisplayPresentationView>),
+    /// A code just minted for a television to enter.
+    DisplayRendezvous(Box<DisplayRendezvousView>),
+    /// What a surface can show, or why that could not be listed.
+    DisplayChoices(Box<DisplayChoicesView>),
+    /// One World's receivers, as [`Request::DisplayWorldReceivers`] answers.
+    DisplayWorldReceivers(Box<DisplayWorldView>),
+    /// A receiver just enrolled, by the act that enrolled it.
+    DisplayDevice {
+        device: String,
+    },
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,

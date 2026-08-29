@@ -36,7 +36,7 @@ const READER_SEED: [u8; 32] = [42u8; 32];
 
 /// A view whose default `authorize_mutation` builds a structurally-valid
 /// receipt — the permissive delegate for [`SeedAuthority`]'s allow path.
-struct PermissiveAuthority;
+pub(crate) struct PermissiveAuthority;
 
 impl AuthorityView for PermissiveAuthority {
     fn resolve(&self, _device: &DeviceId) -> Option<PrincipalResolution> {
@@ -103,7 +103,7 @@ fn reader() -> LocalIdentity {
     Runtime::identity_from_seed(&READER_SEED)
 }
 
-fn test_keys() -> Arc<dyn replica::body::BodyKeySource> {
+pub(crate) fn test_keys() -> Arc<dyn replica::body::BodyKeySource> {
     Arc::new(replica::body::StaticBodyKeys::new(
         mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
     ))
@@ -299,9 +299,9 @@ fn note_registration() -> (Descriptor, Arc<dyn World>) {
     (reg, Arc::new(world))
 }
 
-struct DescribedWorld {
-    descriptor: Descriptor,
-    inner: Arc<dyn World>,
+pub(crate) struct DescribedWorld {
+    pub(crate) descriptor: Descriptor,
+    pub(crate) inner: Arc<dyn World>,
 }
 
 impl World for DescribedWorld {
@@ -357,7 +357,7 @@ impl World for DescribedWorld {
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root() -> PathBuf {
+pub(crate) fn temp_root() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("lait-dispatch-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -411,7 +411,7 @@ fn exec_demand(capability: &str) -> Vec<u8> {
     .unwrap()
 }
 
-fn exec_schema(name: &str) -> crate::exec::SchemaRef {
+pub(crate) fn exec_schema(name: &str) -> crate::exec::SchemaRef {
     crate::exec::SchemaRef {
         name: SchemaId::parse(name).unwrap(),
         version: 1,
@@ -430,7 +430,7 @@ fn exec_limits() -> crate::exec::Limits {
     }
 }
 
-fn exec_spec() -> crate::exec::Spec {
+pub(crate) fn exec_spec() -> crate::exec::Spec {
     let payload = |name| crate::exec::PayloadSpec {
         schema: exec_schema(name),
         max_inline_bytes: 1_024,
@@ -461,7 +461,7 @@ fn exec_spec() -> crate::exec::Spec {
     }
 }
 
-struct ExecAtomicWorld {
+pub(crate) struct ExecAtomicWorld {
     id: WorldId,
     schemas: Vec<Schema>,
     specs: Vec<crate::exec::Spec>,
@@ -473,7 +473,7 @@ impl ExecAtomicWorld {
         Self::with_build(crate::exec::BuildId::from_bytes([0x32; 32]))
     }
 
-    fn with_build(build: crate::exec::BuildId) -> Self {
+    pub(crate) fn with_build(build: crate::exec::BuildId) -> Self {
         Self {
             id: WorldId::parse("com.example.exec-atomic").unwrap(),
             schemas: vec![Schema {
@@ -533,6 +533,14 @@ impl World for ExecAtomicWorld {
                 demand: exec_demand("request.write"),
             });
         }
+        // `to:<64hex>:...` directs the Start at one Station by key bytes.
+        let target = intent
+            .payload
+            .strip_prefix(b"to:")
+            .and_then(|rest| rest.get(..64))
+            .and_then(|hex| data_encoding::HEXLOWER.decode(hex).ok())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+            .map(mechanics::station::Key::from_key_bytes);
         let source = if let Some(rest) = intent.payload.strip_prefix(b"repeat:") {
             if rest.len() != 16 {
                 return Err(Rejection::InvalidRequest);
@@ -564,6 +572,7 @@ impl World for ExecAtomicWorld {
                 resources: Vec::new(),
                 limits: exec_limits(),
                 queries: Vec::new(),
+                target,
             })],
             operations: vec![(
                 self.product_body(),
@@ -846,7 +855,7 @@ fn invalid_start_rolls_back_the_companion_world_mutation() {
     assert!(projection.bytes.is_empty());
 }
 
-fn exec_signed_build(world: &WorldId) -> crate::exec::Build {
+pub(crate) fn exec_signed_build(world: &WorldId) -> crate::exec::Build {
     let spec = exec_spec();
     let seed = [0x61; 32];
     crate::exec::Build {
@@ -929,7 +938,7 @@ fn exec_package(
         .with_handler(handler)
 }
 
-fn echo_package(build: &crate::exec::Build) -> crate::exec::Package {
+pub(crate) fn echo_package(build: &crate::exec::Build) -> crate::exec::Package {
     exec_package(
         build,
         Arc::new(EchoHandler {
@@ -2601,6 +2610,7 @@ fn station_find_policy_can_only_tighten_a_query() {
         .create()
         .unwrap()
         .open(Activation {
+            consent: Default::default(),
             exec: Default::default(),
             find: crate::find::Policy {
                 bound: find_bound(1),
@@ -4787,6 +4797,7 @@ impl World for QueryExecWorld {
                 parent: declared.digest().unwrap(),
                 grant: declared,
             }],
+            target: None,
         };
         Ok(Effect {
             content_refs: Vec::new(),
@@ -4906,6 +4917,7 @@ impl crate::exec::Handler for SearchHandler {
                 parent: declared.digest().unwrap(),
                 grant: declared,
             }],
+            target: None,
         };
         context.start_child(child)?;
         Ok(crate::exec::Candidate {
@@ -5308,6 +5320,7 @@ impl World for CheckpointWorld {
                 resources: Vec::new(),
                 limits: checkpoint_spec().limits,
                 queries: Vec::new(),
+                target: None,
             })],
             operations: vec![(
                 self.marker(),
@@ -5811,6 +5824,7 @@ fn perform_pacing_is_an_activation_option_not_a_constant() {
         .create()
         .unwrap()
         .open(Activation {
+            consent: Default::default(),
             exec: crate::lifecycle::ExecPacing {
                 actions_per_pass: 2,
                 ..Default::default()
@@ -5887,6 +5901,7 @@ fn retention_station(
         .create()
         .unwrap()
         .open(Activation {
+            consent: Default::default(),
             exec: crate::lifecycle::ExecPacing {
                 retention_window: window,
                 ..Default::default()
@@ -6668,6 +6683,7 @@ mod subprocess_perform {
                         ..transform_spec().limits
                     },
                     queries: Vec::new(),
+                    target: None,
                 })],
                 operations: vec![(
                     self.marker(),

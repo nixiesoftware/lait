@@ -1,34 +1,15 @@
 import { createRootRoute, Outlet } from '@tanstack/react-router';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
-import { SidebarProvider } from '@/context/SidebarContext';
-import { ThemeProvider } from '@/context/ThemeContext';
-import { useState } from 'react';
+import { FocusProvider, ToastProvider, UndoProvider } from '@/ds';
 
 function RootComponent() {
-  const [queryClient] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: {
-          queries: {
-            staleTime: 2 * 60 * 1000,
-            gcTime: 5 * 60 * 1000,
-            retry: 1,
-            refetchOnWindowFocus: false,
-          },
-        },
-      }),
-  );
-
   return (
-    <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <SidebarProvider>
+    <ToastProvider>
+      <UndoProvider>
+        <FocusProvider>
           <Outlet />
-        </SidebarProvider>
-      </ThemeProvider>
-      <ReactQueryDevtools initialIsOpen={false} />
-    </QueryClientProvider>
+        </FocusProvider>
+      </UndoProvider>
+    </ToastProvider>
   );
 }
 

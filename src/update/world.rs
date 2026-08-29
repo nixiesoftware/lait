@@ -179,6 +179,44 @@ pub fn active_dir(worlds: &Path, world: &str) -> Option<PathBuf> {
     release_dir(worlds, world, &staged.version)
 }
 
+fn channel_path(worlds: &Path, world: &str) -> PathBuf {
+    world_root(worlds, world).join("channel")
+}
+
+/// The channel this World follows.
+///
+/// A World is published on its own channel pointer
+/// ([`pointer_url`]), so which stream it follows is a per-World fact even
+/// though the node has always answered it node-wide. `None` means this World
+/// has expressed no preference and follows the node's
+/// ([`crate::update::feed::Channel::current`]).
+pub fn channel(worlds: &Path, world: &str) -> Option<feed::Channel> {
+    let recorded = std::fs::read_to_string(channel_path(worlds, world)).ok()?;
+    feed::Channel::parse(&recorded)
+}
+
+/// The channel to actually ask, for one World: its own choice, else the
+/// node's.
+pub fn channel_for(worlds: &Path, world: &str) -> feed::Channel {
+    channel(worlds, world).unwrap_or_else(feed::Channel::current)
+}
+
+/// Record this World's channel, or clear it back to following the node's.
+pub fn follow(worlds: &Path, world: &str, channel: Option<feed::Channel>) -> Result<()> {
+    let path = channel_path(worlds, world);
+    let Some(channel) = channel else {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("clear the World channel"),
+        };
+    };
+    let parent = world_root(worlds, world);
+    std::fs::create_dir_all(&parent).context("create the World's state directory")?;
+    std::fs::write(&path, channel.as_str().as_bytes()).context("record the World channel")?;
+    Ok(())
+}
+
 fn standing_path(worlds: &Path, world: &str) -> PathBuf {
     world_root(worlds, world).join("standing.json")
 }
@@ -645,6 +683,30 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// A World is published on its own channel pointer, so which stream it
+    /// follows is its own fact — but only once it says so.
+    #[test]
+    fn a_world_follows_the_nodes_channel_until_it_chooses_one() {
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        assert!(channel(worlds.path(), "com.lait.issues").is_none());
+        follow(worlds.path(), "com.lait.issues", Some(feed::Channel::Test)).expect("follow test");
+        assert_eq!(
+            channel(worlds.path(), "com.lait.issues"),
+            Some(feed::Channel::Test)
+        );
+        follow(worlds.path(), "com.lait.issues", None).expect("follow the node again");
+        assert!(channel(worlds.path(), "com.lait.issues").is_none());
+    }
+
+    /// One World's choice says nothing about its neighbours.
+    #[test]
+    fn a_channel_choice_is_not_shared_between_worlds() {
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        follow(worlds.path(), "com.lait.issues", Some(feed::Channel::Test)).expect("follow test");
+        assert!(channel(worlds.path(), "com.lait.signage").is_none());
+    }
+
     use super::*;
     use crate::update::feed::Channel;
     use std::collections::BTreeMap;

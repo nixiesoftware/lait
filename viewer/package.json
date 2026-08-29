@@ -6,11 +6,8 @@
   "type": "module",
   "description": "The Issues World's keyboard-first web client, packaged in its independently shipped immutable release.",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "dev:vite": "vite",
     "build": "tsc -b && vite build",
     "check": "tsc -b --noEmit",
-    "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "tokens": "node tool/generate-tokens.mjs",

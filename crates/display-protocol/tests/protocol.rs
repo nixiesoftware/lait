@@ -8,8 +8,10 @@ use display_protocol::ids::{
     DisplayDeviceId, DisplayPairingId, DisplayProgramId, ProgramRevision, ProofKey, ReceiverNonce,
 };
 use display_protocol::pairing::{
-    authenticate_pairing_complete, confirmation_phrase, validate_bootstrap,
+    authenticate_pairing_complete, confirmation_phrase, group_rendezvous_code,
+    normalize_rendezvous_code, rendezvous_from_code, validate_bootstrap,
     validate_pairing_start_response, CoordinatorTrust, PairingStartResponse, ReceiverBootstrap,
+    RENDEZVOUS_CODE_ALPHABET, RENDEZVOUS_CODE_CHARS,
 };
 use display_protocol::program::{
     canonical_program_revision, validate_program, BlankReason, DisplayAsset, DisplayAssetMediaType,
@@ -451,6 +453,50 @@ fn pairing_completion_proof_changes_with_the_enrolled_device() {
 }
 
 #[test]
+fn a_rendezvous_code_is_read_the_way_a_person_types_it() {
+    // Case, spacing and the grouping hyphen are the operator's; the letters
+    // that look like digits fold onto them.
+    assert_eq!(
+        normalize_rendezvous_code(" 7k3q-oi1L ").unwrap(),
+        "7K3Q0111"
+    );
+    assert_eq!(group_rendezvous_code("7k3q0111").unwrap(), "7K3Q-0111");
+    assert_eq!(RENDEZVOUS_CODE_ALPHABET.len(), 32);
+    for bad in [
+        "7K3Q011",
+        "7K3Q01111",
+        "7K3Q-0U11",
+        "",
+        "7K3Q 0!11",
+        "7K3Q-0Ü1",
+    ] {
+        assert!(
+            matches!(
+                normalize_rendezvous_code(bad),
+                Err(Refusal::InvalidIdentifier(_))
+            ),
+            "{bad:?} is not a code"
+        );
+    }
+    // Every symbol of the alphabet is accepted as itself.
+    let all: String = RENDEZVOUS_CODE_ALPHABET
+        .iter()
+        .take(RENDEZVOUS_CODE_CHARS)
+        .map(|byte| char::from(*byte))
+        .collect();
+    assert_eq!(normalize_rendezvous_code(&all).unwrap(), all);
+}
+
+#[test]
+fn a_rendezvous_id_derives_from_the_code_and_nothing_else() {
+    let first = rendezvous_from_code("7K3Q-0111").unwrap();
+    // The same code however it was entered is the same rendezvous.
+    assert_eq!(rendezvous_from_code(" 7k3q oi1l ").unwrap(), first);
+    assert_ne!(rendezvous_from_code("7K3Q-0112").unwrap(), first);
+    assert_eq!(first.as_str().len(), 32);
+}
+
+#[test]
 fn confirmation_phrase_commits_profile_pairing_and_receiver_nonce() {
     let profile = CoordinatorProfile::parse(format!("prf_{}", repeated('6', 26))).unwrap();
     let pairing = DisplayPairingId::parse(repeated('7', 32)).unwrap();
@@ -595,5 +641,20 @@ fn language_neutral_fixture_matches_rust_transcripts_and_json() {
     assert_eq!(
         serde_json::to_value(words).unwrap(),
         phrase.get("words").unwrap().clone()
+    );
+
+    let code = fixture.get("rendezvous_code").unwrap();
+    let entered = code.get("entered").unwrap().as_str().unwrap();
+    assert_eq!(
+        normalize_rendezvous_code(entered).unwrap(),
+        code.get("normalized").unwrap().as_str().unwrap()
+    );
+    assert_eq!(
+        group_rendezvous_code(entered).unwrap(),
+        code.get("grouped").unwrap().as_str().unwrap()
+    );
+    assert_eq!(
+        rendezvous_from_code(entered).unwrap().as_str(),
+        code.get("rendezvous").unwrap().as_str().unwrap()
     );
 }

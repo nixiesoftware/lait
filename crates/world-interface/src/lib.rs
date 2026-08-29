@@ -349,13 +349,76 @@ pub enum HostControlRequest {
     AssignmentGrant {
         actor: String,
         assignments: Vec<HostAssignment>,
+        /// The package's opaque reference (hex) to the role definition the
+        /// assignments expand, recorded as each grant's origin. `None` leaves
+        /// the origin unrecorded rather than guessed.
+        definition_ref: Option<String>,
     },
+    /// Revoke a set of grants as one all-or-nothing batch — the set a role
+    /// expanded into, revoked the way it was granted.
     AssignmentRevoke {
-        grant_id: String,
+        grant_ids: Vec<String>,
     },
     WorldActivate {
         world: WorldId,
     },
+    /// The receivers this World holds, and the ones nobody holds yet. Never
+    /// another World's: the host scopes the answer, not the caller.
+    DisplayReceivers,
+    /// Mint a code a television enters to enrol and show `surface` with
+    /// `input`, in this World, in this Orbit. The host names the World.
+    DisplayCodeMint {
+        label: String,
+        surface: display::DisplaySurfaceId,
+        input: Value,
+        sync: Option<HostDisplaySync>,
+    },
+    /// Withdraw a code this World minted.
+    DisplayCodeRevoke {
+        rendezvous: String,
+    },
+    /// Point a receiver at `surface` with `input`. Allowed for a receiver
+    /// nobody holds or one this World already holds; taking one from another
+    /// World is a person's act, in the linked-devices manager.
+    DisplayAssign {
+        device: String,
+        surface: display::DisplaySurfaceId,
+        input: Value,
+        sync: Option<HostDisplaySync>,
+    },
+    /// Leave a receiver this World holds showing nothing.
+    DisplayUnassign {
+        device: String,
+    },
+    /// Forget a receiver this World holds, or one nobody holds.
+    DisplayForget {
+        device: String,
+    },
+    /// Trust a television that is asking to connect by words, under `label`.
+    /// The answer names the device enrolled, so the World can assign it.
+    DisplayPairingApprove {
+        pairing: String,
+        label: String,
+    },
+    DisplayPairingReject {
+        pairing: String,
+    },
+}
+
+/// Keep a set of receivers in step: every receiver a World gives the same
+/// `group` plays the same source on one clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDisplaySync {
+    pub group: String,
+    pub mode: HostDisplaySyncMode,
+    pub static_delay_ms: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostDisplaySyncMode {
+    StayInSync,
+    Positional,
 }
 
 /// One content operation a package asks the shell to carry out.
@@ -772,8 +835,45 @@ pub fn agent_surface_coverage(
 /// The client interfaces shipped by one World application package.
 #[derive(Clone)]
 pub struct WorldClientPackage {
+    /// The id this package is registered and addressed by.
     world: WorldId,
-    mount: &'static str,
+    /// The id the tree declares for itself.
+    ///
+    /// The same distinction the mount already draws, and it exists for the
+    /// same reason: a local World is registered under an id the host assigns
+    /// so it can run beside the release it was copied from. Checks that ask
+    /// whether a *tree is internally consistent* must use this one — a display
+    /// surface commits its World id into a contract digest the World's own
+    /// runner computed, so validating it against the host's assignment fails a
+    /// tree that is perfectly consistent with itself.
+    declared: WorldId,
+    /// Where this package is actually mounted.
+    ///
+    /// Owned, and not the `&'static str` a World compiles in, because the
+    /// World declares a *preference* and the host decides where it lands. For
+    /// a released World those are the same string and the published-API
+    /// guarantee on `MOUNT` is untouched. A local World — a tree somebody is
+    /// working on — is assigned one in its own namespace, so it can run beside
+    /// the release it was copied from without either one answering to the
+    /// other's tools or URLs.
+    mount: String,
+    /// Whether the bytes behind this package were sealed and verified, or come
+    /// from a tree on this device that nobody signed.
+    ///
+    /// Set from a **required** constructor argument rather than defaulted and
+    /// opted out of. It defaulted to sealed once, which meant any new admission
+    /// path that forgot one builder call produced a package claiming to be
+    /// signed, with nothing failing to compile. Provenance that fails open is
+    /// not provenance. This follows the rule the Tauri boundary already holds:
+    /// a fact added here has to be decided, not inherited.
+    ///
+    /// Carried here because an agent reads this World's teaching text and tool
+    /// descriptions as guidance, and those are free text authored by whatever
+    /// is running. For a released World that text arrived through a signed
+    /// channel from a publisher. For a local one it is a directory somebody
+    /// picked. The two must not read identically to the party downstream of
+    /// every check, which is the agent.
+    sealed: bool,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
     without: &'static [&'static str],
@@ -1023,6 +1123,7 @@ impl WorldClientPackage {
         mount: &'static str,
         surface: AgentSurface,
         decode_reply: ReplyDecoder,
+        sealed: Sealing,
     ) -> Result<Self, Failure> {
         validate_name("mount", mount)?;
         let mut local_tools = BTreeSet::new();
@@ -1037,8 +1138,10 @@ impl WorldClientPackage {
             }
         }
         Ok(Self {
+            declared: world.clone(),
             world,
-            mount,
+            mount: mount.to_owned(),
+            sealed: matches!(sealed, Sealing::Sealed),
             mcp_tools: surface.tools,
             mcp_instructions: surface.instructions,
             without: surface.without,
@@ -1062,7 +1165,9 @@ impl WorldClientPackage {
         mut self,
         surface: display::DisplaySurface,
     ) -> Result<Self, Failure> {
-        surface.descriptor.validate(&self.world)?;
+        // Against what the tree declares, never what the host registered it
+        // as: the runner computed this digest under its own id.
+        surface.descriptor.validate(&self.declared)?;
         let id = surface.descriptor.id.as_str().to_string();
         if self.display_surfaces.contains_key(&id) {
             return Err(Failure::new(format!(
@@ -1292,6 +1397,18 @@ impl WorldClientPackage {
         &self.world
     }
 
+    /// The id this World's own code speaks.
+    ///
+    /// Equal to [`Self::world`] for everything the host did not re-key. It
+    /// differs for a local World, and then it — not the host's assignment — is
+    /// the id that addresses the World's semantic package, because the tree's
+    /// runner is registered under the id the tree declares. Anything routing a
+    /// call wants this one; anything naming the World to a person or an agent
+    /// wants [`Self::world`].
+    pub fn declared(&self) -> &WorldId {
+        &self.declared
+    }
+
     pub fn transient_body(&self, document: &str) -> Result<[u8; 16], Failure> {
         if let Some(adapter) = self.adapter.as_deref() {
             return adapter.transient_body(document);
@@ -1306,8 +1423,36 @@ impl WorldClientPackage {
 
     /// The namespace key every head addresses this package by — the MCP tool
     /// prefix and the `{world}` route segment. See [`Self::new`].
-    pub fn mount(&self) -> &'static str {
-        self.mount
+    pub fn mount(&self) -> &str {
+        &self.mount
+    }
+
+    /// Mount this package somewhere other than where it asked to be.
+    ///
+    /// The World declares a preference; the host decides. Used to put a local
+    /// World — a tree somebody is working on — in its own namespace so it can
+    /// run beside the release it was copied from. Never used for a released
+    /// World, whose `MOUNT` is published API precisely so that it does not
+    /// move.
+    /// Register this package under an id other than the one it declares.
+    ///
+    /// For a local World, which is usually a copy and so declares the
+    /// original's id. What the tree says about itself is untouched, so every
+    /// check that asks whether the tree is internally consistent still asks the
+    /// right question.
+    pub fn registered_as(mut self, world: WorldId) -> Self {
+        self.world = world;
+        self
+    }
+
+    pub fn mounted_at(mut self, mount: impl Into<String>) -> Self {
+        self.mount = mount.into();
+        self
+    }
+
+    /// Whether this World's bytes were proven when they landed.
+    pub fn sealed(&self) -> bool {
+        self.sealed
     }
 
     pub fn mcp_tools(&self) -> &[McpTool] {
@@ -1440,7 +1585,10 @@ impl WorldClientPackage {
                         .unwrap_or(decoded))
                 }
                 ClientInvocationKind::Find { query, presenter } => {
-                    let value = host.call_find(self.world.clone(), query).await?;
+                    // The declared id for the same reason `validate_invocation`
+                    // uses it: this reaches the semantic package, and a re-keyed
+                    // local World's runner is registered under what its tree says.
+                    let value = host.call_find(self.declared.clone(), query).await?;
                     let Some(present) = presenter else {
                         return Ok(value);
                     };
@@ -1467,17 +1615,36 @@ impl WorldClientPackage {
         })
     }
 
+    /// Refuse an invocation this package does not own.
+    ///
+    /// Against [`Self::declared`], never the host's assignment. A package parses
+    /// requests with the World's own code, which knows one id — the one the tree
+    /// declares — so a re-keyed local World would otherwise refuse every request
+    /// it just parsed, naming both ids and explaining neither.
     pub fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), Failure> {
-        if invocation.world_id() == &self.world {
+        if invocation.world_id() == &self.declared {
             Ok(())
         } else {
             Err(Failure::new(format!(
                 "World '{}' client package cannot execute an invocation for '{}'",
-                self.world,
+                self.declared,
                 invocation.world_id()
             )))
         }
     }
+}
+
+/// Whether a package's bytes were proven when they landed.
+///
+/// A two-variant enum taken by value rather than a `bool` defaulted to the
+/// safe-looking case: at a callsite `Sealing::Unsealed` says what it means and
+/// `false` does not, and neither can be omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sealing {
+    /// Verified against a signed manifest when it was staged.
+    Sealed,
+    /// A tree on this device that nobody signed and nothing verified.
+    Unsealed,
 }
 
 /// A mounted tool with its collision-safe public name.
@@ -1491,7 +1658,21 @@ pub struct MountedMcpTool<'a> {
 #[derive(Clone, Default)]
 pub struct WorldClientRegistry {
     packages: BTreeMap<String, WorldClientPackage>,
-    mounts: BTreeMap<&'static str, String>,
+    mounts: BTreeMap<String, String>,
+    /// Every public MCP tool name this registry has composed, to the World that
+    /// composed it.
+    ///
+    /// Unique ids and unique mounts do **not** imply unique public names: a
+    /// public name is `{mount}_{tool}`, and `_` is admitted inside a mount, so
+    /// mount `local` with tool `issues_list` and mount `local_issues` with tool
+    /// `list` both compose `local_issues_list`. While one World is pinned per
+    /// session that cannot bite. The moment every package is merged into one
+    /// router it does, and `ToolRouter::merge` resolves it silently,
+    /// last-registered wins — with local Worlds loaded after installed ones, so
+    /// the unsealed tree would win. That is an unsigned World answering to a
+    /// signed World's tool name, which is the whole guarantee namespacing is
+    /// supposed to provide.
+    tools: BTreeMap<String, String>,
 }
 
 impl WorldClientRegistry {
@@ -1514,7 +1695,23 @@ impl WorldClientRegistry {
                 world
             )));
         }
-        self.mounts.insert(package.mount(), world.clone());
+        // Composed before anything is inserted, so a refusal leaves the
+        // registry exactly as it was rather than half-holding a World.
+        let composing: Vec<String> = mounted_tools(&package)
+            .map(|mounted| mounted.public_name)
+            .collect();
+        for public_name in &composing {
+            if let Some(existing) = self.tools.get(public_name) {
+                return Err(Failure::new(format!(
+                    "MCP tool '{public_name}' is composed by Worlds '{existing}' and '{world}'"
+                )));
+            }
+        }
+        self.mounts
+            .insert(package.mount().to_owned(), world.clone());
+        for public_name in composing {
+            self.tools.insert(public_name, world.clone());
+        }
         self.packages.insert(world, package);
         Ok(self)
     }
@@ -1708,7 +1905,123 @@ mod tests {
             .map_err(|error| Failure::new(format!("decode reply: {error}")))
     }
 
+    /// Provenance is stated, never inherited. It used to default to sealed and
+    /// be opted out of, so any admission path that forgot one builder call
+    /// produced a package claiming to be signed with nothing failing to
+    /// compile. Provenance that fails open is not provenance.
+    #[test]
+    fn a_package_states_its_provenance_and_cannot_omit_it() {
+        assert!(package("com.lait.issues", "issues").sealed());
+        assert!(!sealed_package("local.issues", "issues", Sealing::Unsealed).sealed());
+        assert!(
+            !sealed_package("local.issues", "issues", Sealing::Unsealed)
+                .mounted_at("local_issues")
+                .sealed(),
+            "and re-mounting does not launder it"
+        );
+    }
+
+    /// Unique ids and unique mounts do not imply unique *public* names, and
+    /// the public name is what an agent types. `_` is admitted inside a mount,
+    /// so `local` + `issues_list` and `local_issues` + `list` both compose
+    /// `local_issues_list`. One pinned World per session hid this; merging
+    /// every package into one router exposes it, and `ToolRouter::merge`
+    /// resolves it silently, last-registered wins — with local Worlds loaded
+    /// after installed ones. An unsigned World would answer to a signed
+    /// World's tool name, which is the guarantee namespacing exists to give.
+    #[test]
+    fn two_worlds_cannot_compose_the_same_public_tool_name() {
+        let registry = WorldClientRegistry::new()
+            .with_package(package("com.lait.issues", "local_issues"))
+            .expect("the first registers");
+        // Different World id, different mount — and the same composed name:
+        // `local` + `issues_list` is `local_issues_list`, just as
+        // `local_issues` + `list` is.
+        let collides = package_with_tool("local.issues", "local", Sealing::Unsealed, "issues_list");
+        let refused = registry.with_package(collides);
+        assert!(
+            refused.is_err(),
+            "a second World composing `local_issues_list` must be refused, not silently win"
+        );
+    }
+
+    /// A refusal leaves the registry as it was, rather than half-holding the
+    /// World it just refused.
+    #[test]
+    fn a_refused_package_leaves_the_registry_untouched() {
+        let registry = WorldClientRegistry::new()
+            .with_package(package("com.lait.issues", "issues"))
+            .expect("the first registers");
+        let refused = registry
+            .clone()
+            .with_package(package("com.lait.issues", "other"));
+        assert!(refused.is_err());
+        assert_eq!(registry.packages().count(), 1);
+        assert!(registry.package_for_mount("issues").is_some());
+    }
+
+    /// A World being worked on runs beside the release it was copied from.
+    ///
+    /// Both halves are needed and the registry refuses on either alone: two
+    /// packages cannot share a World id, and two cannot share a mount. The
+    /// host assigns a local tree both, which is what makes this pair legal —
+    /// and what keeps every name that resolves to one from resolving to the
+    /// other.
+    #[test]
+    fn a_local_world_registers_beside_the_release_it_was_copied_from() {
+        let released = package("com.lait.issues", "issues");
+        let local =
+            sealed_package("local.issues", "issues", Sealing::Unsealed).mounted_at("local_issues");
+        let registry = WorldClientRegistry::new()
+            .with_package(released)
+            .expect("the release registers")
+            .with_package(local)
+            .expect("and the tree being worked on registers beside it");
+
+        assert_eq!(
+            registry
+                .package_for_mount("issues")
+                .map(|p| p.world().as_str().to_owned()),
+            Some("com.lait.issues".to_owned()),
+            "the released mount still reaches the release"
+        );
+        assert_eq!(
+            registry
+                .package_for_mount("local_issues")
+                .map(|p| p.world().as_str().to_owned()),
+            Some("local.issues".to_owned()),
+            "and only the assigned mount reaches the tree"
+        );
+    }
+
+    /// The mount alone is not enough: the id collides first.
+    #[test]
+    fn two_copies_of_one_world_are_refused_even_at_different_mounts() {
+        let registry = WorldClientRegistry::new()
+            .with_package(package("com.lait.issues", "issues"))
+            .expect("the first registers");
+        assert!(
+            registry
+                .with_package(package("com.lait.issues", "issues").mounted_at("local_issues"))
+                .is_err(),
+            "a second package for one World id is refused before any mount is looked at"
+        );
+    }
+
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
+        sealed_package(world, mount, Sealing::Sealed)
+    }
+
+    fn sealed_package(world: &str, mount: &'static str, sealing: Sealing) -> WorldClientPackage {
+        package_with_tool(world, mount, sealing, "list")
+    }
+
+    fn package_with_tool(
+        world: &str,
+        mount: &'static str,
+        sealing: Sealing,
+        tool: &'static str,
+    ) -> WorldClientPackage {
         let call = if mount == "notes" {
             notes_invocation as McpCallFactory
         } else {
@@ -1718,13 +2031,66 @@ mod tests {
             WorldId::parse(world).unwrap(),
             mount,
             AgentSurface::designed(
-                vec![McpTool::new("list", "List objects.", empty_schema, call)],
+                vec![McpTool::new(tool, "List objects.", empty_schema, call)],
                 "Work with files.",
                 &[],
             ),
             decode_json_reply,
+            sealing,
         )
         .unwrap()
+    }
+
+    /// A re-keyed package still answers for the World its own code speaks.
+    ///
+    /// The package parses requests with the World's own parser, which knows one
+    /// id: the one the tree declares. Validating against the host's assignment
+    /// meant a local World refused every request it had just successfully
+    /// parsed, with a message naming two ids and explaining neither — which is
+    /// what `local.issues cannot execute an invocation for com.lait.issues`
+    /// was.
+    #[test]
+    fn a_re_keyed_package_executes_what_its_own_parser_produced() {
+        let declared = WorldId::parse("com.lait.issues").unwrap();
+        let assigned = WorldId::parse("local.issues").unwrap();
+        let package = package_with_tool("com.lait.issues", "files", Sealing::Unsealed, "list")
+            .registered_as(assigned.clone())
+            .mounted_at("local_issues");
+
+        assert_eq!(
+            package.world(),
+            &assigned,
+            "it is addressed by the host's id"
+        );
+        assert_eq!(
+            package.declared(),
+            &declared,
+            "and still knows what its tree says it is"
+        );
+
+        let own = ClientInvocation::local(
+            declared.clone(),
+            "list",
+            Value::Null,
+            ClientAccess::Query,
+            None,
+        );
+        package
+            .validate_invocation(&own)
+            .expect("a package must execute what its own parser produced");
+
+        // And the check is still a check: another World's invocation is refused.
+        let stranger = ClientInvocation::local(
+            WorldId::parse("com.example.atlas").unwrap(),
+            "list",
+            Value::Null,
+            ClientAccess::Query,
+            None,
+        );
+        assert!(
+            package.validate_invocation(&stranger).is_err(),
+            "a package must not execute another World's invocation"
+        );
     }
 
     /// A square PNG of `side`, headed exactly as the spec requires — the

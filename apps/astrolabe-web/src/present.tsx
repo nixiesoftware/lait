@@ -19,7 +19,7 @@ import {
   type PresentedItem,
   type PresentedProgram,
 } from "./client";
-import { isSignageSurface } from "./displays";
+import { inputPrompt, surfaceInput } from "./displays";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
@@ -292,7 +292,6 @@ function PresentationChooser({ view, dispatch }: { view: ClientView; dispatch: D
 
   const chosenOrbit = orbit ?? view.orbits[0].space;
   const chosen = surfaces.find((surface) => `${surface.world}/${surface.surface}` === surfaceKey) ?? surfaces[0];
-  const signage = isSignageSurface(chosen);
   const ready = input.trim() !== "";
   const show = () => {
     if (!ready) return;
@@ -301,11 +300,12 @@ function PresentationChooser({ view, dispatch }: { view: ClientView; dispatch: D
       orbit: chosenOrbit,
       world: chosen.world,
       surface: chosen.surface,
-      // A Signage program id is typed bare and wrapped here; every other
+      // A Signage screen id or an Issues project key is typed bare and
+      // wrapped the way that surface's contract spells it; every other
       // surface takes its package's own JSON verbatim. The daemon hands
       // whatever this is to the package's canonicalizer, which is the only
       // thing entitled to judge it.
-      input: signage ? JSON.stringify({ program: input.trim() }) : input.trim(),
+      input: surfaceInput(chosen, input.trim()),
       title: chosen.title,
     });
   };
@@ -323,9 +323,9 @@ function PresentationChooser({ view, dispatch }: { view: ClientView; dispatch: D
         {surfaces.map((surface: DisplaySurface) => <option key={`${surface.world}/${surface.surface}`}
           value={`${surface.world}/${surface.surface}`}>{surface.title} · {surface.world}</option>)}
       </select></label>
-      {signage
-        ? <label>Signage program body ID<input className="mono" value={input} onChange={(event) => setInput(event.target.value)} /></label>
-        : <label>Package input JSON<textarea className="mono" rows={3} value={input} onChange={(event) => setInput(event.target.value)} /></label>}
+      {inputPrompt(chosen).json
+        ? <label>{inputPrompt(chosen).label}<textarea className="mono" rows={3} value={input} onChange={(event) => setInput(event.target.value)} /></label>
+        : <label>{inputPrompt(chosen).label}<input className="mono" value={input} onChange={(event) => setInput(event.target.value)} /></label>}
       <button className="primary-button" disabled={!ready} onClick={show}>Show it</button>
       <span className="present-hint centered">Esc to leave</span>
     </div>

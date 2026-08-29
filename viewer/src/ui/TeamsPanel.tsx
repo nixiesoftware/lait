@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Search, Trash2, UserPlus } from "lucide-react";
 
 import { rpc } from "../api";
@@ -8,8 +8,9 @@ import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
 import { Combobox } from "./Picker";
 import { Button, IconButton, TextInput } from "@astryxdesign/core";
-import { Badge } from "./primitives";
+import { Badge, titleText } from "./primitives";
 import { SettingsPageHeader } from "./settingsLayout";
+import { EmptyState } from "./AppState";
 
 /**
  * Teams — the administration surface for the grouping the sidebar navigates by.
@@ -33,6 +34,8 @@ export function TeamsPanel({
   members,
   readOnly,
   onError,
+  focus = null,
+  onFocusConsumed,
 }: {
   spaceId: string;
   teams: TeamDto[];
@@ -40,10 +43,19 @@ export function TeamsPanel({
   members: MemberDto[];
   readOnly: boolean;
   onError: (message: string) => void;
+  /** A team the settings rail asked for. Opens that team's step once, then
+   *  hands the request back so the rail can ask again for the same team. */
+  focus?: string | null;
+  onFocusConsumed?: () => void;
 }) {
-  const [step, setStep] = useState<{ at: "list" } | { at: "team"; id: string } | { at: "new" }>({
-    at: "list",
-  });
+  const [step, setStep] = useState<{ at: "list" } | { at: "team"; id: string } | { at: "new" }>(
+    () => (focus ? { at: "team", id: focus } : { at: "list" }),
+  );
+  useEffect(() => {
+    if (!focus) return;
+    setStep({ at: "team", id: focus });
+    onFocusConsumed?.();
+  }, [focus, onFocusConsumed]);
 
   const send = async (fn: () => Promise<unknown>): Promise<boolean> => {
     try {
@@ -146,11 +158,12 @@ function TeamList({
         title="Teams"
         description="Group projects and members into durable areas of ownership."
         actions={
-          !readOnly ? (
+          !readOnly && teams.length > 0 ? (
             <Button label="Create team" variant="primary" size="sm" onClick={onNew} />
           ) : undefined
         }
       />
+      {teams.length > 0 && (
       <div className="mb-4 max-w-md">
         <TextInput
           label="Filter teams"
@@ -162,12 +175,15 @@ function TeamList({
           width="100%"
         />
       </div>
+      )}
 
       {teams.length === 0 ? (
-        <p className="text-mute text-sm">
-          No teams yet. A team owns projects, and the sidebar navigates by them — Issues, Projects
-          and Projects, each scoped to what that team owns.
-        </p>
+        <EmptyState
+          art="people"
+          title="Teams"
+          body="A durable area of ownership, holding the projects and members that belong together."
+          action={!readOnly ? <Button label="Create team" variant="primary" size="sm" onClick={onNew} /> : undefined}
+        />
       ) : (
         <div className="overflow-hidden">
           <div className="text-mute grid grid-cols-[minmax(0,1fr)_6rem_7rem_7rem] gap-3 px-3 py-2 pr-12 text-2xs">
@@ -431,7 +447,7 @@ function TeamDetail({
       </ul>
 
       <section className="mt-9">
-        <h2 className="text-xl font-semibold tracking-tight">Team members</h2>
+        <h2 className={titleText({ level: "page" })}>Team members</h2>
 
         <div className="mt-4 flex items-center gap-2">
           <div className="w-full max-w-xs">

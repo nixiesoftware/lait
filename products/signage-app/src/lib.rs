@@ -20,9 +20,11 @@
 //! Product-owned application and display package for Signage.
 
 pub mod application;
+mod athan;
 mod display;
 mod host;
 mod protocol;
+mod tv;
 
 pub use protocol::{
     decode_call, decode_reply, encode_call, SignageCallHandler, SignageRequest, SignageResponse,
@@ -44,6 +46,10 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         MOUNT,
         world_interface::AgentSurface::designed(Vec::new(), "", &[]),
         decode_client_reply,
+        // Compiled into this host build, so it travelled however the host did.
+        // A World cannot know its own provenance; what it can say is that this
+        // package is not read from a tree on somebody's disk.
+        world_interface::Sealing::Sealed,
     )?
     .with_web_parser(host::parse_web)
     .with_local_handler(host::execute)
@@ -73,7 +79,7 @@ mod tests {
             surface.descriptor.runtime_implementation,
             implementation_id()
         );
-        assert_eq!(surface.descriptor.contract_version, 3);
+        assert_eq!(surface.descriptor.contract_version, 4);
         assert!(surface
             .descriptor
             .outputs

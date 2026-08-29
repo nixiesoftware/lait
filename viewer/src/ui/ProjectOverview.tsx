@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ChevronRight } from "lucide-react";
+import { Archive, ArchiveRestore, ChevronRight, SquarePen, UserPlus, UsersRound } from "lucide-react";
 
 import { rpc } from "../api";
 import {
@@ -8,16 +8,17 @@ import {
   useProjectViewerStore,
 } from "../projectStore";
 import { milestonePercent, milestoneProgress } from "../core/milestone";
-import type { MemberDto, MilestoneDto, ProjectDto } from "../types";
+import type { MemberDto, MilestoneDto, ProjectDto, TeamDto } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { ColorPicker } from "./ColorPicker";
+import { DatePicker } from "./DatePicker";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { MilestoneIcon, ProjectIcon } from "./icons";
 import { Button, IconButton, Popover } from "@astryxdesign/core";
-import { cn } from "./primitives";
+import { cn, titleText } from "./primitives";
 import { when } from "./time";
 
 /** The health signals a project update can carry — Linear's on-track palette. */
@@ -26,6 +27,17 @@ const HEALTH: Record<string, { label: string; tone: string }> = {
   at_risk: { label: "At risk", tone: "text-warn" },
   off_track: { label: "Off track", tone: "text-danger" },
 };
+
+/** unix seconds -> YYYY-MM-DD (UTC), the wire format the engine + DatePicker share. */
+function toInput(secs: number | null | undefined): string | null {
+  if (secs == null) return null;
+  return new Date(secs * 1000).toISOString().slice(0, 10);
+}
+
+/** The caption over a movement of the document — Description, Milestones,
+ *  Updates. One string, because three sections at three weights read as three
+ *  pages stapled together. */
+const CAPTION = "text-mute mb-3 text-2xs font-semibold tracking-wider uppercase";
 
 /**
  * A project's overview — the document a project became.
@@ -40,12 +52,15 @@ export function ProjectOverview({
   spaceId,
   project,
   members,
+  teams,
   readOnly,
   onError,
 }: {
   spaceId: string;
   project: ProjectDto;
   members: MemberDto[];
+  /** Every team in the space, for the owner picker. */
+  teams: TeamDto[];
   readOnly: boolean;
   onError: (message: string) => void;
 }) {
@@ -60,83 +75,34 @@ export function ProjectOverview({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto p-6">
-        {/* One column. The rail used to be the second, and it is the shell's now
-            — it has to survive a hop to Issues, which this page does not. What
-            is left is the document, at the measure a document wants. */}
+        {/* One column. The rail is the shell's — it holds the milestone SCOPE,
+            which has to survive a hop to Issues, and this page does not. What
+            the rail does not hold is anything this page is ABOUT: the project's
+            properties are stated here, because a document that loses its facts
+            when a panel is shut is not the document about that thing. */}
         <div className="mx-auto max-w-3xl">
           {/* The measure is capped at the same 35rem the issue body uses — a
               project overview is the same kind of document, and two prose
               columns at different widths in one app read as two apps. */}
           <div className="min-w-0 max-w-[35rem]">
-            <div className="mb-4 flex items-center gap-2">
-              {!readOnly ? (
-                <Popover
-                  alignment="start"
-                  content={
-                    <div className="p-2">
-                      <ColorPicker
-                        value={project.color}
-                        onChange={(color) => void edit({ color })}
-                      />
-                    </div>
-                  }
-                >
-                  <button
-                    aria-label="Project colour"
-                    className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1"
-                  >
-                    <ProjectIcon
-                      color={catalogColor(project.color)}
-                      className="size-icon-lg"
-                    />
-                  </button>
-                </Popover>
-              ) : (
-                <ProjectIcon
-                  color={catalogColor(project.color)}
-                  className="size-icon-lg"
-                />
-              )}
-              <input
-                defaultValue={project.name}
-                readOnly={readOnly}
-                onBlur={(e) => {
-                  const next = e.target.value.trim();
-                  if (next && next !== project.name) void edit({ name: next });
-                }}
-                // Same size as an issue title: both are the name of the document
-                // you are looking at, and the overview was a step smaller for no
-                // reason other than that it was written on a different day.
-                className="min-w-0 flex-1 bg-transparent text-2xl font-semibold tracking-tight outline-none"
-                aria-label="Project name"
-              />
-              {project.archived && (
-                <span className="border-line text-mute rounded-mark border px-1.5 py-px text-2xs">
-                  Archived
-                </span>
-              )}
-              {!readOnly && (
-                <IconButton
-                  label={project.archived ? "Restore project" : "Archive project"}
-                  onClick={() => void edit({ archived: !project.archived })}
-                  variant="ghost"
-                  size="sm"
-                  tooltip={project.archived ? "Restore project" : "Archive project"}
-                  icon={project.archived ? (
-                    <ArchiveRestore className="size-icon-sm" />
-                  ) : (
-                    <Archive className="size-icon-sm" />
-                  )}
-                />
-              )}
-            </div>
-            <Description
-              value={project.description ?? ""}
+            <Identity project={project} readOnly={readOnly} onEdit={edit} />
+            <Properties
+              project={project}
+              members={members}
+              teams={teams}
               readOnly={readOnly}
-              placeholder="Describe this project — goals, scope, links."
-              empty="No description"
-              onSave={(description) => void edit({ description })}
+              onEdit={edit}
             />
+            <section className="mt-6">
+              <h2 className={CAPTION}>Description</h2>
+              <Description
+                value={project.description ?? ""}
+                readOnly={readOnly}
+                placeholder="Describe this project — goals, scope, links."
+                empty="No description"
+                onSave={(description) => void edit({ description })}
+              />
+            </section>
             <MilestoneDocument
               spaceId={spaceId}
               projectId={project.id}
@@ -151,8 +117,232 @@ export function ProjectOverview({
               onError={onError}
             />
           </div>
-
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The project's face: its mark, and its name.
+ *
+ * The mark is a BLOCK above the name rather than a glyph beside it. Inline, at
+ * `icon-lg`, it read as a list row that had been given a page — the same 20px
+ * dot the sidebar draws, with a slightly larger word after it. A project is the
+ * only thing in this app a person names, colours and then looks at for months,
+ * and the header is where that colour is the project's own rather than a
+ * category stripe. The fill is the catalog colour at 14%, so a project reads as
+ * itself at a glance and the glyph inside still holds its contrast.
+ */
+function Identity({
+  project,
+  readOnly,
+  onEdit,
+}: {
+  project: ProjectDto;
+  readOnly: boolean;
+  onEdit: (patch: Record<string, string | boolean | null>) => void;
+}) {
+  const color = catalogColor(project.color);
+  // `ctl-xl` (40px) rather than a literal 48: the block is a control — it opens
+  // the colour picker — so its size belongs on the ladder that moves with
+  // density, and a hand-written 48 would be the one thing in the header that
+  // does not answer a density change.
+  const mark = (
+    <span
+      className="flex size-ctl-xl items-center justify-center rounded-control"
+      style={{ background: `color-mix(in oklab, ${color} 14%, transparent)` }}
+    >
+      <ProjectIcon color={color} className="size-icon-lg" />
+    </span>
+  );
+
+  return (
+    <div className="mb-5">
+      {readOnly ? (
+        mark
+      ) : (
+        <Popover
+          alignment="start"
+          content={
+            <div className="p-2">
+              <ColorPicker value={project.color} onChange={(color) => onEdit({ color })} />
+            </div>
+          }
+        >
+          <button
+            aria-label="Project colour"
+            className="hover:ring-line-strong rounded-control outline-none hover:ring-1 focus-visible:ring-1 focus-visible:ring-accent/50"
+          >
+            {mark}
+          </button>
+        </Popover>
+      )}
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          defaultValue={project.name}
+          readOnly={readOnly}
+          onBlur={(e) => {
+            const next = e.target.value.trim();
+            if (next && next !== project.name) onEdit({ name: next });
+          }}
+          // Same size as an issue title: both are the name of the document
+          // you are looking at, and the overview was a step smaller for no
+          // reason other than that it was written on a different day.
+          className={cn(
+            titleText({ level: "document" }),
+            "min-w-0 flex-1 bg-transparent outline-none",
+          )}
+          aria-label="Project name"
+        />
+        {project.archived && (
+          <span className="border-line text-mute rounded-mark border px-1.5 py-px text-2xs">
+            Archived
+          </span>
+        )}
+        {!readOnly && (
+          <IconButton
+            label={project.archived ? "Restore project" : "Archive project"}
+            onClick={() => onEdit({ archived: !project.archived })}
+            variant="ghost"
+            size="sm"
+            tooltip={project.archived ? "Restore project" : "Archive project"}
+            icon={
+              project.archived ? (
+                <ArchiveRestore className="size-icon-sm" />
+              ) : (
+                <Archive className="size-icon-sm" />
+              )
+            }
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Lead, team and the planned window — IN THE DOCUMENT, which is the correction.
+ *
+ * These four writes lived in `ProjectRail`, and `railOpen` is a preference that
+ * persists. Shut it once and a project's Overview could no longer show or set
+ * anything about the project: an empty one drew a name, a placeholder and an
+ * update composer, and not one fact. Linear puts a project's properties on the
+ * page for this reason — collapsing a panel should cost you navigation, never
+ * facts — and it is why the rail keeps the milestone scope and gives these up.
+ * A property is a fact the document states; a filter is a control the shell
+ * holds.
+ *
+ * One wrapping run of `quiet` controls rather than a labelled column. The rail
+ * needed the terms because a narrow stack of bare values does not scan; a row
+ * reading left to right does, and `Lead Set lead Team Set team` is a sentence
+ * built out of a table — the same thing the issue document's compact strip
+ * already found out. The one term kept is the row's own, which names the run.
+ */
+function Properties({
+  project,
+  members,
+  teams,
+  readOnly,
+  onEdit,
+}: {
+  project: ProjectDto;
+  members: MemberDto[];
+  teams: TeamDto[];
+  readOnly: boolean;
+  onEdit: (patch: Record<string, string | boolean | null>) => void;
+}) {
+  const lead = members.find((m) => m.key === project.lead);
+  const team = teams.find((candidate) => candidate.id === project.team);
+
+  return (
+    <div className="flex items-start gap-3 text-sm">
+      <span className="text-mute flex min-h-ctl-md shrink-0 items-center">Properties</span>
+      {/* 12px between controls, against the `quiet` tone's own `-mx-1` bleed on
+          each side — so the hover pills stand 4px apart and the words 12,
+          which is the pitch Linear's row reads at. At the 8px a rail row uses
+          the bleed would close the gap entirely and two chips would touch. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
+        <Combobox
+          tone="quiet"
+          label="Lead"
+          disabled={readOnly}
+          value={
+            lead
+              ? {
+                  id: lead.key,
+                  label: memberName(lead.key, lead),
+                  icon: <Avatar deviceKey={lead.key} alias={lead.alias} me={lead.me} size="sm" />,
+                }
+              : null
+          }
+          face={
+            lead ? undefined : (
+              <>
+                <UserPlus className="text-mute size-icon-sm shrink-0" />
+                <span className="text-mute">Set lead</span>
+              </>
+            )
+          }
+          options={[
+            { id: "none", label: "No lead" },
+            ...members.map((m) => ({
+              id: m.key,
+              label: memberName(m.key, m),
+              icon: <Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />,
+              hint: m.key.slice(0, 6),
+              keywords: [m.key, m.alias],
+            })),
+          ]}
+          onPick={(id) => onEdit({ lead: id === "none" ? "none" : id })}
+        />
+        {/* Which team owns this project — the write the sidebar's grouping
+            reads. Before the dates because it decides where the project *is*,
+            and the dates only decide when it happens.
+
+            Offered even with no teams yet, so the control is where you learn
+            the concept exists; picking "No team" is the same write as clearing
+            a lead. */}
+        <Combobox
+          tone="quiet"
+          label="Team"
+          disabled={readOnly}
+          value={team ? { id: team.id, label: team.name, hint: team.key } : null}
+          face={
+            team ? undefined : (
+              <>
+                <UsersRound className="text-mute size-icon-sm shrink-0" />
+                <span className="text-mute">{teams.length === 0 ? "No teams yet" : "Set team"}</span>
+              </>
+            )
+          }
+          options={[
+            { id: "none", label: "No team" },
+            ...teams.map((candidate) => ({
+              id: candidate.id,
+              label: candidate.name,
+              hint: candidate.key,
+              keywords: [candidate.key, candidate.name],
+            })),
+          ]}
+          onPick={(id) => onEdit({ team: id === "none" ? "" : id })}
+        />
+        <DatePicker
+          tone="quiet"
+          value={toInput(project.start_date)}
+          disabled={readOnly}
+          placeholder="Add start date"
+          ariaLabel="Start date"
+          onChange={(next) => onEdit({ start: next ?? "none" })}
+        />
+        <DatePicker
+          tone="quiet"
+          value={toInput(project.target_date)}
+          disabled={readOnly}
+          placeholder="Add target date"
+          ariaLabel="Target date"
+          onChange={(next) => onEdit({ target: next ?? "none" })}
+        />
       </div>
     </div>
   );
@@ -264,7 +454,7 @@ function MilestoneDocument({
   if (milestones.length === 0) return null;
   return (
     <section className="mt-8">
-      <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Milestones</h2>
+      <h2 className={CAPTION}>Milestones</h2>
       <ol className="flex flex-col">
         {milestones.map((m) => (
           <MilestoneSection
@@ -393,6 +583,7 @@ function Updates({
   const [draft, setDraft] = useState("");
   const [health, setHealth] = useState("");
   const [posting, setPosting] = useState(false);
+  const [composing, setComposing] = useState(false);
 
   const post = async () => {
     const body = draft.trim();
@@ -410,15 +601,35 @@ function Updates({
     }
   };
 
+  // Empty and untouched, the composer is the wrong shape. A live textarea, a
+  // caption, "No updates yet." and a disabled primary button say one absence
+  // four times — and the disabled button, being the only filled thing on the
+  // page, says it loudest. A project with posts in it is the other case: there
+  // the composer stands open above its own feed, which is what a feed wants.
+  const empty = updates != null && updates.length === 0;
+  const composerOpen = !empty || composing;
+
   return (
     <section className="mt-8">
-      <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Updates</h2>
+      <h2 className={CAPTION}>Updates</h2>
 
-      {!readOnly && (
+      {!readOnly && empty && !composing && (
+        <button
+          type="button"
+          onClick={() => setComposing(true)}
+          className="control-hover-outline border-line hover:border-line-strong text-mute hover:text-fg flex w-full items-center justify-center gap-2 rounded-surface border px-3 py-6 text-sm outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent/50"
+        >
+          <SquarePen className="size-icon-sm" aria-hidden />
+          Write the first project update
+        </button>
+      )}
+
+      {!readOnly && composerOpen && (
         <div className="control-hover-outline border-line focus-within:border-line-strong mb-4 rounded-surface border bg-[var(--field-bg)] p-3 transition-colors">
           <textarea
             value={draft}
             rows={2}
+            autoFocus={composing}
             placeholder="Post a status update — what changed, what's next…"
             onChange={(e) => setDraft(e.target.value)}
             className="placeholder:text-mute w-full resize-none bg-transparent text-sm outline-none"
@@ -459,9 +670,7 @@ function Updates({
 
       {resource.error != null && <p className="text-danger text-sm">Couldn't load updates.</p>}
       {!updates && resource.error == null && <p className="text-mute text-sm">Loading…</p>}
-      {updates && updates.length === 0 && (
-        <p className="text-mute text-sm">No updates yet.</p>
-      )}
+      {readOnly && empty && <p className="text-mute text-sm">No updates yet.</p>}
       <ol className="flex flex-col gap-4">
         {updates?.map((u) => {
           const author = members.find((m) => m.key === u.author);

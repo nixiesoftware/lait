@@ -1,485 +1,443 @@
-import React, {useState, useEffect, useRef} from "react";
+/**
+ * Files — what programs are made of.
+ *
+ * A file wears its use: faint when no program holds it, a dot of now when a
+ * screen is showing it. Dropping files on the page uploads them; deleting one
+ * is a press, and the bar at the foot offers to put it back — with a word
+ * about the programs that still name it, because that is the thing a person
+ * would have wanted a warning about.
+ */
+
+import React, { useMemo, useRef, useState } from "react";
 import { useSearch } from "@tanstack/react-router";
-import { ContentItemProps, ContentDetailsModal, ContentGridItem, ContentListItem, ContentSelectionBar, ContentSortingBar, SortingState, SourceCategory, sourceCategory } from "@/components/content";
-import {Grid, List, Info, Trash2, Upload} from "lucide-react";
-import { useModal } from "@/hooks/useModal";
-import { useContextMenu } from "@/hooks/useContextMenu";
-import { ContextMenu, ContextMenuItem } from "@/components/ui/ContextMenu";
-import { ConfirmationModal } from "@/components/ui/ConfirmationModal";
-import PageHeader from "@/components/common/PageHeader";
-import { PageSearchBar } from "@/components/common/PageSearchBar";
-import {BiPlus} from "@react-icons/all-files/bi/BiPlus";
-import {useCreateBroadcast} from "@/utils/navigation/hooks";
-import { deleteMedia, fetchLibrary, fetchMediaUsedBy, saveMedia, uploadContent } from "@/utils/content/api";
-import { fetchPrograms } from "@/utils/broadcasts/api";
+import { useDropzone } from "react-dropzone";
+import { Images, Plus, Trash2, Upload } from "lucide-react";
+import {
+  CatalogueRow,
+  Chips,
+  CommitText,
+  Empty,
+  GalleryShot,
+  Inspector,
+  Page,
+  PageHeader,
+  PageSearch,
+  PageStatus,
+  SelectionBar,
+  ViewToggle,
+  haptic,
+  litProps,
+  useFocus,
+  useHoldable,
+  useLive,
+  useOrbit,
+  useToast,
+  useUndo,
+  useWide,
+  type MenuItem,
+} from "@/ds";
+import { adopt, current, putMedia, removeMedia, useFleet } from "@/utils/screens/fleet";
+import {
+  type ContentItemProps,
+  type SourceCategory,
+  sourceCategory,
+  sourceLabel,
+} from "@/utils/content/library";
+import { Thumb } from "@/program-editor/Thumb";
+import { formatDuration } from "@/program-editor/model";
+import { useCreateBroadcast } from "@/utils/navigation/hooks";
+import { uploadContentAll } from "@/utils/content/api";
+import type { SignageMedia } from "@/utils/lait/types";
 
 const CATEGORY_ORDER: SourceCategory[] = ["image", "video", "card", "kind", "live", "stored"];
 
-export const ContentListPage: React.FC = () => {
-  const { q: searchQuery } = useSearch({ strict: false }) as { q?: string };
-  const [localSearch, setLocalSearch] = useState(searchQuery || "");
-  const [items, setItems] = useState<ContentItemProps[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+const CATEGORY_LABEL: Record<SourceCategory, string> = {
+  image: "Images",
+  video: "Videos",
+  card: "Cards",
+  kind: "Apps",
+  live: "Live",
+  stored: "Other",
+};
 
-  // Sync local search when URL param changes externally
-  useEffect(() => {
-    setLocalSearch(searchQuery || "");
-  }, [searchQuery]);
+export const ContentListPage: React.FC = () => {
+  const fleet = useFleet();
+  const { now } = useLive();
+  const { held } = useFocus();
+  const undo = useUndo();
+
+  /** Which programs hold a file, and whether any screen is showing it now. */
+  const usageOf = (id: string) => {
+    const holders = fleet.programs.filter((program) => program.items.some((item) => item.media === id));
+    const holderIds = new Set(holders.map((program) => program.id));
+    const onGlass = fleet.screens.some((screen) => {
+      const showing = fleet.playbackFor(screen, now).showing;
+      return showing.showing === "program" && holderIds.has(showing.program);
+    });
+    return { holders, onGlass };
+  };
+
+  const { q: searchQuery } = useSearch({ strict: false }) as { q?: string };
+  const toast = useToast();
+  const orbit = useOrbit();
+  const wide = useWide();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [query, setQuery] = useState(searchQuery || "");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [uploading, setUploading] = useState<ContentItemProps[]>([]);
-  const [selectedContent, setSelectedContent] = useState<ContentItemProps | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
-  const [detailViewItemId, setDetailViewItemId] = useState<string | null>(null);
-  const [sortingState, setSortingState] = useState<SortingState>({
-    nameSort: null,
-    dimensionSort: null,
-    typeFilter: null
-  });
-  const { isOpen: isDetailOpen, openModal: openDetail, closeModal: closeDetail } = useModal();
-  const { isOpen: isDeleteConfirmOpen, openModal: openDeleteConfirm, closeModal: closeDeleteConfirm } = useModal();
-  const [deleteItemId, setDeleteItemId] = useState<string | null>(null);
-  const [deleteMultiple, setDeleteMultiple] = useState(false);
-  // Program names still playing the delete targets — fetched before the
-  // deletion is offered, so the confirmation can say what it would orphan.
-  const [deleteUsedBy, setDeleteUsedBy] = useState<string[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState<"all" | SourceCategory>("all");
+  const [inspect, setInspect] = useState<string | null>(null);
 
-  const { handleCreate: handleCreateBroadcast, isCreating: isCreatingBroadcast } = useCreateBroadcast(() => {
-    fetchContent();
-  });
+  const { handleCreate: handleCreateProgram, isCreating: isCreatingProgram } =
+    useCreateBroadcast();
 
-  const contextMenu = useContextMenu<ContentItemProps>();
+  const items: ContentItemProps[] = fleet.media;
 
-  const fetchContent = () => {
-    setLoading(true);
-    fetchLibrary()
-      .then(setItems)
-      .catch((err) => {
-        setError((err as Error).message || "Failed to load the library");
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  }
+  const refused = (what: string) => (err: unknown) => {
+    haptic("error");
+    toast.show(what, err instanceof Error ? err.message : String(err));
+  };
 
-  useEffect(() => {
-    fetchContent();
-  }, []);
-
-  // Clear error message after 5 seconds
-  useEffect(() => {
-    if (error) {
-      const timer = setTimeout(() => {
-        setError("");
-      }, 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [error]);
-
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+  const uploadFiles = async (files: File[]) => {
     if (files.length === 0) return;
-
     const stamp = Date.now();
-    const placeholders: ContentItemProps[] = files.map((file, i) => {
-      const tempId = `upload-${stamp}-${i}`;
-      return {
-        id: tempId,
-        tempId,
-        name: file.name.replace(/\.[^/.]+$/, ""),
-        source: "stored",
-        content: "",
-        size: file.size,
-        mime: file.type,
-        duration_ms: null,
-        width: null,
-        height: null,
-        isUploading: true,
-      };
-    });
+    const placeholders: ContentItemProps[] = files.map((file, i) => ({
+      id: `upload-${stamp}-${i}`,
+      tempId: `upload-${stamp}-${i}`,
+      name: file.name.replace(/\.[^/.]+$/, ""),
+      source: "stored",
+      content: "",
+      size: file.size,
+      mime: file.type,
+      duration_ms: null,
+      width: null,
+      height: null,
+      isUploading: true,
+    }));
     setUploading(placeholders);
-
     try {
-      await uploadContent(files);
+      const outcome = await uploadContentAll(files);
+      if (outcome.uploaded.length > 0) {
+        adopt({ media: [...outcome.uploaded, ...current().media] });
+      }
+      if (outcome.refused.length > 0) {
+        toast.show(
+          "Some files were refused",
+          outcome.refused.map((row) => row.reason).join(" "),
+        );
+        haptic("error");
+      } else if (outcome.uploaded.length > 0) {
+        haptic("save");
+      }
     } catch (err) {
-      setError((err as Error).message || "Upload failed");
+      toast.show("Upload failed", (err as Error).message);
+      haptic("error");
     } finally {
       setUploading([]);
-      fetchContent();
     }
   };
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click();
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    noClick: true,
+    noKeyboard: true,
+    accept: { "image/*": [], "video/*": [] },
+    onDrop: (files) => {
+      void uploadFiles(files);
+    },
+  });
+
+  const remove = (ids: string[]) => {
+    haptic("delete");
+    setSelected(new Set());
+    if (inspect && ids.includes(inspect)) setInspect(null);
+    const holders = new Set(
+      ids.flatMap((id) => usageOf(id).holders.map((program) => program.name)),
+    );
+    void Promise.all(ids.map((id) => removeMedia(id)))
+      .then((gone) => {
+        const kept = gone.filter((row): row is SignageMedia => row != null);
+        if (kept.length === 0) return;
+        const what = kept.length === 1 ? `Deleted ${kept[0].name}` : `Deleted ${kept.length} files`;
+        const still =
+          holders.size > 0 ? ` — still named by ${[...holders].join(", ")}` : "";
+        undo.offer(`${what}${still}`, () => Promise.all(kept.map((row) => putMedia(row))));
+      })
+      .catch(refused("Could not delete"));
   };
 
-  const handleContentClick = (content: ContentItemProps) => {
-    // Prevent any event bubbling
-    if (window.event) {
-      window.event.stopPropagation();
-    }
-
-    // If item is already open in detail view, close it
-    if (detailViewItemId === content.id) {
-      handleDetailClose();
-    } else {
-      // Otherwise, open it in detail view
-      setSelectedContent(content);
-      setDetailViewItemId(content.id);
-      openDetail();
-    }
-  };
-
-  const toggleItemSelection = (id: string) => {
-    setSelectedItems(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(id)) {
-        newSet.delete(id);
-      } else {
-        newSet.add(id);
-      }
-      return newSet;
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
   };
 
-  const handleDetailClose = () => {
-    setDetailViewItemId(null);
-    closeDetail();
+  const openInspect = (item: ContentItemProps) => {
+    if (item.isUploading) return;
+    setInspect(item.id);
   };
-
-  // The used-by answer exists before the deletion is offered; failing to
-  // get it means the deletion is not offered — an unasked question is
-  // never "nothing uses this".
-  const offerDelete = async (ids: string[], multiple: boolean) => {
-    try {
-      const usedBy = await Promise.all(ids.map((id) => fetchMediaUsedBy(id)));
-      const programIds = [...new Set(usedBy.flat())];
-      let names: string[] = [];
-      if (programIds.length > 0) {
-        const programs = await fetchPrograms();
-        names = programIds.map((pid) => programs.find((p) => p.id === pid)?.name ?? pid);
-      }
-      setDeleteUsedBy(names);
-    } catch (err) {
-      setError((err as Error).message || "Could not check which broadcasts use this media");
-      return;
-    }
-    setDeleteItemId(multiple ? null : ids[0]);
-    setDeleteMultiple(multiple);
-    openDeleteConfirm();
-  };
-
-  const handleDeleteClick = () => {
-    if (detailViewItemId !== null) {
-      offerDelete([detailViewItemId], false);
-    }
-  };
-
-  const handleDeleteMultipleClick = () => {
-    offerDelete(Array.from(selectedItems), true);
-  };
-
-  const handleDeleteConfirm = async () => {
-    try {
-      if (deleteMultiple) {
-        for (const id of selectedItems) {
-          await deleteMedia(id);
-        }
-        setSelectedItems(new Set());
-      } else if (deleteItemId !== null) {
-        await deleteMedia(deleteItemId);
-        if (detailViewItemId === deleteItemId) {
-          handleDetailClose();
-        }
-      }
-      fetchContent();
-    } catch (err) {
-      setError((err as Error).message || "Failed to delete media");
-    }
-    closeDeleteConfirm();
-    setDeleteItemId(null);
-    setDeleteMultiple(false);
-    setDeleteUsedBy([]);
-  };
-
-  const updateContentName = async (id: string, name: string) => {
-    const item = items.find((i) => i.id === id);
-    if (!item) return;
-
-    try {
-      const { isUploading: _isUploading, tempId: _tempId, ...media } = item;
-      await saveMedia({ ...media, name });
-      if (selectedContent && selectedContent.id === id) {
-        setSelectedContent({ ...selectedContent, name });
-      }
-      fetchContent();
-    } catch (err) {
-      setError((err as Error).message || "Failed to rename media");
-    }
-  };
-
-  // Sorting and filtering logic
-  const sortAndFilterContent = (content: ContentItemProps[]): ContentItemProps[] => {
-    let filtered = [...content];
-
-    // Apply search query
-    if (localSearch) {
-      const q = localSearch.toLowerCase();
-      filtered = filtered.filter(item => item.name?.toLowerCase().includes(q));
-    }
-
-    // Type filtering is client-side on the source tag; stored entries
-    // split image/video by mime.
-    if (sortingState.typeFilter) {
-      filtered = filtered.filter(item => sourceCategory(item) === sortingState.typeFilter);
-    }
-
-    // Apply sorting
-    if (sortingState.nameSort) {
-      filtered.sort((a, b) => {
-        const comparison = a.name.localeCompare(b.name);
-        return sortingState.nameSort === "asc" ? comparison : -comparison;
-      });
-    } else if (sortingState.dimensionSort) {
-      filtered.sort((a, b) => {
-        const aSize = (a.width || 0) * (a.height || 0);
-        const bSize = (b.width || 0) * (b.height || 0);
-        const comparison = aSize - bSize;
-        return sortingState.dimensionSort === "asc" ? comparison : -comparison;
-      });
-    }
-
-    return filtered;
-  };
-
-  if (error && !loading) return <p className="text-red-500">{error}</p>;
-  if (loading) return <p>Loading...</p>;
-
-  // Apply sorting and filtering
-  const sortedItems = sortAndFilterContent(items);
-
-  // Combine uploading items with sorted items
-  const displayItems = [...uploading, ...sortedItems];
 
   const availableTypes = CATEGORY_ORDER.filter((c) =>
     items.some((item) => sourceCategory(item) === c),
   );
 
-  const getContextMenuItems = (content: ContentItemProps): ContextMenuItem[] => [
-    {
-      label: "Details",
-      icon: <Info className="w-4 h-4" />,
-      onClick: () => handleContentClick(content),
-    },
-    { divider: true, label: "" },
-    {
-      label: "Move to trash",
-      icon: <Trash2 className="w-4 h-4" />,
-      onClick: () => {
-        setSelectedContent(content);
-        offerDelete([content.id], false);
-      },
-    },
+  const displayItems = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const rows = items.filter((item) => {
+      if (q && !item.name.toLowerCase().includes(q)) return false;
+      if (filter !== "all" && sourceCategory(item) !== filter) return false;
+      return true;
+    });
+    rows.sort((a, b) => a.name.localeCompare(b.name));
+    return [...uploading, ...rows];
+  }, [items, uploading, query, filter]);
+
+  const menuFor = (item: ContentItemProps): MenuItem[] => [
+    { label: "Details", onPick: () => openInspect(item) },
+    { label: "Delete", danger: true, onPick: () => remove([item.id]) },
   ];
 
-  const deleteName = items.find((i) => i.id === deleteItemId)?.name;
-  const usedByNote = deleteUsedBy.length > 0
-    ? ` Still playing in: ${deleteUsedBy.join(", ")}.`
-    : "";
+  const showList = wide && viewMode === "list";
+  const inspected = inspect ? items.find((row) => row.id === inspect) ?? null : null;
 
-  return(
-    <div className={"w-full min-w-0 relative justify-self-center pb-50 overflow-x-hidden"}>
-      <PageHeader pageTitle={"Media"}>
-        <div className="flex flex-row gap-2">
-          <button className="px-3 py-2 text-sm font-medium bg-brand-500 text-white shadow-theme-xs hover:bg-brand-600 disabled:bg-brand-300
-                        flex items-center gap-1.5 rounded-lg whitespace-nowrap transition" onClick={handleUploadClick}>
-            <Upload className="size-4"/>
+  return (
+    <Page>
+      <div {...getRootProps()}>
+        <input {...getInputProps()} />
+        <PageHeader title="Files" icon={<Images size={20} />}>
+          <button
+            type="button"
+            className="ds-btn ds-btn-solid"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={16} />
             Upload
           </button>
-          <button className="px-3 py-2 text-sm font-medium bg-white text-gray-700 shadow-theme-xs border border-gray-300 hover:bg-gray-50 disabled:bg-gray-300
-                        flex items-center gap-1.5 rounded-lg whitespace-nowrap transition"
-                  onClick={() => handleCreateBroadcast()}
-                  disabled={isCreatingBroadcast}>
-            <BiPlus className="size-4"/>
-            {isCreatingBroadcast ? "Creating..." : "New broadcast"}
+          <button
+            type="button"
+            className="ds-btn ds-btn-ghost"
+            disabled={isCreatingProgram}
+            onClick={() => void handleCreateProgram()}
+          >
+            <Plus size={16} />
+            New program
           </button>
-        </div>
-      </PageHeader>
+        </PageHeader>
 
-      <div className="flex items-center justify-between">
-        <p className="flex-1 text-2xl sm:text-xl font-semibold pt-8 pb-4">All Media</p>
-      </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/*,video/*"
+          hidden
+          onChange={(event) => {
+            const files = Array.from(event.target.files || []);
+            event.target.value = "";
+            void uploadFiles(files);
+          }}
+        />
 
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept="image/*,video/*"
-        onChange={handleFileSelect}
-        style={{ display: 'none' }}
-      />
+        <PageStatus loading={fleet.loading} error={fleet.error ?? ""} />
 
-      <div
-        className={`relative h-screen max-h-[calc(100vh-200px)]`}
-      >
-
-      {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
-
-      <div className={`flex flex-wrap justify-between items-center mb-3 rounded-lg`}>
-        {selectedItems.size > 0 ? (
-          <ContentSelectionBar
-            selectedCount={selectedItems.size}
-            onDelete={handleDeleteMultipleClick}
-            onClearSelection={() => setSelectedItems(new Set())}
-          />
+        {selected.size > 0 ? (
+          <SelectionBar count={selected.size} onClear={() => setSelected(new Set())}>
+            <button
+              type="button"
+              className="ds-btn ds-btn-danger"
+              onClick={() => remove(Array.from(selected))}
+            >
+              <Trash2 size={16} />
+              Delete
+            </button>
+          </SelectionBar>
         ) : (
-          <div className="flex flex-wrap items-center gap-2 pr-1 rounded-sm p-0.5 w-full sm:w-auto justify-between">
-            <div className="min-w-0 flex-1 sm:flex-none">
-              <PageSearchBar
-                value={localSearch}
-                onChange={setLocalSearch}
-                placeholder="Filter media..."
+          items.length > 0 && (
+            <div className="ds-toolbar">
+              <PageSearch value={query} onChange={setQuery} placeholder="Filter media…" />
+              <Chips
+                value={filter}
+                onChange={setFilter}
+                items={[
+                  { id: "all" as const, label: "All" },
+                  ...availableTypes.map((id) => ({ id, label: CATEGORY_LABEL[id] })),
+                ]}
               />
+              <ViewToggle value={viewMode} onChange={setViewMode} />
             </div>
-            <ContentSortingBar
-              sortingState={sortingState}
-              onSortingChange={setSortingState}
-              availableTypes={availableTypes}
-            />
+          )
+        )}
+
+        {isDragActive && (
+          <p className="ds-hint" style={{ marginBottom: 12 }}>
+            Drop to upload
+          </p>
+        )}
+
+        {items.length === 0 && !fleet.loading && uploading.length === 0 ? (
+          <Empty title="Drop images or videos here, or upload.">
+            <button
+              type="button"
+              className="ds-btn ds-btn-solid"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Upload size={16} />
+              Upload
+            </button>
+          </Empty>
+        ) : showList ? (
+          <div className="ds-rows">
+            {displayItems.map((item) => (
+              <Star
+                key={item.tempId || item.id}
+                id={item.id}
+                use={item.isUploading || fleet.loading ? null : usageOf(item.id)}
+                held={held}
+              >
+                <CatalogueRow
+                  name={item.name}
+                  meta={
+                    item.isUploading
+                      ? "Uploading…"
+                      : [
+                          sourceLabel(item),
+                          item.width && item.height ? `${item.width}×${item.height}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                  }
+                  selected={selected.has(item.id)}
+                  onSelect={() => toggle(item.id)}
+                  onOpen={() => openInspect(item)}
+                  menu={item.isUploading ? [] : menuFor(item)}
+                  more={item.isUploading ? [] : menuFor(item)}
+                  disabled={item.isUploading}
+                >
+                  <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
+                </CatalogueRow>
+              </Star>
+            ))}
+          </div>
+        ) : (
+          <div className="ds-gallery">
+            {displayItems.map((item) => (
+              <Star
+                key={item.tempId || item.id}
+                id={item.id}
+                use={item.isUploading || fleet.loading ? null : usageOf(item.id)}
+                held={held}
+              >
+                <GalleryShot
+                  name={item.isUploading ? "Uploading…" : item.name}
+                  badge={item.isUploading ? undefined : sourceLabel(item)}
+                  play={
+                    !item.isUploading && item.source === "stored" && item.mime.startsWith("video/")
+                  }
+                  selected={selected.has(item.id)}
+                  onSelect={() => toggle(item.id)}
+                  onOpen={() => openInspect(item)}
+                  menu={item.isUploading ? [] : menuFor(item)}
+                  more={item.isUploading ? [] : menuFor(item)}
+                  disabled={item.isUploading}
+                >
+                  <Thumb media={item.isUploading ? undefined : item} orbit={orbit} />
+                </GalleryShot>
+              </Star>
+            ))}
           </div>
         )}
-        <div className="flex justify-end px-2 gap-2">
-            {/* View mode toggle */}
-            <div className="bg-gray-100 dark:bg-gray-800 rounded-sm p-1 justify-self-end hidden sm:flex">
-              <button
-                onClick={() => setViewMode("grid")}
-                className={`p-2 rounded ${viewMode === "grid" ? "bg-white dark:bg-gray-700 shadow-sm" : ""}`}
-                title="Grid view"
-              >
-                <Grid className="w-4 h-4 dark:text-gray-200" />
-              </button>
-              <button
-                onClick={() => setViewMode("list")}
-                className={`p-2 rounded ${viewMode === "list" ? "bg-white dark:bg-gray-700 shadow-sm" : ""}`}
-                title="List view"
-              >
-                <List className="w-4 h-4 dark:text-gray-200" />
-              </button>
-            </div>
-        </div>
       </div>
 
-      {/* Content grid/list */}
-      {viewMode === "grid" ? (
-        <div className={`grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6`}>
-          {displayItems.map((content) => (
-            <ContentGridItem
-              key={content.tempId || content.id}
-              content={content}
-              onClick={handleContentClick}
-              onContextMenu={(e) => contextMenu.openContextMenu(e, content)}
-              isSelected={selectedItems.has(content.id)}
-              onToggleSelect={toggleItemSelection}
-              onUpdateName={updateContentName}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="rounded-sm mt-4 overflow-x-auto">
-          <table className="w-full table-fixed">
-            <thead className="border-b-gray-200 border-b-1">
-              <tr>
-                <th className="py-1 text-center text-xs max-md:text-[10px] font-medium text-gray-700 dark:text-gray-300 uppercase w-13">
-                  {/* Checkbox column */}
-                </th>
-                <th className="pr-2 py-1 text-left text-xs max-md:text-[10px] font-medium text-gray-900 dark:text-gray-300 uppercase w-3/6">
-                  Name
-                </th>
-                <th className="pr-2 py-1 text-left text-xs max-md:text-[10px] font-medium text-gray-900 dark:text-gray-300 uppercase w-1/6">
-                  Type
-                </th>
-                <th className="pr-2 py-1 text-left text-xs max-md:text-[10px] font-medium text-gray-900 dark:text-gray-300 uppercase w-2/6">
-                  Dimensions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200 dark:divide-gray-700  ">
-              {displayItems.map((content) => (
-                <ContentListItem
-                  key={content.tempId || content.id}
-                  content={content}
-                  onClick={handleContentClick}
-                  onContextMenu={(e) => contextMenu.openContextMenu(e, content)}
-                  isHighlighted={detailViewItemId === content.id}
-                  isSelected={selectedItems.has(content.id)}
-                  isDesktop={true}
-                  onToggleSelect={toggleItemSelection}
-                  onUpdateName={updateContentName}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {/* Empty state */}
-      {items.length === 0 && !loading && (
-        <div className="flex gap-2 flex-col items-center justify-center rounded-md flex-1 text-center border-2 border-dashed bg-gray-50 h-[300px] sm:h-[180px] w-full">
-          <p className="text-md sm:text-sm font-medium">
-            Drop anything here or click upload
-          </p>
-          <button onClick={handleUploadClick} className="text-md sm:text-sm border-1 border-gray-300 bg-white hover:bg-gray-100 py-1 px-2 rounded-md font-medium">
-            Upload
-          </button>
-        </div>
-      )}
-      </div>
-
-      <ContentDetailsModal
-        isOpen={isDetailOpen}
-        content={selectedContent}
-        onClose={handleDetailClose}
-        onDelete={handleDeleteClick}
-        onUpdate={updateContentName}
-      />
-
-      <ConfirmationModal
-        isOpen={isDeleteConfirmOpen}
-        onClose={closeDeleteConfirm}
-        showCloseButton={false}
-        onConfirm={handleDeleteConfirm}
-        title="Delete Media?"
-        message={
-          deleteMultiple
-            ? `Are you sure you want to delete ${selectedItems.size} selected items?${usedByNote} This action cannot be undone.`
-            : `Are you sure you want to delete "${deleteName || selectedContent?.name || 'this media'}"?${usedByNote} This action cannot be undone.`
+      <Inspector
+        open={inspected != null}
+        onOpenChange={(open) => {
+          if (!open) setInspect(null);
+        }}
+        title={inspected?.name ?? "Media"}
+        actions={
+          inspected && (
+            <button
+              type="button"
+              className="ds-btn ds-btn-danger"
+              onClick={() => remove([inspected.id])}
+            >
+              Delete
+            </button>
+          )
         }
-        confirmText="Delete"
-        variant="danger"
-      />
-
-      {contextMenu.data && (
-        <ContextMenu
-          isOpen={contextMenu.isOpen}
-          position={contextMenu.position}
-          onClose={contextMenu.closeContextMenu}
-          header={
-            <div>
-              <div className="font-medium text-gray-900 dark:text-gray-100">{contextMenu.data.name}</div>
-              {contextMenu.data.width && contextMenu.data.height && (
-                <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {contextMenu.data.width}×{contextMenu.data.height}
-                </div>
-              )}
+      >
+        {inspected && (
+          <>
+            <div className="ds-tile-media" style={{ borderRadius: 10, marginBottom: 12 }}>
+              <Thumb media={inspected} orbit={orbit} />
             </div>
-          }
-          items={getContextMenuItems(contextMenu.data)}
-        />
-      )}
-    </div>
+            <CommitText
+              label="Name"
+              value={inspected.name}
+              onWrite={(next) =>
+                next.trim() && next.trim() !== inspected.name
+                  ? putMedia({ ...inspected, name: next.trim() })
+                  : Promise.resolve()
+              }
+            />
+            <p className="ds-hint">Type · {sourceLabel(inspected)}</p>
+            <p className="ds-hint">
+              Size · {inspected.width && inspected.height ? `${inspected.width}×${inspected.height}` : "unknown"}
+            </p>
+            {inspected.duration_ms != null && (
+              <p className="ds-hint">Duration · {formatDuration(inspected.duration_ms)}</p>
+            )}
+            {inspected.source === "stored" && (
+              <p className="ds-hint">File · {(inspected.size / (1024 * 1024)).toFixed(1)} MB</p>
+            )}
+            {(() => {
+              const use = usageOf(inspected.id);
+              return (
+                <p className="ds-hint">
+                  {use.holders.length === 0
+                    ? "Held by no program."
+                    : `Held by ${use.holders.map((program) => program.name).join(", ")}.`}
+                </p>
+              );
+            })()}
+          </>
+        )}
+      </Inspector>
+    </Page>
   );
 };
+
+/**
+ * A file, wearing its use: faint when no program holds it, a dot of now when a
+ * screen is showing it. Holding it lights the programs that hold it elsewhere.
+ */
+function Star({
+  id,
+  use,
+  held,
+  children,
+}: {
+  id: string;
+  use: { holders: { id: string }[]; onGlass: boolean } | null;
+  held: ReturnType<typeof useFocus>["held"];
+  children: React.ReactNode;
+}) {
+  const hold = useHoldable("file", id);
+  const related =
+    held?.kind === "program" && use != null && use.holders.some((program) => program.id === held.id);
+  return (
+    <div
+      className="ds-star"
+      data-unused={use != null && use.holders.length === 0 ? "true" : undefined}
+      data-onglass={use?.onGlass ? "true" : undefined}
+      {...hold.bind}
+      {...(hold.held ? {} : litProps(held, related))}
+    >
+      {children}
+      {use?.onGlass && <span className="ds-star-now" aria-label="Showing now" />}
+    </div>
+  );
+}

@@ -109,6 +109,7 @@ export function Board({
     return (
       <EmptyState
         kind="filtered-empty"
+        art="filtered"
         title="No matching issues"
         body={hasMore
           ? "More publication-pinned matches are available."
@@ -119,11 +120,10 @@ export function Board({
             icon={hasMore ? undefined : <FilterX className="size-icon-sm" />}
             label={hasMore ? (loadingMore ? "Loading…" : "Load more") : "Clear filter"}
             isDisabled={loadingMore}
-            variant="primary"
+            variant="ghost"
             size="sm"
           />
         }
-        className="min-h-60"
       />
     );
   }

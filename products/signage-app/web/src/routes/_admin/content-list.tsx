@@ -6,7 +6,7 @@ interface ContentListSearch {
 }
 
 function ContentListRoute() {
-  document.title = 'Content | AD2SP';
+  document.title = 'Files | Signage';
   return <ContentListPage />;
 }
 

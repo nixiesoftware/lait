@@ -26,7 +26,7 @@
 //!
 //! Hand-rolled rather than clap: a handful of argv shapes, all of them already
 //! deployed (`daemon_spawn` self-execs `<exe> daemon`, agent configs run
-//! `lait mcp`, `viewer/scripts/dev.mjs` runs `lait [--orbit X] --port P
+//! `lait mcp`, and `ci/smoke-p0.sh` runs `lait [--orbit X] --port P
 //! --json`, and installers verify with `lait --version`), and a parser
 //! generator earns nothing against a fixed list of flags.
 //!
@@ -209,12 +209,19 @@ impl Mode {
                 let installation = lait::world::installed::load(
                     &lait::serve::head::installations_root(&identity),
                 )?;
-                lait::daemon::run_lait_daemon(
+                // And in the daemon, which is what the host plane and every
+                // display resolve through. A World that only some of this
+                // device's registries know about is a World that works until
+                // somebody reaches it by a route nobody tested.
+                let (packages, clients, refused) = lait::world::installed::load_local(
+                    &identity,
                     installation.packages,
                     installation.clients,
-                    selection,
-                )
-                .await
+                );
+                for reason in &refused {
+                    tracing::warn!(%reason, "a local World was not loaded");
+                }
+                lait::daemon::run_lait_daemon(packages, clients, selection).await
             }
             Mode::Mcp => {
                 let selection = Selection::default();
@@ -240,6 +247,26 @@ impl Mode {
                 home,
                 world,
             } => {
+                // The head had no subscriber at all, so every `warn!` and
+                // `error!` reached by this process was a no-op — including the
+                // one a linked World logs to say it is *not* serving the
+                // installed release, which is the safety half of that seam.
+                //
+                // To **stderr**, for the reason the daemon arm spells out and
+                // one more: `--json` writes a readiness line to stdout that
+                // callers parse, and a log line landing in the middle of it
+                // would break every one of them.
+                //
+                // `try_init` rather than `init`: this is the launcher, it may
+                // run beside anything, and a second subscriber is not worth a
+                // panic on the way up.
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "lait=warn,warn".into()),
+                    )
+                    .try_init();
                 let port = match port {
                     Some(p) => p.parse::<u16>().map_err(|_| {
                         anyhow::anyhow!("--port must be a number 0-65535, got {p:?}")

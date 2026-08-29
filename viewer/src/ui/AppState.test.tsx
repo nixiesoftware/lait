@@ -9,6 +9,7 @@ import {
   LoadingState,
   recoveryDiagnostics,
   recoveryForError,
+  SkeletonRows,
   trustSummary,
 } from "./AppState";
 
@@ -35,8 +36,12 @@ describe("application state vocabulary", () => {
   });
 
   it("distinguishes filtered empty from ordinary empty", () => {
-    render(<ApplicationState kind="filtered-empty" title="No matching issues" />);
+    render(<ApplicationState kind="filtered-empty" art="filtered" title="No matching issues" />);
     expect(host!.querySelector('[data-application-state="filtered-empty"]')).toBeTruthy();
+    const art = host!.querySelector('[data-empty-state-art="filtered"]');
+    expect(art?.tagName.toLowerCase()).toBe("canvas");
+    expect(art?.getAttribute("aria-hidden")).toBe("true");
+    expect(art?.getAttribute("role")).toBe("presentation");
   });
 
   it("uses an alert only for an error state", () => {
@@ -198,5 +203,29 @@ describe("local trust summary", () => {
         is_current_authority: true,
       }],
     })).toContain("Failure: wrong_protector");
+  });
+});
+
+describe("the list that is coming", () => {
+  /**
+   * Eight grey bars are for the eye. A screen reader gets one honest sentence
+   * instead — announcing each placeholder individually is worse than silence,
+   * and silence would be worse than saying something is on its way.
+   */
+  it("stands in for rows visually and says it once for a reader", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => {
+      root.render(<SkeletonRows rows={5} label="Loading issues" />);
+    });
+
+    const status = host.querySelector('[role="status"]');
+    expect(status?.textContent).toBe("Loading issues");
+    const hidden = host.querySelector("[aria-hidden]");
+    expect(hidden?.children.length).toBe(5);
+    expect(host.querySelector("[data-application-state]")?.getAttribute("aria-busy")).toBe("true");
+    root.unmount();
+    host.remove();
   });
 });

@@ -30,6 +30,8 @@ const board = (rows: Row[]): BoardView => ({
       rows: rows.filter((r) => r.status === "done"),
     },
   ],
+  total: null,
+  complete: true,
 });
 
 describe("groupRows", () => {
@@ -79,21 +81,45 @@ describe("groupRows", () => {
 
 describe("filterNotice", () => {
   it("counts what the filter held back", () => {
-    expect(filterNotice(12, 9)).toEqual({ hidden: 3, show: true });
+    expect(filterNotice(12, 9)).toEqual({ hidden: 3, unloaded: null, show: true });
   });
 
   it("says nothing when the filter hid nothing", () => {
-    expect(filterNotice(12, 12)).toEqual({ hidden: 0, show: false });
+    expect(filterNotice(12, 12)).toEqual({ hidden: 0, unloaded: null, show: false });
   });
 
   // The empty case belongs to the filtered-empty state, which offers the same
   // "clear" action. Two notices answering one question is worse than either.
   it("defers to the empty state when the filter hid everything", () => {
-    expect(filterNotice(12, 0)).toEqual({ hidden: 12, show: false });
+    expect(filterNotice(12, 0)).toEqual({ hidden: 12, unloaded: null, show: false });
   });
 
   // A stale total must never render "-2 issues hidden".
   it("never reports a negative count", () => {
-    expect(filterNotice(3, 5)).toEqual({ hidden: 0, show: false });
+    expect(filterNotice(3, 5)).toEqual({ hidden: 0, unloaded: null, show: false });
+  });
+
+  // The defect this exists for. A hundred rows loaded from a project the
+  // engine counted at five hundred: the filter hid three of the hundred, and
+  // four hundred were never fetched. Those are different facts, and the old
+  // notice reported only the first as if it were the whole story.
+  it("separates what the filter hid from what was never loaded", () => {
+    expect(filterNotice(100, 97, 500)).toEqual({ hidden: 3, unloaded: 400, show: true });
+  });
+
+  // Nothing hidden by the filter, but a page short of the project: still
+  // worth saying, because a count over these rows is a count of a page.
+  it("shows for unloaded rows even when the filter hid nothing", () => {
+    expect(filterNotice(100, 100, 500)).toEqual({ hidden: 0, unloaded: 400, show: true });
+  });
+
+  // Unmeasured is absent, never zero. An engine that declined to count must not
+  // be read as having counted nothing.
+  it("passes an unmeasured total through as absent", () => {
+    expect(filterNotice(100, 97, null)).toEqual({ hidden: 3, unloaded: null, show: true });
+  });
+
+  it("does not invent unloaded rows when everything is loaded", () => {
+    expect(filterNotice(12, 9, 12)).toEqual({ hidden: 3, unloaded: 0, show: true });
   });
 });

@@ -586,6 +586,47 @@ export async function confirmationPhrase(profile, pairing, receiverNonce) {
   return Array.from(digest.slice(0, 6), (byte) => CONFIRMATION_WORDS[byte & 0x1f]);
 }
 
+// Crockford's base32: no I, L, O or U, and what a person types as one of
+// those folds onto the digit it resembles rather than being refused.
+export const RENDEZVOUS_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export const RENDEZVOUS_CODE_CHARS = 8;
+
+/** The code as entered, reduced to the eight symbols it names. */
+export function normalizeRendezvousCode(entered) {
+  let code = "";
+  for (const character of String(entered ?? "")) {
+    if (character === " " || character === "-" || character === "_" || character === ".") continue;
+    const symbol = character === "o" || character === "O" ? "0"
+      : character === "i" || character === "I" || character === "l" || character === "L" ? "1"
+      : character.toUpperCase();
+    if (symbol.length !== 1 || !RENDEZVOUS_CODE_ALPHABET.includes(symbol)) {
+      refuse("invalid_identifier", "rendezvous code is not a code");
+    }
+    code += symbol;
+  }
+  if (code.length !== RENDEZVOUS_CODE_CHARS) refuse("invalid_identifier", "rendezvous code is not a code");
+  return code;
+}
+
+/** The code grouped for reading: `XXXX-XXXX`. */
+export function groupRendezvousCode(entered) {
+  const code = normalizeRendezvousCode(entered);
+  return `${code.slice(0, RENDEZVOUS_CODE_CHARS / 2)}-${code.slice(RENDEZVOUS_CODE_CHARS / 2)}`;
+}
+
+/**
+ * The rendezvous id a code names on the wire: a transcript digest, like the
+ * phrase, so the wire keeps the 32-hex shape every receiver already accepts
+ * and nobody has to type it.
+ */
+export async function rendezvousFromCode(entered) {
+  const code = normalizeRendezvousCode(entered);
+  const transcript = new Transcript("astrolabe-display/rendezvous/v1");
+  transcript.u32(PROTOCOL_MAJOR);
+  transcript.text(code);
+  return (await sha256(transcript.finish())).slice(0, 32);
+}
+
 export function randomHex(byteLength) {
   if (!globalThis.crypto || !globalThis.crypto.getRandomValues) {
     refuse("unsupported_crypto", "secure random generation is required");

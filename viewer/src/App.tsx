@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import {
   PanelLeft,
@@ -10,6 +10,7 @@ import { ConfirmRequired, hostRpc, LaitError, rpc, spaces as fetchSpaces } from 
 import { setFaceScope } from "./ui/faces";
 import { useDoorbell } from "./doorbell";
 import { runBounded, type BulkProgress } from "./core/bulk";
+import { emptinessOf } from "./core/emptiness";
 import { filterNotice, groupRows, loadDisplay, saveDisplay, type DisplayState } from "./core/display";
 import {
   contribute,
@@ -42,7 +43,7 @@ import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
 import { SPEC_KIND_LABEL } from "./core/specs";
 import { Activity } from "./ui/Activity";
-import { classifyFailure, EmptyState, InlineError, recoveryForError, StandingNotice, TrustPopover } from "./ui/AppState";
+import { classifyFailure, EmptyState, InlineError, recoveryForError, SkeletonRows, StandingNotice, TrustPopover } from "./ui/AppState";
 import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
@@ -88,6 +89,7 @@ import { DialogHost } from "./ui/dialogs";
 import { Combobox } from "./ui/Picker";
 import { Dialog, Theme } from "@astryxdesign/core";
 
+import { loadPreferences } from "./core/preferences";
 import { laitTheme } from "./theme/lait";
 import { Button, IconButton } from "@astryxdesign/core";
 import { Sidebar } from "./ui/Sidebar";
@@ -199,7 +201,13 @@ export function App() {
   // resolves the space id to its own local replica after `/api/spaces` answers.
   const initialRoute = useRef((() => {
     const fromUrl = parseRoute(window.location);
-    return fromUrl.spaceId ? fromUrl : (loadLastRoute() ?? fromUrl);
+    if (fromUrl.spaceId) return fromUrl;
+    const last = loadLastRoute();
+    if (!last) return fromUrl;
+    // A chosen home view overrides where you left off — but only on launch,
+    // and only the view: the Space and project it opens in are still yours.
+    const home = loadPreferences().homeView;
+    return home === "last" ? last : { ...last, view: home, issue: null };
   })()).current;
   const [spaces, setSpaces] = useState<SpaceRow[]>([]);
   /** Canonical `ws_…` identity in the URL, distinct from the supervisor's
@@ -362,6 +370,7 @@ export function App() {
   const boardSpace = isProjectView(view) && !team ? current : null;
   const {
     board: projectBoard,
+    resource: projectBoardResource,
     nextCursor: projectBoardCursor,
     loadMore: loadMoreProjectBoard,
   } = useProjectBoard(
@@ -612,6 +621,31 @@ export function App() {
     };
   }, [allowed, board, filter, projectStore]);
 
+  /**
+   * Why there are no rows — which is three different facts, and they were one.
+   *
+   * `shown` is null while a board loads, when a Space holds no project to draw
+   * one for, and when the read failed. The work area called all three "this
+   * view is unavailable — the local projection could not be loaded", under a
+   * warning triangle, with a Retry that could not help two of them. On a Space
+   * that had simply never had a project, the header said "Ready locally" and
+   * the body said it had failed, and the body was the one that was wrong.
+   *
+   * The store has always known: it publishes `cold | partial | ready |
+   * refreshing | error` on every snapshot. Nothing read it — every surface
+   * inferred state from `data ?? []`, which is exactly where "not asked yet"
+   * and "asked, and there is nothing" become the same value.
+   *
+   * Order matters. A failure is worth saying even if a Space is also empty,
+   * because it is the only one of the three anybody can act on.
+   */
+  const emptiness = emptinessOf({
+    hasRows: Boolean(shown),
+    board: projectBoardResource.state,
+    projects: projectsResource.state,
+    projectCount: liveProjects.length,
+  });
+
   /** The list's arrangement (the board renders columns straight off `shown`). */
   const groups = useMemo(() => (shown ? groupRows(shown, display) : []), [shown, display]);
 
@@ -632,8 +666,12 @@ export function App() {
       0,
     ) ?? 0;
   const resultCount = liveCount(shown);
-  const totalCount = liveCount(board);
-  const notice = filterNotice(totalCount, resultCount);
+  const loadedCount = liveCount(board);
+  // The engine's count, not ours. `board.total` is what it measured against the
+  // whole posting; `loadedCount` is merely what we hold. Handing both over is
+  // what lets the notice say "and 400 more not loaded" instead of pretending
+  // the page was the project.
+  const notice = filterNotice(loadedCount, resultCount, board?.total ?? null);
 
   // Motion follows what is *visible*, in the order it is visible: on the list,
   // j/k walks the display *groups*; on the board — which always lays out by
@@ -747,7 +785,7 @@ export function App() {
     const row = spacesRef.current.find((space) => space.id === id);
     if (!row) return;
     const confirmed = await ask.confirm({
-      title: `Forget ${row.name || row.space}?`,
+      title: `Forget ${row.name || row.seen?.name || row.space}?`,
       body: `This removes the space from the list on this device. The encrypted store at ${row.path} is left exactly as it is, and no other device is affected.`,
       confirmText: "Forget",
       danger: true,
@@ -772,7 +810,7 @@ export function App() {
       // written by founding and entering, so re-opening a store does not
       // re-register it. Promising a remedy this app does not have is worse than
       // saying nothing.
-      body: `${gone.map((space) => space.name || space.space).join(", ")} — ${
+      body: `${gone.map((space) => space.name || space.seen?.name || space.space).join(", ")} — ${
         gone.length === 1 ? "the store this row names is" : "the store each row names is"
       } already gone from this machine. Removing ${
         gone.length === 1 ? "it" : "them"
@@ -1679,12 +1717,16 @@ export function App() {
   const fullWidthDetail = detailVisible;
 
   // The third panel survives so the layout keeps one topology for every view —
-  // declaring it conditionally made the library rebalance the sidebar whenever it
-  // came and went — but nothing is drawn in it, so it stays shut. Layout effects
-  // run before paint, so its stored width never flashes.
-  useLayoutEffect(() => {
-    detailPanel.current?.collapse();
-  }, [detailPanel, detailVisible]);
+  // declaring it conditionally made the library rebalance the sidebar whenever
+  // it came and went — but nothing is drawn in it, so it is declared zero-wide
+  // where it is rendered.
+  //
+  // It used to be shut here instead, by a layout effect, on the reasoning that
+  // layout effects run before paint. They do, and it did not help: the group
+  // measures its container asynchronously and lays out from the panel's props
+  // afterwards, so the effect was overwritten by a `defaultSize` of 34% and the
+  // window opened with a third of it empty. Nothing re-ran the effect, so it
+  // stayed that way until something else saved a layout.
 
   useEffect(() => {
     registry.validate();
@@ -2119,8 +2161,9 @@ export function App() {
       ) : (
         <EmptyState
           kind="unavailable"
+          art="unavailable"
           title="Issue not found in this local project"
-          body={`${selection} is not present in the current local projection. It may belong to another project, still be arriving, or not exist on this replica.`}
+          body={`${selection} isn’t available in this local replica.`}
           action={<Button
                     onClick={api.closeIssue}
                     label="Clear selection"
@@ -2193,12 +2236,19 @@ export function App() {
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
         onResize={(size) => setSidebarCollapsed(size.inPixels === 0)}
-        // Just the fill. The `max-[768px]:hidden` that used to ride here could
-        // never do its job: `Panel` routes `className` to a nested div, so it
-        // hid the rail's contents and left the flex item holding 180px of empty
+        // Just the fill, and the room the window's controls take out of the
+        // top of it. The padding is on the column rather than on the row
+        // inside it so the sunken fill still runs to the top edge of the
+        // window — the controls sit *in* the rail, which is the whole reason
+        // the frame gave up drawing a strip of its own. `0px` off a browser
+        // tab. See `core/windowControls.ts`.
+        //
+        // The `max-[768px]:hidden` that used to ride here could never do its
+        // job: `Panel` routes `className` to a nested div, so it hid the
+        // rail's contents and left the flex item holding 180px of empty
         // window. The rule that takes the panel out of the layout is in
         // `styles.css`, keyed on the element the library documents.
-        className="bg-sunken"
+        className="bg-sunken pt-[var(--window-controls-top)]"
       >
         <Sidebar
           spaces={spaces}
@@ -2245,14 +2295,44 @@ export function App() {
         // stands on the raised canvas the columns are sunk into. A seam at the
         // toolbar's edge would split one surface into chrome-over-content; the
         // headers belong to the body they act on.
-        className={`flex min-w-0 flex-col${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
+        //
+        // The same inset the rail carries, for the same reason and on the same
+        // element: with the rail hidden — a narrow window, or Settings — this
+        // column is what the window's controls are sitting on.
+        // No standing top inset. Clearing the whole band left the work area
+        // starting a band's height below the top of its own window — an empty
+        // strip above the header, which is the seam the overlay title bar was
+        // given up to remove. The header rises into the band instead and clears
+        // the controls itself, at whichever end they are.
+        //
+        // Settings is the exception: it hides the header and draws its own
+        // shell, so there is nothing to rise and the band has to be cleared the
+        // old way or the controls sit on its content.
+        className={`flex min-w-0 flex-col${view === "settings" ? " pt-[var(--window-controls-top)]" : ""}${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
       >
         {/* One header for every view, mounted once and never swapped. Opening an
             issue extends the trail and hands the actions slot to the issue; it
             does not build a second bar with its own inset, its own controls and
             its own idea of where the title sits. Only Settings stands outside —
             it hides the sidebar, so it draws its own shell entirely. */}
-        <div className={view === "settings" ? "hidden" : "shrink-0"}>
+        <div
+          className={view === "settings" ? "hidden" : "shrink-0"}
+          // The controls sit *in* this bar now, so it keeps its own end clear.
+          //
+          // Trailing always: this column is the trailing-most one there is, so
+          // where a platform puts its controls at that end — Windows — they are
+          // over this bar whatever else is on screen.
+          //
+          // Leading only when the rail is gone. With the rail drawing, it is
+          // the leading column and the controls are over *it*; insetting here
+          // as well would push the trail sideways to clear something that is
+          // not there. `railHidden` covers both ways it goes: collapsed by
+          // hand, and hidden by CSS under the drawer breakpoint.
+          style={{
+            paddingInlineEnd: "var(--window-controls-trailing)",
+            paddingInlineStart: railHidden ? "var(--window-controls-leading)" : undefined,
+          }}
+        >
           <SurfaceHeader
             // No standing leading control — the bar's first ink is the thing
             // you are looking at, and a permanent toggle was window furniture
@@ -2289,7 +2369,7 @@ export function App() {
                 <HeaderActionsOutlet />
               ) : (
             <>
-              {!projectShell && (
+              {!projectShell && current && (
                 <TrustPopover
                   liveness={liveness}
                   status={statusInfo}
@@ -2343,7 +2423,8 @@ export function App() {
                   onOpenChange={setFilterOpen}
                   focusToken={focusToken}
                   resultCount={resultCount}
-                  totalCount={totalCount}
+                  totalCount={loadedCount}
+                  measuredCount={board?.total ?? null}
                   onChange={setFilter}
                 />
               )}
@@ -2377,7 +2458,6 @@ export function App() {
                   label="New issue"
                   onClick={() => run("issue.create")}
                   variant="secondary"
-                  elevation="low"
                   size="sm"
                   className={toolbarIconControl}
                   tooltip="New issue  C"
@@ -2392,7 +2472,6 @@ export function App() {
                   label="New spec"
                   onClick={() => setComposingSpec("any")}
                   variant="secondary"
-                  elevation="low"
                   size="sm"
                   className={toolbarIconControl}
                   tooltip="New spec"
@@ -2414,7 +2493,6 @@ export function App() {
                     })
                   }
                   variant={railOpen ? "active" : "secondary"}
-                  elevation={railOpen ? "none" : "low"}
                   size="sm"
                   className={toolbarIconControl}
                   tooltip={railOpen ? "Hide project panel" : "Show project panel"}
@@ -2500,12 +2578,12 @@ export function App() {
             />
           ) : !current ? (
             <EmptyState
-              icon={<PanelLeft className="size-icon-lg" />}
+              art="space"
               title={routeSpace ? "This space is not on this device" : "Choose a local space"}
               body={
                 routeSpace
-                  ? `The link names ${routeSpace}, but no matching local replica is available. Enter the space from an invite on this device, then refresh.`
-                  : "Select a space from the sidebar to open its local replica."
+                  ? `${routeSpace} isn’t on this device. Enter it with an invite.`
+                  : "Open the space menu at the top of the sidebar, or start a new one."
               }
               // A route naming a space this device does not hold is answered by
               // entering it, not by founding a second one under the same name.
@@ -2521,8 +2599,9 @@ export function App() {
           ) : missingProject ? (
             <EmptyState
               kind="unavailable"
+              art="unavailable"
               title="Project not found in this local space"
-              body={`${project} is not available in the current replica. Choose another project from the sidebar or wait for catalog data to arrive.`}
+              body={`${project} isn’t available in this local replica.`}
               action={
                 projects[0] ? (
                   <Button
@@ -2563,6 +2642,15 @@ export function App() {
               onTabChange={openSettingsTab}
               onError={setError}
               onExit={() => api.goto("list")}
+              theme={theme}
+              onThemeChange={api.setTheme}
+              density={density}
+              onDensityChange={(nextDensity) => {
+                setDensity(nextDensity);
+                applyDensity(nextDensity);
+              }}
+              onOpenShortcuts={() => setModal("shortcuts")}
+              onForget={() => void forgetSpace(current)}
             />
           ) : view === "my-issues" ? (
             <MyIssues
@@ -2587,6 +2675,7 @@ export function App() {
               spaceId={current}
               project={activeProject}
               members={members}
+              teams={teams}
               readOnly={readOnly}
               onError={setError}
             />
@@ -2702,6 +2791,7 @@ export function App() {
               mutators={issueMutators}
               readOnly={readOnly}
               filtered={isActive(filter)}
+              onClearFilter={() => api.clearFilter()}
               hasMore={display.deleted
                 ? deletedCursor !== null
                 : needsServer(filter)
@@ -2722,9 +2812,30 @@ export function App() {
                 }
               }}
             />
+          ) : emptiness === "loading" ? (
+            <SkeletonRows label="Loading issues" />
+          ) : emptiness === "no-projects" ? (
+            // A first run, taught rather than apologised for: the heading names
+            // the thing, the body says what it is and why you would want one,
+            // and the action is the next step. Nothing here is a warning,
+            // because nothing has gone wrong.
+            <EmptyState
+              art="projects"
+              title="Projects"
+              body="Group issues around one clear outcome."
+              action={
+                <Button
+                  onClick={() => api.createProject()}
+                  label="Create project"
+                  variant="primary"
+                  size="sm"
+                />
+              }
+            />
           ) : (
             <EmptyState
               kind="unavailable"
+              art="unavailable"
               title="This view is unavailable"
               body="The local projection could not be loaded."
               action={<Button
@@ -2742,7 +2853,17 @@ export function App() {
           {projectShell && issueMode && notice.show && (
             <p className="text-mute flex shrink-0 items-center justify-center gap-2 py-2 text-sm">
               <span>
-                {notice.hidden} issue{notice.hidden === 1 ? "" : "s"} hidden by filters
+                {/* Two sentences for two facts. "Hidden by filters" is ours to
+                    explain; "not loaded" is the page's edge, and a person can
+                    scroll for it. Saying only the first over a partial page was
+                    the lie this notice used to tell. */}
+                {notice.hidden > 0 && (
+                  <>{notice.hidden} issue{notice.hidden === 1 ? "" : "s"} hidden by filters</>
+                )}
+                {notice.hidden > 0 && (notice.unloaded ?? 0) > 0 && " · "}
+                {(notice.unloaded ?? 0) > 0 && (
+                  <>{notice.unloaded} more not loaded</>
+                )}
               </span>
               <Button
                 onClick={() => api.clearFilter()}
@@ -2771,12 +2892,15 @@ export function App() {
               railOpen ? "w-rail translate-x-0 opacity-100" : "w-0 translate-x-2 opacity-0",
             )}
           >
-            <div className="w-rail py-3 pr-3">
+            {/* `pt-1`, not `pt-3`: the rail's card and the list's first group header
+                sit side by side and have to start on the same line. The header
+                brings its own `mt-1` and the rail was padding to 3, so the two
+                columns began 8px apart — each spacing decision defensible on its
+                own, and visibly wrong together. */}
+            <div className="w-rail pt-1 pr-3 pb-3">
               <ProjectRail
                 spaceId={current}
                 project={activeProject}
-                members={members}
-                teams={teams}
                 counts={projectCounts}
                 readOnly={readOnly}
                 activeMilestone={filter.milestone}
@@ -2797,9 +2921,24 @@ export function App() {
       <Panel
         id="detail"
         panelRef={detailPanel}
-        defaultSize="34%"
-        minSize="300px"
-        maxSize="58%"
+        // Zero by declaration, because nothing is ever drawn here. It used to
+        // say 34% — the width it had when it held an issue — and be shut again
+        // by a layout effect. That effect cannot win: the group measures its
+        // container asynchronously and lays out from these props *after* the
+        // effect has run, so the first paint of a fresh window gave a third of
+        // it to a panel with nothing in it. Measured at 1399px wide: sidebar
+        // 251, main 671, and 475 of empty. It looked like the app failing to
+        // fill the window, which is exactly what it was.
+        //
+        // It cleared on a reload because the group had saved a layout by then,
+        // and in the client it cleared on reopening the window for the same
+        // reason — the head keeps its port, so the page keeps its origin and
+        // its storage. First open of a new head had nothing saved and no way to
+        // recover, since the effect never runs again.
+        //
+        // The other sizes are gone with it. A panel that is always zero has no
+        // minimum, no maximum and nothing to drag.
+        defaultSize="0%"
         collapsible
         collapsedSize="0%"
         className="ui-detail overflow-hidden"

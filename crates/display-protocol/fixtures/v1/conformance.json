@@ -121,5 +121,11 @@
     "wait_ms": 25000
   },
   "protocol_major": 1,
+  "rendezvous_code": {
+    "entered": " 7k3q-oi1L ",
+    "grouped": "7K3Q-0111",
+    "normalized": "7K3Q0111",
+    "rendezvous": "735364a213f3ff2c72274ed31551f5bb"
+  },
   "schema": "astrolabe.display.conformance.v1"
 }

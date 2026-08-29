@@ -16,8 +16,12 @@ import {
 
 import { errorKindOf } from "../api";
 import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
-import { Button, Popover } from "@astryxdesign/core";
+import { Button, IconButton, Popover, Skeleton } from "@astryxdesign/core";
 import { cn } from "./primitives";
+
+import { EmptyArt, type EmptyStateArt } from "./emptyArt";
+
+export type { EmptyStateArt };
 
 export type ApplicationStateKind =
   | "loading"
@@ -32,6 +36,7 @@ export type ApplicationStateKind =
 export function ApplicationState({
   kind,
   icon,
+  art,
   title,
   body,
   action,
@@ -39,26 +44,90 @@ export function ApplicationState({
 }: {
   kind: ApplicationStateKind;
   icon?: React.ReactNode;
+  art?: EmptyStateArt;
   title: string;
   body?: React.ReactNode;
   action?: React.ReactNode;
   className?: string;
 }) {
+  // Two tiers, and which one a state gets is not a matter of taste.
+  //
+  // TEACHING — a feature this person has not used yet. The drawing, the
+  // feature's own name, one sentence saying what it is for, and the action that
+  // starts it: a left-aligned block, the drawing on the same leading edge as
+  // every line under it.
+  // Linear's Projects and Customer requests states are this shape exactly, and
+  // the title there is the noun ("Projects"), never the negation ("No projects
+  // yet") — the negation reports a fact you can already see, and spends the one
+  // line that could have told you something.
+  //
+  // QUIET — the absence is unremarkable, or it is the good news. The drawing
+  // and one line, centred, at no heading weight: Linear's Inbox, Drafts and My
+  // issues are this, because somebody looking at an empty inbox has nothing
+  // left to learn and a heading over it is a ceremony for nothing.
+  //
+  // The tier follows from `body`, so it cannot be set independently of whether
+  // there is anything to say. A filter matching nothing is quiet whatever it
+  // passes: it is not a first run, the person knows what the list holds, and
+  // the only thing they want is out.
+  //
+  // Everything that is not an empty state — unavailable, error, retry, loading
+  // — stays centred at heading weight. Those are not teaching moments and must
+  // not borrow the shape of one.
+  const teaching = kind === "empty" && body !== undefined;
+  const quiet = (kind === "empty" || kind === "filtered-empty") && !teaching;
   return (
     <div
-      className={cn("flex flex-1 items-center justify-center p-8", className)}
+      className={cn(
+        "flex flex-1 items-center justify-center",
+        quiet ? "min-h-52 p-6" : "min-h-64 p-8",
+        className,
+      )}
       data-application-state={kind}
+      data-empty-tier={teaching ? "teaching" : quiet ? "quiet" : undefined}
       role={kind === "error" || kind === "retry" ? "alert" : "status"}
       aria-live={kind === "loading" || kind === "progress" ? "polite" : undefined}
       aria-busy={kind === "loading" || kind === "progress" ? true : undefined}
     >
-      <div className="flex max-w-sm flex-col items-center text-center">
-        <span className={cn("text-mute mb-3", (kind === "error" || kind === "retry") && "text-danger")}>
-          {icon ?? <StateIcon kind={kind} />}
-        </span>
-        <h2 className="text-base font-semibold">{title}</h2>
-        {body && <p className="text-dim mt-1 text-sm leading-5">{body}</p>}
-        {action && <div className="mt-4">{action}</div>}
+      <div
+        className={cn(
+          "flex flex-col",
+          teaching ? "max-w-[18rem] items-start text-left" : "max-w-xs items-center text-center",
+        )}
+      >
+        {art ? (
+          // The plate is drawn at one ruling and never resized: a halftone that
+          // resizes is no longer a halftone, it is a resampled picture of one.
+          // So a quieter state gets the same plate — the tier is carried by the
+          // words and the block's own air, not by a second treatment of the art.
+          //
+          // One margin, one alignment, in both tiers. The `-ml-8` that used to
+          // hang the teaching plate off the leading edge was cancelling the
+          // blank the old full-lattice canvas padded the drawing with; that
+          // blank varied by 15px across the ten fields, so the correction was
+          // right for none of them. `EmptyArt` now sizes itself to its ink, and
+          // the leading edge is the leading edge.
+          <EmptyArt
+            art={art}
+            className="text-dim pointer-events-none mb-3 shrink-0 select-none"
+          />
+        ) : (
+          <span
+            className={cn(
+              "text-mute mb-3",
+              (kind === "error" || kind === "retry") && "text-danger",
+            )}
+          >
+            {icon ?? <StateIcon kind={kind} />}
+          </span>
+        )}
+        {quiet ? (
+          <h2 className="text-dim text-sm">{title}</h2>
+        ) : (
+          <h2 className="text-sm font-semibold">{title}</h2>
+        )}
+        {body && !quiet && <p className="text-dim mt-1 max-w-[18rem] text-xs leading-4">{body}</p>}
+        {action && <div className="mt-3">{action}</div>}
       </div>
     </div>
   );
@@ -67,6 +136,44 @@ export function ApplicationState({
 export function EmptyState(props: Omit<React.ComponentProps<typeof ApplicationState>, "kind"> & { kind?: Extract<ApplicationStateKind, "empty" | "filtered-empty" | "unavailable"> }) {
   const { kind = "empty", ...rest } = props;
   return <ApplicationState kind={kind} {...rest} />;
+}
+
+/**
+ * The shape of the list that is coming, while it comes.
+ *
+ * A centred spinner over an empty pane says "something is happening" and
+ * nothing else: the pane is blank, the chrome is absent, and when the rows
+ * arrive everything jumps into place at once. Rows are a fixed `h-ctl-xl` — a
+ * rung on the control ladder, scaled by `--scale` — so standing in for them at
+ * the same rung means the arrival costs no movement.
+ *
+ * The `Skeleton` is the design system's own, and so is `--color-skeleton`: both
+ * were already here, and neither had a caller.
+ *
+ * Marked `aria-hidden` and wrapped in a live region that says the honest thing
+ * once. A screen reader has no use for eight grey bars, and eight of them
+ * announced individually is worse than silence.
+ */
+export function SkeletonRows({ rows = 8, label = "Loading" }: { rows?: number; label?: string }) {
+  return (
+    <div className="flex flex-1 flex-col" data-application-state="loading" aria-busy>
+      <span className="sr-only" role="status" aria-live="polite">
+        {label}
+      </span>
+      <div aria-hidden className="flex flex-col">
+        {Array.from({ length: rows }, (_, row) => (
+          <div key={row} className="border-line h-ctl-xl flex items-center gap-3 border-b px-4">
+            <Skeleton width={16} height={16} radius={4} />
+            <Skeleton width={64} height={10} radius={4} />
+            {/* Uneven, because a list is: a column of identical bars reads as a
+                table of one repeated value rather than as titles arriving. */}
+            <Skeleton width={`${34 + ((row * 13) % 38)}%`} height={10} radius={4} />
+            <span className="flex-1" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function LoadingState(props: Omit<React.ComponentProps<typeof ApplicationState>, "kind">) {
@@ -79,7 +186,7 @@ export function ProgressState(props: Omit<React.ComponentProps<typeof Applicatio
 
 function StateIcon({ kind }: { kind: ApplicationStateKind }) {
   if (kind === "loading" || kind === "progress") return <LoaderCircle className="size-icon-lg animate-spin" />;
-  if (kind === "filtered-empty") return <SearchX className="size-icon-lg" />;
+  if (kind === "filtered-empty") return <SearchX className="size-icon-md" />;
   if (kind === "error" || kind === "retry" || kind === "unavailable") return <AlertTriangle className="size-icon-lg" />;
   if (kind === "success") return <CheckCircle2 className="text-ok size-icon-lg" />;
   return <Database className="size-icon-lg" />;
@@ -128,14 +235,14 @@ export function InlineError({
         />
       )}
       {onDismiss && (
-        <Button
+        <IconButton
           onClick={onDismiss}
           className="text-danger"
+          icon={<X className="size-icon-xs" />}
           label="Dismiss error"
           variant="ghost"
-          size="sm">
-          <X className="size-icon-xs" />
-        </Button>
+          size="sm"
+        />
       )}
     </div>
   );

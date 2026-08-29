@@ -5,7 +5,10 @@ import { projectKeys, ProjectViewerStore } from "./projectStore";
 import type {
   BoardView,
   Page,
+  DirtyPlane,
+  DirtyScope,
   Response,
+  SpecSummary,
   Row,
   SpaceDoorbell,
   SpecLink,
@@ -53,6 +56,8 @@ const board: BoardView & { kind: "board" } = {
     state: { id: "todo", name: "Todo", category: "backlog", color: "gray" },
     rows: [row],
   }],
+  total: 1,
+  complete: true,
 };
 
 const boardResponse = (view: BoardView): Response => ({
@@ -608,6 +613,87 @@ describe("ProjectViewerStore", () => {
     });
 
     expect(store.resources.read(key).data).toHaveLength(2);
+    unsubscribe();
+  });
+
+  it("refetches a project's Spec register only for that project's Spec writes", async () => {
+    let specs: SpecSummary[] = [
+      { spec: "spc_1", project: "prj_1", kind: "requirement", heads: ["r1"], issued: [], conflicted: false },
+    ];
+    const rpc = vi.fn(async (_space: string, request: { cmd: string; project?: string | null }) => {
+      if (request.cmd === "spec_list") return { kind: "specs", page: page(specs) } as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureSpecs("local", "ONE");
+    await store.ensureSpecs("local", null);
+    const mine = projectKeys.specs("local", "ONE");
+    const everywhere = projectKeys.specs("local", null);
+    const stop = [mine, everywhere].map((key) => store.resources.subscribe(key, () => undefined));
+    const lists = () => rpc.mock.calls.filter((call) => call[1].cmd === "spec_list").length;
+    const ring = (id: string | null) => store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      invalidations: [{
+        world: "com.lait.issues", dirty: [],
+        planes: [{ plane: "specs", scope: id ? { kind: "project", id, label: null } : null }],
+      }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+
+    // Another project's Spec: the whole-Space register refetches, ONE's does not.
+    let before = lists();
+    await ring("prj_2");
+    expect(lists() - before).toBe(1);
+
+    // ONE's own Spec: both.
+    specs = [...specs, { spec: "spc_2", project: "prj_1", kind: "guide", heads: ["r2"], issued: [], conflicted: false }];
+    before = lists();
+    await ring("prj_1");
+    expect(lists() - before).toBe(2);
+    expect(store.resources.read(mine).data).toHaveLength(2);
+
+    // A ring that names no project reaches every register.
+    before = lists();
+    await ring(null);
+    expect(lists() - before).toBe(2);
+    for (const unsubscribe of stop) unsubscribe();
+  });
+
+  it("re-reads an Issue's packet for a Spec anywhere and for the Issue's own doc", async () => {
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "packet") {
+        return {
+          kind: "packet", issue: row.doc_id, governing: [], guidance: [], proof: [], record: [], conflicts: [],
+        } as Response;
+      }
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    store.resources.set(projectKeys.row("local", row.reff), row);
+    await store.ensurePacket("local", row.reff);
+    const key = projectKeys.packet("local", row.reff);
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+    const packets = () => rpc.mock.calls.filter((call) => call[1].cmd === "packet").length;
+    const ring = (frame: { dirty: DirtyScope[]; planes: DirtyPlane[] }) => store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      invalidations: [{ world: "com.lait.issues", ...frame }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+
+    // A Spec in another project may govern this Issue: the plane is whole.
+    let before = packets();
+    await ring({ dirty: [], planes: [{ plane: "specs", scope: { kind: "project", id: "prj_2", label: null } }] });
+    expect(packets() - before).toBe(1);
+
+    // Another Issue moving is not this one.
+    before = packets();
+    await ring({ dirty: [{ kind: "project", id: row.project_id, label: "ONE", docs: ["doc_9"] }], planes: [] });
+    expect(packets() - before).toBe(0);
+
+    // This Issue -- its binding is a relation on it.
+    before = packets();
+    await ring({ dirty: [{ kind: "project", id: row.project_id, label: "ONE", docs: [row.doc_id] }], planes: [] });
+    expect(packets() - before).toBe(1);
     unsubscribe();
   });
 

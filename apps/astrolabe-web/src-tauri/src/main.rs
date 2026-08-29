@@ -201,7 +201,15 @@ struct WebStaleness {
 struct WebLibraryWorld {
     key: String,
     world_mount: String,
+    world: String,
     installed: bool,
+    /// The channel this World follows by its own choice; `None` follows the
+    /// node's.
+    channel: Option<String>,
+    /// The directory a local World is read from; `None` is a released World.
+    source_dir: Option<String>,
+    /// Whether that tree still holds the bytes somebody agreed to.
+    source_standing: Option<String>,
     display_name: String,
     opens_at: Option<String>,
     version: Option<u32>,
@@ -281,6 +289,7 @@ struct WebFailure {
     what: String,
     error: String,
     retryable: bool,
+    key: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -416,9 +425,32 @@ struct WebDisplayFacts {
     devices: Vec<WebDisplayReceiver>,
     assignments: Vec<WebDisplayAssignment>,
     pending_pairings: Vec<WebDisplayPairing>,
+    pending_rendezvous: Vec<WebDisplayRendezvous>,
+    /// What each surface can show, per Orbit, as last listed.
+    choices: Vec<WebDisplayChoices>,
     /// `None` from a daemon that predates the custody split — not reported,
     /// as distinct from reported-as-none.
     identifier_custody: Option<WebIdentifierCustody>,
+}
+
+/// What one surface can show in one Orbit. `choices` is null when the list
+/// could not be taken and `unavailable` says why; an empty list is a Space
+/// with nothing to show.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayChoices {
+    orbit: String,
+    world: String,
+    surface: String,
+    choices: Option<Vec<WebDisplayChoice>>,
+    unavailable: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayChoice {
+    id: String,
+    title: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -465,6 +497,7 @@ struct WebDisplayHealth {
     drift_residual_ms: i32,
     correction_events: u32,
     pipeline_unobservable: bool,
+    reported_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -496,6 +529,48 @@ struct WebDisplayPairing {
     build: String,
     created_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+}
+
+/// A code minted for a television to enter.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayRendezvous {
+    rendezvous: String,
+    code: String,
+    site: Option<String>,
+    label: String,
+    assignment: Option<WebDisplayRendezvousAssignment>,
+    /// `waiting`, `connecting` or `connected`.
+    state: &'static str,
+    device: Option<String>,
+    created_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayRendezvousAssignment {
+    orbit: String,
+    world: String,
+    surface: String,
+}
+
+/// What a code pins its television to: the assignment fields without the
+/// device.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDisplayAssignmentRequest {
+    orbit: String,
+    world: String,
+    surface: String,
+    input_json: String,
+    theme: WebDisplayTheme,
+    stale_after_ms: u32,
+    on_stale: WebDisplayStaleAction,
+    sync_group: Option<String>,
+    sync_mode: WebDisplaySyncMode,
+    static_delay_ms: i32,
+    expires_at_unix_ms: Option<u64>,
 }
 
 impl From<ClientView> for WebClientView {
@@ -548,61 +623,91 @@ impl From<ClientView> for WebClientView {
             }),
             library: library.map(|rows| {
                 rows.into_iter()
-                    .map(|row| WebLibraryWorld {
-                        key: row.key,
-                        world_mount: row.world_mount,
-                        installed: row.installed,
-                        display_name: row.display_name,
-                        opens_at: row.opens_at,
-                        version: row.version,
-                        tagline: row.tagline,
-                        accent: row.accent,
-                        people: row.people.map(|people| {
-                            people
-                                .into_iter()
-                                .map(|person| WebWorldPerson {
-                                    name: person.name,
-                                    picture: person.picture,
-                                    presence: person.presence.map(|presence| match presence {
-                                        api::PresenceView::Online => "online",
-                                        api::PresenceView::Away => "away",
-                                        api::PresenceView::Offline => "offline",
-                                    }),
-                                    agent: person.agent,
-                                    here: person.here,
-                                })
-                                .collect()
-                        }),
-                        update: row.update.map(|update| {
-                            // Destructured whole for the same reason ClientView
-                            // is: this row grew fields once and the browser
-                            // quietly drew a view without them.
-                            let api::WorldUpdateRow {
-                                serving,
-                                available,
-                                behind,
-                                unmet,
-                                operation,
-                                phase,
-                                progress,
-                                message,
-                            } = update;
-                            WebWorldUpdate {
-                                serving,
-                                available,
-                                behind,
-                                unmet,
-                                operation,
-                                phase,
-                                progress,
-                                message,
-                            }
-                        }),
-                        install: row.install.map(|install| WebWorldInstall {
-                            phase: install.phase,
-                            received: install.received,
-                            total: install.total,
-                        }),
+                    .map(|row| {
+                        // Destructured whole, without `..`, for the reason the
+                        // row's own `update` already is and one level higher:
+                        // the guarantee at the top of this impl stopped at
+                        // `ClientView` and read fields from here, so a fact
+                        // added to a World row compiled cleanly and never
+                        // reached the browser. That is the same defect the
+                        // nested comment below records having already had.
+                        let api::LibraryRow {
+                            key,
+                            world_mount,
+                            world,
+                            installed,
+                            display_name,
+                            opens_at,
+                            version,
+                            tagline,
+                            accent,
+                            people,
+                            update,
+                            install,
+                            channel,
+                            source_dir,
+                            source_standing,
+                        } = row;
+                        WebLibraryWorld {
+                            key,
+                            world_mount,
+                            world,
+                            installed,
+                            display_name,
+                            opens_at,
+                            version,
+                            tagline,
+                            accent,
+                            channel,
+                            source_dir,
+                            source_standing,
+                            people: people.map(|people| {
+                                people
+                                    .into_iter()
+                                    .map(|person| WebWorldPerson {
+                                        name: person.name,
+                                        picture: person.picture,
+                                        presence: person.presence.map(|presence| match presence {
+                                            api::PresenceView::Online => "online",
+                                            api::PresenceView::Away => "away",
+                                            api::PresenceView::Offline => "offline",
+                                        }),
+                                        agent: person.agent,
+                                        here: person.here,
+                                    })
+                                    .collect()
+                            }),
+                            update: update.map(|update| {
+                                // Destructured whole for the same reason ClientView
+                                // is: this row grew fields once and the browser
+                                // quietly drew a view without them.
+                                let api::WorldUpdateRow {
+                                    serving,
+                                    available,
+                                    behind,
+                                    unmet,
+                                    operation,
+                                    phase,
+                                    progress,
+                                    message,
+                                } = update;
+                                WebWorldUpdate {
+                                    serving,
+                                    available,
+                                    behind,
+                                    unmet,
+                                    operation,
+                                    phase,
+                                    progress,
+                                    message,
+                                }
+                            }),
+                            install: install.map(|install| WebWorldInstall {
+                                phase: install.phase,
+                                received: install.received,
+                                total: install.total,
+                            }),
+                        }
                     })
                     .collect()
             }),
@@ -651,6 +756,7 @@ impl From<ClientView> for WebClientView {
                             drift_residual_ms: health.drift_residual_ms,
                             correction_events: health.correction_events,
                             pipeline_unobservable: health.pipeline_unobservable,
+                            reported_at_unix_ms: health.reported_at_unix_ms,
                         }),
                     })
                     .collect(),
@@ -685,6 +791,50 @@ impl From<ClientView> for WebClientView {
                         build: pairing.build,
                         created_at_unix_ms: pairing.created_at_unix_ms,
                         expires_at_unix_ms: pairing.expires_at_unix_ms,
+                    })
+                    .collect(),
+                pending_rendezvous: display
+                    .pending_rendezvous
+                    .into_iter()
+                    .map(|minted| WebDisplayRendezvous {
+                        rendezvous: minted.rendezvous,
+                        code: minted.code,
+                        site: minted.site,
+                        label: minted.label,
+                        assignment: minted.assignment.map(|assignment| {
+                            WebDisplayRendezvousAssignment {
+                                orbit: assignment.orbit,
+                                world: assignment.world,
+                                surface: assignment.surface,
+                            }
+                        }),
+                        state: match minted.state {
+                            api::DisplayRendezvousState::Waiting => "waiting",
+                            api::DisplayRendezvousState::Connecting => "connecting",
+                            api::DisplayRendezvousState::Connected => "connected",
+                        },
+                        device: minted.device,
+                        created_at_unix_ms: minted.created_at_unix_ms,
+                        expires_at_unix_ms: minted.expires_at_unix_ms,
+                    })
+                    .collect(),
+                choices: display
+                    .choices
+                    .into_iter()
+                    .map(|listed| WebDisplayChoices {
+                        orbit: listed.orbit,
+                        world: listed.world,
+                        surface: listed.surface,
+                        choices: listed.choices.map(|choices| {
+                            choices
+                                .into_iter()
+                                .map(|choice| WebDisplayChoice {
+                                    id: choice.id,
+                                    title: choice.title,
+                                })
+                                .collect()
+                        }),
+                        unavailable: listed.unavailable,
                     })
                     .collect(),
                 identifier_custody: display.identifier_custody.map(|custody| {
@@ -927,6 +1077,7 @@ impl From<ClientView> for WebClientView {
                     what: failure.what,
                     error: failure.error,
                     retryable: failure.retryable,
+                    key: failure.key,
                 })
                 .collect(),
             in_flight: in_flight,
@@ -1029,6 +1180,20 @@ enum WebAction {
     InstallWorld {
         world: String,
     },
+    /// Follow a channel for this World alone, or (`None`) the node's.
+    FollowWorldChannel {
+        world: String,
+        channel: Option<String>,
+    },
+    /// Register a tree on this device as a local World of its own. The
+    /// directory is the whole ask; the name is derived from the tree.
+    RegisterLocalWorld {
+        dir: String,
+    },
+    /// Stop carrying a row for one. Nothing on disk is deleted.
+    ForgetLocalWorld {
+        key: String,
+    },
     StartDevice {
         id: String,
     },
@@ -1112,6 +1277,18 @@ enum WebAction {
     },
     DisplayPairingReject {
         pairing: String,
+    },
+    DisplayRendezvousMint {
+        label: String,
+        assignment: Option<WebDisplayAssignmentRequest>,
+    },
+    DisplayRendezvousRevoke {
+        rendezvous: String,
+    },
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
     },
     DisplayAssignmentPut {
         device: String,
@@ -1259,6 +1436,11 @@ impl From<WebAction> for ActionRequest {
             WebAction::Open { world, entry_path } => Self::Open { world, entry_path },
             WebAction::UpdateWorld { world } => Self::UpdateWorld { world },
             WebAction::InstallWorld { world } => Self::InstallWorld { world },
+            WebAction::FollowWorldChannel { world, channel } => {
+                Self::FollowWorldChannel { world, channel }
+            }
+            WebAction::RegisterLocalWorld { dir } => Self::RegisterLocalWorld { dir },
+            WebAction::ForgetLocalWorld { key } => Self::ForgetLocalWorld { key },
             WebAction::StartDevice { id } => Self::StartDevice { id },
             WebAction::StopDevice { id } => Self::StopDevice { id },
             WebAction::RestartDevice { id } => Self::RestartDevice { id },
@@ -1303,6 +1485,46 @@ impl From<WebAction> for ActionRequest {
                 Self::DisplayPairingApprove { pairing, label }
             }
             WebAction::DisplayPairingReject { pairing } => Self::DisplayPairingReject { pairing },
+            WebAction::DisplayRendezvousMint { label, assignment } => Self::DisplayRendezvousMint {
+                label,
+                assignment: assignment.map(|assignment| api::DisplayRendezvousAssignment {
+                    orbit: assignment.orbit,
+                    world: assignment.world,
+                    surface: assignment.surface,
+                    input_json: assignment.input_json,
+                    theme: match assignment.theme {
+                        WebDisplayTheme::Light => api::DisplayTheme::Light,
+                        WebDisplayTheme::Dark => api::DisplayTheme::Dark,
+                        WebDisplayTheme::HighContrast => api::DisplayTheme::HighContrast,
+                    },
+                    stale_after_ms: assignment.stale_after_ms,
+                    on_stale: match assignment.on_stale {
+                        WebDisplayStaleAction::KeepWithNativeBanner => {
+                            api::DisplayStaleAction::KeepWithNativeBanner
+                        }
+                        WebDisplayStaleAction::Blank => api::DisplayStaleAction::Blank,
+                    },
+                    sync_group: assignment.sync_group,
+                    sync_mode: match assignment.sync_mode {
+                        WebDisplaySyncMode::StayInSync => api::DisplaySyncMode::StayInSync,
+                        WebDisplaySyncMode::Positional => api::DisplaySyncMode::Positional,
+                    },
+                    static_delay_ms: assignment.static_delay_ms,
+                    expires_at_unix_ms: assignment.expires_at_unix_ms,
+                }),
+            },
+            WebAction::DisplayRendezvousRevoke { rendezvous } => {
+                Self::DisplayRendezvousRevoke { rendezvous }
+            }
+            WebAction::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => Self::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            },
             WebAction::DisplayAssignmentPut {
                 device,
                 orbit,
@@ -1507,6 +1729,44 @@ async fn summon_world_settings(
     Ok(())
 }
 
+/// Where the controls land once the title bar is transparent, in CSS pixels.
+///
+/// macOS keeps the buttons at a fixed offset inside a 28pt bar and never tells
+/// the document about either, so the host states the fact it owns and the World
+/// decides what to keep clear of.
+///
+/// Stated as `leading` and `trailing` rather than left and right, and both are
+/// said even though one is zero. macOS fills the leading end; a platform that
+/// puts its controls at the other one — Windows — fills the trailing end
+/// instead, and a page written against logical edges is correct on both without
+/// asking which it is running on. Saying the zero is what makes that true: a
+/// field the host omits is a field the page has to invent a default for.
+#[cfg(target_os = "macos")]
+const WINDOW_CONTROLS_INIT: &str =
+    "window.__LAIT_WINDOW_CONTROLS__ = { top: 28, leading: 78, trailing: 0 };";
+
+/// The same fact, restated when it stops being true.
+///
+/// Full screen takes the controls away entirely, and a page still holding room
+/// for them wears a band of nothing along its top edge — the defect this whole
+/// change exists to remove, arriving by a different door. The host says so the
+/// way it said it in the first place: it writes the fact and rings, and the
+/// World decides again. One direction only — this is the host talking to a
+/// page, never a page reaching the host, which is why `world:*` windows are
+/// still absent from every capability.
+#[cfg(target_os = "macos")]
+fn restate_controls(overlapping: bool) -> String {
+    let controls = if overlapping {
+        "{ top: 28, leading: 78, trailing: 0 }"
+    } else {
+        "null"
+    };
+    format!(
+        "window.__LAIT_WINDOW_CONTROLS__ = {controls};\
+         window.dispatchEvent(new Event('lait:window-controls'));"
+    )
+}
+
 /// Not `owned_by_main`: a World keeps its own taskbar identity.
 fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::WorldLaunch) {
     let sanitized: String = launch
@@ -1532,15 +1792,53 @@ fn present_world_window(app: &tauri::AppHandle, launch: astrolabe::browser::Worl
         let _ = window.set_focus();
         return;
     }
-    let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(&launch.title)
         .inner_size(1280.0, 800.0)
         .min_inner_size(800.0, 600.0)
         .resizable(true)
         .maximizable(true)
         .minimizable(true)
-        .visible(true)
-        .build();
+        .visible(true);
+    // The title stays on the window — the taskbar, the window menu and the
+    // switcher all read it — it just stops being drawn over the page.
+    // The World's own declaration, not a list held here. A client cannot
+    // answer this for a World it has never heard of, and a list answered
+    // *wrongly* for a copy of one running under a mount of its own — which was
+    // the tree somebody was working on, the one window most likely to be
+    // looked at.
+    #[cfg(target_os = "macos")]
+    let builder = if matches!(launch.chrome, world_interface::manifest::Chrome::World) {
+        builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .initialization_script(WINDOW_CONTROLS_INIT)
+    } else {
+        builder
+    };
+    let built = builder.build();
+    #[cfg(target_os = "macos")]
+    if let Ok(window) = &built {
+        if matches!(launch.chrome, world_interface::manifest::Chrome::World) {
+            // `Resized` rather than a fullscreen event, because there is no
+            // fullscreen event to have: entering and leaving both arrive as a
+            // resize, and the flag is only true afterwards. Latched, so an
+            // ordinary drag-resize does not re-say a thing that has not
+            // changed.
+            let handle = window.clone();
+            let overlapping = std::sync::atomic::AtomicBool::new(true);
+            window.on_window_event(move |event| {
+                if !matches!(event, tauri::WindowEvent::Resized(_)) {
+                    return;
+                }
+                let now = !handle.is_fullscreen().unwrap_or(false);
+                if now == overlapping.swap(now, std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let _ = handle.eval(restate_controls(now));
+            });
+        }
+    }
     if built.is_err() {
         let _ = astrolabe::browser::open(&launch.url);
     }
@@ -1844,15 +2142,13 @@ fn main() {
         Err(error) => eprintln!("astrolabe: {error}"),
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .append_invoke_initialization_script(PLATFORM_INIT)
         .setup(|app| {
             astrolabe::client::update::identify_running_version(
                 app.package_info().version.to_string(),
             );
-            let resources = app
-                .path()
-                .resource_dir()
-                .map_err(std::io::Error::other)?;
+            let resources = app.path().resource_dir().map_err(std::io::Error::other)?;
             let mut catalog = resources.join("world-catalog");
             // The canonical Linux package is a relocatable stable-root tree,
             // not a system package under /usr/lib. Tauri therefore resolves
@@ -1870,12 +2166,8 @@ fn main() {
                     catalog = beside;
                 }
             }
-            api::start_with_catalog(
-                None,
-                None,
-                Some(catalog.to_string_lossy().into_owned()),
-            )
-            .map_err(std::io::Error::other)?;
+            api::start_with_catalog(None, None, Some(catalog.to_string_lossy().into_owned()))
+                .map_err(std::io::Error::other)?;
             // Window creation hops to the main thread; every platform makes
             // windows there.
             let presenter = app.handle().clone();

@@ -14,8 +14,9 @@ import { Route as AdminIndexRouteImport } from './routes/_admin/index'
 import { Route as AdminContentListRouteImport } from './routes/_admin/content-list'
 import { Route as AdminSplatRouteImport } from './routes/_admin/$'
 import { Route as AdminScreenListIndexRouteImport } from './routes/_admin/screen-list/index'
-import { Route as AdminIntegrationsIndexRouteImport } from './routes/_admin/integrations/index'
+import { Route as AdminChannelListIndexRouteImport } from './routes/_admin/channel-list/index'
 import { Route as AdminBroadcastListIndexRouteImport } from './routes/_admin/broadcast-list/index'
+import { Route as AdminBroadcastHubIndexRouteImport } from './routes/_admin/broadcast-hub/index'
 import { Route as AdminScreenListIdRouteImport } from './routes/_admin/screen-list/$id'
 import { Route as AdminBroadcastListBroadcastIdRouteImport } from './routes/_admin/broadcast-list/broadcast.$id'
 
@@ -43,14 +44,19 @@ const AdminScreenListIndexRoute = AdminScreenListIndexRouteImport.update({
   path: '/screen-list/',
   getParentRoute: () => AdminRoute,
 } as any)
-const AdminIntegrationsIndexRoute = AdminIntegrationsIndexRouteImport.update({
-  id: '/integrations/',
-  path: '/integrations/',
+const AdminChannelListIndexRoute = AdminChannelListIndexRouteImport.update({
+  id: '/channel-list/',
+  path: '/channel-list/',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminBroadcastListIndexRoute = AdminBroadcastListIndexRouteImport.update({
   id: '/broadcast-list/',
   path: '/broadcast-list/',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminBroadcastHubIndexRoute = AdminBroadcastHubIndexRouteImport.update({
+  id: '/broadcast-hub/',
+  path: '/broadcast-hub/',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminScreenListIdRoute = AdminScreenListIdRouteImport.update({
@@ -70,8 +76,9 @@ export interface FileRoutesByFullPath {
   '/$': typeof AdminSplatRoute
   '/content-list': typeof AdminContentListRoute
   '/screen-list/$id': typeof AdminScreenListIdRoute
+  '/broadcast-hub/': typeof AdminBroadcastHubIndexRoute
   '/broadcast-list/': typeof AdminBroadcastListIndexRoute
-  '/integrations/': typeof AdminIntegrationsIndexRoute
+  '/channel-list/': typeof AdminChannelListIndexRoute
   '/screen-list/': typeof AdminScreenListIndexRoute
   '/broadcast-list/broadcast/$id': typeof AdminBroadcastListBroadcastIdRoute
 }
@@ -80,8 +87,9 @@ export interface FileRoutesByTo {
   '/content-list': typeof AdminContentListRoute
   '/': typeof AdminIndexRoute
   '/screen-list/$id': typeof AdminScreenListIdRoute
+  '/broadcast-hub': typeof AdminBroadcastHubIndexRoute
   '/broadcast-list': typeof AdminBroadcastListIndexRoute
-  '/integrations': typeof AdminIntegrationsIndexRoute
+  '/channel-list': typeof AdminChannelListIndexRoute
   '/screen-list': typeof AdminScreenListIndexRoute
   '/broadcast-list/broadcast/$id': typeof AdminBroadcastListBroadcastIdRoute
 }
@@ -92,8 +100,9 @@ export interface FileRoutesById {
   '/_admin/content-list': typeof AdminContentListRoute
   '/_admin/': typeof AdminIndexRoute
   '/_admin/screen-list/$id': typeof AdminScreenListIdRoute
+  '/_admin/broadcast-hub/': typeof AdminBroadcastHubIndexRoute
   '/_admin/broadcast-list/': typeof AdminBroadcastListIndexRoute
-  '/_admin/integrations/': typeof AdminIntegrationsIndexRoute
+  '/_admin/channel-list/': typeof AdminChannelListIndexRoute
   '/_admin/screen-list/': typeof AdminScreenListIndexRoute
   '/_admin/broadcast-list/broadcast/$id': typeof AdminBroadcastListBroadcastIdRoute
 }
@@ -104,8 +113,9 @@ export interface FileRouteTypes {
     | '/$'
     | '/content-list'
     | '/screen-list/$id'
+    | '/broadcast-hub/'
     | '/broadcast-list/'
-    | '/integrations/'
+    | '/channel-list/'
     | '/screen-list/'
     | '/broadcast-list/broadcast/$id'
   fileRoutesByTo: FileRoutesByTo
@@ -114,8 +124,9 @@ export interface FileRouteTypes {
     | '/content-list'
     | '/'
     | '/screen-list/$id'
+    | '/broadcast-hub'
     | '/broadcast-list'
-    | '/integrations'
+    | '/channel-list'
     | '/screen-list'
     | '/broadcast-list/broadcast/$id'
   id:
@@ -125,8 +136,9 @@ export interface FileRouteTypes {
     | '/_admin/content-list'
     | '/_admin/'
     | '/_admin/screen-list/$id'
+    | '/_admin/broadcast-hub/'
     | '/_admin/broadcast-list/'
-    | '/_admin/integrations/'
+    | '/_admin/channel-list/'
     | '/_admin/screen-list/'
     | '/_admin/broadcast-list/broadcast/$id'
   fileRoutesById: FileRoutesById
@@ -172,11 +184,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminScreenListIndexRouteImport
       parentRoute: typeof AdminRoute
     }
-    '/_admin/integrations/': {
-      id: '/_admin/integrations/'
-      path: '/integrations'
-      fullPath: '/integrations/'
-      preLoaderRoute: typeof AdminIntegrationsIndexRouteImport
+    '/_admin/channel-list/': {
+      id: '/_admin/channel-list/'
+      path: '/channel-list'
+      fullPath: '/channel-list/'
+      preLoaderRoute: typeof AdminChannelListIndexRouteImport
       parentRoute: typeof AdminRoute
     }
     '/_admin/broadcast-list/': {
@@ -184,6 +196,13 @@ declare module '@tanstack/react-router' {
       path: '/broadcast-list'
       fullPath: '/broadcast-list/'
       preLoaderRoute: typeof AdminBroadcastListIndexRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/_admin/broadcast-hub/': {
+      id: '/_admin/broadcast-hub/'
+      path: '/broadcast-hub'
+      fullPath: '/broadcast-hub/'
+      preLoaderRoute: typeof AdminBroadcastHubIndexRouteImport
       parentRoute: typeof AdminRoute
     }
     '/_admin/screen-list/$id': {
@@ -208,8 +227,9 @@ interface AdminRouteChildren {
   AdminContentListRoute: typeof AdminContentListRoute
   AdminIndexRoute: typeof AdminIndexRoute
   AdminScreenListIdRoute: typeof AdminScreenListIdRoute
+  AdminBroadcastHubIndexRoute: typeof AdminBroadcastHubIndexRoute
   AdminBroadcastListIndexRoute: typeof AdminBroadcastListIndexRoute
-  AdminIntegrationsIndexRoute: typeof AdminIntegrationsIndexRoute
+  AdminChannelListIndexRoute: typeof AdminChannelListIndexRoute
   AdminScreenListIndexRoute: typeof AdminScreenListIndexRoute
   AdminBroadcastListBroadcastIdRoute: typeof AdminBroadcastListBroadcastIdRoute
 }
@@ -219,8 +239,9 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminContentListRoute: AdminContentListRoute,
   AdminIndexRoute: AdminIndexRoute,
   AdminScreenListIdRoute: AdminScreenListIdRoute,
+  AdminBroadcastHubIndexRoute: AdminBroadcastHubIndexRoute,
   AdminBroadcastListIndexRoute: AdminBroadcastListIndexRoute,
-  AdminIntegrationsIndexRoute: AdminIntegrationsIndexRoute,
+  AdminChannelListIndexRoute: AdminChannelListIndexRoute,
   AdminScreenListIndexRoute: AdminScreenListIndexRoute,
   AdminBroadcastListBroadcastIdRoute: AdminBroadcastListBroadcastIdRoute,
 }

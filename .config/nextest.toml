@@ -89,6 +89,41 @@ filter = '''
 '''
 slow-timeout = { period = "120s", terminate-after = 5 }
 
+# Board continuation builds a full `BOARD_BLOCK_CAPACITY` (128) leaf through 128
+# real signed transactions, then pages the board nine times across a topology
+# split. Like the gates below it is CPU- and fsync-bound on the writes rather
+# than on the query under test.
+#
+# NOT a regression, and measured both ways: 32 s solo on a warm 12-core macOS
+# dev box, against 87 s in a loaded nextest batch and a 90 s timeout in the full
+# suite -- and that full-suite timeout predates every test added beside it. The
+# enrichment the board gained (assignees, labels, milestone, which it never had)
+# is not the cost: solo it is FASTER than it was before that landed.
+#
+# 3 x 120 s gives a shared 2-core runner ~11x the measured single-machine time.
+[[profile.default.overrides]]
+filter = '(binary_id(lait::it) & test(orbital_product_parity::board_continuation_is_exact_across_a_leaf_split))'
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+# The board-history guard drives 300 real signed moves of one Issue so that its
+# `issue_transition` relations pile up the way a dragged card's do in life. It
+# exists because an inbound Walk along `edge::SOURCE` swept those transitions,
+# and after roughly 250 of them Find refused -- which made that project's list
+# and board permanently un-renderable. Nothing cheaper reproduces it: the cost
+# IS the history, and the failure only appears once enough of it exists.
+#
+# Measured evidence: 126 s on a warm 12-core macOS dev box (dev profile),
+# dominated by 300 signed transactions rather than by the query under test.
+# 4 x 150 s keeps a genuine wedge surfacing within 10 minutes while giving a
+# shared 2-core runner ~5x the measured single-machine time.
+#
+# This can shrink to a cheap extractor-level assertion once memberships ride an
+# edge of their own -- at that point the hazard is structural and a traversal
+# cannot reach a transition at all, so there is nothing to accumulate.
+[[profile.default.overrides]]
+filter = '(binary_id(lait::it) & test(orbital_product_parity::a_heavily_moved_issue_does_not_break_its_own_list))'
+slow-timeout = { period = "150s", terminate-after = 4 }
+
 # The smoke-scale performance gate builds a ~500-request corpus through the
 # real daemon and restarts it twice. Measured evidence: ~27 s wall on a warm
 # 12-core Windows dev box (dev profile); GitHub's 2-core windows-latest runner

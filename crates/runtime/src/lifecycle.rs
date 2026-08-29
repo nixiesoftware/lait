@@ -269,6 +269,9 @@ pub struct Activation {
     pub drain_deadline: Duration,
     /// How the local Exec drain paces its own labor.
     pub exec: ExecPacing,
+    /// Which Specs this Station performs for devices other than its own. A
+    /// device's fact: nothing a Space says can widen it.
+    pub consent: crate::exec::Consent,
     /// The content plane's local policy: how much disk it may hold, and how
     /// large a single content this Station will accept.
     pub content: ContentOptions,
@@ -291,6 +294,7 @@ impl Activation {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
             exec: ExecPacing::default(),
+            consent: crate::exec::Consent::none(),
             content: ContentOptions::default(),
             find: crate::find::Policy::default(),
             planes: PlaneOptions::default(),
@@ -729,6 +733,7 @@ impl Orbit {
             .map_err(|_| Failure::ReadCapacity)?,
         );
         core.set_exec_pacing(options.exec);
+        core.set_exec_consent(options.consent);
 
         // The resident cache lives beside the store rather than inside it: the
         // journal's promise is that everything a root names is present, and a
@@ -1873,6 +1878,7 @@ mod tests {
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
         let opts = Activation {
+            consent: Default::default(),
             exec: Default::default(),
             drain_deadline: Duration::from_millis(20),
             ..Default::default()

@@ -9,9 +9,11 @@ import type { SignageMedia, SignageScreen } from './types';
 export function normalizeScreen(screen: SignageScreen): SignageScreen {
   return {
     ...screen,
-    group: screen.group ?? null,
-    intent: screen.intent ?? {},
-    schedule: screen.schedule ?? [],
+    place: screen.place ?? null,
+    facts: screen.facts ?? {},
+    sync: screen.sync ?? null,
+    labels: screen.labels ?? [],
+    tuned: screen.tuned ?? null,
   };
 }
 

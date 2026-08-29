@@ -1,44 +1,37 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp, MoreHorizontal, Plus, Trash2, UserPlus, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, MoreHorizontal, Plus, Trash2 } from "lucide-react";
 
 import { rpc } from "../api";
 import { useProjectMilestones, useProjectViewerStore } from "../projectStore";
 import { milestonePercent, milestoneProgress } from "../core/milestone";
-import type { MemberDto, MilestoneDto, ProjectDto, TeamDto } from "../types";
-import { Avatar, memberName } from "./Avatar";
+import type { MilestoneDto, ProjectDto } from "../types";
 import { DatePicker } from "./DatePicker";
-import { Combobox } from "./Picker";
 import { MilestoneIcon } from "./icons";
-import { RailCard, RailRow } from "./layout";
+import { RailCard } from "./layout";
 import { Button, DropdownMenu, DropdownMenuItem, IconButton, TextInput } from "@astryxdesign/core";
 import { cn } from "./primitives";
 
-/** unix seconds -> YYYY-MM-DD (UTC), the wire format the engine + DatePicker share. */
-function toInput(secs: number | null | undefined): string | null {
-  if (secs == null) return null;
-  return new Date(secs * 1000).toISOString().slice(0, 10);
-}
-
 /**
- * The project's console — and it now belongs to the project SHELL, not to the
- * overview page.
+ * The project's console: the milestone scope, and the progress it moves.
  *
- * It used to live inside `ProjectOverview`, which made "the project's
- * properties" a thing you could only see on one of the project's five faces.
- * The moment a milestone became a filter that answer stopped holding: you click
- * a milestone to narrow the issues, land on Issues, and the panel you clicked
- * from vanished — taking with it the only way to clear the filter or pick a
- * different stage. A console you have to navigate away from to use is not a
- * console.
+ * It belongs to the project SHELL rather than to any one face, because a
+ * milestone is a FILTER — you click one to narrow the issues, land on Issues,
+ * and a panel that lived on Overview would have vanished, taking with it the
+ * only way to clear the filter or pick a different stage. A console you have to
+ * navigate away from to use is not a console. So it is drawn beside every
+ * project surface and the shell owns whether it is open.
  *
- * So it is drawn beside every project surface, and the shell owns whether it is
- * open. Overview, Activity and the three issue layouts all keep it.
+ * The project's PROPERTIES used to be here too, and that was the same mistake
+ * from the other direction. `railOpen` is a persisted preference, so a person
+ * who shut the rail once had a project Overview that could no longer show or
+ * set the project's lead, team or dates — an empty project rendered a name, a
+ * placeholder and a composer, and nothing about the project at all. A property
+ * is a fact the document states; a filter is a control the shell holds. They
+ * now live where each belongs: properties in `ProjectOverview`, scope here.
  */
 export function ProjectRail({
   spaceId,
   project,
-  members,
-  teams,
   counts,
   readOnly,
   activeMilestone,
@@ -47,9 +40,6 @@ export function ProjectRail({
 }: {
   spaceId: string;
   project: ProjectDto;
-  members: MemberDto[];
-  /** Every team in the space, for the owner picker. */
-  teams: TeamDto[];
   counts: { backlog: number; active: number; done: number; total: number };
   readOnly: boolean;
   /** The `mls_` id currently scoping the issue surfaces, `""` for the
@@ -59,113 +49,10 @@ export function ProjectRail({
   /** Pass `null` to clear the scope. */
   onOpenMilestone: (milestone: string | null) => void;
 }) {
-  const edit = async (patch: Record<string, string | boolean | null>) => {
-    try {
-      await rpc(spaceId, { cmd: "project_edit", project: project.key, ...patch });
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const lead = members.find((m) => m.key === project.lead);
-  const team = teams.find((candidate) => candidate.id === project.team);
   const { backlog, active, done, total } = counts;
 
   return (
           <div className="flex flex-col gap-2 text-sm">
-            <RailCard title="Properties" id="properties">
-            <RailRow label="Lead">
-              <Combobox
-                tone="quiet"
-                label="Lead"
-                disabled={readOnly}
-                value={
-                  lead
-                    ? {
-                        id: lead.key,
-                        label: memberName(lead.key, lead),
-                        icon: <Avatar deviceKey={lead.key} alias={lead.alias} me={lead.me} size="sm" />,
-                      }
-                    : null
-                }
-                face={
-                  lead ? undefined : (
-                    <>
-                      <UserPlus className="text-mute size-icon-sm shrink-0" />
-                      <span className="text-mute">Set lead</span>
-                    </>
-                  )
-                }
-                options={[
-                  { id: "none", label: "No lead" },
-                  ...members.map((m) => ({
-                    id: m.key,
-                    label: memberName(m.key, m),
-                    icon: <Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />,
-                    hint: m.key.slice(0, 6),
-                    keywords: [m.key, m.alias],
-                  })),
-                ]}
-                onPick={(id) => void edit({ lead: id === "none" ? "none" : id })}
-              />
-            </RailRow>
-            {/* Which team owns this project — the write the sidebar's grouping
-                reads. Above the dates because it decides where the project
-                *is*, and the dates only decide when it happens.
-
-                Offered even with no teams yet, so the row is where you learn
-                the concept exists; picking "No team" is the same write as
-                clearing a lead. */}
-            <RailRow label="Team">
-              <Combobox
-                tone="quiet"
-                label="Team"
-                disabled={readOnly}
-                value={team ? { id: team.id, label: team.name, hint: team.key } : null}
-                face={
-                  team ? undefined : (
-                    <>
-                      <UsersRound className="text-mute size-icon-sm shrink-0" />
-                      <span className="text-mute">
-                        {teams.length === 0 ? "No teams yet" : "Set team"}
-                      </span>
-                    </>
-                  )
-                }
-                options={[
-                  { id: "none", label: "No team" },
-                  ...teams.map((candidate) => ({
-                    id: candidate.id,
-                    label: candidate.name,
-                    hint: candidate.key,
-                    keywords: [candidate.key, candidate.name],
-                  })),
-                ]}
-                onPick={(id) => void edit({ team: id === "none" ? "" : id })}
-              />
-            </RailRow>
-            <RailRow label="Start date">
-              <DatePicker
-                tone="quiet"
-                value={toInput(project.start_date)}
-                disabled={readOnly}
-                placeholder="Add start date"
-                ariaLabel="Start date"
-                onChange={(next) => void edit({ start: next ?? "none" })}
-              />
-            </RailRow>
-            <RailRow label="Target date">
-              <DatePicker
-                tone="quiet"
-                value={toInput(project.target_date)}
-                disabled={readOnly}
-                placeholder="Add target date"
-                ariaLabel="Target date"
-                onChange={(next) => void edit({ target: next ?? "none" })}
-              />
-            </RailRow>
-            </RailCard>
-
             <Milestones
               spaceId={spaceId}
               projectId={project.id}

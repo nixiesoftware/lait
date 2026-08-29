@@ -42,7 +42,6 @@ export function NewLabelDialog({
           onClick={onCancel}
           label="Cancel"
           variant="secondary"
-          elevation="low"
           size="md"
         />
         <Button

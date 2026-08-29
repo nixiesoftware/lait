@@ -47,12 +47,10 @@ impl TransportFactory for MemFactory {
     }
 }
 
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("lait-2node-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A throwaway root that removes itself — see [`crate::head::temp_root`],
+/// which is the one place that knows how.
+fn temp_home(tag: &str) -> crate::head::TempRoot {
+    crate::head::temp_root(&format!("2node-{tag}"))
 }
 
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
@@ -135,7 +133,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     let founder_home = temp_home("founder");
     crate::world_fixture::form_space(&founder_home, &FOUNDER_SEED, "Two Node Space").unwrap();
 
-    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), FOUNDER_SEED, net.clone());
 
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -206,7 +204,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     let joiner_home = temp_home("joiner");
     crate::world_fixture::enter_space(&joiner_home, &JOINER_SEED, &invite).unwrap();
 
-    let joiner_handle = spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), JOINER_SEED, net.clone());
     wait_online(&client, &joiner_home);
 
     // Before admission the joiner is pending: no epoch key, no standing.
@@ -359,6 +357,51 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         "the joiner's comment never surfaced in the founder's inbox projection"
     );
 
+    // The entry names its Issue the way every other surface does.
+    //
+    // `reff` and `title` were derived per row from `issue_coordinate_for` plus
+    // two `unique_find_row`s, and nothing asserted either -- the inbox tests
+    // read `kind` and `detail` and stopped. That let the inbox render
+    // `ENG-12-9f3a1c…` (the disambiguated form) while the Issue's own page and
+    // its list rows said `ENG-12`, for as long as anyone cared to look.
+    //
+    // The shape rather than a literal: this test does not fix the ordinal, and
+    // the point is the FORM -- project key, dash, number, and no hex tail.
+    let entries = match issue_req(
+        &client,
+        &founder_home,
+        issues_app::IssuesRequest::Inbox {
+            watermark: 0,
+            page: issues::contract::PageRequest::default(),
+            publication: None,
+        },
+    ) {
+        IssueResponse::Inbox { page, .. } => page.items,
+        other => panic!("expected Inbox, got {other:?}"),
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.kind == "comment" && e.detail == "joined over the socket")
+        .expect("the comment entry");
+    let (key, ordinal) = entry
+        .reff
+        .split_once('-')
+        .unwrap_or_else(|| panic!("inbox reff is not KEY-n: {}", entry.reff));
+    assert!(
+        !key.is_empty() && key.chars().all(|c| c.is_ascii_uppercase()),
+        "inbox reff should lead with the project KEY, got {}",
+        entry.reff
+    );
+    assert!(
+        ordinal.chars().all(|c| c.is_ascii_digit()),
+        "inbox reff should be the short form with no disambiguator, got {}",
+        entry.reff
+    );
+    assert!(
+        !entry.title.is_empty(),
+        "an inbox entry names its Issue's title"
+    );
+
     // Teardown.
     let _ = req(&client, &joiner_home, Request::Stop);
     let _ = req(&client, &founder_home, Request::Stop);
@@ -380,7 +423,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
 
     let founder_home = temp_home("recip-founder");
     crate::world_fixture::found_space(&founder_home, &F_SEED, "Reciprocal Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), F_SEED, net.clone());
 
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
@@ -401,7 +444,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
     // Joiner bootstraps from the link and serves.
     let joiner_home = temp_home("recip-joiner");
     crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
-    let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
 
     // Only the JOINER drives Connect (to the invite's approach Station). The
@@ -444,7 +487,7 @@ fn members_promote_and_demote_over_the_socket() {
 
     let founder_home = temp_home("role-founder");
     crate::world_fixture::found_space(&founder_home, &F_SEED, "Role Space").unwrap();
-    let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), F_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
 
@@ -462,7 +505,7 @@ fn members_promote_and_demote_over_the_socket() {
     };
     let joiner_home = temp_home("role-joiner");
     crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
-    let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
     let approach = mechanics::actor::device_from_seed(&F_SEED).to_string();
     let admitted = poll_until(Duration::from_secs(25), || {

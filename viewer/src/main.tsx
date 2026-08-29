@@ -5,6 +5,7 @@ import { registerIcons } from "@astryxdesign/core/Icon";
 
 import { App } from "./App";
 import { contribute, registry } from "./core/registry";
+import { trackWindowControls } from "./core/windowControls";
 import type { Inspect } from "./dev/inspect";
 import { WorldViewStoreProvider } from "./core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "./projectStore";
@@ -68,6 +69,19 @@ window.lait = { contribute, registry };
 if (import.meta.env.DEV) {
   void import("./dev/inspect").then(({ inspect }) => Object.assign(window.lait, inspect));
 }
+
+/**
+ * Before the first paint, not during it.
+ *
+ * The shell spends `--window-controls-top` as padding on its two columns, so a
+ * value that arrives a frame late is a frame of the app drawn underneath the
+ * close button and then jumping out from under it. The host declares it before
+ * this script runs, and restates it on the rare occasion it changes, so this
+ * belongs on the element rather than in a hook that re-decides it on every
+ * render — no surface should have to hold an opinion about the window frame to
+ * lay itself out.
+ */
+trackWindowControls(document.documentElement);
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root missing from index.html");

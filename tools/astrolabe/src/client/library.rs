@@ -48,6 +48,9 @@ pub struct WorldStanding {
     pub phase: Option<String>,
     pub progress: Option<String>,
     pub message: Option<String>,
+    /// The channel this World follows by its own choice. `None` follows the
+    /// node's, which is not the same fact and must not draw as one.
+    pub channel: Option<String>,
 }
 
 /// Progress of an explicit first installation, keyed by the catalog mount.
@@ -93,7 +96,7 @@ impl From<lait::update::world::InstallProgress> for WorldInstallProgress {
 /// Enumerates the Worlds itself rather than taking the Library's rows, because
 /// this is sampled on the host tick — once a second, beside the two control
 /// round trips already there — and a signature that needed the rows would have
-/// made the cheap half depend on the expensive one. Two small file reads per
+/// made the cheap half depend on the expensive one. A few small file reads per
 /// World; the Library is a handful of rows and never a corpus.
 pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStanding> {
     let Some(identity) = identity else {
@@ -105,7 +108,15 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
         .into_iter()
         .filter_map(|declaration| {
             let world = declaration.manifest.id;
-            let standing = lait::update::world::standing(&worlds, &world)?;
+            let standing = lait::update::world::standing(&worlds, &world);
+            let channel = lait::update::world::channel(&worlds, &world);
+            // A World nothing has ever been checked for still has a fact worth
+            // drawing once it follows a channel of its own. Dropping the row on
+            // a missing standing would hide the one state that must not be
+            // invisible.
+            if standing.is_none() && channel.is_none() {
+                return None;
+            }
             let upgrade = lait::update::consent::load(&worlds, &world).ok().flatten();
             let progress = upgrade.as_ref().map(|job| {
                 if let Some(remaining) = job.remaining_records {
@@ -123,14 +134,15 @@ pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStandin
             Some((
                 world,
                 WorldStanding {
-                    behind: standing.behind(),
-                    serving: standing.serving,
-                    available: standing.channel,
-                    unmet: standing.unmet,
+                    behind: standing.as_ref().is_some_and(|standing| standing.behind()),
+                    serving: standing.as_ref().and_then(|it| it.serving.clone()),
+                    available: standing.as_ref().and_then(|it| it.channel.clone()),
+                    unmet: standing.as_ref().and_then(|it| it.unmet.clone()),
                     operation: upgrade.as_ref().map(|job| job.operation_hex()),
                     phase: upgrade.as_ref().map(|job| job.phase.as_str().to_owned()),
                     progress,
                     message: upgrade.and_then(|job| job.message),
+                    channel: channel.map(|channel| channel.as_str().to_owned()),
                 },
             ))
         })
@@ -160,6 +172,8 @@ pub struct LibraryEntry {
     /// The entry path the World declared, or `None` when it declares none.
     /// `/` is not a guess to make on a World's behalf.
     pub entry_path: Option<String>,
+    /// Who the World says draws the top edge of the window it opens in.
+    pub chrome: world_interface::manifest::Chrome,
     /// One line saying what this World is for.
     pub tagline: Option<String>,
     /// The colour it is drawn from, packed `0xRRGGBB`. A seed a client
@@ -167,6 +181,22 @@ pub struct LibraryEntry {
     pub accent: Option<u32>,
     /// The reviewed implementation version declared by this World release.
     pub version: Option<u32>,
+    /// The directory this World is read from, when it is a local one.
+    ///
+    /// `None` is a released World, and that is the ordinary case. A row
+    /// carrying this is a tree somebody on this device is working on: it has
+    /// no release behind it, no version it did not build itself, and it is not
+    /// the World whose id it may have been copied from — the host gave it one
+    /// of its own. A surface that draws a World and not this would be offering
+    /// unsealed bytes under a released World's face.
+    pub source_dir: Option<String>,
+    /// Whether a local World's tree still holds the bytes somebody agreed to.
+    ///
+    /// `"unchanged"`, `"changed"`, or `"unrecorded"` — and `None` for a
+    /// released World, which is not the same question. `"unrecorded"` is not
+    /// `"unchanged"`: a registration written before this was taken cannot say,
+    /// and an absence that cannot say which kind it is has to say that.
+    pub source_standing: Option<String>,
 }
 
 /// A World's own artwork, read from its selected immutable release.
@@ -253,6 +283,24 @@ pub(crate) fn installed() -> Vec<LibraryEntry> {
     installed_for(None)
 }
 
+/// Every World this identity can actually open: the releases it has installed
+/// and the trees it is working on.
+///
+/// Not the catalog. A row nobody has installed has no window to dress, and no
+/// declaration of its own to dress it from.
+///
+/// Distinct from [`installed`], which is the release half alone and is what the
+/// channel-facing actions want — a tree being worked on follows no channel.
+pub(crate) fn openable() -> Vec<LibraryEntry> {
+    openable_for(None)
+}
+
+pub(crate) fn openable_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
+    let mut entries = installed_for(identity);
+    entries.extend(local_for(identity));
+    entries
+}
+
 fn declarations(identity: Option<&Path>) -> Vec<lait::world::installed::Declaration> {
     let identity = identity
         .map(std::path::PathBuf::from)
@@ -296,6 +344,64 @@ fn catalog_for(
         .collect()
 }
 
+/// The local Worlds registered on this device, as rows of their own.
+///
+/// Keyed by the id the host assigned, which is why they cannot displace a
+/// released row in the map below however closely the tree resembles it.
+///
+/// A registration whose tree has gone is still a row. It says it cannot be
+/// read rather than disappearing, because "the tree moved" and "nothing is
+/// registered" are different facts and only the first one has something to do
+/// about it — including the Forget that removes it.
+fn local_for(identity: Option<&Path>) -> Vec<LibraryEntry> {
+    let identity = identity
+        .map(std::path::PathBuf::from)
+        .or_else(|| lait::config::Selection::default().identity_dir().ok());
+    let Some(identity) = identity else {
+        return Vec::new();
+    };
+    lait::world::local::list(&identity)
+        .into_iter()
+        .filter_map(|local| {
+            let handle = local.key.trim_start_matches(lait::world::local::PREFIX);
+            let mount = lait::world::local::mount_for(handle).ok()?;
+            let world = lait::world::local::world_id_for(handle).ok()?;
+            let mut entry = match &local.manifest {
+                Some(manifest) => library_entry(manifest.clone(), true),
+                None => LibraryEntry {
+                    world_mount: String::new(),
+                    world: String::new(),
+                    // Not openable: there is nothing to open. The row exists so
+                    // the registration can be seen and removed.
+                    installed: false,
+                    display_name: local.display_name(),
+                    entry_path: None,
+                    chrome: Default::default(),
+                    tagline: None,
+                    accent: None,
+                    version: None,
+                    source_dir: None,
+                    source_standing: None,
+                },
+            };
+            // The host's assignment, never the tree's declaration — a local
+            // tree is usually a copy and declares the original's names.
+            entry.world_mount = mount;
+            entry.world = world.as_str().to_owned();
+            entry.source_dir = Some(local.dir.to_string_lossy().into_owned());
+            entry.source_standing = Some(
+                match local.sameness {
+                    lait::world::local::Sameness::Unchanged => "unchanged",
+                    lait::world::local::Sameness::Changed => "changed",
+                    lait::world::local::Sameness::Unrecorded => "unrecorded",
+                }
+                .to_owned(),
+            );
+            Some(entry)
+        })
+        .collect()
+}
+
 pub(crate) fn available_for(identity: Option<&Path>, catalog: Option<&Path>) -> Vec<LibraryEntry> {
     let mut entries: BTreeMap<String, LibraryEntry> = catalog_for(catalog)
         .into_iter()
@@ -304,6 +410,9 @@ pub(crate) fn available_for(identity: Option<&Path>, catalog: Option<&Path>) -> 
     for installed in installed_for(identity) {
         entries.insert(installed.world.clone(), installed);
     }
+    for local in local_for(identity) {
+        entries.insert(local.world.clone(), local);
+    }
     entries.into_values().collect()
 }
 
@@ -311,6 +420,20 @@ fn library_entry(
     manifest: world_interface::manifest::WorldManifest,
     installed: bool,
 ) -> LibraryEntry {
+    // The entry a client would actually open, so its declarations travel
+    // together — the path it opens and how it wants the window are one answer.
+    let chrome = manifest
+        .launch
+        .iter()
+        .find(|entry| {
+            entry.present == world_interface::manifest::Present::Primary
+                && entry
+                    .when
+                    .as_ref()
+                    .is_none_or(|when| when.admits(std::env::consts::OS, std::env::consts::ARCH))
+        })
+        .map(|entry| entry.chrome)
+        .unwrap_or_default();
     let entry_path = manifest.launch.iter().find_map(|entry| {
         (entry.present == world_interface::manifest::Present::Primary
             && entry
@@ -332,6 +455,11 @@ fn library_entry(
         tagline: manifest.tagline,
         accent: manifest.accent,
         version: manifest.implementation_version,
+        // A released World reads from its release. `local_for` overrides these
+        // for the rows that do not.
+        chrome,
+        source_dir: None,
+        source_standing: None,
     }
 }
 
@@ -407,6 +535,44 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// The claim the window dressing rests on: a tree being worked on is
+    /// openable, and is *not* among the installed releases.
+    ///
+    /// Testing the lookup alone proved nothing — it passes against either list.
+    /// This is the seam that was actually wrong.
+    #[test]
+    fn a_local_world_is_openable_but_is_not_an_installed_release() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let tree = tempfile::tempdir().expect("a tree");
+        std::fs::write(
+            tree.path().join("world.json"),
+            br#"{"format":1,"id":"com.example.tasks","version":"0.0.0-local",
+                 "mount":"tasks","name":"Tasks",
+                 "launch":[{"id":"app","present":"primary",
+                            "target":{"type":"web","path":"/"},"chrome":"world"}],
+                 "runners":[]}"#,
+        )
+        .expect("a declaration");
+        lait::world::local::register(identity.path(), "tasks", tree.path()).expect("it registers");
+
+        let installed = installed_for(Some(identity.path()));
+        assert!(
+            !installed.iter().any(|row| row.world_mount == "local_tasks"),
+            "a tree being worked on is not an installed release"
+        );
+
+        let openable = openable_for(Some(identity.path()));
+        let row = openable
+            .iter()
+            .find(|row| row.world_mount == "local_tasks")
+            .expect("a registered local World is openable");
+        assert_eq!(row.display_name, "Tasks", "it is named by its own tree");
+        assert!(
+            matches!(row.chrome, world_interface::manifest::Chrome::World),
+            "and carries the window treatment its tree declared"
+        );
+    }
+
     use super::*;
 
     fn selected_manifest() -> world_interface::manifest::WorldManifest {
@@ -518,9 +684,12 @@ mod tests {
             installed: true,
             display_name: "Issues".into(),
             entry_path: None,
+            chrome: Default::default(),
             tagline: None,
             accent: None,
             version: None,
+            source_dir: None,
+            source_standing: None,
         };
         assert!(
             entry.entry_path.is_none(),

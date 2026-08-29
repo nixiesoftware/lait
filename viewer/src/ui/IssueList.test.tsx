@@ -109,6 +109,7 @@ describe("IssueList semantics", () => {
           mutators={noopMutators}
           readOnly={false}
           filtered={false}
+      onClearFilter={() => {}}
         />
       );
     }
@@ -149,6 +150,7 @@ describe("IssueList semantics", () => {
           mutators={noopMutators}
           readOnly={false}
           filtered={false}
+      onClearFilter={() => {}}
         />
     ));
 
@@ -188,6 +190,7 @@ describe("IssueList semantics", () => {
           mutators={noopMutators}
           readOnly={false}
           filtered={false}
+      onClearFilter={() => {}}
         />
     ));
 
@@ -237,6 +240,7 @@ describe("IssueList semantics", () => {
           mutators={noopMutators}
           readOnly={false}
           filtered={false}
+      onClearFilter={() => {}}
         />
     ));
   }

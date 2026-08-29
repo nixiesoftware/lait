@@ -136,20 +136,37 @@ export const laitTheme = defineTheme({
       "variant:secondary": {
         "backgroundColor": "var(--color-background-surface)",
         "color": "var(--color-text-primary)",
+        "backgroundImage": "radial-gradient(110% 140% at 50% -25%, light-dark(rgb(255 255 255 / 0), rgb(255 255 255 / 0.08)) 0%, transparent 58%), linear-gradient(to bottom, transparent 38%, light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.07)) 100%)",
+        "boxShadow": "inset 0 0.5px 0 light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.06)), inset 0 -0.5px 0 light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.18)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.17))",
         ":hover": {
           "backgroundColor": "var(--color-tint-hover)"
+        },
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.055)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.18)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.11), rgb(0 0 0 / 0.17))"
         }
       },
       "variant:active": {
         "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
-        "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.06)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.19)) 0%, transparent 46%)",
+        "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.18)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))",
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.045)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.26)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 3px light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.26)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        }
       },
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
         "color": "var(--color-background-body)",
+        "backgroundImage": "radial-gradient(110% 140% at 50% -25%, light-dark(rgb(255 255 255 / 0.12), rgb(255 255 255 / 0)) 0%, transparent 58%), linear-gradient(to bottom, transparent 38%, light-dark(rgb(0 0 0 / 0.08), rgb(0 0 0 / 0.11)) 100%)",
+        "boxShadow": "inset 0 0.5px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.36)), inset 0 -0.5px 0 light-dark(rgb(0 0 0 / 0.26), rgb(0 0 0 / 0.16)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.13), transparent)",
         ":hover": {
           "backgroundColor": "color-mix(in oklch, var(--color-background-inverted) 85%, var(--color-background-body))"
+        },
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.28)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.15), rgb(0 0 0 / 0.13)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.26), rgb(0 0 0 / 0.18))"
         }
       },
       "variant:danger": {
@@ -168,20 +185,37 @@ export const laitTheme = defineTheme({
       "variant:secondary": {
         "backgroundColor": "var(--color-background-surface)",
         "color": "var(--color-text-primary)",
+        "backgroundImage": "radial-gradient(110% 140% at 50% -25%, light-dark(rgb(255 255 255 / 0), rgb(255 255 255 / 0.08)) 0%, transparent 58%), linear-gradient(to bottom, transparent 38%, light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.07)) 100%)",
+        "boxShadow": "inset 0 0.5px 0 light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.06)), inset 0 -0.5px 0 light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.18)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.17))",
         ":hover": {
           "backgroundColor": "var(--color-tint-hover)"
+        },
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.055)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.18)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.11), rgb(0 0 0 / 0.17))"
         }
       },
       "variant:active": {
         "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
-        "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.06)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.19)) 0%, transparent 46%)",
+        "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.18)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))",
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.045)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.26)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 3px light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.26)), 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
+        }
       },
       "variant:primary": {
         "backgroundColor": "var(--color-background-inverted)",
         "color": "var(--color-background-body)",
+        "backgroundImage": "radial-gradient(110% 140% at 50% -25%, light-dark(rgb(255 255 255 / 0.12), rgb(255 255 255 / 0)) 0%, transparent 58%), linear-gradient(to bottom, transparent 38%, light-dark(rgb(0 0 0 / 0.08), rgb(0 0 0 / 0.11)) 100%)",
+        "boxShadow": "inset 0 0.5px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.36)), inset 0 -0.5px 0 light-dark(rgb(0 0 0 / 0.26), rgb(0 0 0 / 0.16)), 0 1px 1.5px light-dark(rgb(0 0 0 / 0.13), transparent)",
         ":hover": {
           "backgroundColor": "color-mix(in oklch, var(--color-background-inverted) 85%, var(--color-background-body))"
+        },
+        ":active": {
+          "backgroundImage": "radial-gradient(110% 140% at 50% 125%, light-dark(rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.28)) 0%, transparent 58%), linear-gradient(to bottom, light-dark(rgb(0 0 0 / 0.15), rgb(0 0 0 / 0.13)) 0%, transparent 46%)",
+          "boxShadow": "inset 0 1px 2px light-dark(rgb(0 0 0 / 0.26), rgb(0 0 0 / 0.18))"
         }
       },
       "variant:danger": {

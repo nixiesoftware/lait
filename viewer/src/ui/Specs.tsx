@@ -22,7 +22,11 @@ import {
   standingLabel,
   targetLabel,
   transitions,
+  baselineCards,
+  specCards,
+  type BaselineCard,
   type LinkDelta,
+  type SpecCard,
   type SpecStanding,
   type SpecTransition,
 } from "../core/specs";
@@ -49,8 +53,6 @@ import {
 } from "../projectStore";
 import type {
   AssignmentDto,
-  BaselineSummary,
-  BaselineView,
   MemberDto,
   PlanData,
   Row,
@@ -80,7 +82,7 @@ import { NewSpecDialog } from "./NewSpec";
 import { Button, CheckboxInput, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
 import { Combobox, type Option } from "./Picker";
 import { fromRowControl } from "./fields";
-import { cn, interactiveRow } from "./primitives";
+import { cn, interactiveRow, titleText } from "./primitives";
 import { short, when } from "./time";
 
 function MoreRows<T>({
@@ -125,11 +127,8 @@ const SPEC_ROW_LAYOUT = cn("group/row flex items-center gap-2 py-2", SPEC_LIST_I
  *  so the index and title keep the same geometry whether or not it is showing. */
 const SPEC_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
 
-const renderedSpecs = (summaries: readonly SpecSummary[]): SpecView[] =>
-  summaries.flatMap((summary) => summary.view ? [summary.view] : []);
-
-const renderedBaselines = (summaries: readonly BaselineSummary[]): BaselineView[] =>
-  summaries.flatMap((summary) => summary.view ? [summary.view] : []);
+const renderedSpecs = specCards;
+const renderedBaselines = baselineCards;
 
 /** Standing is joined from the same exact page rather than copied into every
  * immutable relation fact. Missing summaries leave a fact historical/inert. */
@@ -375,6 +374,7 @@ function Register({
     return (
       <ApplicationState
         kind="unavailable"
+        art="unavailable"
         title="Specs unavailable"
         body="This project's specs could not be read from the local replica. Known issues remain available."
       />
@@ -390,8 +390,9 @@ function Register({
     return (
       <ApplicationState
         kind="empty"
-        title="No specs yet"
-        body="A spec is what the work is meant to satisfy — a goal, a requirement, a design, a record of what was decided."
+        art="specs"
+        title="Specs"
+        body="Capture requirements and decisions beside the work."
         action={
           !readOnly && project ? (
             <Button
@@ -480,10 +481,15 @@ function SpecRow({
 }) {
   const label = spec.conflicted
     ? { text: "conflicted", tone: "warn" as const }
-    : spec.view
-      ? standingLabel(standing(spec.view))
+    : spec.head
+      ? standingLabel(standing({
+          heads: spec.heads,
+          issued: spec.issued,
+          revision: spec.head.revision,
+          state: spec.head.state,
+        }))
       : null;
-  const title = spec.view?.title ?? spec.spec;
+  const title = spec.head?.title ?? spec.spec;
   return (
     <li
       className={cn(
@@ -574,7 +580,7 @@ function SpecRow({
           of these did I touch last. Right-aligned and quiet — it is how you find
           a row, not something you read. */}
       <span className="text-mute w-14 shrink-0 text-right text-2xs tabular-nums">
-        {spec.view ? when(spec.view.body.ts) : ""}
+        {spec.head ? when(spec.head.ts) : ""}
       </span>
     </li>
   );
@@ -617,6 +623,7 @@ function BaselineReader({
     return (
       <ApplicationState
         kind="unavailable"
+        art="unavailable"
         title="Baseline unavailable"
         body="This baseline could not be read from the local replica."
       />
@@ -683,11 +690,11 @@ function BaselineReader({
                 }}
                 label="Issue set"
                 variant="primary"
-                size="md"
+                size="sm"
               />
             )}
           </div>
-          <h1 className="text-2xl leading-tight font-semibold tracking-tight">{view.body.name}</h1>
+          <h1 className={titleText({ level: "document" })}>{view.body.name}</h1>
           {draftAhead && issued && (
             <p className="text-dim text-xs">
               Revision <code className="text-mute" title={issued}>{short(issued)}</code> is the
@@ -807,8 +814,7 @@ function BaselineReader({
                     onClick={() => setAdding(false)}
                     label="Done"
                     variant="secondary"
-                    elevation="low"
-                    size="md"
+                    size="sm"
                   />
                 </div>
               ) : (
@@ -817,8 +823,7 @@ function BaselineReader({
                   icon={<Plus className="size-icon-sm" />}
                   label="Add an issued revision"
                   variant="secondary"
-                  elevation="low"
-                  size="md"
+                  size="sm"
                 />
               )}
             </div>
@@ -859,10 +864,10 @@ function Relations({
   onCommit,
 }: {
   view: SpecView;
-  everySpec: SpecView[];
+  everySpec: SpecCard[];
   /** What a relation may name, resolved by the reader — one subscription for
    *  the two blocks that offer them rather than one each. */
-  baselines: BaselineView[];
+  baselines: BaselineCard[];
   rows: Row[];
   references: SpecReference[];
   readOnly: boolean;
@@ -926,7 +931,7 @@ function Relations({
         ? (entry.link.target.kind === "spec"
             ? titles.get(entry.link.target.spec)?.title
             : openBaselineId !== null
-              ? baselines.find((candidate) => candidate.baseline === openBaselineId)?.body.name
+              ? baselines.find((candidate) => candidate.baseline === openBaselineId)?.name
               : undefined) ?? targetLabel(entry.link.target)
         : (entry.from?.title ?? entry.title ?? entry.source ?? "");
     const coordinate =
@@ -1050,7 +1055,6 @@ function Relations({
                     icon={<Plus className="size-icon-sm" />}
                     label="Add a relation"
                     variant="secondary"
-                    elevation="low"
                     size="md"
                   />
                 </span>
@@ -1071,7 +1075,6 @@ function Relations({
                     onClick={() => setStaged(null)}
                     label="Discard"
                     variant="secondary"
-                    elevation="low"
                     size="md"
                   />
                   {/* Saving writes a revision, and on an issued document that
@@ -1117,8 +1120,8 @@ function RelationComposer({
   onCancel,
 }: {
   self: string;
-  everySpec: SpecView[];
-  baselines: BaselineView[];
+  everySpec: SpecCard[];
+  baselines: BaselineCard[];
   rows: Row[];
   /** What the sentence opens with — the difference between the document
    *  asserting something and somebody noticing it. */
@@ -1153,7 +1156,7 @@ function RelationComposer({
       : kind === "baseline"
         ? baselines.map((candidate) => ({
             id: candidate.baseline,
-            label: candidate.body.name,
+            label: candidate.name,
             kicker: "Baseline",
             hint: short(pinned(candidate)),
           }))
@@ -1245,9 +1248,9 @@ function RelationComposer({
           isDisabled={!link}
           label="Add"
           variant="primary"
-          size="md"
+          size="sm"
         />
-        <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
+        <Button onClick={onCancel} label="Cancel" variant="secondary" size="md" />
       </div>
     </div>
   );
@@ -1291,8 +1294,8 @@ function Observations({
   view: SpecView;
   observations: SpecObservation[];
   members: MemberDto[];
-  everySpec: SpecView[];
-  baselines: BaselineView[];
+  everySpec: SpecCard[];
+  baselines: BaselineCard[];
   rows: Row[];
   readOnly: boolean;
   grants: AssignmentDto[];
@@ -1399,7 +1402,6 @@ function Observations({
               icon={<Plus className="size-icon-sm" />}
               label="Note something"
               variant="secondary"
-              elevation="low"
               size="md"
             />
           </span>
@@ -1412,7 +1414,7 @@ function Observations({
  *  rows additionally carry who asserted it, since that is not on the link. */
 interface LinkEntry {
   link: SpecLink;
-  from: SpecView | null;
+  from: SpecCard | null;
   title?: string;
   source?: string;
   revision?: string;
@@ -1519,7 +1521,7 @@ function Resolve({
           I have read all {heads.length} heads and this draft accounts for them.
         </label>
         <div className="flex justify-end gap-2">
-          <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
+          <Button onClick={onCancel} label="Cancel" variant="secondary" size="md" />
           <Button
             isDisabled={!acknowledged || !title.trim()}
             onClick={() => onCommit({
@@ -1606,8 +1608,7 @@ function Compare({
           onClick={onClose}
           label="Close"
           variant="secondary"
-          elevation="low"
-          size="md"
+          size="sm"
         />
       </header>
       <div className="flex flex-col gap-3 p-3 text-xs">
@@ -2066,6 +2067,7 @@ function SpecReader({
     return (
       <ApplicationState
         kind="unavailable"
+        art="unavailable"
         title="Spec unavailable"
         body="This spec could not be read from the local replica."
       />
@@ -2176,7 +2178,7 @@ function SpecReader({
                 titleRef.current?.blur();
               }
             }}
-            className="resize-none overflow-hidden bg-transparent text-2xl leading-tight font-semibold tracking-tight outline-none"
+            className={cn(titleText({ level: "document" }), "resize-none overflow-hidden bg-transparent outline-none")}
             aria-label="Title"
           />
           {/* What this document can do to the work, in words, next to the
@@ -2260,15 +2262,14 @@ function SpecReader({
                       }
                       label="Compare heads"
                       variant="secondary"
-                      elevation="low"
-                      size="md"
+                      size="sm"
                     />
                   )}
                   <Button
                     onClick={() => setResolving(true)}
                     label="Resolve…"
                     variant="primary"
-                    size="md"
+                    size="sm"
                   />
                 </span>
               )}
@@ -2436,8 +2437,7 @@ function NewBaseline({ onCreate }: { onCreate: () => void }) {
         icon={<Plus className="size-icon-sm" />}
         label="New baseline"
         variant="secondary"
-        elevation="low"
-        size="md"
+        size="sm"
       />
     </div>
   );

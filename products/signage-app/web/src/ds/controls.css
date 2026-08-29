@@ -1,0 +1,336 @@
+/*
+ * Controls.
+ *
+ * Every one is the same small object under the same light: a rim on the top
+ * edge, a hairline of shade on the bottom, and only as much shadow as a thing
+ * of that height would throw. The variants differ in fill, never in shape.
+ *
+ *   solid  — the one forward act on a surface. Blue, because blue is the action.
+ *   ghost  — a secondary act. White, lit as a control.
+ *   quiet  — a text button that grows a soft pill on hover.
+ *   alarm  — an act that reaches screens. Always beside a stated count.
+ *   danger — a destructive act on something that is not a screen.
+ *
+ * Nothing here needs saving, so nothing here is a Save button.
+ */
+
+.ds-btn {
+  appearance: none;
+  min-height: var(--ds-control);
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: var(--ds-r-pill);
+  background: transparent;
+  color: var(--ds-ink);
+  cursor: pointer;
+  font-family: var(--ds-sans);
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-body);
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease),
+    transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-btn svg {
+  flex: 0 0 auto;
+}
+
+/* Pressing moves the object. One pixel is enough to feel it. */
+.ds-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.ds-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.ds-btn-solid {
+  background: var(--ds-accent);
+  color: var(--ds-accent-ink);
+  box-shadow: var(--ds-material-accent);
+}
+
+.ds-btn-solid:hover:not(:disabled) {
+  background: var(--ds-accent-hover);
+}
+
+.ds-btn-ghost {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-btn-ghost:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ds-surface) 92%, var(--ds-ink));
+}
+
+.ds-btn-quiet {
+  padding-inline: 12px;
+  background: transparent;
+  color: var(--ds-muted);
+  box-shadow: none;
+}
+
+.ds-btn-quiet:hover:not(:disabled) {
+  background: var(--ds-hover);
+  color: var(--ds-ink);
+}
+
+.ds-btn-alarm {
+  background: var(--ds-alarm);
+  color: var(--ds-alarm-ink);
+  box-shadow: var(--ds-material-alarm);
+}
+
+.ds-btn-alarm:hover:not(:disabled) {
+  background: var(--ds-alarm-hover);
+}
+
+.ds-btn-danger {
+  background: var(--ds-surface);
+  color: var(--ds-alarm);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-btn-danger:hover:not(:disabled) {
+  background: var(--ds-alarm-soft);
+}
+
+.ds-btn.is-danger {
+  color: var(--ds-alarm);
+}
+
+.ds-btn.is-danger:hover:not(:disabled) {
+  background: var(--ds-alarm-soft);
+  color: var(--ds-alarm);
+}
+
+/* An icon button is a round pressed object that only shows itself in use. */
+.ds-icon {
+  appearance: none;
+  width: var(--ds-control);
+  height: var(--ds-control);
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ds-r-pill);
+  background: transparent;
+  color: var(--ds-muted);
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-icon:hover,
+.ds-icon:active {
+  background: var(--ds-hover);
+  color: var(--ds-ink);
+}
+
+.ds-icon.is-on {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-icon:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* ── Fields — a well cut into the surface, filled with light on focus ───── */
+
+.ds-input,
+.ds-search,
+.ds-select,
+select.ds-input {
+  appearance: none;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-ink);
+  font-family: var(--ds-sans);
+  font-size: var(--ds-fs-small);
+  letter-spacing: var(--ds-track-body);
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.06);
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-input::placeholder,
+.ds-search::placeholder {
+  color: var(--ds-faint);
+}
+
+.ds-input:hover,
+.ds-search:hover,
+.ds-select:hover {
+  background: color-mix(in srgb, var(--ds-surface-sunken) 92%, var(--ds-ink));
+}
+
+.ds-input:focus,
+.ds-search:focus,
+.ds-select:focus {
+  outline: none;
+  background: var(--ds-surface);
+  box-shadow:
+    inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.04),
+    0 0 0 2px var(--ds-accent);
+}
+
+select.ds-input,
+.ds-select {
+  padding-right: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23171a1d' stroke-opacity='0.5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+
+textarea.ds-input {
+  min-height: 96px;
+  padding: 12px 16px;
+  border-radius: var(--ds-r-lg);
+  resize: vertical;
+}
+
+/* A field that was refused is ringed in alarm — the only ring besides focus. */
+.ds-field.is-refused .ds-input,
+.pe-field.is-bad .ds-input {
+  box-shadow:
+    inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.04),
+    0 0 0 2px var(--ds-alarm);
+}
+
+.ds-hint {
+  margin: 0;
+  color: var(--ds-muted);
+  font-size: var(--ds-fs-small);
+  line-height: 1.5;
+}
+
+.ds-danger-text {
+  margin: 0;
+  color: var(--ds-alarm);
+  font-size: var(--ds-fs-small);
+  line-height: 1.5;
+}
+
+.ds-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ds-empty {
+  padding: var(--ds-space-5) var(--ds-space-2);
+  color: var(--ds-faint);
+  text-align: center;
+}
+
+/* ── Chips — a pill resting in its well, or lifted out of it ─────────────
+ * Labels on a row, facets in a builder. One primitive, both jobs. A facet
+ * says how big it is before you choose it.
+ */
+
+.ds-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ds-chip {
+  appearance: none;
+  min-height: 32px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-body);
+  white-space: nowrap;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease),
+    transform var(--ds-dur-fast) var(--ds-ease);
+}
+
+.ds-chip em {
+  font-style: normal;
+  color: var(--ds-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-chip:hover {
+  color: var(--ds-ink);
+}
+
+.ds-chip:active {
+  transform: translateY(1px);
+}
+
+.ds-chip.is-on {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-control);
+}
+
+.ds-chip.is-on em {
+  color: var(--ds-muted);
+}
+
+/* A chip that states rather than selects. */
+.ds-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-ink);
+  font-size: var(--ds-fs-label);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-label);
+  white-space: nowrap;
+}
+
+.ds-tag.is-miss {
+  background: var(--ds-miss-soft);
+  color: var(--ds-miss);
+}
+
+.ds-tag.is-reached {
+  background: var(--ds-surface);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-material-card);
+}

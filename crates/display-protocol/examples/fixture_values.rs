@@ -147,6 +147,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "receiver_nonce": "8".repeat(64),
             "words": phrase,
         },
+        "rendezvous_code": {
+            "entered": " 7k3q-oi1L ",
+            "normalized": display_protocol::pairing::normalize_rendezvous_code(" 7k3q-oi1L ")?,
+            "grouped": display_protocol::pairing::group_rendezvous_code(" 7k3q-oi1L ")?,
+            "rendezvous": display_protocol::pairing::rendezvous_from_code(" 7k3q-oi1L ")?,
+        },
         "negative_cases": [
             {"name": "unknown_protocol_major", "expected": "unsupported"},
             {"name": "unknown_required_field", "expected": "invalid_request"},

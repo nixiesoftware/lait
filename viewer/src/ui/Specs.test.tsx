@@ -99,7 +99,15 @@ describe("Specs", () => {
               heads: view.heads,
               issued: view.issued,
               conflicted: view.heads.length !== 1,
-              view: view.heads.length === 1 ? view : null,
+              head: view.heads.length === 1
+                ? {
+                    revision: view.revision,
+                    title: view.title,
+                    state: view.state,
+                    author: view.body.author,
+                    ts: view.body.ts,
+                  }
+                : null,
             })),
           },
         });
@@ -220,7 +228,7 @@ describe("Specs", () => {
   it("offers creation from an empty register", async () => {
     const onCompose = vi.fn();
     const el = await render({ onCompose }, []);
-    expect(el.textContent).toContain("No specs yet");
+    expect(el.textContent).toContain("Capture requirements and decisions beside the work.");
     const button = [...el.querySelectorAll("button")].find((b) => b.textContent?.includes("New spec"));
     await act(async () => button?.click());
     expect(onCompose).toHaveBeenCalledWith("any");

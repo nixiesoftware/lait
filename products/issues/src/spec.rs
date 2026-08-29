@@ -183,6 +183,14 @@ impl Rel {
     }
 }
 
+impl State {
+    pub const ALL: [Self; 4] = [Self::Draft, Self::Review, Self::Issued, Self::Withdrawn];
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.as_str() == raw)
+    }
+}
+
 /// An exact Spec revision.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -700,6 +708,23 @@ pub struct SpecView {
     pub body: Body,
 }
 
+/// The one head of a register row, as its corpus row states it.
+///
+/// What a register draws about a document -- its title, where its head stands,
+/// who last wrote it and when -- read from the row the revision posts rather
+/// than from its Body. Text, links and topology are deliberately absent: they
+/// are the document, and a reader opens one (`Spec`) or pages its history
+/// (`SpecHistory`) to see them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecHead {
+    pub revision: String,
+    pub title: String,
+    pub state: State,
+    pub author: String,
+    pub ts: u64,
+}
+
 /// Bounded collection row for one Spec/Plan. Revision text and topology are
 /// deliberately absent: callers page those immutable records through
 /// `SpecHistory`. Concurrent heads remain explicit rather than being flattened
@@ -713,11 +738,11 @@ pub struct SpecSummary {
     pub heads: Vec<String>,
     pub issued: Vec<String>,
     pub conflicted: bool,
-    /// Present only when one exact head can be rendered without choosing among
-    /// concurrent intent. The bounded register page may hydrate this one
-    /// revision; conflicts remain summaries until the caller pages the heads.
+    /// Present only when exactly one head exists, so nothing here chooses among
+    /// concurrent intent. Absent, never defaulted, when the corpus has not
+    /// posted that head yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<Box<SpecView>>,
+    pub head: Option<SpecHead>,
 }
 
 /// Stable external view of one Baseline.
@@ -735,6 +760,19 @@ pub struct BaselineView {
     pub body: BaselineBody,
 }
 
+/// The one head of a Baseline register row, as its corpus row states it.
+/// Same shape as [`SpecHead`]; the members are the document, and a reader
+/// opens one (`Baseline`) to see them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineHead {
+    pub revision: String,
+    pub name: String,
+    pub state: State,
+    pub author: String,
+    pub ts: u64,
+}
+
 /// Bounded collection row for one Baseline. The immutable revision records are
 /// a separate cursor page, preserving conflicts without revisiting the whole
 /// document DAG.
@@ -746,8 +784,10 @@ pub struct BaselineSummary {
     pub heads: Vec<String>,
     pub issued: Vec<String>,
     pub conflicted: bool,
+    /// Present only when exactly one head exists; absent when the corpus has
+    /// not posted that head yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<Box<BaselineView>>,
+    pub head: Option<BaselineHead>,
 }
 
 /// How an exact revision reached a Packet.

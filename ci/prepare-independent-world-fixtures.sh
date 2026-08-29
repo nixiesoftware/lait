@@ -37,8 +37,10 @@ HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
   exit 1
 }
 
-PROFILE="${PROFILE:-debug}" ARTIFACT_ROOT="$ARTIFACT_ROOT" \
-  bash .github/scripts/stage-worlds.sh "$HOST_TARGET" "$PUBLISH_STAGE"
+# The same program the inner loop and the publish workflow run.
+cargo run --quiet -p world-stage -- \
+  --target "$HOST_TARGET" --profile "${PROFILE:-debug}" \
+  --artifacts "$ARTIFACT_ROOT" --out "$PUBLISH_STAGE"
 
 KEY_OUTPUT="$OUT/keygen.out"
 "$FEED_TOOL" keygen --out "$OUT/signing.seed" > "$KEY_OUTPUT"

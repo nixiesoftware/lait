@@ -72,7 +72,6 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
               icon={<Plus className="size-icon-xs" />}
               label="Save"
               variant="secondary"
-              elevation="low"
               size="sm"
             />
           </div>

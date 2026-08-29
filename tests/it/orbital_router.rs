@@ -16,13 +16,6 @@ use runtime::{plane::Activation, world::Builder, world::LocalIdentity, Runtime, 
 
 const WRITER_SEED: [u8; 32] = [71u8; 32];
 
-fn temp_root() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lait-router-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 struct WriterAuthority;
 impl runtime::world::AuthorityView for WriterAuthority {
     fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
@@ -37,13 +30,14 @@ fn actor() -> ActorId {
     ActorId::from_incept_hash(&"a".repeat(64))
 }
 
-fn station() -> (Runtime, Station) {
+fn station() -> (crate::head::TempRoot, Runtime, Station) {
+    let root = crate::head::temp_root("router");
     let registry = Builder::new()
         .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
     let rt = Runtime::open(
-        temp_root(),
+        root.to_path_buf(),
         registry,
         Arc::new(WriterAuthority),
         Arc::new(replica::body::StaticBodyKeys::new(
@@ -51,7 +45,7 @@ fn station() -> (Runtime, Station) {
         )),
     );
     let station = rt.create().unwrap().open(Activation::offline()).unwrap();
-    (rt, station)
+    (root, rt, station)
 }
 
 fn facts() -> RouterFacts {
@@ -76,7 +70,7 @@ fn dock(station: &Station) -> (Session, LocalIdentity) {
 
 #[test]
 fn the_router_maps_the_control_surface_to_the_issues_world() {
-    let (_rt, station) = station();
+    let (_root, _rt, station) = station();
     let (session, identity) = dock(&station);
     let clock = SystemUlidSource;
     let router = IssueRouter::new(&session, &identity, &clock);

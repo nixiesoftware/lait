@@ -2,7 +2,7 @@ import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MilestoneDto, ProjectDto } from "../types";
+import type { MemberDto, MilestoneDto, ProjectDto, TeamDto } from "../types";
 import { WorldViewStoreProvider } from "../core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
 import { ProjectOverview } from "./ProjectOverview";
@@ -82,6 +82,7 @@ describe("ProjectOverview", () => {
                   spaceId="local"
                   project={project}
                   members={[]}
+                  teams={[]}
                   readOnly
                   onError={vi.fn()}
                 />
@@ -113,6 +114,121 @@ describe("ProjectOverview", () => {
     expect(host.textContent).toContain("2 issues · 50%");
   });
 
+
+  /**
+   * The defect this page shipped with, and the reason the properties moved.
+   *
+   * Lead, team and the planned window lived in `ProjectRail`, whose open/shut
+   * state is a PERSISTED preference. Shut it once and a project's Overview
+   * could no longer show or set a single fact about the project — an empty one
+   * drew a name, a placeholder and an update composer, and nothing else. The
+   * page has to state the project's facts on its own, because it is the page
+   * that is about the project; the rail is a filter and may be absent.
+   *
+   * Asserted through the controls' own labels rather than through a rail prop,
+   * so it still holds if the rail is rebuilt or removed entirely.
+   */
+  it("states the project's properties without a rail", async () => {
+    rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
+      if (request.cmd === "milestone_list") {
+        return Promise.resolve({ kind: "milestones", page: { publication, items: [] } });
+      }
+      if (request.cmd === "project_updates") {
+        return Promise.resolve({ kind: "updates", page: { publication, items: [] } });
+      }
+      throw new Error(`Unexpected request: ${request.cmd}`);
+    });
+
+    const members: MemberDto[] = [];
+    const teams: TeamDto[] = [];
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    const store = new ProjectViewerStore(rpcMock);
+
+    await act(async () => {
+      root?.render(
+        <WorldViewStoreProvider store={store.resources}>
+          <ProjectViewerStoreProvider store={store}>
+            <ProjectOverview
+              spaceId="local"
+              project={project}
+              members={members}
+              teams={teams}
+              readOnly={false}
+              onError={vi.fn()}
+            />
+          </ProjectViewerStoreProvider>
+        </WorldViewStoreProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const text = host.textContent ?? "";
+    for (const prompt of ["Set lead", "No teams yet", "Add start date", "Add target date"]) {
+      expect(text, `the page must offer "${prompt}" with no rail beside it`).toContain(prompt);
+    }
+  });
+
+  /**
+   * One absence, said once.
+   *
+   * An empty feed used to draw a live textarea, an `UPDATES` caption, "No
+   * updates yet." and a disabled `Post update` — four statements of the same
+   * nothing, and the disabled button was the only filled thing on the page, so
+   * it was the loudest. The composer is the shape a feed WITH posts in it
+   * wants; an empty project wants one affordance that opens it.
+   */
+  it("offers one way in to an empty updates feed, not a standing composer", async () => {
+    rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
+      if (request.cmd === "milestone_list") {
+        return Promise.resolve({ kind: "milestones", page: { publication, items: [] } });
+      }
+      if (request.cmd === "project_updates") {
+        return Promise.resolve({ kind: "updates", page: { publication, items: [] } });
+      }
+      throw new Error(`Unexpected request: ${request.cmd}`);
+    });
+
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    const store = new ProjectViewerStore(rpcMock);
+
+    await act(async () => {
+      root?.render(
+        <WorldViewStoreProvider store={store.resources}>
+          <ProjectViewerStoreProvider store={store}>
+            <ProjectOverview
+              spaceId="local"
+              project={project}
+              members={[]}
+              teams={[]}
+              readOnly={false}
+              onError={vi.fn()}
+            />
+          </ProjectViewerStoreProvider>
+        </WorldViewStoreProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const composer = () => host?.querySelector('textarea[aria-label="New project update"]');
+    expect(composer()).toBeNull();
+    expect(host.textContent).not.toContain("No updates yet.");
+
+    const invitation = [...host.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Write the first project update"),
+    );
+    expect(invitation, "an empty feed must carry its own way in").toBeDefined();
+
+    await act(async () => {
+      invitation?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(composer()).not.toBeNull();
+  });
+
   /** The milestone resource is keyed on the `prj_` id, so the request the page
    *  makes must carry the id — a KEY would register under an alias a rename
    *  moves, and the panel would silently stop refreshing. */
@@ -140,6 +256,7 @@ describe("ProjectOverview", () => {
                 spaceId="local"
                 project={project}
                 members={[]}
+                teams={[]}
                 readOnly
                 onError={vi.fn()}
               />

@@ -74,6 +74,8 @@ const CLIENT_EXECUTE: &str = "client.execute";
 const CLIENT_DISPLAY_CANONICALIZE: &str = "client.display.canonicalize";
 const CLIENT_DISPLAY_PREPARE: &str = "client.display.prepare";
 const CLIENT_DISPLAY_PROJECT: &str = "client.display.project";
+const CLIENT_DISPLAY_CHOICES_PREPARE: &str = "client.display.choices.prepare";
+const CLIENT_DISPLAY_CHOICES_PROJECT: &str = "client.display.choices.project";
 const EXEC_DESCRIBE: &str = "exec.describe";
 const EXEC_HANDLE: &str = "exec.handle";
 const EXEC_FIND: &str = "exec.find";
@@ -117,6 +119,8 @@ enum ClientOrigin {
     },
     Web(serde_json::Value),
     Display(world_interface::display::DisplayRequest),
+    /// The listing of what a display surface can show.
+    DisplayChoices(world_interface::display::DisplaySurfaceId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -861,6 +865,61 @@ impl<W: World> Service for WorldService<W> {
                     });
                 encode(&result)
             }
+            CLIENT_DISPLAY_CHOICES_PREPARE => {
+                let client = self
+                    .client
+                    .as_ref()
+                    .ok_or_else(|| "this World exposes no client package".to_string())?;
+                let surface_id: world_interface::display::DisplaySurfaceId = decode(payload)?;
+                let origin = ClientOrigin::DisplayChoices(surface_id.clone());
+                let encoded_origin = encode(&origin)?;
+                // A surface that lists nothing is `Ok(None)`, told apart from
+                // a listing that failed to prepare.
+                let result = client
+                    .display_surface(&surface_id)
+                    .ok_or_else(|| {
+                        world_interface::Failure::new(format!(
+                            "unknown display surface {}",
+                            surface_id.as_str()
+                        ))
+                    })
+                    .and_then(|surface| surface.choices_prepare())
+                    .and_then(|prepared| {
+                        prepared
+                            .map(|invocation| {
+                                client.validate_invocation(&invocation)?;
+                                Ok(ParsedClientInvocation {
+                                    access: invocation.access(),
+                                    confirmation_question: invocation
+                                        .confirmation_question()
+                                        .map(str::to_string),
+                                    origin: encoded_origin.clone(),
+                                })
+                            })
+                            .transpose()
+                    });
+                encode(&result)
+            }
+            CLIENT_DISPLAY_CHOICES_PROJECT => {
+                let client = self
+                    .client
+                    .as_ref()
+                    .ok_or_else(|| "this World exposes no client package".to_string())?;
+                let (surface_id, value): (
+                    world_interface::display::DisplaySurfaceId,
+                    serde_json::Value,
+                ) = decode(payload)?;
+                let result = client
+                    .display_surface(&surface_id)
+                    .ok_or_else(|| {
+                        world_interface::Failure::new(format!(
+                            "unknown display surface {}",
+                            surface_id.as_str()
+                        ))
+                    })
+                    .and_then(|surface| surface.choices_project(value));
+                encode(&result)
+            }
             CLIENT_CONFIRMATION | CLIENT_EXECUTE => {
                 let client = self
                     .client
@@ -1261,6 +1320,21 @@ fn parse_client_origin(
                 ))
             })?
             .prepare(request),
+        ClientOrigin::DisplayChoices(surface) => client
+            .display_surface(surface)
+            .ok_or_else(|| {
+                world_interface::Failure::new(format!(
+                    "unknown display surface {}",
+                    surface.as_str()
+                ))
+            })?
+            .choices_prepare()?
+            .ok_or_else(|| {
+                world_interface::Failure::new(format!(
+                    "display surface {} lists no choices",
+                    surface.as_str()
+                ))
+            }),
     }
 }
 
@@ -2487,6 +2561,35 @@ impl world_interface::display::DisplayAdapter for RemoteClient {
             .await
             .map_err(Self::failure)?
         })
+    }
+
+    fn choices_prepare(
+        &self,
+        surface: &world_interface::display::DisplaySurfaceId,
+    ) -> Result<Option<world_interface::ClientInvocation>, world_interface::Failure> {
+        let result = self
+            .world
+            .invoke_application::<_, Result<Option<ParsedClientInvocation>, world_interface::Failure>>(
+                CLIENT_DISPLAY_CHOICES_PREPARE,
+                surface,
+                None,
+            )
+            .map_err(Self::failure)?;
+        result?.map(|parsed| self.parsed(Ok(parsed))).transpose()
+    }
+
+    fn choices_project(
+        &self,
+        surface: &world_interface::display::DisplaySurfaceId,
+        value: serde_json::Value,
+    ) -> Result<Vec<world_interface::display::DisplayChoice>, world_interface::Failure> {
+        self.world
+            .invoke_application::<_, Result<_, world_interface::Failure>>(
+                CLIENT_DISPLAY_CHOICES_PROJECT,
+                &(surface.clone(), value),
+                None,
+            )
+            .map_err(Self::failure)?
     }
 }
 

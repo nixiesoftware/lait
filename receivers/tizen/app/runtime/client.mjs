@@ -197,6 +197,15 @@ function supportedLiveTracks(tracks) {
   if (!selected.has("video")) {
     throw new ProtocolError("unsupported", "The live catalog has no supported video rendition");
   }
+  // Packets name their rendition and nothing else, so two tracks under one
+  // name cannot be told apart on arrival. Refused here, by name, rather than
+  // letting the audio entry overwrite the video one and H.264 fragments land
+  // in an AAC SourceBuffer — which is what "codec h264 doesn't match
+  // SourceBuffer codecs" was.
+  const names = new Set(tracks.map((track) => track.rendition));
+  if (names.size !== tracks.length) {
+    throw new ProtocolError("live_catalog", "Live catalog names two tracks by one rendition");
+  }
   return new Map(Array.from(selected.values(), (track) => [track.rendition, track]));
 }
 
@@ -230,7 +239,13 @@ class MseLiveSession {
       this.video.autoplay = true;
       this.video.playsInline = true;
       this.video.setAttribute("aria-label", summary || "Assigned Astrolabe live media");
-      this.video.addEventListener("error", () => this.fail(new ProtocolError("media_decode", "Live media decoder failed")));
+      this.video.addEventListener("error", () => {
+        // The element's own words — "DEMUXER_ERROR…", "PIPELINE_ERROR_DECODE" —
+        // are the difference between a stream this box cannot decode and a
+        // stream nobody could.
+        const detail = this.video.error ? ` (${this.video.error.code}: ${this.video.error.message || "no message"})` : "";
+        this.fail(new ProtocolError("media_decode", `Live media decoder failed${detail}`));
+      });
     }
     if (this.video.parentElement !== container) container.replaceChildren(this.video);
     this.connect();
@@ -274,6 +289,7 @@ class MseLiveSession {
     }
     this.complete = hello.complete;
     this.tracks = supportedLiveTracks(hello.tracks);
+    console.info(`live catalog: ${Array.from(this.tracks.values(), (track) => `${track.rendition} ${track.mime_type}`).join(" | ")}`);
     this.rebuildMediaSource();
   }
 
@@ -396,7 +412,11 @@ class MseLiveSession {
     this.failed = true;
     if (this.socket) this.socket.close();
     this.socket = null;
-    this.onFailure(error instanceof ProtocolError ? error : new ProtocolError("media_decode", String(error)));
+    const reported = error instanceof ProtocolError ? error : new ProtocolError("media_decode", String(error));
+    // Said to the console as well as to the owner: a blank clip has a reason,
+    // and the console is where a person on a simulator can read it.
+    console.warn(`live media session failed: ${reported.code}: ${reported.message}`);
+    this.onFailure(reported);
   }
 
   release() {
@@ -498,31 +518,42 @@ export class DisplayReceiverClient {
       timeoutMs: 30_000,
     });
     if (response.status < 200 || response.status >= 300) {
-      throw new ProtocolError("coordinator_refused", `Coordinator returned HTTP ${response.status}`);
+      const refused = new ProtocolError("coordinator_refused", `Coordinator returned HTTP ${response.status}`);
+      refused.status = response.status;
+      throw refused;
     }
     return response.body;
   }
 
   async fetchInstance() {
     const instance = await this.publicJson("/head/v1/instance");
-    exactFields(instance, ["protocol_major", "instance", "label", "trust"], "coordinator instance");
+    exactFields(instance, ["protocol_major", "instance", "label", "profile", "trust"], "coordinator instance");
     if (instance.protocol_major !== PROTOCOL_MAJOR
       || !isLowerHex(instance.instance, 32)
+      || !isProfileId(instance.profile)
       || typeof instance.label !== "string"
       || new TextEncoder().encode(instance.label).byteLength < 1
       || new TextEncoder().encode(instance.label).byteLength > 96
       || /[\u0000-\u001f\u007f-\u009f]/u.test(instance.label)) {
       throw new ProtocolError("unsupported", "Coordinator does not speak protocol major 1");
     }
-    const trustFields = this.trust.kind === "pinned_certificate"
-      ? ["kind", "origin", "sha256"]
-      : ["kind", "origin"];
-    exactFields(instance.trust, trustFields, "coordinator trust");
-    if (instance.trust.kind !== this.trust.kind
-      || coordinatorOrigin(instance.trust.origin) !== this.origin
-      || (this.trust.kind === "pinned_certificate"
-        && instance.trust.sha256 !== this.trust.sha256)) {
-      throw new ProtocolError("unsupported_trust", "Coordinator trust does not match the receiver bootstrap");
+    // The instance describes the *placement* that answered: where it listens
+    // and which certificate it holds. A pinned bootstrap holds it to exactly
+    // that. A routed one — reached by site through the deployment's Web PKI —
+    // cannot: the certificate is the placement's and the route is the
+    // deployment's, and a coordinator that moves machines keeps neither.
+    // What it keeps is its identity, and that is what a routed receiver holds
+    // it to: the profile the offer must derive its words from, and the one a
+    // credential is stored against.
+    if (this.trust.kind === "pinned_certificate") {
+      exactFields(instance.trust, ["kind", "origin", "sha256"], "coordinator trust");
+      if (instance.trust.kind !== "pinned_certificate"
+        || coordinatorOrigin(instance.trust.origin) !== this.origin
+        || instance.trust.sha256 !== this.trust.sha256) {
+        throw new ProtocolError("unsupported_trust", "Coordinator trust does not match the receiver bootstrap");
+      }
+    } else if (!["pinned_certificate", "web_pki_origin", "profile"].includes(instance.trust?.kind)) {
+      throw new ProtocolError("unsupported_trust", "Coordinator trust kind is unsupported");
     }
     return instance;
   }
@@ -538,15 +569,45 @@ export class DisplayReceiverClient {
       rendezvous: this.rendezvous,
       capabilities: this.capabilities,
     };
-    const response = await this.publicJson("/head/v1/pairings", "POST", request);
+    let response;
+    try {
+      response = await this.publicJson("/head/v1/pairings", "POST", request);
+    } catch (error) {
+      // A start carrying a code the coordinator does not hold is refused as
+      // a credential, not as a malformed request — which is the one refusal
+      // a person at the television can act on.
+      if (this.rendezvous !== null
+        && error instanceof ProtocolError
+        && error.code === "coordinator_refused"
+        && error.status === 403) {
+        throw new ProtocolError(
+          "rendezvous_refused",
+          "The code entered is not one this coordinator holds, or it has expired",
+        );
+      }
+      throw error;
+    }
+    // The offer names two things about the coordinator: the certificate it
+    // is speaking through (`coordinator_fingerprint`) and the identity it is
+    // (`coordinator_profile`). The words derive from the identity — v2 of the
+    // phrase — so they survive a certificate rotation or a move to another
+    // machine; the fingerprint is still what a pinned bootstrap checks.
     exactFields(
       response,
-      ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"],
+      [
+        "protocol_major",
+        "pairing",
+        "expires_in_ms",
+        "confirmation_phrase",
+        "coordinator_fingerprint",
+        "coordinator_profile",
+      ],
       "pairing start response",
     );
     if (response.protocol_major !== PROTOCOL_MAJOR
       || !isLowerHex(response.pairing, 32)
       || !isLowerHex(response.coordinator_fingerprint, 64)
+      || !isProfileId(response.coordinator_profile)
       || !Number.isSafeInteger(response.expires_in_ms)
       || response.expires_in_ms <= 0
       || response.expires_in_ms > 600_000) {
@@ -556,8 +617,12 @@ export class DisplayReceiverClient {
       && response.coordinator_fingerprint !== this.trust.sha256) {
       throw new ProtocolError("pairing_integrity", "Pairing certificate does not match the receiver bootstrap");
     }
+    // The identity that made the offer is the one the instance said it was.
+    if (response.coordinator_profile !== instance.profile) {
+      throw new ProtocolError("pairing_integrity", "Pairing offer names a different identity than the coordinator");
+    }
     const expectedPhrase = await confirmationPhrase(
-      response.coordinator_fingerprint,
+      response.coordinator_profile,
       response.pairing,
       receiverNonce,
     );
@@ -571,10 +636,23 @@ export class DisplayReceiverClient {
       receiverNonce,
       pollKey,
       fingerprint: response.coordinator_fingerprint,
+      profile: response.coordinator_profile,
       phrase: expectedPhrase,
       userConfirmed: false,
+      // Whether a code from the controller opened this pairing. The code is
+      // the person's confirmation, made in advance at the controller; there
+      // is nobody to press anything here, and the words are not shown.
+      viaCode: this.rendezvous !== null,
     };
+    // A code is spent by the start that carried it. Forgetting it here means
+    // a cancelled or re-paired ceremony goes the long way rather than
+    // presenting a spent code and being refused for it.
+    this.rendezvous = null;
     await this.vault.save(this.credential);
+    if (this.credential.viaCode) {
+      await this.confirmPairing();
+      return;
+    }
     this.presentPairing();
   }
 
@@ -583,6 +661,7 @@ export class DisplayReceiverClient {
       phrase: this.credential.phrase,
       fingerprint: this.credential.fingerprint,
       confirmed: this.credential.userConfirmed,
+      viaCode: Boolean(this.credential.viaCode),
     });
   }
 
@@ -676,6 +755,7 @@ export class DisplayReceiverClient {
         this.credential = {
           mode: "enrolling",
           origin: this.origin,
+          profile: current.profile,
           pairing: current.pairing,
           device: response.device,
           proofKey: response.proof_key,
@@ -721,6 +801,9 @@ export class DisplayReceiverClient {
     this.credential = {
       mode: "paired",
       origin: this.origin,
+      // The identity this receiver is enrolled with — what it would hold a
+      // coordinator to if the route ever answered as somebody else.
+      profile: this.credential.profile ?? null,
       device: this.credential.device,
       proofKey: this.credential.proofKey,
     };
@@ -967,7 +1050,19 @@ export class DisplayReceiverClient {
         if (!this.program || response.revision !== this.program.revision) {
           throw new ProtocolError("invalid_revision", "No-change cursor does not name the current program");
         }
-        this.adoptCursor(response.playback, true);
+        this.validateCursor(response.playback);
+        if (response.playback.sync !== null || this.program.playback.sync !== null) {
+          // A sync group is aligned by the coordinator's clock; its cursor is
+          // computed when the answer is written and is the one to follow.
+          this.adoptCursor(response.playback, true);
+          return;
+        }
+        // An unaligned program keeps this receiver's own clock. The answer
+        // carries the cursor the poll opened with, as old as the poll itself —
+        // adopting it rewound playback by up to a long-poll every cycle, which
+        // cut the last item of a 30-second loop to five seconds.
+        this.lastProgramDeliveryAt = performance.now();
+        if (this.deliveryStale) this.renderCurrent();
         return;
       case "reset":
         exactFields(response, ["kind", "reason"], "program reset response");
@@ -1021,7 +1116,23 @@ export class DisplayReceiverClient {
         if (stagedBytes > this.capabilities.max_staged_bytes || stagedBytes > BOUNDS.maxStagedBytes) {
           throw new ProtocolError("bound_exceeded", "Program exceeds negotiated staging bytes");
         }
-        assets.set(manifest.id, await this.authorizedLiveMedia(item, program));
+        try {
+          assets.set(manifest.id, await this.authorizedLiveMedia(item, program));
+        } catch (error) {
+          if (error instanceof ProtocolError && ["revoked", "re_pair_required", "unsupported"].includes(error.code)) {
+            throw error;
+          }
+          // One clip the coordinator cannot serve yet blanks that clip while it
+          // is current; the frames beside it still draw, and the next cycle
+          // asks for the clip again. Refusing the whole program here left a
+          // screen on "No source" for one clip out of three.
+          assets.set(manifest.id, {
+            asset: manifest,
+            item,
+            session: { failed: true, release() {} },
+            lastError: error,
+          });
+        }
         continue;
       }
       if (item.scene.kind !== "frame") continue;
@@ -1110,7 +1221,8 @@ export class DisplayReceiverClient {
     return { currentIndex: this.program.playback.current_index, elapsedMs: Math.min(elapsed, 0xffffffff) };
   }
 
-  adoptCursor(playback, programDelivery = false) {
+  /** A cursor the coordinator sent, refused before it can move anything. */
+  validateCursor(playback) {
     exactFields(playback, ["current_index", "elapsed_ms", "cycle", "sync"], "playback cursor");
     if (playback.sync !== null) {
       exactFields(playback.sync, ["group", "mode", "sampled_at_unix_ms"], "sync target");
@@ -1134,6 +1246,10 @@ export class DisplayReceiverClient {
         && playback.elapsed_ms >= this.program.items[playback.current_index].duration_ms)) {
       throw new ProtocolError("invalid_cursor", "Coordinator cursor is outside the current program");
     }
+  }
+
+  adoptCursor(playback, programDelivery = false) {
+    this.validateCursor(playback);
     const previous = this.currentPlayback();
     if (playback.sync !== null) {
       const residual = previous.currentIndex === playback.current_index
@@ -1170,20 +1286,23 @@ export class DisplayReceiverClient {
       this.ui.setSourceState(state);
       return;
     }
+    // An item that cannot be drawn is blanked for its own duration and the
+    // program moves on: returning early here left a screen on "Source
+    // unavailable" for as long as one clip out of three could not be served.
     if (item.scene.kind === "frame") {
       const staged = this.staged.get(item.scene.asset.id);
       if (!staged) {
         this.ui.showBlank("host_unavailable", state);
-        return;
+      } else {
+        this.ui.showFrame(staged.url, item.spoken_summary, state);
       }
-      this.ui.showFrame(staged.url, item.spoken_summary, state);
     } else if (item.scene.kind === "media") {
       const staged = this.staged.get(item.scene.manifest.id);
       if (!staged || staged.session.failed || typeof this.ui.showMedia !== "function") {
         this.ui.showBlank("source_unavailable", state);
-        return;
+      } else {
+        this.ui.showMedia(staged.session, item.spoken_summary, state);
       }
-      this.ui.showMedia(staged.session, item.spoken_summary, state);
     } else if (item.scene.kind === "blank") {
       this.ui.showBlank(item.scene.reason, state);
     } else {
@@ -1293,4 +1412,20 @@ export class DisplayReceiverClient {
     this.ui.showRePair(reason);
     if (this.running) await this.startPairing();
   }
+}
+
+/**
+ * Whether the receiver's chrome — its name, its transport, its source, its
+ * delivery — has anything to say over what is on the glass.
+ *
+ * While a state panel is up the chrome is the page's header. Once a
+ * program is on the glass and every word the chrome would say is "fine",
+ * it retires: a banner over a picture is the receiver asserting itself
+ * over the World it is showing. It speaks again the moment there is
+ * something worth saying, or when the person asks with the Info key.
+ */
+export function chromeSpeaks({ panel, transport, source, stale, details }) {
+  if (details) return true;
+  if (panel !== "frame-panel" && panel !== "media-panel") return true;
+  return transport !== "online" || source === "none" || Boolean(stale);
 }

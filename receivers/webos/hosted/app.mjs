@@ -1,9 +1,10 @@
-import { DisplayReceiverClient } from "./runtime/client.mjs";
+import { DisplayReceiverClient, chromeSpeaks } from "./runtime/client.mjs";
+import { groupRendezvousCode, rendezvousFromCode } from "./runtime/protocol.mjs";
 import { CredentialVault } from "./runtime/vault.mjs";
 import {
   ProvisioningStore,
   deploymentRoot,
-  normalizeSiteCode,
+  parseEntry,
   siteOrigin,
   validSiteCode,
   webPkiBootstrap,
@@ -19,10 +20,15 @@ const panels = [
   "message-panel",
 ];
 
+/** How long the chrome lingers over a program before it retires. */
+const CHROME_LINGER_MS = 4000;
+
 class WebOsReceiverUi {
   constructor() {
     this.client = null;
     this.detailsVisible = false;
+    this.chrome = { panel: "booting-panel", transport: "connecting", source: "none", stale: false, details: false };
+    this.chromeTimer = null;
     this.confirmButton = document.getElementById("confirm-pairing");
     this.retryButton = document.getElementById("retry-action");
     this.changeSiteButton = document.getElementById("change-site-action");
@@ -35,51 +41,71 @@ class WebOsReceiverUi {
 
   show(name) {
     for (const panel of panels) document.getElementById(panel).hidden = panel !== name;
+    this.reviewChrome({ panel: name });
     if (name !== "media-panel") document.querySelector("#program-media video")?.pause();
   }
 
   showBooting() { this.show("booting-panel"); }
 
-  /// Ask which location this display belongs to, and resolve once it is
-  /// stored. The origin is never compiled in: one package serves every site,
-  /// and the site is a fact about where the television is standing.
-  askForSite(store, parent) {
+  /// Ask what Astrolabe showed: a site, and the code beside it if a display
+  /// was added there. The origin is never compiled in — one package serves
+  /// every site, and the site is a fact about where the television stands.
+  /// A site with no code is the long way, the words ceremony, and is still
+  /// a way in.
+  ///
+  /// Resolves `{ site, rendezvous }` once the site is stored: `site` is the
+  /// stored record, `rendezvous` the wire id the code names, or `null`.
+  askForEntry(store, parent, storedSite) {
     return new Promise((resolve) => {
       this.show("provisioning-panel");
       const form = document.getElementById("site-entry");
       const input = document.getElementById("site-code");
       const preview = document.getElementById("site-preview");
       const render = () => {
-        const code = normalizeSiteCode(input.value);
-        if (!code) {
-          preview.textContent = "Enter the code printed on this location's setup card.";
-        } else if (validSiteCode(code)) {
-          preview.textContent = `This display will reach ${siteOrigin(code, parent).slice("https://".length)}`;
+        const entry = parseEntry(input.value);
+        if (!entry.site) {
+          preview.textContent = "Enter the code shown in Astrolabe, or just this location's site name.";
+        } else if (!validSiteCode(entry.site)) {
+          preview.textContent = "A site name is up to 32 letters, digits and hyphens.";
+        } else if (entry.code) {
+          preview.textContent = `This display will connect to ${siteOrigin(entry.site, parent).slice("https://".length)} with code ${groupRendezvousCode(entry.code)}.`;
         } else {
-          preview.textContent = "A site code is up to 32 letters, digits and hyphens.";
+          preview.textContent = `This display will reach ${siteOrigin(entry.site, parent).slice("https://".length)} and show words to compare in Astrolabe.`;
         }
       };
       input.addEventListener("input", render);
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        const code = normalizeSiteCode(input.value);
-        if (!validSiteCode(code)) {
+        const entry = parseEntry(input.value);
+        if (!validSiteCode(entry.site)) {
           render();
           return;
         }
         preview.textContent = "Storing this display's site…";
-        store.save(code, parent).then(resolve, (error) => {
+        Promise.all([
+          store.save(entry.site, parent),
+          entry.code ? rendezvousFromCode(entry.code) : Promise.resolve(null),
+        ]).then(([site, rendezvous]) => resolve({ site, rendezvous }), (error) => {
           preview.textContent = `This display could not store its site: ${error.message || error}`;
         });
       });
-      input.value = "";
+      // A display that already knows its site is most likely here holding a
+      // code: start it after the site, ready for the rest.
+      input.value = storedSite ? `${storedSite}-` : "";
       render();
       input.focus();
+      if (storedSite) input.setSelectionRange(input.value.length, input.value.length);
     });
   }
   showConnecting() { this.message("Astrolabe Display", "Connecting…", "Authenticating this receiver and requesting its complete current program."); }
 
-  showPairing({ phrase, fingerprint, confirmed }) {
+  showPairing({ phrase, fingerprint, confirmed, viaCode = false }) {
+    if (viaCode) {
+      // The code was the confirmation, made at the controller. Nothing here
+      // is compared, and nothing here is pressed.
+      this.message("Connecting this display", "Code accepted", "Enrolling with Astrolabe…");
+      return;
+    }
     this.show("pairing-panel");
     const phraseElement = document.getElementById("pairing-phrase");
     phraseElement.replaceChildren(...phrase.map((word) => {
@@ -140,7 +166,20 @@ class WebOsReceiverUi {
   showRePair(reason) { this.message("Trust changed", "Pairing is required again", reason); }
   showPendingAtEnd() { this.message("Program boundary", "Waiting for the next program", "The last verified frame has ended. Astrolabe is requesting a complete snapshot."); }
   showRecovering(code) { document.getElementById("pairing-state").textContent = `Delivery interrupted (${code}). Retrying with bounded backoff.`; }
-  showFailure(code, detail) { this.message("Receiver refused", "Astrolabe cannot continue safely", `${code}: ${detail}`, true); }
+  showFailure(code, detail) {
+    if (code === "rendezvous_refused") {
+      // The one refusal a person at the television can act on. The site is
+      // kept; the retry lands back on the entry screen with it filled in.
+      this.message(
+        "Code not accepted",
+        "That code isn't one this site holds",
+        "A code works once and lasts fifteen minutes. Get a fresh one in Astrolabe: Displays, then Add a display.",
+        true,
+      );
+      return;
+    }
+    this.message("Receiver refused", "Astrolabe cannot continue safely", `${code}: ${detail}`, true);
+  }
 
   message(eyebrow, title, body, retry = false) {
     this.show("message-panel");
@@ -174,6 +213,7 @@ class WebOsReceiverUi {
     element.dataset.state = state;
     element.textContent = state === "online" ? "Online" : state === "offline" ? "Offline" : "Connecting";
     document.getElementById("detail-transport").textContent = element.textContent;
+    this.reviewChrome({ transport: state });
   }
 
   setSourceState(state) {
@@ -181,16 +221,40 @@ class WebOsReceiverUi {
     element.dataset.state = state;
     element.textContent = state === "none" ? "No source" : state[0].toUpperCase() + state.slice(1);
     document.getElementById("detail-source").textContent = element.textContent;
+    this.reviewChrome({ source: state });
   }
 
   setStaleState(stale) {
     document.getElementById("stale-state").hidden = !stale;
     document.getElementById("detail-delivery").textContent = stale ? "Stale" : "Current";
+    this.reviewChrome({ stale });
   }
 
   toggleDetails() {
     this.detailsVisible = !this.detailsVisible;
     document.getElementById("detail-panel").hidden = !this.detailsVisible;
+    this.reviewChrome({ details: this.detailsVisible });
+  }
+
+  /// The chrome speaks or retires — see `chromeSpeaks`. Retiring waits a
+  /// moment so a person at the TV sees the connection land before the
+  /// picture is alone; speaking is immediate.
+  reviewChrome(change) {
+    this.chrome = { ...this.chrome, ...change };
+    const receiver = document.getElementById("receiver");
+    if (chromeSpeaks(this.chrome)) {
+      clearTimeout(this.chromeTimer);
+      this.chromeTimer = null;
+      receiver.dataset.chrome = "speaking";
+      return;
+    }
+    // A program answers every few seconds; the linger runs from the first
+    // fine answer, not the latest, or it would never end.
+    if (receiver.dataset.chrome === "retired" || this.chromeTimer !== null) return;
+    this.chromeTimer = setTimeout(() => {
+      this.chromeTimer = null;
+      receiver.dataset.chrome = "retired";
+    }, CHROME_LINGER_MS);
   }
 }
 
@@ -252,20 +316,26 @@ window.addEventListener("pagehide", () => client && client.stop());
 
 // The origin is resolved before the client exists, because the client takes
 // its coordinator as a constructor argument and has no notion of not having
-// one yet. A stored site starts silently; an unprovisioned display asks.
+// one yet. An enrolled display with a stored site starts silently. Anything
+// else asks — with the site filled in when one is stored — because what a
+// person is most likely holding at that screen is a code from Astrolabe.
 async function boot() {
   ui.showBooting();
   const root = deploymentRoot(window.location.hostname);
   const store = await ProvisioningStore.open();
-  const site = (await store.read(root)) || (await ui.askForSite(store, root));
+  const stored = await store.read(root);
 
   const vault = await CredentialVault.open();
   const enrolled = Boolean(await vault.load().catch(() => null));
   vault.close();
+
+  const entry = stored && enrolled
+    ? { site: stored, rendezvous: null }
+    : await ui.askForEntry(store, root, stored ? stored.code : null);
   ui.allowChangeSite(!enrolled, () => store.clear());
 
   client = new DisplayReceiverClient({
-    bootstrap: webPkiBootstrap(site.origin),
+    bootstrap: webPkiBootstrap(entry.site.origin, entry.rendezvous),
     capabilities,
     ui,
   });

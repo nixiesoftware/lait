@@ -8,6 +8,8 @@
 export interface LibraryWorld {
   key: string;
   worldMount: string;
+  /** The World's id, as an assignment or a binding names it. */
+  world: string;
   /** Catalogued does not mean installed; false offers Install, never Open. */
   installed: boolean;
   displayName: string;
@@ -19,6 +21,17 @@ export interface LibraryWorld {
   people: WorldPerson[] | null;
   update: WorldUpdate | null;
   install: WorldInstall | null;
+  /** The channel this World follows by its own choice. `null` follows the
+   *  device's, which is a different fact and must not draw as this one. */
+  channel: string | null;
+  /** The directory a local World is read from; `null` is a released World.
+   *  A row carrying this is a tree being worked on — unsealed, under an id and
+   *  mount the host assigned it, and not the World it was copied from. */
+  sourceDir: string | null;
+  /** Whether a local World's tree still holds the bytes somebody agreed to:
+   *  "unchanged", "changed", or "unrecorded". `null` for a released World —
+   *  a different question, not a reassuring answer to this one. */
+  sourceStanding: string | null;
 }
 
 export interface WorldInstall {
@@ -83,6 +96,8 @@ export interface Failure {
   what: string;
   error: string;
   retryable: boolean;
+  /** The action key this refused, so the surface that asked can answer beside its own control; null for a read. */
+  key: string | null;
 }
 
 export interface Device {
@@ -110,12 +125,28 @@ export type DisplayTheme = "light" | "dark" | "highContrast";
 export type DisplaySyncMode = "stayInSync" | "positional";
 export type DisplayStaleAction = "keepWithNativeBanner" | "blank";
 export interface DisplaySurface { world: string; surface: string; title: string; contractVersion: number; outputs: string[]; }
-export interface DisplayHealth { revision: string; currentItem: string; elapsedMs: number; connection: string; playback: string; lastError: string; stagedItems: number; stagedBytes: number; driftResidualMs: number; correctionEvents: number; pipelineUnobservable: boolean; }
+/** A receiver's last report, and when it arrived — `reportedAtUnixMs` is null from a daemon that predates it. */
+export interface DisplayHealth { revision: string; currentItem: string; elapsedMs: number; connection: string; playback: string; lastError: string; stagedItems: number; stagedBytes: number; driftResidualMs: number; correctionEvents: number; pipelineUnobservable: boolean; reportedAtUnixMs: number | null; }
 export interface DisplayReceiver { device: string; label: string; platform: string; build: string; issuedAtUnixMs: number; revokedAtUnixMs: number | null; health: DisplayHealth | null; }
 export interface DisplayAssignment { assignment: string; device: string; orbit: string; space: string; program: string; world: string; surface: string; controller: string; theme: DisplayTheme; syncGroup: string | null; syncMode: DisplaySyncMode | null; staticDelayMs: number; expiresAtUnixMs: number | null; revokedAtUnixMs: number | null; }
 export interface DisplayPairing { pairing: string; confirmationPhrase: string[]; certificateSha256: string; platform: string; build: string; createdAtUnixMs: number; expiresAtUnixMs: number; }
 export interface IdentifierCustody { slots: string[]; portable: boolean; }
-export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
+export interface DisplayRendezvousAssignment { orbit: string; world: string; surface: string; }
+/** A code minted for a television to enter: the site it resolves the coordinator by, then the code. */
+export type DisplayRendezvousState = "waiting" | "connecting" | "connected";
+export interface DisplayRendezvous { rendezvous: string; code: string; site: string | null; label: string; assignment: DisplayRendezvousAssignment | null; /** A spent code stays listed a while as the TV it became. */ state: DisplayRendezvousState; device: string | null; createdAtUnixMs: number; expiresAtUnixMs: number; }
+/** One thing a surface can show, as the World names it: `id` is what its input takes. */
+export interface DisplayChoice { id: string; title: string; }
+/**
+ * What one surface can show in one Space, as last listed. `choices` is null
+ * when the list could not be taken and `unavailable` says why; an empty list
+ * is a Space with nothing to show — a typed field for one, an empty picker
+ * for the other.
+ */
+export interface DisplayChoices { orbit: string; world: string; surface: string; choices: DisplayChoice[] | null; unavailable: string | null; }
+export interface Display { instance: string; label: string; origin: string; certificateSha256: string; certificatePem: string; surfaces: DisplaySurface[]; devices: DisplayReceiver[]; assignments: DisplayAssignment[]; pendingPairings: DisplayPairing[]; pendingRendezvous: DisplayRendezvous[]; /** Listings taken so far, per (space, world, surface); absent until asked. */ choices: DisplayChoices[]; /** null from a daemon that predates the custody split — not reported. */ identifierCustody: IdentifierCustody | null; }
+/** What a code pins its television to once it connects: an assignment without the device. */
+export interface DisplayAssignmentRequest { orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null; }
 export interface McpBinding { path: string; detail: string; note: string | null; replaced: boolean; agent: string | null; written: boolean; world: string | null; }
 
 /**
@@ -275,6 +306,9 @@ export type ClientAction =
   | { type: "open"; world: string; entryPath: string }
   | { type: "updateWorld"; world: string }
   | { type: "installWorld"; world: string }
+  | { type: "followWorldChannel"; world: string; channel: string | null }
+  | { type: "registerLocalWorld"; dir: string }
+  | { type: "forgetLocalWorld"; key: string }
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
   | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
   | { type: "startHead" } | { type: "stopHead"; id: string } | { type: "forgetOrbit"; space: string }
@@ -285,7 +319,9 @@ export type ClientAction =
   | { type: "bookAccept"; suggestion: string } | { type: "bookDismiss"; suggestion: string }
   | { type: "installMcp"; client: string; scope: string | null; name: string; agent: string | null; noAgent: boolean; project: string; world: string | null; preview: boolean }
   | { type: "displayPairingApprove"; pairing: string; label: string } | { type: "displayPairingReject"; pairing: string }
-  | { type: "displayAssignmentPut"; device: string; orbit: string; world: string; surface: string; inputJson: string; theme: DisplayTheme; staleAfterMs: number; onStale: DisplayStaleAction; syncGroup: string | null; syncMode: DisplaySyncMode; staticDelayMs: number; expiresAtUnixMs: number | null }
+  | { type: "displayRendezvousMint"; label: string; assignment: DisplayAssignmentRequest | null } | { type: "displayRendezvousRevoke"; rendezvous: string }
+  | { type: "displaySurfaceChoices"; orbit: string; world: string; surface: string }
+  | ({ type: "displayAssignmentPut"; device: string } & DisplayAssignmentRequest)
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
   | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
@@ -306,6 +342,9 @@ export const actionKey = {
   open: (world: string) => `open:${world}`,
   updateWorld: (world: string) => `world.update:${world}`,
   installWorld: (world: string) => `world.install:${world}`,
+  followWorldChannel: (world: string) => `world.channel:${world}`,
+  registerLocalWorld: (dir: string) => `world.local.add:${dir}`,
+  forgetLocalWorld: (key: string) => `world.local.forget:${key}`,
   startDevice: (id: string) => `device.start:${id}`,
   stopDevice: (id: string) => `device.stop:${id}`,
   restartDevice: (id: string) => `device.restart:${id}`,
@@ -328,6 +367,9 @@ export const actionKey = {
   installMcp: (preview: boolean) => preview ? "mcp.preview" : "mcp.install",
   displayPairingApprove: (pairing: string) => `display.pairing.approve:${pairing}`,
   displayPairingReject: (pairing: string) => `display.pairing.reject:${pairing}`,
+  displayRendezvousMint: "display.rendezvous.mint",
+  displayRendezvousRevoke: (rendezvous: string) => `display.rendezvous.revoke:${rendezvous}`,
+  displaySurfaceChoices: (orbit: string, world: string, surface: string) => `display.surface.choices:${orbit}/${world}/${surface}`,
   displayAssignmentPut: (device: string) => `display.assignment.put:${device}`,
   displayAssignmentRevoke: (assignment: string) => `display.assignment.revoke:${assignment}`,
   displayDeviceRevoke: (device: string) => `display.device.revoke:${device}`,
@@ -360,6 +402,9 @@ export function keyFor(action: ClientAction): string {
     case "openLink": return `link.open:${action.url}`;
     case "open": return actionKey.open(action.world);
     case "updateWorld": return actionKey.updateWorld(action.world);
+    case "followWorldChannel": return actionKey.followWorldChannel(action.world);
+    case "registerLocalWorld": return actionKey.registerLocalWorld(action.dir);
+    case "forgetLocalWorld": return actionKey.forgetLocalWorld(action.key);
     case "installWorld": return actionKey.installWorld(action.world);
     case "startDevice": return actionKey.startDevice(action.id);
     case "stopDevice": return actionKey.stopDevice(action.id);
@@ -385,6 +430,9 @@ export function keyFor(action: ClientAction): string {
     case "installMcp": return actionKey.installMcp(action.preview);
     case "displayPairingApprove": return actionKey.displayPairingApprove(action.pairing);
     case "displayPairingReject": return actionKey.displayPairingReject(action.pairing);
+    case "displayRendezvousMint": return actionKey.displayRendezvousMint;
+    case "displayRendezvousRevoke": return actionKey.displayRendezvousRevoke(action.rendezvous);
+    case "displaySurfaceChoices": return actionKey.displaySurfaceChoices(action.orbit, action.world, action.surface);
     case "displayAssignmentPut": return actionKey.displayAssignmentPut(action.device);
     case "displayAssignmentRevoke": return actionKey.displayAssignmentRevoke(action.assignment);
     case "displayDeviceRevoke": return actionKey.displayDeviceRevoke(action.device);
@@ -659,6 +707,25 @@ export async function setFullscreen(fullscreen: boolean): Promise<void> {
  * the Tauri command/event bridge (or an embedding host bridge) before this
  * bundle considers the development fallback.
  */
+/**
+ * Ask the person for a directory, natively.
+ *
+ * `null` is either a cancelled dialog or a context with no picker to open —
+ * a browser preview, or a build without the plugin. Both mean "carry on with
+ * what is typed", which is why the field stays and this only fills it in.
+ * A picker that could not open must never leave somebody unable to proceed.
+ */
+export async function pickDirectory(title: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const chosen = await open({ directory: true, multiple: false, title });
+    return typeof chosen === "string" ? chosen : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createClientTransport(): ClientTransport {
   const bridge = window.__ASTROLABE_CLIENT__;
   if (bridge !== undefined) return {
@@ -868,6 +935,7 @@ function createUnavailableTransport(): ClientTransport {
       what: "Connect to local identity",
       error: "The desktop host did not provide an Astrolabe client bridge.",
       retryable: false,
+      key: null,
     }],
   };
   return {
@@ -885,6 +953,7 @@ export const fixtureClientView: ClientView = {
   library: [{
     key: "issues",
     worldMount: "issues",
+    world: "com.lait.issues",
     installed: true,
     displayName: "Issues",
     opensAt: "/",
@@ -899,6 +968,9 @@ export const fixtureClientView: ClientView = {
     ],
     update: null,
     install: null,
+    channel: null,
+    sourceDir: null,
+    sourceStanding: null,
   }],
   heads: [],
   host: {
@@ -927,7 +999,7 @@ export const fixtureClientView: ClientView = {
       health: {
         revision: "rev_9", currentItem: "itm_standup", elapsedMs: 5_400, connection: "connected",
         playback: "playing", lastError: "none", stagedItems: 4, stagedBytes: 8_192,
-        driftResidualMs: 12, correctionEvents: 2, pipelineUnobservable: false,
+        driftResidualMs: 12, correctionEvents: 2, pipelineUnobservable: false, reportedAtUnixMs: 1_755_000_000_000,
       },
     }],
     assignments: [{
@@ -944,6 +1016,21 @@ export const fixtureClientView: ClientView = {
       build: "1.4.0",
       createdAtUnixMs: 1_755_000_000_000,
       expiresAtUnixMs: 1_755_000_600_000,
+    }],
+    pendingRendezvous: [{
+      rendezvous: "735364a213f3ff2c72274ed31551f5bb",
+      code: "7K3Q-0111",
+      site: "acme",
+      label: "Lobby",
+      assignment: { orbit: "orb_fixture", world: "com.lait.signage", surface: "signage.program" },
+      state: "waiting",
+      device: null,
+      createdAtUnixMs: 1_755_000_000_000,
+      expiresAtUnixMs: 1_755_000_900_000,
+    }],
+    choices: [{
+      orbit: "orb_fixture", world: "com.lait.signage", surface: "signage.program",
+      choices: [{ id: "bod_lobby", title: "Lobby" }, { id: "bod_cafe", title: "Café" }], unavailable: null,
     }],
     identifierCustody: { slots: ["windows-dpapi"], portable: false },
   },

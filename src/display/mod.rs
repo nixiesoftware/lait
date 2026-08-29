@@ -40,7 +40,8 @@ pub use mediabox::{
     StoredPlan, TrackShape,
 };
 pub use pairing::{
-    AuthorizationRefusal, AuthorizedDevice, DisplayPairingService, PendingPairingView,
+    AssignmentIntent, AuthorizationRefusal, AuthorizedDevice, DisplayPairingService,
+    EnrollmentHook, PendingPairingView, RendezvousRefused, RendezvousState, RendezvousView,
 };
 pub use publish::publish_route;
 pub use runtime::DisplayRuntime;

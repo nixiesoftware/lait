@@ -9,9 +9,28 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Exactly what `src-tauri/tauri.conf.json` names as `devUrl`, and both
+    // halves matter.
+    //
+    // `host`: without it Vite binds `[::1]` only on a dual-stack machine, while
+    // Tauri probes `127.0.0.1` -- so `tauri dev` prints "Waiting for your
+    // frontend dev server" forever and the window is a white pane. Nothing
+    // errors; the two sides simply never meet.
+    //
+    // `strictPort`: without it a busy 5180 makes Vite move to 5181 and say so
+    // in a log nobody is watching, while Tauri keeps waiting on 5180. Same
+    // silent hang, one port over. Refusing to start is the version of that
+    // failure a person can act on.
+    host: "127.0.0.1",
     port: 5180,
+    strictPort: true,
   },
   test: {
     environment: "jsdom",
+    // Fluent's focus layer (`tabster`, `keyborg`) ships CommonJS; left
+    // external, Node cannot see its named exports and every surface that
+    // imports the kit fails to load. Inlined, vitest transforms it like the
+    // rest of the app.
+    server: { deps: { inline: [/@fluentui\//, /tabster/, /keyborg/] } },
   },
 });

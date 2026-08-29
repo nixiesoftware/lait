@@ -200,12 +200,9 @@ mod behaviour {
     const WRITER_SEED: [u8; 32] = [55u8; 32];
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root() -> std::path::PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("lait-sig-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A throwaway root that removes itself — see [`crate::head::temp_root`].
+    fn temp_root() -> crate::head::TempRoot {
+        crate::head::temp_root("signal")
     }
 
     fn demand() -> Vec<u8> {
@@ -314,6 +311,7 @@ mod behaviour {
 
     fn options() -> Activation {
         Activation {
+            consent: Default::default(),
             exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),

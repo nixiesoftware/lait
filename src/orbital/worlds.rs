@@ -199,6 +199,17 @@ impl WorldPackage {
     }
 }
 
+/// One assignment a membership role expands to, and which role definition
+/// said so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipAssignment {
+    pub capability: mechanics::authorization::PolicyCapability,
+    pub resource: mechanics::authorization::Resource,
+    /// The World's opaque reference to the role definition — what
+    /// [`mechanics::membership::GrantOrigin::Membership`] records.
+    pub definition_ref: Vec<u8>,
+}
+
 /// The selected process generations installed for one daemon launch.
 ///
 /// The package set is cloned down the Daemon → Station placement →
@@ -530,6 +541,19 @@ impl WorldHost {
         session.sweep_resolved_runs()
     }
 
+    /// Presume foreign in-flight Attempts dead once their deadline has elapsed
+    /// on this Station's own clock. Non-terminal: the executor can still
+    /// return. Requires the Spec's `control` demand, enforced at commit.
+    pub fn sweep_liveness(
+        &self,
+        session: &Session,
+        now_millis: u64,
+        grace_millis: u64,
+    ) -> Result<Vec<(runtime::exec::RunId, runtime::exec::AttemptId)>, runtime::world::Failure>
+    {
+        session.sweep_liveness(now_millis, grace_millis)
+    }
+
     /// Ensure the Space's primary identity has a Session for this World.
     ///
     /// Docking remains lazy: an unadmitted joiner can keep its StationHost
@@ -709,16 +733,15 @@ impl WorldRouter {
     /// that claims it. Root membership remains product-neutral; each World
     /// supplies the exact scoped assignments that make that membership useful
     /// in its own namespace.
+    /// Every installed World's exact expansion of one membership role
+    /// selector, each assignment beside the opaque reference to the role
+    /// definition it came from — the same reference an admission carries, so
+    /// a role change records the same provenance a redemption would.
     pub fn membership_assignments(
         &self,
         role: &str,
         parent_manifest_root: [u8; 32],
-    ) -> anyhow::Result<
-        Vec<(
-            mechanics::authorization::PolicyCapability,
-            mechanics::authorization::Resource,
-        )>,
-    > {
+    ) -> anyhow::Result<Vec<MembershipAssignment>> {
         let mut assignments = Vec::new();
         for world in self.world_ids() {
             let Some(lifecycle) = self.preferred_host(world).and_then(WorldHost::lifecycle) else {
@@ -736,10 +759,17 @@ impl WorldRouter {
                     evidence.world
                 );
             }
-            assignments.extend(evidence.assignments);
+            let mut expansion = evidence.assignments;
+            expansion.sort();
+            expansion.dedup();
+            assignments.extend(expansion.into_iter().map(|(capability, resource)| {
+                MembershipAssignment {
+                    capability,
+                    resource,
+                    definition_ref: evidence.opaque_definition_ref.clone(),
+                }
+            }));
         }
-        assignments.sort();
-        assignments.dedup();
         Ok(assignments)
     }
 

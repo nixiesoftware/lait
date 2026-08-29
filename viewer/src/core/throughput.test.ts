@@ -42,6 +42,8 @@ const board = (rows: Row[]): BoardView => ({
   schema_version: 1,
   project: project(),
   columns: STATES.map((state) => ({ state, rows: rows.filter((r) => r.status === state.id) })),
+  total: rows.length,
+  complete: true,
 });
 
 const milestone = (id: string, over: Partial<MilestoneDto> = {}): MilestoneDto => ({

@@ -60,8 +60,9 @@ pub enum AccessRequest {
         role: String,
         project: Option<String>,
     },
+    /// The grant ids a role expanded into, revoked as one all-or-nothing set.
     Revoke {
-        grant_id: String,
+        grant_ids: Vec<String>,
     },
 }
 
@@ -111,6 +112,11 @@ impl IssuesHostRequest {
 
 pub struct AccessGrantPlan {
     pub assignments: Vec<crate::AccessAssignment>,
+    /// The opaque reference to the role revision the plan expands — what the
+    /// host records as every resulting grant's origin. `None` when the view
+    /// could not name the revision, which leaves the origin unrecorded rather
+    /// than wrong.
+    pub definition_ref: Option<Vec<u8>>,
 }
 
 /// Read the caller-local inbox watermark. Missing or malformed state simply
@@ -182,8 +188,9 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Failur
                     project: optional(&input, "project"),
                 },
                 "revoke" => AccessRequest::Revoke {
-                    grant_id: required(&input, "grant_id")?,
+                    grant_ids: grant_ids(&input)?,
                 },
+
                 other => {
                     return Err(Failure::new(format!(
                         "unsupported Issues access action '{other}'"
@@ -322,9 +329,10 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
             LOCAL_ACCESS,
             json!({
                 "action": "revoke",
-                "grant_id": required(&input, "grant_id")?,
+                "grant_ids": grant_ids(&input)?,
             }),
         ),
+
         "work" => invocation(LOCAL_WORK, input),
         _ => {
             let request: IssuesRequest = serde_json::from_value(input)
@@ -548,15 +556,25 @@ async fn run_inbox(
 
 async fn run_access(host: &dyn ClientHost, access: AccessRequest) -> Result<Value, Failure> {
     let control = match access {
-        AccessRequest::List { actor } => HostControlRequest::AssignmentList { actor },
-        AccessRequest::Revoke { grant_id } => HostControlRequest::AssignmentRevoke { grant_id },
+        AccessRequest::List { actor } => {
+            let mut rows = host
+                .call_control(HostControlRequest::AssignmentList { actor })
+                .await?;
+            name_assignment_roles(&mut rows);
+            return Ok(rows);
+        }
+        AccessRequest::Revoke { grant_ids } => HostControlRequest::AssignmentRevoke { grant_ids },
         AccessRequest::Grant {
             actor,
             role,
             project,
         } => {
             let response = call_issues(host, IssuesRequest::AccessPlan { role, project }).await?;
-            let crate::IssuesResponse::AccessPlan { assignments } = response else {
+            let crate::IssuesResponse::AccessPlan {
+                assignments,
+                definition_ref,
+            } = response
+            else {
                 return Ok(issues_output(&response));
             };
             HostControlRequest::AssignmentGrant {
@@ -569,10 +587,68 @@ async fn run_access(host: &dyn ClientHost, access: AccessRequest) -> Result<Valu
                         resource: assignment.resource,
                     })
                     .collect(),
+                definition_ref,
             }
         }
     };
     host.call_control(control).await
+}
+
+/// Fill in `origin.role` on every listed assignment whose origin names one of
+/// this product's role definitions. The host carries the reference opaque;
+/// this is the one reader that can turn it into a role id, and it does so only
+/// for this World's rows — another World's reference is not ours to guess at.
+fn name_assignment_roles(reply: &mut Value) {
+    let ours = issues::contract::product_world();
+    let Some(rows) = reply.get_mut("rows").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for row in rows {
+        if row.get("world").and_then(Value::as_str) != Some(ours) {
+            continue;
+        }
+        let Some(origin) = row.get_mut("origin").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let role = origin
+            .get("definition_ref")
+            .and_then(Value::as_str)
+            .and_then(|hex| {
+                data_encoding::HEXLOWER_PERMISSIVE
+                    .decode(hex.as_bytes())
+                    .ok()
+            })
+            .and_then(|bytes| issues::roles::decode_provenance_ref(&bytes))
+            .map(|(role_id, _)| role_id);
+        if let Some(role) = role {
+            origin.insert("role".into(), Value::String(role));
+        }
+    }
+}
+
+/// The grant ids an access revoke names: `grant_ids` as a list, or the
+/// single `grant_id` the verb took before a role's expansion was revoked as
+/// one set. Either spelling, at least one id.
+fn grant_ids(input: &Value) -> Result<Vec<String>, Failure> {
+    let mut ids: Vec<String> = input
+        .get("grant_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Some(one) = optional(input, "grant_id").filter(|id| !id.trim().is_empty()) {
+        ids.push(one.trim().to_string());
+    }
+    if ids.is_empty() {
+        return Err(Failure::new(
+            "Issues invocation is missing 'grant_ids' (or 'grant_id')",
+        ));
+    }
+    Ok(ids)
 }
 
 async fn run_attach(
@@ -776,7 +852,7 @@ pub fn plan_access_grant(
         )));
     }
     let scope_kind = body["scope_kind"].as_str().unwrap_or("space");
-    let world = issues::contract::PRODUCT_WORLD;
+    let world = issues::contract::product_world();
     let resource = match (scope_kind, project) {
         ("space", None) => mechanics::authorization::Resource::root(world),
         ("space", Some(_)) => {
@@ -835,7 +911,18 @@ pub fn plan_access_grant(
             "role `{role}` expands to no capabilities"
         )));
     }
-    Ok(AccessGrantPlan { assignments })
+    let definition_ref = body["role_id"].as_str().and_then(|role_id| {
+        let hex = revision["revision_id"].as_str()?;
+        let bytes = data_encoding::HEXLOWER_PERMISSIVE
+            .decode(hex.as_bytes())
+            .ok()?;
+        let revision_id = <[u8; 32]>::try_from(bytes.as_slice()).ok()?;
+        Some(issues::roles::provenance_ref(role_id, &revision_id))
+    });
+    Ok(AccessGrantPlan {
+        assignments,
+        definition_ref,
+    })
 }
 
 fn required(value: &Value, field: &str) -> Result<String, Failure> {

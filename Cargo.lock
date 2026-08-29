@@ -781,9 +781,9 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -3858,6 +3858,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lait-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mechanics",
+ "netstack",
+ "tokio",
+]
+
+[[package]]
 name = "lait-post"
 version = "0.7.8"
 dependencies = [
@@ -3929,6 +3939,7 @@ dependencies = [
  "anyhow",
  "font8x8",
  "image",
+ "jiff",
  "lait-signage",
  "mechanics",
  "mediabox",
@@ -4548,6 +4559,18 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
+ "tokio",
+]
+
+[[package]]
+name = "netstack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "comms",
+ "libc",
+ "mechanics",
  "tokio",
 ]
 
@@ -5559,7 +5582,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
- "chacha20 0.10.0",
+ "chacha20 0.10.2",
  "getrandom 0.4.2",
  "rand_core 0.10.1",
 ]
@@ -5872,18 +5895,27 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8dddc5b1924b9a59fba420166160ca2c4663a4e01803e52eda33070f56d63c8"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
+ "bytes",
  "chrono",
  "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "pastey",
  "pin-project-lite",
+ "rand 0.10.1",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
+ "sse-stream",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "uuid",
 ]
@@ -6710,6 +6742,19 @@ checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
  "der 0.8.0",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -8991,6 +9036,14 @@ dependencies = [
  "runtime",
  "world-runner",
  "world-sdk",
+]
+
+[[package]]
+name = "world-stage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
 ]
 
 [[package]]

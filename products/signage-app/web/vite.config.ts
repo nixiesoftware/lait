@@ -1,18 +1,18 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import svgr from 'vite-plugin-svgr';
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite';
 import path from 'path';
 
 /**
- * The Signage application, served by a lait head (`lait --world signage`).
+ * The Signage application, served by a lait head.
  *
  * Like every World web client, this bundle is not compiled into the host. A
  * head serves it only from the selected immutable Signage release, and it
  * ships on the World's own update channel. `npm run build` emits straight
  * into `products/signage-app/assets/web`, which is **committed** and copied
- * into the release by `.github/scripts/stage-worlds.sh` beside the runner and
- * the signed declaration — the same arrangement `viewer/` has with Issues.
+ * into the release by `cargo stage-worlds` beside the runner and the signed
+ * declaration — the same arrangement `viewer/` has with Issues. The same
+ * command stages the unsealed tree a local World is added from.
  *
  * The tradeoff is honest: build output in git, kept fresh by `npm run build`
  * and guarded by CI diffing a rebuild.
@@ -29,14 +29,22 @@ export default defineConfig({
       generatedRouteTree: './src/routeTree.gen.ts',
     }),
     react(),
-    svgr({
-      include: '**/*.svg',
-    }),
   ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
+    dedupe: ['react', 'react-dom'],
+  },
+  optimizeDeps: {
+    include: [
+      '@base-ui/react/popover',
+      '@base-ui/react/context-menu',
+      '@base-ui/react/dialog',
+      '@base-ui/react/alert-dialog',
+      '@use-gesture/react',
+      'interactjs',
+    ],
   },
   build: {
     outDir: '../assets/web',

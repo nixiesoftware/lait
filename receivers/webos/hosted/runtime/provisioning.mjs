@@ -1,4 +1,4 @@
-import { PROTOCOL_MAJOR, ProtocolError } from "./protocol.mjs";
+import { normalizeRendezvousCode, PROTOCOL_MAJOR, ProtocolError } from "./protocol.mjs";
 
 // Which coordinator this receiver was pointed at, and nothing about whether it
 // may talk to one.
@@ -39,6 +39,30 @@ export function normalizeSiteCode(entered) {
 
 export function validSiteCode(code) {
   return typeof code === "string" && SITE_CODE.test(code);
+}
+
+// What Astrolabe shows beside a minted code: the site, then the code's two
+// groups. The code is always the last eight symbols, so the site is whatever
+// came before them, hyphens and all.
+const SITE_AND_CODE = /^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)[-\s]+([a-z0-9]{4})[-\s]*([a-z0-9]{4})$/;
+
+/**
+ * What a person typed on the television, taken apart: the site this display
+ * belongs to, and the code from Astrolabe if they had one. A site alone is
+ * the long way — the words ceremony — and is not an error.
+ */
+export function parseEntry(entered) {
+  const normalized = normalizeSiteCode(entered).replace(/\s+/g, " ");
+  const match = SITE_AND_CODE.exec(normalized);
+  if (match) {
+    try {
+      return { site: match[1], code: normalizeRendezvousCode(match[2] + match[3]) };
+    } catch {
+      // The tail is not a code, so the whole thing is a site name, and
+      // `validSiteCode` is what judges that.
+    }
+  }
+  return { site: normalized, code: null };
 }
 
 function validParent(value) {
@@ -82,12 +106,12 @@ export function siteOrigin(code, root) {
   return `https://${code}.${validParent(root)}`;
 }
 
-export function webPkiBootstrap(origin) {
+export function webPkiBootstrap(origin, rendezvous = null) {
   return {
     protocol_major: PROTOCOL_MAJOR,
     trust: { kind: "web_pki_origin", origin },
     certificate_pem: null,
-    rendezvous: null,
+    rendezvous,
   };
 }
 

@@ -73,6 +73,37 @@ impl WorldId {
     }
 }
 
+/// The environment fact that names the World a process is serving.
+///
+/// Set by the launcher on every World runner it starts, after `env_clear`, so
+/// it cannot be smuggled in from an editor's environment. Absent everywhere
+/// else — a host serves many Worlds and never claims to be one.
+pub const SERVED_WORLD_VAR: &str = "LAIT_WORLD_ID";
+
+/// The id this process serves `declared` under.
+///
+/// A World declares what it *is*; the host decides what it is *called here*.
+/// They are the same string for every installed release, and differ for a tree
+/// somebody is working on, which the host names in its own namespace so it can
+/// run beside the release it was copied from.
+///
+/// This is not cosmetic. The World id is hashed into every Body id, carried in
+/// every `BodyKey`, spelled into every capability and resource, and committed
+/// to the reviewed implementation digest — so it is the identity of the data,
+/// not a label on it. A World that answers this question from a compiled-in
+/// constant can only ever have one set of data on a device.
+///
+/// Falling back to `declared` is what keeps a runner started by hand, or by
+/// anything that is not our launcher, serving exactly what its tree says.
+pub fn served_world(declared: &WorldId) -> WorldId {
+    std::env::var(SERVED_WORLD_VAR)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .as_deref()
+        .and_then(WorldId::parse)
+        .unwrap_or_else(|| declared.clone())
+}
+
 impl std::fmt::Display for WorldId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -204,6 +235,49 @@ impl BodyKey {
 
 #[cfg(test)]
 mod tests {
+    /// The whole point of the seam: a World declares what it is, the host says
+    /// what it is called here, and the host wins. `served_world` is read on the
+    /// path that builds every `BodyKey`, so this is what decides whether a tree
+    /// somebody is working on keeps its own data.
+    #[test]
+    fn the_host_names_the_world_and_the_tree_is_the_fallback() {
+        // Serial and restored: this reads process-wide state, and a sibling
+        // test that saw it set would be reading somebody else's answer.
+        let declared = WorldId::parse("com.example.tasks").expect("a declared id");
+        let restore = std::env::var(SERVED_WORLD_VAR).ok();
+        // SAFETY: single-threaded within this test, and restored below.
+        unsafe { std::env::remove_var(SERVED_WORLD_VAR) };
+        assert_eq!(
+            served_world(&declared).as_str(),
+            "com.example.tasks",
+            "with nothing said, a World serves what its tree declares"
+        );
+
+        unsafe { std::env::set_var(SERVED_WORLD_VAR, "local.tasks") };
+        assert_eq!(
+            served_world(&declared).as_str(),
+            "local.tasks",
+            "the host's name is what the World serves under"
+        );
+
+        // A malformed or empty name is not a rename, and must not be taken as
+        // one: falling back is the only answer that keeps a World's data
+        // reachable at the id it has always used.
+        for bad in ["", "not a world id", "nodots"] {
+            unsafe { std::env::set_var(SERVED_WORLD_VAR, bad) };
+            assert_eq!(
+                served_world(&declared).as_str(),
+                "com.example.tasks",
+                "{bad:?} is not a World id and must not rename anything"
+            );
+        }
+
+        match restore {
+            Some(value) => unsafe { std::env::set_var(SERVED_WORLD_VAR, value) },
+            None => unsafe { std::env::remove_var(SERVED_WORLD_VAR) },
+        }
+    }
+
     use super::*;
 
     #[test]

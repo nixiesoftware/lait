@@ -67,6 +67,19 @@ pub enum Action {
     UpdateWorld {
         world: String,
     },
+    /// Record — or clear — the channel this World follows on its own.
+    FollowWorldChannel {
+        world: String,
+        channel: Option<String>,
+    },
+    /// Register a tree on this device as a local World.
+    RegisterLocalWorld {
+        dir: String,
+    },
+    /// Stop carrying a row for one. Nothing on disk is deleted.
+    ForgetLocalWorld {
+        key: String,
+    },
     /// Install a catalogued World's selected signed channel release.
     InstallWorld {
         world: String,
@@ -234,6 +247,14 @@ pub enum Action {
         label: String,
     },
     DisplayPairingReject(String),
+    DisplayRendezvousMint(Box<crate::client::display::DisplayRendezvousInput>),
+    DisplayRendezvousRevoke(String),
+    /// Ask a World what one of its display surfaces can show in one Orbit.
+    DisplaySurfaceChoices {
+        orbit: String,
+        world: String,
+        surface: String,
+    },
     DisplayAssignmentPut(Box<DisplayAssignmentInput>),
     DisplayAssignmentRevoke(String),
     DisplayDeviceRevoke(String),
@@ -250,6 +271,9 @@ impl Action {
             Self::Refresh => "refresh".into(),
             Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
+            Self::FollowWorldChannel { world, .. } => format!("world.channel:{world}"),
+            Self::RegisterLocalWorld { dir } => format!("world.local.add:{dir}"),
+            Self::ForgetLocalWorld { key } => format!("world.local.forget:{key}"),
             Self::InstallWorld { world } => format!("world.install:{world}"),
             Self::OpenLink { url } => format!("link.open:{url}"),
             Self::Reload => "image.reload".into(),
@@ -313,6 +337,15 @@ impl Action {
                 format!("display.pairing.approve:{pairing}")
             }
             Self::DisplayPairingReject(pairing) => format!("display.pairing.reject:{pairing}"),
+            Self::DisplayRendezvousMint(_) => "display.rendezvous.mint".into(),
+            Self::DisplayRendezvousRevoke(rendezvous) => {
+                format!("display.rendezvous.revoke:{rendezvous}")
+            }
+            Self::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => format!("display.surface.choices:{orbit}/{world}/{surface}"),
             Self::DisplayAssignmentPut(assignment) => {
                 format!("display.assignment.put:{}", assignment.device)
             }
@@ -337,6 +370,12 @@ impl Action {
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
+            Self::FollowWorldChannel { world, channel } => match channel {
+                Some(channel) => format!("follow {channel} for {world}"),
+                None => format!("follow the node's channel for {world}"),
+            },
+            Self::RegisterLocalWorld { dir } => format!("add a local World from {dir}"),
+            Self::ForgetLocalWorld { key } => format!("forget {key}"),
             Self::InstallWorld { world } => format!("install {world}"),
             Self::OpenLink { url } => format!("open {url}"),
             Self::Reload => "roll forward onto the rebuilt image".into(),
@@ -398,6 +437,13 @@ impl Action {
                 format!("approve the display '{label}'")
             }
             Self::DisplayPairingReject(_) => "reject a display pairing".into(),
+            Self::DisplayRendezvousMint(input) => {
+                format!("mint a code for the display '{}'", input.label)
+            }
+            Self::DisplayRendezvousRevoke(_) => "withdraw a display code".into(),
+            Self::DisplaySurfaceChoices { world, surface, .. } => {
+                format!("list what {world} {surface} can show")
+            }
             Self::DisplayAssignmentPut(assignment) => {
                 format!("assign display {}", assignment.device)
             }
@@ -508,6 +554,12 @@ pub enum Read {
     Events(Box<EventHistoryPage>),
     Transitions(Box<ConnectionHistoryPage>),
     Space(Box<SpaceView>),
+    /// What a display surface can show in one Orbit, keyed by the Orbit it
+    /// was asked for so the answer lands beside the question.
+    DisplayChoices {
+        orbit: String,
+        view: Box<lait::control::DisplayChoicesView>,
+    },
 }
 
 /// The background half of the client.
@@ -619,17 +671,57 @@ struct Worker {
     correspondence: Option<std::sync::Mutex<DemoCarrier>>,
 }
 
+/// Resolve a Library mount to the World id and installations root that the
+/// records beneath it are keyed by.
+///
+/// The surface names a World by its mount — the Library row's stable key —
+/// and everything under `world-bundles-v1` is keyed by World id. Sending one
+/// where the other belongs is refused a long way from here, in a voice that
+/// names neither.
+fn world_state(
+    client: &crate::client::Client,
+    mount: &str,
+) -> Result<(String, std::path::PathBuf), ClientError> {
+    let world_id = crate::client::library::world_id_for_mount(mount).ok_or_else(|| {
+        ClientError::refused(format!("no installed World is mounted at '{mount}'"))
+    })?;
+    let identity = client
+        .identity_dir()
+        .ok_or_else(|| ClientError::internal("the World installation has no identity directory"))?;
+    Ok((world_id, lait::serve::head::installations_root(&identity)))
+}
+
 fn world_launch(mount: &str, url: String) -> crate::browser::WorldLaunch {
-    let title = crate::client::library::installed()
-        .into_iter()
-        .find(|row| row.world_mount == mount)
-        .map(|row| row.display_name)
-        // A label is not worth blocking a launch over.
+    launch_from(&crate::client::library::openable(), mount, url)
+}
+
+/// Dress the window from the row the mount belongs to.
+///
+/// Over everything openable, not the installed half. A tree somebody is working
+/// on has no row among the releases, so it used to find nothing and fall
+/// through to both defaults at once: its window was titled `local_issues` — the
+/// mount, which is a key and not a name — and wore the system's title bar while
+/// its own declaration asked to draw the top of the window itself. The World
+/// most likely to be looked at was the one dressed by neither of its own
+/// answers.
+fn launch_from(
+    rows: &[crate::client::library::LibraryEntry],
+    mount: &str,
+    url: String,
+) -> crate::browser::WorldLaunch {
+    let row = rows.iter().find(|row| row.world_mount == mount);
+    // A label is not worth blocking a launch over, and neither is a window
+    // treatment: a World this client cannot find gets the system's title bar,
+    // which is what a page that has said nothing needs.
+    let title = row
+        .map(|row| row.display_name.clone())
         .unwrap_or_else(|| mount.to_owned());
+    let chrome = row.map(|row| row.chrome).unwrap_or_default();
     crate::browser::WorldLaunch {
         world: mount.to_owned(),
         title,
         url,
+        chrome,
     }
 }
 
@@ -1040,6 +1132,58 @@ impl Worker {
                     job.operation_hex()
                 )))
             }
+            Action::RegisterLocalWorld { dir } => {
+                let identity = client.identity_dir().ok_or_else(|| {
+                    ClientError::internal("this client has no identity directory")
+                })?;
+                let dir = std::path::Path::new(dir.trim());
+                // Read before registering, so the name comes from the tree and
+                // a directory that is not a World tree is refused here rather
+                // than becoming a row that never loads.
+                let manifest = std::fs::read(dir.join("world.json"))
+                    .ok()
+                    .and_then(|bytes| world_interface::manifest::WorldManifest::parse(&bytes).ok())
+                    .ok_or_else(|| {
+                        ClientError::refused(format!(
+                            "{} has no readable world.json — a local World is a built World \
+                             tree, not a directory of pages",
+                            dir.display()
+                        ))
+                    })?;
+                let handle = lait::world::local::handle_from(&identity, &manifest)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                let key = lait::world::local::register(&identity, &handle, dir)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(format!("{key} added to the Library")))
+            }
+            Action::ForgetLocalWorld { key } => {
+                let identity = client.identity_dir().ok_or_else(|| {
+                    ClientError::internal("this client has no identity directory")
+                })?;
+                // The tree is not this client's to delete. Forgetting removes
+                // the row and the registration; whatever it pointed at is
+                // whoever's it was.
+                lait::world::local::forget(&identity, key)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(format!("{key} is no longer in the Library")))
+            }
+            Action::FollowWorldChannel { world, channel } => {
+                let (world_id, worlds) = world_state(client, world)?;
+                let channel = match channel {
+                    Some(name) => {
+                        Some(lait::update::feed::Channel::parse(name).ok_or_else(|| {
+                            ClientError::refused(format!("'{name}' is not a channel"))
+                        })?)
+                    }
+                    None => None,
+                };
+                lait::update::world::follow(&worlds, &world_id, channel)
+                    .map_err(|error| ClientError::refused(format!("{error:#}")))?;
+                Ok(Outcome::Said(match channel {
+                    Some(channel) => format!("{world} follows {}", channel.as_str()),
+                    None => format!("{world} follows this device's channel"),
+                }))
+            }
             Action::InstallWorld { world } => {
                 let entry = client
                     .get_library()
@@ -1063,10 +1207,11 @@ impl Worker {
                 let updates = self.updates.clone();
                 let wake = self.wake.clone();
                 let outcome = tokio::task::spawn_blocking(move || {
+                    let channel = lait::update::world::channel_for(&worlds, &world_id);
                     lait::update::world::check_with_progress(
                         &world_id,
                         &worlds,
-                        lait::update::feed::Channel::current(),
+                        channel,
                         move |progress| {
                             send(
                                 &updates,
@@ -1535,6 +1680,30 @@ impl Worker {
                 client.display_pairing_reject(pairing.clone()).await?;
                 Ok(Outcome::Said("rejected the display pairing".into()))
             }
+            Action::DisplayRendezvousMint(input) => {
+                let minted = client.display_rendezvous_mint((**input).clone()).await?;
+                Ok(Outcome::Said(format!(
+                    "code {} is ready for the display '{}'",
+                    minted.code, minted.label
+                )))
+            }
+            Action::DisplayRendezvousRevoke(rendezvous) => {
+                client.display_rendezvous_revoke(rendezvous.clone()).await?;
+                Ok(Outcome::Said("withdrew the display code".into()))
+            }
+            Action::DisplaySurfaceChoices {
+                orbit,
+                world,
+                surface,
+            } => {
+                let view = client
+                    .display_surface_choices(orbit, world.clone(), surface.clone())
+                    .await?;
+                Ok(Outcome::Read(Read::DisplayChoices {
+                    orbit: orbit.clone(),
+                    view: Box::new(view),
+                }))
+            }
             Action::DisplayAssignmentPut(assignment) => {
                 client
                     .display_assignment_put((**assignment).clone())
@@ -1652,6 +1821,57 @@ fn send(sender: &UnboundedSender<Update>, wake: &(impl Fn() + ?Sized), update: U
 
 #[cfg(test)]
 mod tests {
+    /// A tree somebody is working on wears its own declaration.
+    ///
+    /// This looked at the installed half of the Library, so a local World
+    /// matched no row and took *both* fallbacks at once: titled with its mount
+    /// — `local_issues`, a key and not a name — and given the system's title
+    /// bar while its own `world.json` asked to draw the top of the window
+    /// itself. Nothing failed; the window was simply dressed by neither of the
+    /// World's own answers, which is the one window most likely to be looked
+    /// at.
+    #[test]
+    fn a_local_world_window_is_dressed_by_the_row_it_belongs_to() {
+        use world_interface::manifest::Chrome;
+
+        fn row(mount: &str, name: &str, chrome: Chrome) -> crate::client::library::LibraryEntry {
+            crate::client::library::LibraryEntry {
+                world_mount: mount.to_owned(),
+                world: format!("com.example.{name}"),
+                installed: true,
+                display_name: name.to_owned(),
+                entry_path: Some("/".to_owned()),
+                chrome,
+                tagline: None,
+                accent: None,
+                version: None,
+                source_dir: None,
+                source_standing: None,
+            }
+        }
+
+        let rows = vec![
+            row("issues", "Issues", Chrome::World),
+            row("local_issues", "Issues", Chrome::World),
+        ];
+
+        let launch = launch_from(&rows, "local_issues", "http://127.0.0.1:1/".to_owned());
+        assert_eq!(
+            launch.title, "Issues",
+            "the window took its mount for a name"
+        );
+        assert!(
+            matches!(launch.chrome, Chrome::World),
+            "the World asked to draw its own top edge and was given the system's"
+        );
+
+        // And a mount nothing claims still opens, wearing what a page that has
+        // said nothing needs.
+        let unknown = launch_from(&rows, "stranger", "http://127.0.0.1:1/".to_owned());
+        assert_eq!(unknown.title, "stranger");
+        assert!(matches!(unknown.chrome, Chrome::System));
+    }
+
     use super::*;
     use lait_workbench::{
         BackendEvent, Capabilities, EnvironmentSnapshot, EventKind, SnapshotReason,

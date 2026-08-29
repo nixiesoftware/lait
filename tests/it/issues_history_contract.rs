@@ -30,17 +30,6 @@ use runtime::{plane::Activation, world::Builder, world::LocalIdentity, Runtime, 
 const WRITER_SEED: [u8; 32] = [73u8; 32];
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "lait-history-{}-{}",
-        std::process::id(),
-        NEXT_ROOT.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 struct WriterAuthority;
 impl runtime::world::AuthorityView for WriterAuthority {
     fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
@@ -82,13 +71,14 @@ fn device() -> String {
         .to_string()
 }
 
-fn station() -> (Runtime, Station) {
+fn station() -> (crate::head::TempRoot, Runtime, Station) {
+    let root = crate::head::temp_root("history");
     let registry = Builder::new()
         .register_reviewed(Arc::new(IssuesWorld::new()), reviewed_implementation())
         .build()
         .unwrap();
     let rt = Runtime::open(
-        temp_root(),
+        root.to_path_buf(),
         registry,
         Arc::new(WriterAuthority),
         Arc::new(replica::body::StaticBodyKeys::new(
@@ -96,7 +86,7 @@ fn station() -> (Runtime, Station) {
         )),
     );
     let station = rt.create().unwrap().open(Activation::offline()).unwrap();
-    (rt, station)
+    (root, rt, station)
 }
 
 /// The product result inside the durable acknowledgement.
@@ -132,7 +122,7 @@ fn dock(station: &Station) -> (Session, LocalIdentity) {
 
 #[test]
 fn history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on() {
-    let (_rt, station) = station();
+    let (_root, _rt, station) = station();
     let (session, identity) = dock(&station);
     let clock = SystemUlidSource;
     let router = IssueRouter::new(&session, &identity, &clock);
@@ -230,7 +220,7 @@ fn an_event_written_before_history_carried_an_actor_reads_back_as_no_name() {
 
 #[test]
 fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
-    let (_rt, station) = station();
+    let (_root, _rt, station) = station();
     let (session, identity) = dock(&station);
     let clock = SystemUlidSource;
     let router = IssueRouter::new(&session, &identity, &clock);

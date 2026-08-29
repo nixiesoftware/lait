@@ -118,3 +118,64 @@ fn a_stopped_daemon_is_reaped_while_the_head_that_spawned_it_lives_on() {
         }
     );
 }
+
+/// The harness has to reap too, and the failing path is the one that matters.
+///
+/// `Head::stop` is an explicit call, so it runs only when a test reaches its
+/// end. A test that panics — one failed assertion — never got there, and
+/// `Child`'s own drop neither kills nor waits, so the head, the daemon under
+/// it, and every World runner beneath survived the test that started them.
+///
+/// That is worse than the disk it costs. An orphaned daemon holds the display
+/// coordinator's fixed port, so the *next* test to want it fails, and orphans
+/// its own — one bad assertion becoming a suite-wide cascade that reads as
+/// flakiness and points at nothing.
+#[test]
+fn a_head_dropped_without_being_stopped_is_still_reaped() {
+    let root = temp_root("drop-reaping");
+    let config = root.join("config");
+
+    let (head_pid, daemon_pid) = {
+        let head = Head::start(&config, None);
+        let pair = (head.pid(), pid(&config));
+        assert!(
+            state(pair.0).is_some(),
+            "the head at pid {} was not running to begin with",
+            pair.0
+        );
+        pair
+        // Dropped here without `stop`, which is exactly what a panicking test
+        // does.
+    };
+
+    // Gone, not merely stopped: a `Z` here would be the corpse this is about.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = None;
+    while Instant::now() < deadline {
+        last = state(head_pid);
+        if last.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        last.is_none(),
+        "a dropped head left pid {head_pid} behind as {last:?}"
+    );
+
+    // And the daemon it started went with it, or nothing was gained: the
+    // daemon is what holds the ports the next test needs.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = None;
+    while Instant::now() < deadline {
+        last = state(daemon_pid);
+        if last.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        last.is_none(),
+        "a dropped head left its daemon at pid {daemon_pid} behind as {last:?}"
+    );
+}

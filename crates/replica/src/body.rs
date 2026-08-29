@@ -9,7 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+pub use crate::ids::{
+    served_world, BodyId, BodyKey, EncodingId, SchemaId, WorldId, SERVED_WORLD_VAR,
+};
 pub use crate::protected::{
     BodyKeySource, StaticBodyKeys, MAX_BODY_BYTES, MAX_PROTECTED_PLAINTEXT, MUTATION_ATOMIC,
     MUTATION_COLLABORATIVE, MUTATION_IMMUTABLE_ATOMIC,
