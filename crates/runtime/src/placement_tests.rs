@@ -220,6 +220,21 @@ fn consent_to_implement() -> crate::exec::Consent {
     crate::exec::Consent::for_specs([exec_schema("agent.implement")])
 }
 
+/// Start one Run on `station`, directed at the device behind `target_seed`.
+fn start_run_targeting(
+    station: &Station,
+    writer: &LocalIdentity,
+    target_seed: &[u8; 32],
+) -> crate::exec::RunId {
+    let key = mechanics::actor::device_from_seed(target_seed)
+        .key_bytes()
+        .unwrap();
+    let mut payload = b"to:".to_vec();
+    payload.extend_from_slice(data_encoding::HEXLOWER.encode(&key).as_bytes());
+    payload.extend_from_slice(b":run there");
+    start_run(station, writer, &payload)
+}
+
 /// Start one Run on `station` as `writer`; returns its id.
 fn start_run(station: &Station, writer: &LocalIdentity, payload: &[u8]) -> crate::exec::RunId {
     let session = station.dock(&world_id(), writer).unwrap();
@@ -463,4 +478,44 @@ fn two_stations_may_both_lease_and_only_the_owner_accepts() {
     assert!(!closed.unresolved);
     assert_eq!(closed.accepted.len(), 1);
     assert_eq!(closed.accepted[0].attempt, by_b.attempt);
+}
+
+#[test]
+fn a_directed_start_is_performed_only_by_the_named_station() {
+    // A directs the Run at B; both consent to the Spec, so consent is not
+    // what decides placement here — the target is.
+    let pair = pair(consent_to_implement());
+    let run = start_run_targeting(&pair.a, &pair.writer_a, &WRITER_B_SEED);
+    pair.b.contact(&station_key(&STATION_A_SEED)).unwrap();
+
+    // A holds no handler package running, but even a Station that did would
+    // pass this by: A is not the target. B performs it.
+    let report = perform(&pair.b, &pair.writer_b);
+    assert!(
+        returned(&report),
+        "the named Station performs it: {report:?}"
+    );
+
+    pair.a.contact(&station_key(&STATION_B_SEED)).unwrap();
+    let state = inspect(&pair.a, &pair.writer_a, run, [0x08; 16]);
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].station, performer_key(&pair.writer_b));
+}
+
+#[test]
+fn a_station_not_named_by_a_directed_start_never_leases_it() {
+    // A directs the Run at A itself; B consents to the Spec and holds the
+    // Build, but is not the target, so it never leases.
+    let pair = pair(consent_to_implement());
+    let run = start_run_targeting(&pair.a, &pair.writer_a, &WRITER_A_SEED);
+    pair.b.contact(&station_key(&STATION_A_SEED)).unwrap();
+
+    let report = perform(&pair.b, &pair.writer_b);
+    assert!(
+        report.steps.is_empty(),
+        "B is not the target: no Try, no lease: {report:?}"
+    );
+    assert!(inspect(&pair.b, &pair.writer_b, run, [0x09; 16])
+        .attempts
+        .is_empty());
 }

@@ -10717,6 +10717,7 @@ impl World for IssuesWorld {
                         resources: Vec::new(),
                         limits: contract::verify_limits(),
                         queries: Vec::new(),
+                        target: None,
                     }),
                 );
                 Ok(staging.into_effect(Some(doc)))

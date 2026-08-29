@@ -139,7 +139,7 @@ pub const BUILD_ENVELOPE_KEY: &str = "bytes";
 /// Domain for deriving a reserved Build Body id from a [`BuildId`].
 const BUILD_BODY_ID_DOMAIN: &[u8] = b"lait/exec/build-body/1\0";
 
-const RUN_EVENT_VERSION: u8 = 1;
+const RUN_EVENT_VERSION: u8 = 2;
 const RUN_EVENT_ID_CONTEXT: &str = "lait.exec.run-event.v1";
 const RUN_ID_DOMAIN: &[u8] = b"lait/exec/run-id/1\0";
 const ACTIVE_RUN_BODY_DOMAIN: &[u8] = b"lait/exec/active-body/1\0";
@@ -2833,6 +2833,15 @@ pub struct Start {
     pub resources: Vec<Resource>,
     pub limits: Limits,
     pub queries: Vec<QueryGrant>,
+    /// The one Station this Run must run on, when the requester named it.
+    ///
+    /// `None` leaves placement open: any consenting Station that holds the
+    /// Build may lease it. `Some(station)` is a directed Start — "run it
+    /// there" — and only that Station's own activation may lease it, in
+    /// addition to the consent every foreign Run needs. The target is fixed
+    /// at Start and is not part of the Run id, so it never forks the Run.
+    #[serde(default)]
+    pub target: Option<StationKey>,
 }
 
 /// The content identity of one immutable predecessor-bound Run event.
@@ -2881,6 +2890,9 @@ pub struct Started {
     pub command_digest: [u8; 32],
     pub command_bytes: u32,
     pub command_chunks: u32,
+    /// The Station this Run was directed to, carried from its [`Start`].
+    #[serde(default)]
+    pub target: Option<StationKey>,
 }
 
 /// Exact Attempt coordinates committed before an executor may begin work.
@@ -5627,6 +5639,7 @@ mod tests {
                 parent: declared.digest().unwrap(),
                 grant: declared,
             }],
+            target: None,
         }
     }
 
@@ -5667,6 +5680,7 @@ mod tests {
             command_digest: command.digest().unwrap(),
             command_bytes: u32::try_from(command_bytes.len()).unwrap(),
             command_chunks: 1,
+            target: intent.target.clone(),
         }
     }
 
@@ -7377,13 +7391,14 @@ mod tests {
 
     #[test]
     fn start_and_try_tags_field_order_and_bytes_are_frozen() {
+        // Generation-2 Start bytes: carries the optional `target` Station.
         let start = Cmd::Start(start());
         let start_bytes = start.encode().unwrap();
         assert_eq!(start_bytes[0], 0);
         assert_eq!(Cmd::decode_canonical(&start_bytes), Ok(start));
         assert_eq!(
             blake3::hash(&start_bytes).to_hex().as_str(),
-            "ac8a59bfd79e6ccca17767fa6dea63d11e92c25c75072d7202c161cdcb9378ee"
+            "d8b207a3f9c5a38ad57ba7c77c800f30506b62b4df53488a5893c70ecbc47e84"
         );
 
         let intent = Cmd::Try(try_intent());

@@ -533,6 +533,14 @@ impl World for ExecAtomicWorld {
                 demand: exec_demand("request.write"),
             });
         }
+        // `to:<64hex>:...` directs the Start at one Station by key bytes.
+        let target = intent
+            .payload
+            .strip_prefix(b"to:")
+            .and_then(|rest| rest.get(..64))
+            .and_then(|hex| data_encoding::HEXLOWER.decode(hex).ok())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+            .map(mechanics::station::Key::from_key_bytes);
         let source = if let Some(rest) = intent.payload.strip_prefix(b"repeat:") {
             if rest.len() != 16 {
                 return Err(Rejection::InvalidRequest);
@@ -564,6 +572,7 @@ impl World for ExecAtomicWorld {
                 resources: Vec::new(),
                 limits: exec_limits(),
                 queries: Vec::new(),
+                target,
             })],
             operations: vec![(
                 self.product_body(),
@@ -4788,6 +4797,7 @@ impl World for QueryExecWorld {
                 parent: declared.digest().unwrap(),
                 grant: declared,
             }],
+            target: None,
         };
         Ok(Effect {
             content_refs: Vec::new(),
@@ -4907,6 +4917,7 @@ impl crate::exec::Handler for SearchHandler {
                 parent: declared.digest().unwrap(),
                 grant: declared,
             }],
+            target: None,
         };
         context.start_child(child)?;
         Ok(crate::exec::Candidate {
@@ -5309,6 +5320,7 @@ impl World for CheckpointWorld {
                 resources: Vec::new(),
                 limits: checkpoint_spec().limits,
                 queries: Vec::new(),
+                target: None,
             })],
             operations: vec![(
                 self.marker(),
@@ -6671,6 +6683,7 @@ mod subprocess_perform {
                         ..transform_spec().limits
                     },
                     queries: Vec::new(),
+                    target: None,
                 })],
                 operations: vec![(
                     self.marker(),

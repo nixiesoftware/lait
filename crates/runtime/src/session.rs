@@ -4038,6 +4038,7 @@ fn lower_exec(
                     command_digest: command.digest().map_err(exec_invalid)?,
                     command_bytes: command_len,
                     command_chunks,
+                    target: start.target.clone(),
                 };
                 let event = crate::exec::RunEvent::started(started)
                     .and_then(|event| event.encode())
@@ -8248,6 +8249,14 @@ impl Session {
         if !handles {
             return false;
         }
+        // A directed Start names the one Station that may run it: "run it
+        // there". Only that Station's own activation leases it — every other
+        // Station passes it by, whatever its consent or Build.
+        if let Some(target) = &run.started.target {
+            if self.principal.station != *target {
+                return false;
+            }
+        }
         // Consent is the device's, checked before any lease is minted: a Run
         // another device started is performed here only for a Spec this
         // Station said it performs for others.
@@ -10421,6 +10430,7 @@ mod reservation_tests {
             resources: Vec::new(),
             limits: spec.limits,
             queries: Vec::new(),
+            target: None,
         };
         let command = crate::exec::Cmd::Start(start.clone());
         let command_bytes = command.encode().unwrap();
@@ -10455,6 +10465,7 @@ mod reservation_tests {
                     .div_ceil(crate::exec::MAX_RUN_COMMAND_CHUNK_BYTES),
             )
             .unwrap(),
+            target: None,
         })
         .unwrap();
         let leased = crate::exec::RunEvent::new(
