@@ -125,6 +125,16 @@
   white-space: nowrap;
 }
 
+.ds-onair.is-quiet {
+  color: var(--ds-muted);
+  background: var(--ds-surface-sunken);
+}
+
+.ds-onair.is-quiet .ds-onair-dot {
+  background: var(--ds-muted);
+  animation: none;
+}
+
 .ds-onair.is-alarm {
   background: var(--ds-alarm-soft);
   color: var(--ds-alarm);

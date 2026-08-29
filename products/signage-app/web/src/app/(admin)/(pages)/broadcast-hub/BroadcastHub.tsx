@@ -34,6 +34,7 @@ import {
   useToast,
   useUndo,
   windowToday,
+  timeOfDayIn,
   DAY_MS,
   type Segment,
 } from "@/ds";
@@ -48,7 +49,7 @@ import {
 import { Thumb } from "@/program-editor/Thumb";
 import { screensReached } from "@/utils/lait/resolve";
 import { mintBodyId } from "@/utils/lait/ids";
-import { nextQuarterHour, scheduledWindow } from "@/utils/lait/schedule";
+import { broadcastStatus, nextQuarterHour, scheduledWindow } from "@/utils/lait/schedule";
 import type {
   BroadcastAction,
   Match,
@@ -196,10 +197,20 @@ export default function BroadcastHub({ screen: addressed }: { screen?: string } 
           const band: Segment[] = span
             ? [{ id: broadcast.id, start: span.start, end: span.end, tone: "band", title: broadcast.name }]
             : [];
+          // A window still ahead is scheduled, not on air: the chip says which,
+          // and only a broadcast that is reaching screens now wears the alarm.
+          const status = broadcastStatus(
+            broadcast.timing.timing === "window" ? span : undefined,
+            broadcast.timing.timing === "window" ? timeOfDayIn(tick, broadcast.timing.timezone) : null,
+          );
+          const onAir = status.kind === "on_air";
           return (
-            <div className="ds-unit is-onair ds-transit ds-arrive" key={broadcast.id}>
+            <div className={`ds-unit${onAir ? " is-onair" : ""} ds-transit ds-arrive`} key={broadcast.id}>
               <div className="ds-transit-head">
-                <OnAir label="On air" tone="alarm" />
+                <OnAir
+                  label={status.kind === "on_air" ? "On air" : status.kind === "not_today" ? "Not today" : status.label}
+                  tone={onAir ? "alarm" : "quiet"}
+                />
                 <div className="ds-unit-copy">
                   <strong>{broadcast.name}</strong>
                   <span>

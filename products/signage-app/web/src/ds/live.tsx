@@ -159,7 +159,8 @@ export function OnAir({
 }: {
   since?: number | null;
   label?: string;
-  tone?: "live" | "alarm";
+  /** `quiet` is a state that is not happening yet, or has finished. */
+  tone?: "live" | "alarm" | "quiet";
 }) {
   const { now } = useLive();
   const elapsed = since == null ? null : Math.max(0, now - since);
