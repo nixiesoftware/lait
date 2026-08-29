@@ -840,6 +840,7 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
         route_lease: Duration::from_secs(60),
     };
     let activation = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| Activation {
+        consent: Default::default(),
         exec: Default::default(),
         planes: Default::default(),
         content: Default::default(),

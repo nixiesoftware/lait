@@ -765,6 +765,7 @@ impl StationHost {
         advertise.dedup();
         advertise.truncate(runtime::beacon::MAX_ROUTE_HINTS);
         let activation = Activation {
+            consent: Default::default(),
             exec: Default::default(),
             content: Default::default(),
             find: Default::default(),

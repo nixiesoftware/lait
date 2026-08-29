@@ -77,6 +77,8 @@ pub mod neighbor;
 mod neighbor_presence;
 mod neighbors;
 mod peer_supply;
+#[cfg(test)]
+mod placement_tests;
 pub mod plane;
 mod plane_driver;
 mod plane_stream;

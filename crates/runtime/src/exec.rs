@@ -229,6 +229,38 @@ pub struct SchemaRef {
     pub version: u32,
 }
 
+/// Which Specs this Station performs for a device other than its own.
+///
+/// Consent is a device's fact, never a Space's: membership and invites confer
+/// no right to run on a device. A Station always performs Runs its own device
+/// started; for anyone else's it must have said so here, per Spec. The
+/// default says nothing, so a Station that never configured consent performs
+/// only its own work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Consent {
+    specs: Vec<SchemaRef>,
+}
+
+impl Consent {
+    /// Perform nothing another device started.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Perform exactly these Specs for other devices.
+    pub fn for_specs(specs: impl IntoIterator<Item = SchemaRef>) -> Self {
+        let mut specs: Vec<SchemaRef> = specs.into_iter().collect();
+        specs.sort();
+        specs.dedup();
+        Self { specs }
+    }
+
+    /// Whether a Run of `spec` started elsewhere may be performed here.
+    pub fn allows(&self, spec: &SchemaRef) -> bool {
+        self.specs.binary_search(spec).is_ok()
+    }
+}
+
 /// The independent authority demanded by every way a Spec can be acted on.
 ///
 /// These are canonical, non-empty [`AuthorizationDemand`] bytes. They are

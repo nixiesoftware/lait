@@ -311,6 +311,7 @@ mod behaviour {
 
     fn options() -> Activation {
         Activation {
+            consent: Default::default(),
             exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),

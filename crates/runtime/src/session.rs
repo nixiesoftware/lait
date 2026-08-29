@@ -2178,6 +2178,7 @@ struct ExecGate {
     /// forgets elapsed grace, which only ever delays disposal.
     resolved_seen: std::collections::BTreeMap<crate::exec::RunId, std::time::Instant>,
     pacing: crate::lifecycle::ExecPacing,
+    consent: crate::exec::Consent,
 }
 
 impl StationCore {
@@ -2264,6 +2265,7 @@ impl StationCore {
                 cursor: std::collections::BTreeMap::new(),
                 resolved_seen: std::collections::BTreeMap::new(),
                 pacing: crate::lifecycle::ExecPacing::default(),
+                consent: crate::exec::Consent::none(),
             }),
             exec_tick: tokio::sync::watch::Sender::new(0),
         })
@@ -2283,6 +2285,20 @@ impl StationCore {
 
     pub fn exec_pacing(&self) -> crate::lifecycle::ExecPacing {
         self.exec.lock_recovering().pacing
+    }
+
+    pub(crate) fn set_exec_consent(&self, consent: crate::exec::Consent) {
+        self.exec.lock_recovering().consent = consent;
+    }
+
+    /// Whether this Station performs `spec` for a Run some other device
+    /// started. Its own device's Runs need no consent.
+    fn consents_to(
+        &self,
+        started: &crate::exec::Started,
+        device: &mechanics::ids::DeviceId,
+    ) -> bool {
+        started.device == *device || self.exec.lock_recovering().consent.allows(&started.spec)
     }
 
     fn perform_cursor(&self, world: &WorldId) -> Option<crate::exec::RunId> {
@@ -4263,6 +4279,12 @@ fn lower_exec(
                     return Err(Rejection::ContractViolation);
                 };
                 outcome.validate_with_spec(spec).map_err(exec_invalid)?;
+                // Exactly one choice closes a Run, and "exactly one" is only
+                // convergent when one writer makes it: the device that
+                // started the Run accepts or rejects its Outcome.
+                if ambient.principal.device != state.run.started.device {
+                    return Err(Rejection::ContractViolation);
+                }
                 if !state.run.is_unresolved()
                     || state.terminal_staged
                     || selected.build != state.run.started.build
@@ -8224,6 +8246,12 @@ impl Session {
                     && handler.binding().spec == run.started.spec
             });
         if !handles {
+            return false;
+        }
+        // Consent is the device's, checked before any lease is minted: a Run
+        // another device started is performed here only for a Spec this
+        // Station said it performs for others.
+        if !self.core.consents_to(&run.started, &self.principal.device) {
             return false;
         }
         if run.attempts.is_empty() {
