@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Plus, Radio, X } from "lucide-react";
+import { Plus, Radio, Trash2, X } from "lucide-react";
 import {
   Bezel,
   Cover,
@@ -187,6 +187,7 @@ function ChannelCard({
       <div className="ds-row-between">
         <ChannelName channel={channel} put={put} select={fresh} />
         <button type="button" className="ds-btn ds-btn-quiet is-danger" onClick={onRemove}>
+          <Trash2 size={15} />
           Remove
         </button>
       </div>
@@ -195,40 +196,47 @@ function ChannelCard({
           empty track says "carries nothing" without a sentence. */}
       <DayTrack segments={day} now={now} />
 
-      {/* The screens tuned to it, drawn as themselves — attached, not counted.
-          Holding the channel lights them. */}
-      {tuned.length > 0 && (
-        <div
-          className="ds-attached"
-          {...litProps(held, held?.kind === "channel" && held.id === channel.id)}
-        >
-          {tuned.map((screen) => (
-            <button
-              type="button"
-              key={screen.id}
-              className="ds-attached-hit"
-              title={screen.name}
-              aria-label={screen.name}
-              onClick={() => void navigate({ to: "/screen-list/$id", params: { id: screen.id } })}
-            >
-              <Bezel
-                size="xs"
-                screen={screen}
-                playback={fleet.playbackFor(screen, now)}
-                programs={fleet.programs}
-                media={fleet.media}
-                presets={fleet.presets}
-                orbit={orbit}
-                now={now}
-              />
-            </button>
-          ))}
-        </div>
-      )}
+      {/* The screens tuned to it, each drawn as itself beside its name —
+          attached, not counted. Holding the channel lights them. */}
+      <div className="ds-stack" style={{ gap: 8 }}>
+        <span className="ds-field-label">
+          {tuned.length === 0 ? "Tuned to it" : tuned.length === 1 ? "Tuned to it · 1 screen" : `Tuned to it · ${tuned.length} screens`}
+        </span>
+        {tuned.length === 0 ? (
+          <span className="ds-hint">No screen yet — a screen is tuned on its own page.</span>
+        ) : (
+          <div className="ds-attached">
+            {tuned.map((screen) => (
+              <button
+                type="button"
+                key={screen.id}
+                className="ds-attached-hit"
+                title={`Open ${screen.name}`}
+                onClick={() => void navigate({ to: "/screen-list/$id", params: { id: screen.id } })}
+                {...litProps(held, held?.kind === "channel" && held.id === channel.id)}
+              >
+                <Bezel
+                  size="xs"
+                  screen={screen}
+                  playback={fleet.playbackFor(screen, now)}
+                  programs={fleet.programs}
+                  media={fleet.media}
+                  presets={fleet.presets}
+                  orbit={orbit}
+                  now={now}
+                />
+                {screen.name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* What it carries: press the cover. The press is the commit. */}
       <div className="ds-stack" style={{ gap: 8 }}>
-        <span className="ds-field-label">Carries, when no daypart is open</span>
+        <span className="ds-field-label">
+          {(channel.schedule ?? []).length > 0 ? "Carries, when no daypart is open" : "Carries"}
+        </span>
         <div className="ds-carry" role="radiogroup" aria-label="Carries">
           {programs.map((program) => {
             const on = channel.base === program.id;
@@ -334,6 +342,7 @@ function Dayparts({
   put: (next: SignageChannel) => Promise<void>;
 }) {
   const windows = channel.schedule ?? [];
+  const base = programs.find((program) => program.id === channel.base);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   const write = (schedule: ChannelWindowOnWire[]) =>
@@ -384,7 +393,11 @@ function Dayparts({
         </button>
       </div>
       {windows.length === 0 ? (
-        <p className="ds-hint">None. The channel carries the program above at all hours.</p>
+        <p className="ds-hint">
+          {base
+            ? `None — it carries ${base.name} at all hours.`
+            : "None — and it carries nothing, so a screen tuned to it shows nothing."}
+        </p>
       ) : (
         windows.map((window, index) => (
           <div className="ds-daypart" key={window.id}>

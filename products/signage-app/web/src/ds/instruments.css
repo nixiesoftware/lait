@@ -141,6 +141,15 @@
   right: 25%;
 }
 
+/* At 40px a screen is a swatch: the kind's colour and shape, never its
+   words, which at this size are noise the chip's own name replaces. The
+   previews set their own colours, hence the override. */
+.ds-bezel.is-xs .ds-glass,
+.ds-bezel.is-xs .ds-glass * {
+  color: transparent !important;
+  text-shadow: none !important;
+}
+
 /* ── Day: one axis, one playhead ───────────────────────────────────────── */
 
 .ds-day {
@@ -200,12 +209,15 @@
   filter: brightness(0.96);
 }
 
-/* The ground is what plays when nothing else does: the well itself, tinted. */
+/* The ground is what plays when nothing else does: the well itself, tinted.
+   Its name sits at noon, where the playhead crosses it once a day rather
+   than every night. */
 .ds-day-seg.is-ground {
   background: color-mix(in srgb, var(--ds-surface-sunken) 70%, var(--ds-ink) 6%);
   color: var(--ds-muted);
   border-radius: 0;
   padding: 0 12px;
+  text-align: center;
 }
 
 /* A daypart is an object on the track. */
@@ -749,21 +761,33 @@
 .ds-attached {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
 }
 
+/* A tuned screen is a chip: the screen itself, small, beside its name. */
 .ds-attached-hit {
   appearance: none;
   border: 0;
-  padding: 0;
-  background: transparent;
-  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px 3px 3px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  color: var(--ds-ink);
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  white-space: nowrap;
   cursor: pointer;
-  transition: transform var(--ds-dur-fast) var(--ds-ease);
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease);
 }
 
 .ds-attached-hit:hover {
-  transform: translateY(-1px);
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
 }
 
 /* ── Transit: a broadcast as a row — when it is open, whom it reaches ──── */
