@@ -64,8 +64,17 @@ impl Client {
                 "approving a display requires its pairing id and a label",
             ));
         }
-        self.display_ok(Request::DisplayPairingApprove { pairing, label })
-            .await
+        match self
+            .display_request(Request::DisplayPairingApprove { pairing, label })
+            .await?
+        {
+            // The device it enrolled is the World's to use; here it is enough
+            // that the pairing was approved.
+            Response::DisplayDevice { .. } | Response::Ok { .. } => Ok(()),
+            other => Err(ClientError::internal(format!(
+                "unexpected display pairing reply: {other:?}"
+            ))),
+        }
     }
 
     pub async fn display_pairing_reject(&self, pairing: String) -> ClientResult<()> {

@@ -53,6 +53,7 @@ import {
   type Segment,
 } from "@/ds";
 import { fetchAsRun } from "@/utils/screens/api";
+import { TvSection } from "./TvSection";
 import { putScreen, removeScreen, tune, useFleet } from "@/utils/screens/fleet";
 import { explain, reaches, type Context } from "@/utils/lait/resolve";
 import { KIND_PANELS } from "@/program-editor/kinds/registry";
@@ -379,6 +380,12 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
             Broadcast to this screen
           </button>
         </div>
+      </section>
+
+      {/* ── Who is watching: the televisions on this screen ─────────────── */}
+      <section className="ds-band">
+        <h3>TVs on this screen</h3>
+        <TvSection screenId={screen.id} screenName={screen.name} />
       </section>
 
       {/* ── Today ──────────────────────────────────────────────────────── */}

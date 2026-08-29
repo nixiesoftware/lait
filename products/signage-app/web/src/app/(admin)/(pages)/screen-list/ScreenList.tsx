@@ -17,6 +17,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { MapPin, Monitor, Plus, Tv } from "lucide-react";
+import { screenOf, tvStatus, useTvs } from "@/utils/tv/api";
 import {
   Bezel,
   ChoiceMenu,
@@ -39,6 +40,15 @@ import { mintBodyId } from "@/utils/lait/ids";
 import type { SignageScreen } from "@/utils/lait/types";
 
 export default function ScreenList() {
+  const { fleet: tvs } = useTvs();
+  const tvSummary = (screenId: string): { label: string; tone: string } | null => {
+    const mine = (tvs?.receivers ?? []).filter((tv) => screenOf(tv.assignment?.input) === screenId);
+    if (mine.length === 0) return null;
+    const rank = { crit: 3, warn: 2, neutral: 1, good: 0 } as const;
+    const worst = mine.map((tv) => tvStatus(tv)).sort((a, b) => rank[b.tone] - rank[a.tone])[0];
+    const count = mine.length === 1 ? "1 TV" : `${mine.length} TVs`;
+    return { label: worst.tone === "good" ? count : `${count} · ${worst.label}`, tone: worst.tone };
+  };
   const navigate = useNavigate();
   const toast = useToast();
   const undo = useUndo();
@@ -219,6 +229,12 @@ export default function ScreenList() {
                               {held}
                             </span>
                           ))}
+                        </span>
+                      )}
+                      {tvSummary(screen.id) && (
+                        <span className={`ds-tag ds-tv-count is-${tvSummary(screen.id)!.tone}`}>
+                          <Tv size={11} />
+                          {tvSummary(screen.id)!.label}
                         </span>
                       )}
                     </span>

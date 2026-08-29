@@ -45,6 +45,25 @@ const MIN_PASSPHRASE_CHARS: usize = 12;
 /// program and an unavailable source are different facts, and a surface that
 /// showed them the same way would be the false-disconnection defect wearing
 /// display clothes.
+/// A receiver's last report, and when it arrived, as the control plane says it.
+fn health_view(reported: super::pairing::ReportedHealth) -> crate::control::DisplayHealthView {
+    let health = reported.health;
+    crate::control::DisplayHealthView {
+        reported_at_unix_ms: Some(reported.reported_at_unix_ms),
+        revision: health.revision.as_str().to_string(),
+        current_item: health.current_item.as_str().to_string(),
+        elapsed_ms: health.elapsed_ms,
+        connection: wire_name(&health.connection),
+        playback: wire_name(&health.playback),
+        last_error: wire_name(&health.last_error),
+        staged_items: health.staged_items,
+        staged_bytes: health.staged_bytes,
+        drift_residual_ms: health.drift_residual_ms,
+        correction_events: health.correction_events,
+        pipeline_unobservable: health.pipeline_unobservable,
+    }
+}
+
 fn present_view(
     world: &str,
     surface: &str,
@@ -388,13 +407,20 @@ impl DisplayRuntime {
         {
             return Some(self.surface_choices(orbit, world, surface).await);
         }
+        if let Request::DisplayWorldReceivers { world, orbit } = request {
+            return Some(
+                self.world_receivers(world, orbit)
+                    .map(|view| Response::DisplayWorldReceivers(Box::new(view)))
+                    .unwrap_or_else(|error| Response::err(format!("{error:#}"))),
+            );
+        }
 
         let result = match request {
             Request::DisplayStatus => self.status().map(|view| Response::Display(Box::new(view))),
             Request::DisplayPairingApprove { pairing, label } => self
                 .approve_pairing(pairing, label)
-                .map(|device| Response::Ok {
-                    message: Some(format!("approved display pairing for device {device}")),
+                .map(|device| Response::DisplayDevice {
+                    device: device.as_str().to_string(),
                 }),
             Request::DisplayPairingReject { pairing } => {
                 self.reject_pairing(pairing).map(|()| Response::Ok {
@@ -519,6 +545,108 @@ impl DisplayRuntime {
         Ok(present_view(world, surface, projection))
     }
 
+    /// One World's receivers in one Orbit: the ones it holds, with the input
+    /// each is pinned to, and the ones nobody holds. A receiver another World
+    /// holds is not listed — not marked, absent — so a World cannot learn the
+    /// fleet beyond its own.
+    fn world_receivers(
+        &self,
+        world: &str,
+        orbit: &str,
+    ) -> Result<crate::control::DisplayWorldView> {
+        use crate::control::{
+            DisplayAssignmentSyncView, DisplayPairingView, DisplayWorldAssignmentView,
+            DisplayWorldCodeView, DisplayWorldReceiverView, DisplayWorldView,
+        };
+        let state = self.store.snapshot()?;
+        let now = mechanics::wallclock::now_millis();
+        let mut receivers = Vec::new();
+        for device in state.devices.values() {
+            if device.revoked_at_unix_ms.is_some() {
+                continue;
+            }
+            let active = state.assignments.values().find(|assignment| {
+                assignment.device == device.device && assignment.revoked_at_unix_ms.is_none()
+            });
+            let assignment = match active {
+                None => None,
+                Some(held) if held.source.world == world && held.orbit == orbit => {
+                    Some(DisplayWorldAssignmentView {
+                        assignment: held.id.as_str().to_string(),
+                        surface: held.source.surface.as_str().to_string(),
+                        input: serde_json::from_slice(held.source.input.as_bytes())
+                            .unwrap_or(serde_json::Value::Null),
+                        sync: held.sync.as_ref().map(|sync| DisplayAssignmentSyncView {
+                            group: sync.group.clone(),
+                            mode: control_sync_mode(sync.mode),
+                            static_delay_ms: sync.static_delay_ms,
+                        }),
+                        expires_at_unix_ms: held.expires_at_unix_ms,
+                    })
+                }
+                Some(_) => continue,
+            };
+            receivers.push(DisplayWorldReceiverView {
+                device: device.device.as_str().to_string(),
+                label: device.label.clone(),
+                platform: wire_name(&device.capabilities.platform),
+                build: device.capabilities.build.clone(),
+                issued_at_unix_ms: device.issued_at_unix_ms,
+                health: self
+                    .pairing
+                    .health(&device.device)
+                    .ok()
+                    .flatten()
+                    .map(health_view),
+                assignment,
+            });
+        }
+        let codes = self
+            .pairing
+            .outstanding_rendezvous(now)?
+            .into_iter()
+            .filter_map(|minted| {
+                let intent = minted.assignment.as_ref()?;
+                if intent.world != world || intent.orbit != orbit {
+                    return None;
+                }
+                let view = self.rendezvous_view(minted.clone());
+                Some(DisplayWorldCodeView {
+                    rendezvous: view.rendezvous,
+                    code: view.code,
+                    site: view.site,
+                    label: view.label,
+                    surface: intent.surface.clone(),
+                    input: intent.input.clone(),
+                    state: view.state,
+                    device: view.device,
+                    created_at_unix_ms: view.created_at_unix_ms,
+                    expires_at_unix_ms: view.expires_at_unix_ms,
+                })
+            })
+            .collect();
+        let pairings = self
+            .pairing
+            .pending(now)?
+            .into_iter()
+            .map(|pairing| DisplayPairingView {
+                pairing: pairing.pairing.as_str().to_string(),
+                confirmation_phrase: pairing.confirmation_phrase,
+                certificate_sha256: pairing.coordinator_fingerprint.as_str().to_string(),
+                platform: wire_name(&pairing.capabilities.platform),
+                build: pairing.capabilities.build,
+                created_at_unix_ms: pairing.created_at_unix_ms,
+                expires_at_unix_ms: pairing.expires_at_unix_ms,
+            })
+            .collect();
+        Ok(DisplayWorldView {
+            site: self.site.clone(),
+            receivers,
+            codes,
+            pairings,
+        })
+    }
+
     /// List what a surface can show. A World that could not be asked answers
     /// with the reason rather than an empty list, so a controller can tell
     /// "nothing to show" from "could not look".
@@ -615,23 +743,7 @@ impl DisplayRuntime {
                     .health(&device.device)
                     .ok()
                     .flatten()
-                    .map(|reported| {
-                        let health = reported.health;
-                        crate::control::DisplayHealthView {
-                            reported_at_unix_ms: Some(reported.reported_at_unix_ms),
-                            revision: health.revision.as_str().to_string(),
-                            current_item: health.current_item.as_str().to_string(),
-                            elapsed_ms: health.elapsed_ms,
-                            connection: wire_name(&health.connection),
-                            playback: wire_name(&health.playback),
-                            last_error: wire_name(&health.last_error),
-                            staged_items: health.staged_items,
-                            staged_bytes: health.staged_bytes,
-                            drift_residual_ms: health.drift_residual_ms,
-                            correction_events: health.correction_events,
-                            pipeline_unobservable: health.pipeline_unobservable,
-                        }
-                    });
+                    .map(health_view);
                 DisplayDeviceView {
                     device: device.device.as_str().to_string(),
                     label: device.label.clone(),

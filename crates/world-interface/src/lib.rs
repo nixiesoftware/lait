@@ -362,6 +362,63 @@ pub enum HostControlRequest {
     WorldActivate {
         world: WorldId,
     },
+    /// The receivers this World holds, and the ones nobody holds yet. Never
+    /// another World's: the host scopes the answer, not the caller.
+    DisplayReceivers,
+    /// Mint a code a television enters to enrol and show `surface` with
+    /// `input`, in this World, in this Orbit. The host names the World.
+    DisplayCodeMint {
+        label: String,
+        surface: display::DisplaySurfaceId,
+        input: Value,
+        sync: Option<HostDisplaySync>,
+    },
+    /// Withdraw a code this World minted.
+    DisplayCodeRevoke {
+        rendezvous: String,
+    },
+    /// Point a receiver at `surface` with `input`. Allowed for a receiver
+    /// nobody holds or one this World already holds; taking one from another
+    /// World is a person's act, in the linked-devices manager.
+    DisplayAssign {
+        device: String,
+        surface: display::DisplaySurfaceId,
+        input: Value,
+        sync: Option<HostDisplaySync>,
+    },
+    /// Leave a receiver this World holds showing nothing.
+    DisplayUnassign {
+        device: String,
+    },
+    /// Forget a receiver this World holds, or one nobody holds.
+    DisplayForget {
+        device: String,
+    },
+    /// Trust a television that is asking to connect by words, under `label`.
+    /// The answer names the device enrolled, so the World can assign it.
+    DisplayPairingApprove {
+        pairing: String,
+        label: String,
+    },
+    DisplayPairingReject {
+        pairing: String,
+    },
+}
+
+/// Keep a set of receivers in step: every receiver a World gives the same
+/// `group` plays the same source on one clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDisplaySync {
+    pub group: String,
+    pub mode: HostDisplaySyncMode,
+    pub static_delay_ms: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostDisplaySyncMode {
+    StayInSync,
+    Positional,
 }
 
 /// One content operation a package asks the shell to carry out.

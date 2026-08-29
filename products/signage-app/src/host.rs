@@ -52,6 +52,11 @@ pub fn execute<'a>(
     local: LocalInvocation,
 ) -> world_interface::ClientFuture<'a, Value> {
     Box::pin(async move {
+        if local.operation == crate::tv::LOCAL_TV {
+            let request: crate::tv::TvRequest = serde_json::from_value(local.input)
+                .map_err(|error| Failure::new(format!("decode Signage TV request: {error}")))?;
+            return crate::tv::run(host, request).await;
+        }
         if local.operation != LOCAL_MEDIA_INGEST {
             return Err(Failure::new(format!(
                 "unsupported Signage local operation '{}'",
@@ -229,6 +234,25 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
         .and_then(Value::as_str)
         .ok_or_else(|| Failure::new("Signage request is missing string field 'cmd'"))?
         .to_owned();
+    // Televisions are this World's to manage, but the acts are the host's —
+    // they ride as local operations and never reach the World's own store.
+    if crate::tv::TvRequest::is_tv_command(&command) {
+        let request: crate::tv::TvRequest = serde_json::from_value(input).map_err(|error| {
+            Failure::new(format!(
+                "Signage TV request '{command}' could not be read: {error}"
+            ))
+        })?;
+        let access = request.access();
+        let input = serde_json::to_value(&request)
+            .map_err(|error| Failure::new(format!("encode Signage TV request: {error}")))?;
+        return Ok(ClientInvocation::local(
+            signage::contract::world_id(),
+            crate::tv::LOCAL_TV,
+            input,
+            access,
+            None,
+        ));
+    }
     match serde_json::from_value::<SignageRequest>(input) {
         Ok(request) => world_invocation(request),
         Err(error) => Err(Failure::new(format!(

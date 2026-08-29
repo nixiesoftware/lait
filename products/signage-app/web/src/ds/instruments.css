@@ -350,6 +350,98 @@
    own inset hairline to the rung above, and rounds with the card at the
    ends. Hovering it is a whisper of ink, never a ring — the ring is what a
    held relation wears elsewhere, and a rung is never lit by itself. */
+/* ── TVs on a screen ──────────────────────────────────────────────────── */
+
+.ds-tvs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ds-tv-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: calc(var(--ds-r-lg) - 4px);
+  background: var(--ds-surface-sunken);
+}
+
+.ds-tv-row.is-code,
+.ds-tv-row.is-asking,
+.ds-tv-row.is-free {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.ds-tv-row.is-asking {
+  outline: 1px solid var(--ds-alarm);
+  outline-offset: -1px;
+}
+
+.ds-tv-mark {
+  display: inline-flex;
+  color: var(--ds-muted);
+}
+
+.ds-tv-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ds-tv-copy > span {
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+}
+
+.ds-tv-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ds-tv-status.is-good { color: var(--ds-live, #2a8a5b); }
+.ds-tv-status.is-warn { color: var(--ds-miss); }
+.ds-tv-status.is-crit { color: var(--ds-alarm); }
+
+.ds-tv-code {
+  font-family: var(--ds-font-mono, ui-monospace, monospace);
+  font-size: 1.35em;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: 0.08em;
+  color: var(--ds-ink);
+  user-select: all;
+}
+
+.ds-tv-words {
+  font-style: normal;
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ds-ink);
+}
+
+.ds-tv-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ds-tv-name .ds-input {
+  width: 16em;
+}
+
+.ds-tv-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ds-tv-count.is-warn { color: var(--ds-miss); }
+.ds-tv-count.is-crit { color: var(--ds-alarm); }
+
 .ds-sky-rung {
   position: relative;
   display: grid;

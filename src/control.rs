@@ -502,6 +502,53 @@ pub struct DisplayChoicesView {
     pub unavailable: Option<String>,
 }
 
+/// One World's receivers: what it holds, what it may take, and the codes and
+/// word-pairings waiting. The input a receiver is pinned to travels here and
+/// nowhere else on this plane — it is the World's own and only the World can
+/// read it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldView {
+    pub site: Option<String>,
+    pub receivers: Vec<DisplayWorldReceiverView>,
+    pub codes: Vec<DisplayWorldCodeView>,
+    pub pairings: Vec<DisplayPairingView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldReceiverView {
+    pub device: String,
+    pub label: String,
+    pub platform: String,
+    pub build: String,
+    pub issued_at_unix_ms: u64,
+    pub health: Option<DisplayHealthView>,
+    /// `None` is a receiver nobody holds, which this World may take.
+    pub assignment: Option<DisplayWorldAssignmentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldAssignmentView {
+    pub assignment: String,
+    pub surface: String,
+    pub input: serde_json::Value,
+    pub sync: Option<DisplayAssignmentSyncView>,
+    pub expires_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayWorldCodeView {
+    pub rendezvous: String,
+    pub code: String,
+    pub site: Option<String>,
+    pub label: String,
+    pub surface: String,
+    pub input: serde_json::Value,
+    pub state: DisplayRendezvousState,
+    pub device: Option<String>,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DisplayDeviceView {
     pub device: String,
@@ -692,6 +739,13 @@ pub enum Request {
         orbit: String,
         world: String,
         surface: String,
+    },
+    /// The receivers one World holds in one Orbit, with the input each is
+    /// pinned to — which only that World can read — and the receivers nobody
+    /// holds yet, which it may take. Another World's receivers are absent.
+    DisplayWorldReceivers {
+        world: String,
+        orbit: String,
     },
     /// Commit an exact package display pin for one enrolled receiver. The
     /// daemon derives Space, implementation and contract digests from its
@@ -1902,6 +1956,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::DisplayRendezvousMint { .. }
         | Request::DisplayRendezvousRevoke { .. }
         | Request::DisplaySurfaceChoices { .. }
+        | Request::DisplayWorldReceivers { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
@@ -2017,6 +2072,10 @@ pub fn representative_requests() -> Vec<Request> {
             orbit: s(),
             world: s(),
             surface: s(),
+        },
+        Request::DisplayWorldReceivers {
+            world: s(),
+            orbit: s(),
         },
         Request::DisplayAssignmentPut {
             device: s(),
@@ -2461,6 +2520,12 @@ pub enum Response {
     DisplayRendezvous(Box<DisplayRendezvousView>),
     /// What a surface can show, or why that could not be listed.
     DisplayChoices(Box<DisplayChoicesView>),
+    /// One World's receivers, as [`Request::DisplayWorldReceivers`] answers.
+    DisplayWorldReceivers(Box<DisplayWorldView>),
+    /// A receiver just enrolled, by the act that enrolled it.
+    DisplayDevice {
+        device: String,
+    },
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,

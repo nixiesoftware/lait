@@ -24,7 +24,7 @@ use world_interface::display::{
 };
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
-const SURFACE_ID: &str = "signage.program";
+pub(crate) const SURFACE_ID: &str = "signage.program";
 /// How long an item plays when neither it nor its library entry says. The
 /// editor shows the same ten seconds, so what a person saw on the strip is
 /// what the screen does. Without this a video whose length nobody recorded

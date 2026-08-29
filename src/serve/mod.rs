@@ -1109,6 +1109,7 @@ async fn world_rpc(
         scope,
         None,
         app.selection.clone(),
+        Some(package.world().clone()),
     );
     if !q.confirm {
         // The package-resolved question, resolved once, so no two surfaces
