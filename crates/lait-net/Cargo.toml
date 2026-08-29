@@ -1,0 +1,28 @@
+[package]
+name = "lait-net"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "A self-sovereign L3 tunnel for a lait Space: a virtual IPv6 interface addressed by device key. Linux-first prototype."
+license = "PolyForm-Noncommercial-1.0.0"
+# Not published: this is lait's networking boundary made runnable, a prototype
+# of the packet layer, not a library surface.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lait-net"
+path = "src/main.rs"
+
+[dependencies]
+# The address of a device is derived from its identity: a lait DeviceId is an
+# ed25519 key, and its tunnel address is a hash of that key. No coordinator
+# hands out addresses; the key is the address.
+mechanics = { path = "../mechanics" }
+blake3 = "1"
+
+# The TUN interface is a raw ioctl on Linux and nothing anywhere else yet.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

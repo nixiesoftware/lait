@@ -2,6 +2,7 @@
 members = [
     "crates/display-protocol",
     "crates/journal",
+    "crates/lait-net",
     "crates/mechanics",
     "crates/mediabox",
     "crates/fabric",
