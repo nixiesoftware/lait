@@ -1,7 +1,7 @@
 {
   "format": 1,
   "id": "com.lait.issues",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "mount": "issues",
   "name": "Issues",
   "tagline": "Plans, issues, and the Specs that govern them",
