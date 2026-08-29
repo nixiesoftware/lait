@@ -125,11 +125,17 @@ describe("the displays coordination rules", () => {
     expect(inputProblem({ chosenKey: "com.lait.signage signage.program", input: " " }, surfaces)).toMatch(/screen/);
   });
 
-  it("special-cases the signage and issues surfaces and nothing else", () => {
+  it("special-cases the signage and issues surfaces and nothing else, whichever World serves them", () => {
     expect(isSignageSurface({ world: "com.lait.signage", surface: "signage.program" })).toBe(true);
+    // A local copy of Signage serves the same surface under its own id, and
+    // it is the same form — keyed on the World it fell to "package JSON".
+    expect(isSignageSurface({ world: "local.signage", surface: "signage.program" })).toBe(true);
     expect(isSignageSurface({ world: "com.lait.signage", surface: "signage.other" })).toBe(false);
     expect(isIssuesBoard({ world: "com.lait.issues", surface: "issues.board.wall" })).toBe(true);
     expect(isIssuesBoard({ world: "issues", surface: "board" })).toBe(false);
+    // Two copies are told apart in the choice, not left as twins.
+    expect(surfaceChoice({ ...surfaces[1], world: "local.signage" })).toBe("A Signage screen (local copy)");
+    expect(surfaceChoice(surfaces[1])).toBe("A Signage screen");
   });
 
   it("tells a TV's whole state in one chip", () => {

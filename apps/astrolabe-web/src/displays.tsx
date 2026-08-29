@@ -50,7 +50,7 @@ import {
   MoreHorizontal20Regular,
   Tv20Regular,
 } from "@fluentui/react-icons";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   actionKey,
@@ -159,14 +159,22 @@ export function newAssignmentDraft(surfaces: DisplaySurface[], orbits: Orbit[]):
 /**
  * The signage surface takes a single screen id, not free JSON — the form
  * offers the one field and spells the wrapping itself.
+ *
+ * Known by its surface id, not its World's: a local copy of Signage serves
+ * the same surface under `local.<handle>`, and it is the same form.
  */
 export function isSignageSurface(surface: Pick<DisplaySurface, "world" | "surface">): boolean {
-  return surface.world === "com.lait.signage" && surface.surface === "signage.program";
+  return surface.surface === "signage.program";
 }
 
 /** The Issues board takes a project key, wrapped the same way. */
 export function isIssuesBoard(surface: Pick<DisplaySurface, "world" | "surface">): boolean {
-  return surface.world === "com.lait.issues" && surface.surface === "issues.board.wall";
+  return surface.surface === "issues.board.wall";
+}
+
+/** A World added from an unsealed tree, beside the release it was copied from. */
+export function isLocalWorld(surface: Pick<DisplaySurface, "world">): boolean {
+  return surface.world.startsWith("local.");
 }
 
 /** What the person is asked for, in their words, for each surface. */
@@ -176,11 +184,10 @@ export function inputPrompt(surface: Pick<DisplaySurface, "world" | "surface">):
   return { label: "Package input JSON", hint: "This surface takes its own JSON input.", json: true };
 }
 
-/** A surface's name as a choice: "A Signage screen", "An Issues board". */
+/** A surface's name as a choice: "A Signage screen", "An Issues board" — and which copy, when there are two. */
 export function surfaceChoice(surface: DisplaySurface): string {
-  if (isSignageSurface(surface)) return "A Signage screen";
-  if (isIssuesBoard(surface)) return "An Issues board";
-  return surface.title;
+  const name = isSignageSurface(surface) ? "A Signage screen" : isIssuesBoard(surface) ? "An Issues board" : surface.title;
+  return isLocalWorld(surface) ? `${name} (local copy)` : name;
 }
 
 /**
@@ -718,18 +725,21 @@ function ShowFields({ draft, setDraft, surfaces, orbits, allowNothing, view, dis
   const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
   const problem = draft.input.trim() === "" ? null : inputProblem(draft, surfaces);
   const set = <K extends keyof AssignmentDraft>(key: K, value: AssignmentDraft[K]) => setDraft({ ...draft, [key]: value });
-  // Ask the World what there is to choose from, once per (Space, surface):
-  // the answer lands in the view, and a refusal is keyed so it is not asked
-  // again on every frame.
+  // Ask the World what there is to choose from, once per (Space, surface)
+  // each time this form is opened: the answer lands in the view and the last
+  // one shows meanwhile. Asked per opening rather than per answer held, so a
+  // World that could not list last time — a runner since replaced — is asked
+  // again the next time somebody comes to choose, not never.
   const listings = view.display?.choices ?? [];
   const listed = chosen === undefined ? undefined : choicesFor(listings, draft.orbit, chosen);
   const listingKey = chosen === undefined ? null : actionKey.displaySurfaceChoices(draft.orbit, chosen.world, chosen.surface);
   const looking = listingKey !== null && view.inFlight.includes(listingKey);
-  const refused = listingKey !== null && failureOf(view.failures, listingKey) !== undefined;
+  const asked = useRef(new Set<string>());
   useEffect(() => {
-    if (chosen === undefined || draft.orbit === "" || listed !== undefined || looking || refused) return;
+    if (chosen === undefined || draft.orbit === "" || listingKey === null || asked.current.has(listingKey)) return;
+    asked.current.add(listingKey);
     void dispatch({ type: "displaySurfaceChoices", orbit: draft.orbit, world: chosen.world, surface: chosen.surface });
-  }, [chosen, draft.orbit, listed, looking, refused, dispatch]);
+  }, [chosen, draft.orbit, listingKey, dispatch]);
   const which = chosen === undefined ? null : chooser(listed, looking, inputPrompt(chosen));
   const stale = `${staleActionNames[draft.onStale]} after ${draft.staleSeconds}s offline`;
   const sync = draft.syncGroup.trim() === "" ? "not kept in step with other TVs" : `in step with "${draft.syncGroup.trim()}"`;
