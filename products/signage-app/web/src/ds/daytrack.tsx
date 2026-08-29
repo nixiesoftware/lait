@@ -50,6 +50,11 @@ export function timeOfDayIn(now: number, timezone: string | null | undefined): n
   }
 }
 
+/** Today's civil date, `YYYY-MM-DD`, in a zone — never the UTC date. */
+export function civilDateIn(now: number, timezone: string | null | undefined): string {
+  return civilIn(now, timezone).date;
+}
+
 function civilIn(now: number, timezone: string | null | undefined) {
   try {
     const parts = new Intl.DateTimeFormat("en-CA", {

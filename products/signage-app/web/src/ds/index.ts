@@ -45,6 +45,6 @@ export {
 } from "./commit";
 export { Ago, LiveProvider, LiveValue, OnAir, useLive, useRevision } from "./live";
 export { Bezel, type BezelProps, type BezelSize, type Heard } from "./bezel";
-export { DayTrack, channelDay, windowToday, timeOfDayIn, DAY_MS, type Segment } from "./daytrack";
+export { DayTrack, channelDay, windowToday, timeOfDayIn, civilDateIn, DAY_MS, type Segment } from "./daytrack";
 export { Footprint } from "./footprint";
 export { FocusProvider, useFocus, useHoldable, isHeld, litProps, type Held, type HeldKind } from "./focus";

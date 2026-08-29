@@ -22,6 +22,7 @@ import {
   PageHeader,
   PageStatus,
   channelDay,
+  civilDateIn,
   haptic,
   litProps,
   useCommit,
@@ -354,7 +355,10 @@ function Dayparts({
       {
         id: mintBodyId().slice(0, 12),
         program: programs.find((program) => program.id !== channel.base)?.id ?? programs[0]?.id ?? "",
-        start_local: `${new Date().toISOString().slice(0, 10)}T${String(startHour).padStart(2, "0")}:00:00`,
+        // The civil date in the daypart's own zone. `toISOString()` gave the
+        // UTC date, which after 19:00 Central is already tomorrow — a "once"
+        // daypart authored in the evening never opened that evening.
+        start_local: `${civilDateIn(Date.now(), zone)}T${String(startHour).padStart(2, "0")}:00:00`,
         duration_ms: 3 * HOUR_MS,
         recurrence: "daily",
         until_unix_ms: null,
