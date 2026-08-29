@@ -32,6 +32,7 @@ members = [
     "tools/astrolabe",
     "tools/astrolabe-ios",
     "tools/feed",
+    "tools/feed-notify",
     "tools/stub",
     "tools/world-fixture",
     "tools/world-channel-installer",
@@ -308,6 +309,9 @@ libc = "0.2"
 
 [dev-dependencies]
 mediabox = { path = "crates/mediabox", features = ["testkit"] }
+# The notify relay in-process, so the daemon's subscription is tested against
+# the real router rather than a stand-in that agrees with it by construction.
+lait-feed-notify = { path = "tools/feed-notify" }
 tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }

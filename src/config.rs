@@ -1036,6 +1036,15 @@ pub const FOUNDATION_SERVICES: &str = "https://post.foundation.pub";
 /// `relay` is on the registry's RESERVED list for exactly this.
 pub const FOUNDATION_RELAY: &str = "https://relay.foundation.pub";
 
+/// The Foundation notify relay — `lait-feed-notify` on Cloud Run. What an
+/// installed machine subscribes to so a publish is heard within the round
+/// trip rather than on the period; the bucket stays the authority.
+///
+/// The service's own deterministic URL rather than `notify.foundation.pub`:
+/// the zone is held outside GCP and carries no record for it yet. When one
+/// exists this moves behind the name like the relay and the Post did.
+pub const FOUNDATION_NOTIFY: &str = "https://foundation-notify-894246603476.us-central1.run.app";
+
 /// The cloud default for a hosted-service endpoint.
 ///
 /// Present only in release builds — the product connects out of the box, and
@@ -1105,6 +1114,13 @@ pub const KEYS: &[KeySpec] = &[
         daemon_read: false,
         help: "Comma-separated relay URLs the overlay rendezvouses through (applies at next daemon start; LAIT_RELAY overrides, LAIT_NETWORK overrides everything; release default is the Foundation relay, empty falls back to the public mesh).",
         built_in: || cloud_default(FOUNDATION_RELAY),
+    },
+    KeySpec {
+        name: "update.notify",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Notify relay the daemon subscribes to for instant channel updates (applies at next daemon start; LAIT_FEED_NOTIFY overrides; release default is the Foundation relay, empty falls back to the check period).",
+        built_in: || cloud_default(FOUNDATION_NOTIFY),
     },
     KeySpec {
         name: "directory.url",
@@ -1257,6 +1273,11 @@ impl Settings {
     /// The hosted Post this identity carries correspondence over, if any.
     pub fn post_url(&self) -> Option<String> {
         self.service_url("post.url", "LAIT_POST_URL")
+    }
+
+    /// The notify relay this daemon subscribes to for instant updates, if any.
+    pub fn notify_url(&self) -> Option<String> {
+        self.service_url("update.notify", "LAIT_FEED_NOTIFY")
     }
 
     /// The identity directory addresses publish and resolve against, if any.

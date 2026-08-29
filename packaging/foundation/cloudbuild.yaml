@@ -1,4 +1,6 @@
-# Cloud Build: build the Post seam image and push it to the Foundation's
+# Cloud Build: build one Foundation service image (the Post seam by default,
+# the notify relay with `_DOCKERFILE=packaging/foundation/Dockerfile.notify`
+# and `_IMAGE=.../lait-feed-notify`) and push it to the Foundation's
 # Artifact Registry. No local Docker in the authoring environment, so the
 # server images are built in the cloud and pinned by digest into the
 # NixieSoftware/foundation Terraform.
@@ -13,13 +15,14 @@
 substitutions:
   _IMAGE: us-central1-docker.pkg.dev/the-foundation-498604/foundation/lait-post
   _TAG: latest
+  _DOCKERFILE: packaging/foundation/Dockerfile.post
 
 steps:
   - name: gcr.io/cloud-builders/docker
     args:
       - build
       - -f
-      - packaging/foundation/Dockerfile.post
+      - ${_DOCKERFILE}
       - -t
       - ${_IMAGE}:${_TAG}
       - -t

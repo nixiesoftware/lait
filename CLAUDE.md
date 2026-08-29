@@ -96,6 +96,23 @@ ci/publish-feed.sh --from-run <run-id> --version 0.9.1 --channel stable \
 `--version ... --artifacts-dir ...` is the local recovery path. There is no
 `--from-release`: GitHub Releases are not an artifact source or an authority.
 
+**A publish is heard within the round trip, not on the period.** Both publish
+scripts end by `POST`ing the pointer they just wrote to the notify relay
+(`tools/feed-notify`, `lait-feed-notify` on Cloud Run as `foundation-notify`,
+deployed from `nixiesoftware/foundation`; it will sit behind
+`notify.foundation.pub` once the zone carries a record), and
+every installed daemon holds one SSE subscription to it (`src/update/notify.rs`),
+keyed by `update.notify` / `LAIT_FEED_NOTIFY`. A frame is opened with the same
+pinned feed keys and only *wakes* the staging watcher — the watcher then walks
+the bucket exactly as it does on its period, and a staged World release
+relaunches the daemon generation on the spot instead of waiting for the next
+start. The relay holds no keys of its own, verifies with the operator's
+`--pubkey`s, and ratchets `published_at` forward per key; it is a doorbell, not
+a second feed, and it primes its board from the bucket on start and every
+five minutes, so a lost announce costs minutes and a restart costs nothing.
+The 4.5 h check period is the floor for a machine that cannot hear it, not
+the latency. Self-hosting is one binary and one config key.
+
 The build emits what the feed serves, named the way it names things: the
 `.dmg` a person installs, and `astrolabe-tree-<version>-<target>.tar.gz`, which
 is what an already-running machine swaps in. **A release with an installer and
