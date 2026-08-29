@@ -269,5 +269,12 @@ img.world-mark { width:24px; height:24px; border-radius:6px; object-fit:cover; }
 .rendezvous-code { margin:2px 0; color:#fff; font-size:26px; font-weight:700; letter-spacing:.1em; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; user-select:all; }
 .dialog-body label.check-row { display:flex; align-items:center; gap:8px; color:var(--text); font-size:12px; font-weight:500; letter-spacing:0; }
 .dialog-body label.check-row input { width:auto; margin:0; }
+/* Plain fields inside a Fluent dialog, for a surface not yet moved to Fluent
+   fields. The field rules of `.dialog-body` without its panel: the panel is
+   Fluent's now. */
+.dialog-fields > label:not(.check-row) { display:grid; gap:6px; color:var(--muted); font-size:10px; font-weight:750; letter-spacing:.07em; }
+.dialog-fields > label > input,.dialog-fields > label > textarea,.dialog-fields > label > select { border:1px solid var(--border); border-radius:5px; padding:8px 9px; color:var(--text); background:#0f1318; font:inherit; font-size:12px; letter-spacing:normal; font-weight:400; }
+.dialog-fields > label > textarea { resize:vertical; }
+.dialog-fields .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 /* Forget removes a row, never a tree — which is why it sits with the World's
    own controls and not beside anything that deletes. */

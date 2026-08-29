@@ -4,8 +4,27 @@
  * the web spellings of the Flutter client's `face.dart` / `person.dart`
  * anatomy: a tile draws facts and nothing else; a surface composes gestures
  * and controls around it.
+ *
+ * Drawn with Fluent. A surface that needs a button, a field or a card takes
+ * it from `@fluentui/react-components` directly; what lives here is the
+ * handful of compositions Astrolabe repeats.
  */
-import { useEffect, useRef, type ReactNode } from "react";
+import {
+  Badge as FluentBadge,
+  Caption1,
+  Caption1Strong,
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
+  MessageBar,
+  MessageBarBody,
+  Text,
+  makeStyles,
+  tokens,
+} from "@fluentui/react-components";
+import type { ReactNode } from "react";
 
 import type { Card } from "./client";
 
@@ -63,7 +82,12 @@ export function AiMark() {
 }
 
 export function Badge({ label, solid = false }: { label: string; solid?: boolean }) {
-  return <span className={solid ? "badge badge-solid" : "badge"}>{label}</span>;
+  // A badge is one word or two and never breaks: a card's action slot is
+  // narrow, and a label folded onto two lines reads as two badges.
+  return <FluentBadge appearance={solid ? "filled" : "outline"} color={solid ? "brand" : "informative"} size="medium" shape="rounded"
+    style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+    {label}
+  </FluentBadge>;
 }
 
 /**
@@ -91,51 +115,109 @@ export function PersonTile({ name, picture, presence, agent = false, note, size 
   </span>;
 }
 
+const useKitStyles = makeStyles({
+  fact: {
+    display: "grid",
+    gridTemplateColumns: "minmax(120px, 160px) minmax(0, 1fr)",
+    columnGap: tokens.spacingHorizontalM,
+    alignItems: "baseline",
+    paddingTop: tokens.spacingVerticalXXS,
+    paddingBottom: tokens.spacingVerticalXXS,
+  },
+  factLabel: { color: tokens.colorNeutralForeground3, textTransform: "uppercase", letterSpacing: "0.06em" },
+  factValue: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200, overflowWrap: "anywhere", userSelect: "all" },
+  section: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    marginTop: tokens.spacingVerticalL,
+    marginBottom: tokens.spacingVerticalS,
+    color: tokens.colorNeutralForeground3,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+  },
+  empty: {
+    display: "grid",
+    gap: tokens.spacingVerticalXS,
+    alignContent: "center",
+    minHeight: "96px",
+    padding: tokens.spacingVerticalL,
+    textAlign: "center",
+    border: `1px dashed ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusLarge,
+    color: tokens.colorNeutralForeground3,
+  },
+  dialogStack: { display: "grid", gap: tokens.spacingVerticalM, marginTop: tokens.spacingVerticalS },
+  dialogFooter: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: tokens.spacingHorizontalS,
+    marginTop: tokens.spacingVerticalM,
+  },
+});
+
 /** A labelled fact row whose value is selectable, never truncated by hand. */
 export function Fact({ label, value }: { label: string; value: string }) {
-  return <div className="fact-row"><span className="fact-label">{label}</span><code className="fact-value">{value}</code></div>;
+  const styles = useKitStyles();
+  return <div className={styles.fact}>
+    <Caption1 className={styles.factLabel}>{label}</Caption1>
+    <Text className={styles.factValue}>{value}</Text>
+  </div>;
 }
 
 /** A section marking: an emphatic label with the count dim beside it. */
 export function SectionTitle({ label, count }: { label: string; count?: number }) {
-  return <div className="section-heading section-title"><span>{label}</span>{count !== undefined && <span>{count}</span>}</div>;
+  const styles = useKitStyles();
+  return <div className={styles.section}>
+    <Caption1Strong>{label}</Caption1Strong>
+    {count !== undefined && <Caption1>{count}</Caption1>}
+  </div>;
 }
 
 export function Empty({ said, next }: { said: string; next?: string }) {
-  return <div className="empty-state"><strong>{said}</strong>{next !== undefined && <p>{next}</p>}</div>;
+  const styles = useKitStyles();
+  return <div className={styles.empty}>
+    <Text weight="semibold">{said}</Text>
+    {next !== undefined && <Caption1>{next}</Caption1>}
+  </div>;
 }
 
 export function Notice({ tone, children }: { tone: "warn" | "danger" | "good"; children: ReactNode }) {
-  return <p className={`notice notice-${tone}`}>{children}</p>;
+  const intent = tone === "danger" ? "error" : tone === "warn" ? "warning" : "success";
+  return <MessageBar intent={intent} layout="multiline">
+    <MessageBarBody>{children}</MessageBarBody>
+  </MessageBar>;
 }
 
 /**
  * The app dialog. Rendered by the surface that owns the draft, dismissed by
  * Escape, the scrim, or its own controls; focus lands inside on mount. Kept
  * deliberately small — drafts live in the caller, facts stay in the view.
+ *
+ * The content carries the `dialog-fields` class so a surface not yet moved to
+ * Fluent fields draws its plain labels and inputs the way it did — the field
+ * rules only, never the old panel.
  */
 export function AppDialog({ title, description, onDismiss, children }: {
   title: string; description?: string; onDismiss(): void; children: ReactNode;
 }) {
-  const body = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const target = body.current?.querySelector<HTMLElement>("input, textarea, select, button");
-    target?.focus();
-    return () => previous?.focus();
-  }, []);
-  return <div className="dialog-overlay" role="presentation"
-    onMouseDown={(event) => { if (event.target === event.currentTarget) onDismiss(); }}
-    onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onDismiss(); } }}>
-    <div ref={body} className="dialog-body" role="dialog" aria-modal aria-label={title}>
-      <header><h2>{title}</h2>{description !== undefined && <p>{description}</p>}</header>
-      {children}
-    </div>
-  </div>;
+  const styles = useKitStyles();
+  return <Dialog open modalType="modal" onOpenChange={(_, data) => { if (!data.open) onDismiss(); }}>
+    <DialogSurface aria-label={title}>
+      <DialogBody>
+        <DialogTitle>{title}</DialogTitle>
+        <DialogContent>
+          {description !== undefined && <Text block>{description}</Text>}
+          <div className={`dialog-fields ${styles.dialogStack}`}>{children}</div>
+        </DialogContent>
+      </DialogBody>
+    </DialogSurface>
+  </Dialog>;
 }
 
 export function DialogFooter({ children }: { children: ReactNode }) {
-  return <footer className="dialog-footer">{children}</footer>;
+  const styles = useKitStyles();
+  return <footer className={styles.dialogFooter}>{children}</footer>;
 }
 
 export function shortId(value: string): string {

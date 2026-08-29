@@ -27,5 +27,10 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Fluent's focus layer (`tabster`, `keyborg`) ships CommonJS; left
+    // external, Node cannot see its named exports and every surface that
+    // imports the kit fails to load. Inlined, vitest transforms it like the
+    // rest of the app.
+    server: { deps: { inline: [/@fluentui\//, /tabster/, /keyborg/] } },
   },
 });

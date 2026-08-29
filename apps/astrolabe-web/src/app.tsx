@@ -32,6 +32,7 @@ import {
 import { BookSurface } from "./book";
 import { ChatSurface } from "./chat";
 import { DisplaysSurface } from "./displays";
+import { AstrolabeTheme } from "./fluent";
 import { BigPictureSurface } from "./present";
 import { WorldSettingsSurface } from "./settings";
 import { FacePlate, PersonTile, presenceLabel } from "./kit";
@@ -51,8 +52,10 @@ export function App() {
   // come back. So that window attaches the transport too — a second view of
   // the one model, never a second model. See `settings.tsx`.
   const settingsSnapshot = useMemo(() => currentWorldSettingsSnapshot(), []);
-  if (settingsSnapshot !== null) return <WorldSettingsWindow snapshot={settingsSnapshot} />;
-  return <ClientApp platform={platform} dark={dark} setDark={setDark} />;
+  if (settingsSnapshot !== null) {
+    return <AstrolabeTheme dark={settingsSnapshot.dark}><WorldSettingsWindow snapshot={settingsSnapshot} /></AstrolabeTheme>;
+  }
+  return <AstrolabeTheme dark={dark}><ClientApp platform={platform} dark={dark} setDark={setDark} /></AstrolabeTheme>;
 }
 
 /**

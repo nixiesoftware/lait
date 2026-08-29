@@ -4,7 +4,37 @@
  * Facts are the daemon's display projection. Local state is draft form input
  * only; approvals, assignments, and revocations all cross as actions and
  * return through the ordinary authoritative refresh.
+ *
+ * The first surface drawn with Fluent: every control is the system's, and
+ * what is Astrolabe's — the code a television takes, the receiver's health
+ * line — is spelled with the system's tokens rather than a stylesheet.
  */
+import {
+  Body1,
+  Button,
+  Card,
+  CardFooter,
+  CardHeader,
+  Caption1,
+  Checkbox,
+  Field,
+  Input,
+  Select,
+  Text,
+  Textarea,
+  Title3,
+  makeStyles,
+  mergeClasses,
+  shorthands,
+  tokens,
+} from "@fluentui/react-components";
+import {
+  Add20Regular,
+  ArrowLeft20Regular,
+  ArrowSync20Regular,
+  Copy20Regular,
+  Dismiss20Regular,
+} from "@fluentui/react-icons";
 import { useState } from "react";
 
 import {
@@ -107,11 +137,6 @@ export function newAssignmentDraft(surfaces: DisplaySurface[], orbits: Orbit[]):
 }
 
 /**
- * The draft as the daemon takes it, or null while it could not cross. A
- * Signage program id is typed bare and wrapped here; every other surface's
- * input goes verbatim to the package's own canonicalizer.
- */
-/**
  * Why the draft's input cannot cross yet, or null when it can. A signage
  * program id is any non-empty text; every other surface's input is JSON,
  * and the daemon's parser is the one that would otherwise say so — from
@@ -131,6 +156,11 @@ export function inputProblem(draft: Pick<AssignmentDraft, "chosenKey" | "input">
   }
 }
 
+/**
+ * The draft as the daemon takes it, or null while it could not cross. A
+ * Signage program id is typed bare and wrapped here; every other surface's
+ * input goes verbatim to the package's own canonicalizer.
+ */
 export function assignmentPayload(draft: AssignmentDraft, surfaces: DisplaySurface[]): DisplayAssignmentRequest | null {
   const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
   if (chosen === undefined || !assignmentDraftValid(draft) || inputProblem(draft, surfaces) !== null) return null;
@@ -172,6 +202,59 @@ const themeNames: Record<DisplayTheme, string> = { light: "Light", dark: "Dark",
 const staleActionNames: Record<DisplayStaleAction, string> = { keepWithNativeBanner: "Keep with native banner", blank: "Blank" };
 const syncModeNames: Record<DisplaySyncMode, string> = { stayInSync: "Stay in sync", positional: "Positional" };
 
+const useStyles = makeStyles({
+  surface: {
+    height: "100%",
+    minHeight: 0,
+    display: "grid",
+    gridTemplateRows: "auto minmax(0, 1fr)",
+    backgroundColor: tokens.colorNeutralBackground2,
+    color: tokens.colorNeutralForeground1,
+  },
+  header: {
+    display: "grid",
+    gridTemplateColumns: "auto minmax(0, 1fr) auto",
+    alignItems: "center",
+    columnGap: tokens.spacingHorizontalL,
+    padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalXL}`,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+  },
+  headerCopy: { display: "grid", gap: tokens.spacingVerticalXXS, minWidth: 0 },
+  headerActions: { display: "flex", gap: tokens.spacingHorizontalS },
+  scroll: {
+    overflowY: "auto",
+    padding: `${tokens.spacingVerticalL} ${tokens.spacingHorizontalXL} ${tokens.spacingVerticalXXL}`,
+  },
+  column: { maxWidth: "920px", margin: "0 auto", display: "grid", gap: tokens.spacingVerticalM },
+  cards: { display: "grid", gap: tokens.spacingVerticalS },
+  stack: { display: "grid", gap: tokens.spacingVerticalXS },
+  row: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS, flexWrap: "nowrap", flexShrink: 0, whiteSpace: "nowrap" },
+  end: { justifyContent: "flex-end" },
+  between: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: tokens.spacingHorizontalM },
+  muted: { color: tokens.colorNeutralForeground3 },
+  warn: { color: tokens.colorPaletteMarigoldForeground2 },
+  danger: { color: tokens.colorPaletteRedForeground1 },
+  phrase: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeBase400,
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorBrandForeground1,
+    letterSpacing: "0.04em",
+  },
+  code: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeHero700,
+    fontWeight: tokens.fontWeightSemibold,
+    letterSpacing: "0.1em",
+    userSelect: "all",
+    margin: 0,
+  },
+  codeCard: { ...shorthands.borderColor(tokens.colorBrandStroke1) },
+  facts: { display: "grid", gap: tokens.spacingVerticalXXS },
+  grid2: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: tokens.spacingHorizontalM },
+});
+
 type DisplaysDialog =
   | { kind: "add" }
   | { kind: "approve"; pairing: DisplayPairing }
@@ -183,70 +266,86 @@ type DisplaysDialog =
 export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }: {
   view: ClientView; dispatch: Dispatch; onBack(): void; ownedWindow?: boolean;
 }) {
+  const styles = useStyles();
   const [dialog, setDialog] = useState<DisplaysDialog | null>(null);
   const display = view.display;
   // A refusal of something asked from this window is answered in this
   // window. The main window's bar keeps the whole list; here only the
   // latest that concerns displays, which is the one the person is waiting on.
   const failure = view.failures.find((candidate) => /display/i.test(candidate.what) || /display/i.test(candidate.error));
-  return <section className="secondary-surface" aria-label="Displays">
-    <header className="secondary-header">
-      <button className="back-button" onClick={onBack}>{ownedWindow ? "Close window" : "← Library"}</button>
-      <div><h1>Displays</h1><p>Enroll receivers on this network and pin each one to an exact World surface in an Orbit.</p></div>
-      <div className="header-actions">
-        <button className="quiet-button" disabled={view.inFlight.includes(actionKey.refresh)}
-          onClick={() => void dispatch({ type: "refresh" })}>Refresh</button>
-        <button className="primary-button" disabled={display === null}
-          onClick={() => setDialog({ kind: "add" })}>Add a display…</button>
+  return <section className={styles.surface} aria-label="Displays">
+    <header className={styles.header}>
+      <Button appearance="subtle" icon={ownedWindow ? <Dismiss20Regular /> : <ArrowLeft20Regular />} onClick={onBack}>
+        {ownedWindow ? "Close window" : "Library"}
+      </Button>
+      <div className={styles.headerCopy}>
+        <Title3>Displays</Title3>
+        <Caption1 className={styles.muted}>Enroll receivers on this network and pin each one to an exact World surface in an Orbit.</Caption1>
+      </div>
+      <div className={styles.headerActions}>
+        <Button appearance="secondary" icon={<ArrowSync20Regular />} disabled={view.inFlight.includes(actionKey.refresh)}
+          onClick={() => void dispatch({ type: "refresh" })}>Refresh</Button>
+        <Button appearance="primary" icon={<Add20Regular />} disabled={display === null}
+          onClick={() => setDialog({ kind: "add" })}>Add a display</Button>
       </div>
     </header>
-    {display === null
-      ? <div className="secondary-scroll"><div className="skeleton" style={{ height: 112, marginBottom: 22 }} />
-          <div className="skeleton" style={{ height: 152, marginBottom: 9 }} /><div className="skeleton" style={{ height: 152 }} /></div>
-      : <div className="secondary-scroll displays-surface">
-        {failure !== undefined && <Notice tone="danger">{failure.what}: {failure.error}</Notice>}
-        <Coordinator display={display} openDialog={setDialog} />
-        {display.pendingRendezvous.length > 0 && <section className="section-block">
-          <SectionTitle label="CODES WAITING" count={display.pendingRendezvous.length} />
-          {display.pendingRendezvous.map((minted) => <RendezvousCard key={minted.rendezvous} minted={minted}
-            view={view} dispatch={dispatch} />)}
-        </section>}
-        <section className="section-block">
-          <SectionTitle label="PAIRING REQUESTS" count={display.pendingPairings.length} />
-          {display.pendingPairings.length === 0
-            ? <Empty said="No receiver is waiting for approval."
-                next="Add a display for a code the TV enters, or open Astrolabe on a TV and compare words here." />
-            : display.pendingPairings.map((pairing) => <PairingCard key={pairing.pairing} pairing={pairing} view={view}
-                dispatch={dispatch} onApprove={() => setDialog({ kind: "approve", pairing })} />)}
-        </section>
-        <section className="section-block">
-          <SectionTitle label="RECEIVERS" count={display.devices.length} />
-          {display.devices.length === 0
-            ? <Empty said="No receiver is enrolled." next="Pairing is confirmed on both the TV and here." />
-            : display.devices.map((receiver) => <ReceiverCard key={receiver.device} receiver={receiver}
-                assignment={assignmentFor(display, receiver.device)} display={display} view={view} openDialog={setDialog} />)}
-        </section>
-      </div>}
+    <div className={styles.scroll}>
+      {display === null
+        ? <div className={styles.column}><Empty said="Reading the display coordinator…" /></div>
+        : <div className={styles.column}>
+          {failure !== undefined && <Notice tone="danger">{failure.what}: {failure.error}</Notice>}
+          <Coordinator display={display} openDialog={setDialog} />
+          {display.pendingRendezvous.length > 0 && <section>
+            <SectionTitle label="Codes waiting" count={display.pendingRendezvous.length} />
+            <div className={styles.cards}>
+              {display.pendingRendezvous.map((minted) => <RendezvousCard key={minted.rendezvous} minted={minted}
+                view={view} dispatch={dispatch} />)}
+            </div>
+          </section>}
+          <section>
+            <SectionTitle label="Pairing requests" count={display.pendingPairings.length} />
+            {display.pendingPairings.length === 0
+              ? <Empty said="No receiver is waiting for approval."
+                  next="Add a display for a code the TV enters, or open Astrolabe on a TV and compare words here." />
+              : <div className={styles.cards}>
+                {display.pendingPairings.map((pairing) => <PairingCard key={pairing.pairing} pairing={pairing} view={view}
+                  dispatch={dispatch} onApprove={() => setDialog({ kind: "approve", pairing })} />)}
+              </div>}
+          </section>
+          <section>
+            <SectionTitle label="Receivers" count={display.devices.length} />
+            {display.devices.length === 0
+              ? <Empty said="No receiver is enrolled." next="Pairing is confirmed on both the TV and here." />
+              : <div className={styles.cards}>
+                {display.devices.map((receiver) => <ReceiverCard key={receiver.device} receiver={receiver}
+                  assignment={assignmentFor(display, receiver.device)} display={display} view={view} openDialog={setDialog} />)}
+              </div>}
+          </section>
+        </div>}
+    </div>
     {dialog !== null && display !== null && <DisplaysDialogs dialog={dialog} display={display} orbits={view.orbits}
       dispatch={dispatch} onDismiss={() => setDialog(null)} />}
   </section>;
 }
 
 function Coordinator({ display, openDialog }: { display: Display; openDialog(dialog: DisplaysDialog): void }) {
-  return <section className="coordinator-card">
-    <div className="coordinator-title">
-      <strong>{display.label}</strong>
-      <span className="button-row">
-        <button className="quiet-button" title="Copy the pinned receiver bootstrap JSON."
-          onClick={() => void navigator.clipboard.writeText(receiverBootstrap(display))}>Copy setup</button>
-        <Badge label="SELF-HOSTED" />
-      </span>
+  const styles = useStyles();
+  return <Card>
+    <CardHeader
+      header={<Text weight="semibold" size={500}>{display.label}</Text>}
+      description={<Caption1 className={styles.muted}>This coordinator</Caption1>}
+      action={<div className={styles.row}>
+        <Button appearance="secondary" size="small" icon={<Copy20Regular />} title="Copy the pinned receiver bootstrap JSON."
+          onClick={() => void navigator.clipboard.writeText(receiverBootstrap(display))}>Copy setup</Button>
+        <Badge label="Self-hosted" />
+      </div>} />
+    <div className={styles.facts}>
+      <Fact label="LAN origin" value={display.origin} />
+      <Fact label="Certificate SHA-256" value={display.certificateSha256} />
     </div>
-    <Fact label="LAN ORIGIN" value={display.origin} />
-    <Fact label="CERTIFICATE SHA-256" value={display.certificateSha256} />
     <IdentifierCustodyFacts custody={display.identifierCustody}
       onAddPassphrase={() => openDialog({ kind: "passphrase" })} />
-  </section>;
+  </Card>;
 }
 
 const slotNames: Record<string, string> = {
@@ -263,25 +362,26 @@ const slotNames: Record<string, string> = {
 function IdentifierCustodyFacts({ custody, onAddPassphrase }: {
   custody: Display["identifierCustody"]; onAddPassphrase(): void;
 }) {
+  const styles = useStyles();
   if (custody === null) {
-    return <Fact label="IDENTIFIER KEY UNLOCKS" value="not reported by this coordinator" />;
+    return <Fact label="Identifier key unlocks" value="not reported by this coordinator" />;
   }
   const paths = custody.slots.length === 0 ? "none" : custody.slots.map((slot) => slotNames[slot] ?? slot).join(", ");
   // Offered once: the store refuses a second passphrase, and a control that
   // would be refused is one this surface should not draw.
   const hasPassphrase = custody.slots.includes("passphrase");
-  return <div className="identifier-custody">
-    <div className="coordinator-title">
-      <Fact label="IDENTIFIER KEY UNLOCKS" value={paths} />
-      {!hasPassphrase && <button className="quiet-button"
+  return <div className={styles.stack}>
+    <div className={styles.between}>
+      <Fact label="Identifier key unlocks" value={paths} />
+      {!hasPassphrase && <Button appearance="secondary" size="small"
         title="A way in that survives losing this machine and this identity."
-        onClick={onAddPassphrase}>Add a passphrase</button>}
+        onClick={onAddPassphrase}>Add a passphrase</Button>}
     </div>
-    <p className="custody-note" data-warning={!custody.portable || undefined}>
+    <Caption1 className={custody.portable ? styles.muted : styles.warn}>
       {custody.portable
         ? "Losing every unlock path invalidates the item and asset identifiers already delivered to paired screens. They would each need pairing again."
         : "Every unlock path is bound to this machine. Losing this profile invalidates the item and asset identifiers already delivered to paired screens, and they would each need pairing again. Add a passphrase or a second device."}
-    </p>
+    </Caption1>
   </div>;
 }
 
@@ -290,55 +390,54 @@ function IdentifierCustodyFacts({ custody, onAddPassphrase }: {
  * then code — with what entering it will do, and how long that holds.
  */
 function RendezvousCard({ minted, view, dispatch }: { minted: DisplayRendezvous; view: ClientView; dispatch: Dispatch }) {
+  const styles = useStyles();
   const busy = view.inFlight.includes(actionKey.displayRendezvousRevoke(minted.rendezvous));
   const left = minutesLeft(minted.expiresAtUnixMs);
   const entry = codeEntry(minted);
-  return <article className="receiver-card rendezvous-card">
-    <div className="receiver-title">
-      <div>
-        <strong>{minted.label}</strong>
-        <small>{minted.assignment === null
-          ? "Enrols, then waits for an assignment"
-          : `Shows ${minted.assignment.world} · ${minted.assignment.surface} as soon as it connects`}</small>
-      </div>
-      <Badge label={left === 0 ? "EXPIRED" : `${left} MIN LEFT`} />
-    </div>
-    <p className="rendezvous-code" aria-label="Code to enter on the television">{entry}</p>
-    <p className="health-line">{minted.site === null
+  return <Card className={styles.codeCard}>
+    <CardHeader
+      header={<Text weight="semibold">{minted.label}</Text>}
+      description={<Caption1 className={styles.muted}>{minted.assignment === null
+        ? "Enrols, then waits for an assignment"
+        : `Shows ${minted.assignment.world} · ${minted.assignment.surface} as soon as it connects`}</Caption1>}
+      action={<Badge label={left === 0 ? "Expired" : `${left} min left`} solid={left > 0} />} />
+    <p className={styles.code} aria-label="Code to enter on the television">{entry}</p>
+    <Caption1 className={styles.muted}>{minted.site === null
       ? "This coordinator publishes no site, so the television must already reach it; enter the code where it asks."
-      : "On the television: open Astrolabe, enter this where it asks for the code, press OK."}</p>
-    <div className="button-row end">
-      <button className="quiet-button" onClick={() => void navigator.clipboard.writeText(entry)}>Copy</button>
-      <button className="quiet-button" disabled={busy}
-        onClick={() => void dispatch({ type: "displayRendezvousRevoke", rendezvous: minted.rendezvous })}>Withdraw</button>
-    </div>
-  </article>;
+      : "On the television: open Astrolabe, enter this where it asks for the code, press OK."}</Caption1>
+    <CardFooter>
+      <Button appearance="secondary" icon={<Copy20Regular />} onClick={() => void navigator.clipboard.writeText(entry)}>Copy</Button>
+      <Button appearance="subtle" disabled={busy}
+        onClick={() => void dispatch({ type: "displayRendezvousRevoke", rendezvous: minted.rendezvous })}>Withdraw</Button>
+    </CardFooter>
+  </Card>;
 }
 
 function PairingCard({ pairing, view, dispatch, onApprove }: {
   pairing: DisplayPairing; view: ClientView; dispatch: Dispatch; onApprove(): void;
 }) {
+  const styles = useStyles();
   const busy = view.inFlight.includes(actionKey.displayPairingApprove(pairing.pairing))
     || view.inFlight.includes(actionKey.displayPairingReject(pairing.pairing));
-  return <article className="receiver-card">
-    <div className="receiver-title">
-      <strong>{platformName(pairing.platform)} · {pairing.build}</strong>
-      <Badge label="VERIFY ON TV" />
-    </div>
-    <p className="phrase">{pairing.confirmationPhrase.join("  ")}</p>
-    <Fact label="CERTIFICATE SHA-256" value={pairing.certificateSha256} />
-    <div className="button-row end">
-      <button className="quiet-button" disabled={busy}
-        onClick={() => void dispatch({ type: "displayPairingReject", pairing: pairing.pairing })}>Reject</button>
-      <button className="primary-button" disabled={busy} onClick={onApprove}>Approve…</button>
-    </div>
-  </article>;
+  return <Card>
+    <CardHeader
+      header={<Text weight="semibold">{platformName(pairing.platform)} · {pairing.build}</Text>}
+      action={<Badge label="Verify on TV" />} />
+    <p className={styles.phrase}>{pairing.confirmationPhrase.join("  ")}</p>
+    <Fact label="Certificate SHA-256" value={pairing.certificateSha256} />
+    <CardFooter className={styles.end}>
+      <Button appearance="secondary" disabled={busy}
+        onClick={() => void dispatch({ type: "displayPairingReject", pairing: pairing.pairing })}>Reject</Button>
+      <Button appearance="primary" disabled={busy} onClick={onApprove}>Approve…</Button>
+    </CardFooter>
+  </Card>;
 }
 
 function ReceiverCard({ receiver, assignment, display, view, openDialog }: {
   receiver: DisplayReceiver; assignment: DisplayAssignment | undefined; display: Display; view: ClientView;
   openDialog(dialog: DisplaysDialog): void;
 }) {
+  const styles = useStyles();
   const revoked = receiver.revokedAtUnixMs !== null;
   const health = receiver.health;
   const assigning = view.inFlight.includes(actionKey.displayAssignmentPut(receiver.device));
@@ -350,41 +449,39 @@ function ReceiverCard({ receiver, assignment, display, view, openDialog }: {
     : display.surfaces.length === 0
       ? "This build declares no display surfaces."
       : null;
-  return <article className="receiver-card">
-    <div className="receiver-title">
-      <div>
-        <strong>{receiver.label}</strong>
-        <small>{platformName(receiver.platform)} · {receiver.build}</small>
-      </div>
-      <Badge label={revoked ? "REVOKED" : health === null ? "NOT YET REPORTED" : health.connection.toUpperCase()} />
-    </div>
+  return <Card>
+    <CardHeader
+      header={<Text weight="semibold">{receiver.label}</Text>}
+      description={<Caption1 className={styles.muted}>{platformName(receiver.platform)} · {receiver.build}</Caption1>}
+      action={<Badge label={revoked ? "Revoked" : health === null ? "Not yet reported" : words(health.connection)}
+        solid={!revoked && health !== null} />} />
     {assignment === undefined
-      ? <p className="health-line">Unassigned</p>
-      : <div className="assignment-facts">
-        <strong>{assignment.world} · {assignment.surface}</strong>
-        <code>Orbit {shortId(assignment.orbit)} · program {shortId(assignment.program)}</code>
-        {assignment.syncGroup !== null && <small>
+      ? <Body1 className={styles.muted}>Unassigned</Body1>
+      : <div className={styles.stack}>
+        <Text weight="semibold">{assignment.world} · {assignment.surface}</Text>
+        <Caption1 className={styles.muted}>Orbit {shortId(assignment.orbit)} · program {shortId(assignment.program)}</Caption1>
+        {assignment.syncGroup !== null && <Caption1 className={styles.muted}>
           Sync {assignment.syncGroup} · {assignment.syncMode === null ? "" : syncModeNames[assignment.syncMode]} ·{" "}
           {assignment.staticDelayMs >= 0 ? "+" : ""}{assignment.staticDelayMs} ms
-        </small>}
+        </Caption1>}
       </div>}
-    {health !== null && <>
-      <p className="health-line">{words(health.playback)} · item {shortId(health.currentItem)} · {health.elapsedMs} ms</p>
-      {assignment?.syncGroup != null && <p className="health-line">
+    {health !== null && <div className={styles.stack}>
+      <Caption1 className={styles.muted}>{words(health.playback)} · item {shortId(health.currentItem)} · {health.elapsedMs} ms</Caption1>
+      {assignment?.syncGroup != null && <Caption1 className={styles.muted}>
         Residual {health.driftResidualMs} ms · {health.correctionEvents} corrections
-      </p>}
-      {health.lastError !== "none" && <p className="health-line error-line">Receiver reports {words(health.lastError)}</p>}
-    </>}
-    <div className="button-row wrap">
-      {!revoked && <button className="quiet-button" disabled={assigning || cannotAssign !== null}
+      </Caption1>}
+      {health.lastError !== "none" && <Caption1 className={styles.danger}>Receiver reports {words(health.lastError)}</Caption1>}
+    </div>}
+    <CardFooter>
+      {!revoked && <Button appearance="secondary" disabled={assigning || cannotAssign !== null}
         title={cannotAssign ?? undefined}
-        onClick={() => openDialog({ kind: "assign", receiver })}>{assignment === undefined ? "Assign…" : "Replace…"}</button>}
-      {assignment !== undefined && <button className="quiet-button" disabled={revokingAssignment}
-        onClick={() => openDialog({ kind: "unassign", assignment })}>Unassign</button>}
-      {!revoked && <button className="danger-button" disabled={revokingDevice}
-        onClick={() => openDialog({ kind: "revoke", receiver })}>Revoke receiver…</button>}
-    </div>
-  </article>;
+        onClick={() => openDialog({ kind: "assign", receiver })}>{assignment === undefined ? "Assign…" : "Replace…"}</Button>}
+      {assignment !== undefined && <Button appearance="subtle" disabled={revokingAssignment}
+        onClick={() => openDialog({ kind: "unassign", assignment })}>Unassign</Button>}
+      {!revoked && <Button appearance="subtle" className={styles.danger} disabled={revokingDevice}
+        onClick={() => openDialog({ kind: "revoke", receiver })}>Revoke receiver…</Button>}
+    </CardFooter>
+  </Card>;
 }
 
 function DisplaysDialogs({ dialog, display, orbits, dispatch, onDismiss }: {
@@ -399,22 +496,22 @@ function DisplaysDialogs({ dialog, display, orbits, dispatch, onDismiss }: {
     case "unassign": return <AppDialog title="Unassign this display?"
       description="The receiver will get an unassigned program on its next poll." onDismiss={onDismiss}>
       <DialogFooter>
-        <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-        <button className="primary-button" onClick={() => {
+        <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
+        <Button appearance="primary" onClick={() => {
           void dispatch({ type: "displayAssignmentRevoke", assignment: dialog.assignment.assignment });
           onDismiss();
-        }}>Unassign</button>
+        }}>Unassign</Button>
       </DialogFooter>
     </AppDialog>;
     case "revoke": return <AppDialog title={`Revoke ${dialog.receiver.label}?`}
       description="Its proof key will stop working immediately. Reconnecting this receiver requires a new pairing ceremony."
       onDismiss={onDismiss}>
       <DialogFooter>
-        <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-        <button className="danger-button" onClick={() => {
+        <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
+        <Button appearance="primary" onClick={() => {
           void dispatch({ type: "displayDeviceRevoke", device: dialog.receiver.device });
           onDismiss();
-        }}>Revoke receiver</button>
+        }}>Revoke receiver</Button>
       </DialogFooter>
     </AppDialog>;
   }
@@ -429,42 +526,43 @@ function PassphraseDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismi
   const [again, setAgain] = useState("");
   const long = [...entered].length >= minPassphrase;
   const matches = entered === again;
+  const problem = entered !== "" && !long
+    ? `At least ${minPassphrase} characters.`
+    : again !== "" && !matches ? "These do not match." : undefined;
   return <AppDialog title="Add a passphrase"
     description="A second way into the identifier key, independent of this machine and this identity. It is not stored — it wraps the key and is forgotten, so losing it costs this path and nothing else."
     onDismiss={onDismiss}>
-    <label>Passphrase<input type="password" value={entered} onChange={(event) => setEntered(event.target.value)} /></label>
+    <Field label="Passphrase"><Input type="password" value={entered} onChange={(_, data) => setEntered(data.value)} /></Field>
     {/* Typed twice because it cannot be recovered and cannot be shown back:
         a mistyped passphrase would look like a working slot until the day it
         was the only one left. */}
-    <label>Again<input type="password" value={again} onChange={(event) => setAgain(event.target.value)} /></label>
-    {entered !== "" && !long
-      ? <p className="custody-note">At least {minPassphrase} characters.</p>
-      : again !== "" && !matches
-        ? <p className="custody-note">These do not match.</p>
-        : null}
+    <Field label="Again" validationMessage={problem} validationState={problem === undefined ? "none" : "warning"}>
+      <Input type="password" value={again} onChange={(_, data) => setAgain(data.value)} />
+    </Field>
     <DialogFooter>
-      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-      <button className="primary-button" disabled={!long || !matches} onClick={() => {
+      <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
+      <Button appearance="primary" disabled={!long || !matches} onClick={() => {
         void dispatch({ type: "displayIdentifierAdmitPassphrase", passphrase: entered });
         onDismiss();
-      }}>Add it</button>
+      }}>Add it</Button>
     </DialogFooter>
   </AppDialog>;
 }
 
 function ApproveDialog({ pairing, dispatch, onDismiss }: { pairing: DisplayPairing; dispatch: Dispatch; onDismiss(): void }) {
+  const styles = useStyles();
   const [label, setLabel] = useState(platformName(pairing.platform));
   return <AppDialog title="Approve this display?"
     description="Continue only if the six words and certificate fingerprint exactly match the receiver screen."
     onDismiss={onDismiss}>
-    <p className="phrase">{pairing.confirmationPhrase.join("  ")}</p>
-    <label>Display name<input value={label} onChange={(event) => setLabel(event.target.value)} /></label>
+    <p className={styles.phrase}>{pairing.confirmationPhrase.join("  ")}</p>
+    <Field label="Display name"><Input value={label} onChange={(_, data) => setLabel(data.value)} /></Field>
     <DialogFooter>
-      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-      <button className="primary-button" disabled={label.trim() === ""} onClick={() => {
+      <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
+      <Button appearance="primary" disabled={label.trim() === ""} onClick={() => {
         void dispatch({ type: "displayPairingApprove", pairing: pairing.pairing, label: label.trim() });
         onDismiss();
-      }}>Approve</button>
+      }}>Approve</Button>
     </DialogFooter>
   </AppDialog>;
 }
@@ -473,40 +571,43 @@ function ApproveDialog({ pairing, dispatch, onDismiss }: { pairing: DisplayPairi
 function AssignmentDraftFields({ draft, setDraft, surfaces, orbits }: {
   draft: AssignmentDraft; setDraft(next: AssignmentDraft): void; surfaces: DisplaySurface[]; orbits: Orbit[];
 }) {
+  const styles = useStyles();
   const chosen = surfaces.find((surface) => surfaceKey(surface) === draft.chosenKey);
   const signage = chosen !== undefined && isSignageSurface(chosen);
-  const problem = inputProblem(draft, surfaces);
+  const problem = draft.input.trim() === "" ? null : inputProblem(draft, surfaces);
   const set = <K extends keyof AssignmentDraft>(key: K, value: AssignmentDraft[K]) => setDraft({ ...draft, [key]: value });
   return <>
-    <label>ORBIT<select value={draft.orbit} onChange={(event) => set("orbit", event.target.value)}>
+    <Field label="Orbit"><Select value={draft.orbit} onChange={(_, data) => set("orbit", data.value)}>
       {orbits.map((row) => <option key={row.space} value={row.space}>{row.name}</option>)}
-    </select></label>
-    <label>DISPLAY SURFACE<select value={draft.chosenKey} onChange={(event) => setDraft({ ...draft, chosenKey: event.target.value, input: "" })}>
+    </Select></Field>
+    <Field label="Display surface"><Select value={draft.chosenKey} onChange={(_, data) => setDraft({ ...draft, chosenKey: data.value, input: "" })}>
       {surfaces.map((surface) => <option key={surfaceKey(surface)} value={surfaceKey(surface)}>
         {surface.title} · {surface.world}
       </option>)}
-    </select></label>
-    {signage
-      ? <label>Signage program body ID<input className="mono" value={draft.input} onChange={(event) => set("input", event.target.value)} /></label>
-      : <label>Package input JSON<textarea className="mono" rows={4} value={draft.input} onChange={(event) => set("input", event.target.value)} /></label>}
-    {draft.input.trim() !== "" && problem !== null && <p className="custody-note" data-warning>{problem}</p>}
-    <div className="dialog-grid">
-      <label>THEME<select value={draft.theme} onChange={(event) => set("theme", event.target.value as DisplayTheme)}>
+    </Select></Field>
+    <Field label={signage ? "Signage program body ID" : "Package input JSON"}
+      validationMessage={problem ?? undefined} validationState={problem === null ? "none" : "warning"}>
+      {signage
+        ? <Input value={draft.input} onChange={(_, data) => set("input", data.value)} />
+        : <Textarea rows={4} resize="vertical" value={draft.input} onChange={(_, data) => set("input", data.value)} />}
+    </Field>
+    <div className={styles.grid2}>
+      <Field label="Theme"><Select value={draft.theme} onChange={(_, data) => set("theme", data.value as DisplayTheme)}>
         {(Object.keys(themeNames) as DisplayTheme[]).map((option) => <option key={option} value={option}>{themeNames[option]}</option>)}
-      </select></label>
-      <label>Stale after (seconds)<input value={draft.staleSeconds} onChange={(event) => set("staleSeconds", event.target.value)} /></label>
+      </Select></Field>
+      <Field label="Stale after (seconds)"><Input value={draft.staleSeconds} onChange={(_, data) => set("staleSeconds", data.value)} /></Field>
     </div>
-    <label>WHEN STALE<select value={draft.onStale} onChange={(event) => set("onStale", event.target.value as DisplayStaleAction)}>
+    <Field label="When stale"><Select value={draft.onStale} onChange={(_, data) => set("onStale", data.value as DisplayStaleAction)}>
       {(Object.keys(staleActionNames) as DisplayStaleAction[]).map((option) =>
         <option key={option} value={option}>{staleActionNames[option]}</option>)}
-    </select></label>
-    <label>Sync group (optional)<input className="mono" value={draft.syncGroup} onChange={(event) => set("syncGroup", event.target.value)} /></label>
-    <div className="dialog-grid">
-      <label>SYNC MODE<select value={draft.syncMode} onChange={(event) => set("syncMode", event.target.value as DisplaySyncMode)}>
+    </Select></Field>
+    <Field label="Sync group (optional)"><Input value={draft.syncGroup} onChange={(_, data) => set("syncGroup", data.value)} /></Field>
+    <div className={styles.grid2}>
+      <Field label="Sync mode"><Select value={draft.syncMode} onChange={(_, data) => set("syncMode", data.value as DisplaySyncMode)}>
         {(Object.keys(syncModeNames) as DisplaySyncMode[]).map((option) =>
           <option key={option} value={option}>{syncModeNames[option]}</option>)}
-      </select></label>
-      <label>Static delay (ms, + advances)<input value={draft.staticDelay} onChange={(event) => set("staticDelay", event.target.value)} /></label>
+      </Select></Field>
+      <Field label="Static delay (ms, + advances)"><Input value={draft.staticDelay} onChange={(_, data) => set("staticDelay", data.value)} /></Field>
     </div>
   </>;
 }
@@ -526,8 +627,8 @@ function AssignDialog({ receiver, surfaces, orbits, dispatch, onDismiss }: {
     onDismiss={onDismiss}>
     <AssignmentDraftFields draft={draft} setDraft={setDraft} surfaces={surfaces} orbits={orbits} />
     <DialogFooter>
-      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-      <button className="primary-button" disabled={payload === null} onClick={assign}>Assign</button>
+      <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
+      <Button appearance="primary" disabled={payload === null} onClick={assign}>Assign</Button>
     </DialogFooter>
   </AppDialog>;
 }
@@ -541,6 +642,7 @@ function AssignDialog({ receiver, surfaces, orbits, dispatch, onDismiss }: {
 function AddDisplayDialog({ display, orbits, dispatch, onDismiss }: {
   display: Display; orbits: Orbit[]; dispatch: Dispatch; onDismiss(): void;
 }) {
+  const styles = useStyles();
   const canPromise = display.surfaces.length > 0 && orbits.length > 0;
   const [label, setLabel] = useState("");
   const [promise, setPromise] = useState(canPromise);
@@ -555,17 +657,16 @@ function AddDisplayDialog({ display, orbits, dispatch, onDismiss }: {
   return <AppDialog title="Add a display"
     description="A code the television enters. It works once and lasts fifteen minutes, and it stands in for comparing words: whoever enters it enrols that screen as this display."
     onDismiss={onDismiss}>
-    <label>Display name<input value={label} placeholder="Lobby" autoFocus onChange={(event) => setLabel(event.target.value)} /></label>
+    <Field label="Display name"><Input value={label} placeholder="Lobby" autoFocus onChange={(_, data) => setLabel(data.value)} /></Field>
     {canPromise
-      ? <label className="check-row"><input type="checkbox" checked={promise} onChange={(event) => setPromise(event.target.checked)} />
-          Show something as soon as it connects</label>
-      : <p className="custody-note">{display.surfaces.length === 0
+      ? <Checkbox label="Show something as soon as it connects" checked={promise} onChange={(_, data) => setPromise(data.checked === true)} />
+      : <Caption1 className={mergeClasses(styles.muted)}>{display.surfaces.length === 0
           ? "No selected World declares a display surface, so the display will enrol and wait for an assignment."
-          : "This identity has no Orbit to draw from, so the display will enrol and wait for an assignment."}</p>}
+          : "This identity has no Orbit to draw from, so the display will enrol and wait for an assignment."}</Caption1>}
     {promise && canPromise && <AssignmentDraftFields draft={draft} setDraft={setDraft} surfaces={display.surfaces} orbits={orbits} />}
     <DialogFooter>
-      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
-      <button className="primary-button" disabled={!ready} onClick={mint}>Get a code</button>
+      <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
+      <Button appearance="primary" disabled={!ready} onClick={mint}>Get a code</Button>
     </DialogFooter>
   </AppDialog>;
 }
