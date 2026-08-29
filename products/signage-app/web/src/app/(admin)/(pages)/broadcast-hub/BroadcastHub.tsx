@@ -48,6 +48,7 @@ import {
 import { Thumb } from "@/program-editor/Thumb";
 import { screensReached } from "@/utils/lait/resolve";
 import { mintBodyId } from "@/utils/lait/ids";
+import { nextQuarterHour, scheduledWindow } from "@/utils/lait/schedule";
 import type {
   BroadcastAction,
   Match,
@@ -304,6 +305,10 @@ function Composer({
   const [named, setNamed] = useState<string[]>(addressed ? [addressed] : []);
   const [action, setAction] = useState<BroadcastAction | null>(null);
   const [urgency, setUrgency] = useState<(typeof URGENCY)[number]["id"]>("normal");
+  /** Now, or a window from a time for some minutes — a scheduled broadcast. */
+  const [when, setWhen] = useState<"now" | "later">("now");
+  const [startAt, setStartAt] = useState(() => nextQuarterHour());
+  const [minutes, setMinutes] = useState("30");
   const [sending, setSending] = useState(false);
 
   const mediaMap = useMemo(() => new Map(media.map((entry) => [entry.id, entry])), [media]);
@@ -391,7 +396,10 @@ function Composer({
   /** A name nobody has to invent: what, to whom. Editable, never required. */
   const suggested = whatName && whoName ? `${whatName} to ${whoName}` : "";
 
-  const ready = !!rule && !!action && reach.reached.length > 0 && !sending;
+  const later = when === "later";
+  const minutesValue = Number.parseInt(minutes, 10);
+  const timed = !later || (/^\d{2}:\d{2}$/.test(startAt) && Number.isInteger(minutesValue) && minutesValue >= 1);
+  const ready = !!rule && !!action && reach.reached.length > 0 && !sending && timed;
 
   const send = async () => {
     if (!rule || !action) return;
@@ -412,7 +420,9 @@ function Composer({
         name: name.trim() || suggested || "Broadcast",
         audience: audience.id,
         action,
-        timing: { timing: "when", of: { match: "all" }, priority },
+        timing: later
+          ? { timing: "window", ...scheduledWindow(startAt, minutesValue, priority) }
+          : { timing: "when", of: { match: "all" }, priority },
         supersedes: [],
         cancelled_at_unix_ms: null,
       });
@@ -637,6 +647,43 @@ function Composer({
             if (event.key === "Enter" && ready) void send();
           }}
         />
+        <div className="ds-urgency" role="radiogroup" aria-label="When">
+          {(["now", "later"] as const).map((option) => (
+            <button
+              type="button"
+              key={option}
+              role="radio"
+              aria-checked={when === option}
+              className={when === option ? "is-on" : ""}
+              onClick={() => setWhen(option)}
+            >
+              {option === "now" ? "Now" : "Later"}
+            </button>
+          ))}
+        </div>
+        {later && (
+          <span className="ds-when">
+            <span>at</span>
+            <input
+              className="ds-input"
+              type="time"
+              value={startAt}
+              aria-label="Starts at"
+              onChange={(event) => setStartAt(event.target.value)}
+            />
+            <span>for</span>
+            <input
+              className="ds-input ds-when-minutes"
+              type="number"
+              min={1}
+              max={1440}
+              value={minutes}
+              aria-label="Minutes"
+              onChange={(event) => setMinutes(event.target.value)}
+            />
+            <span>min</span>
+          </span>
+        )}
         <div className="ds-urgency" role="radiogroup" aria-label="Priority">
           {URGENCY.map((entry) => (
             <button
@@ -663,7 +710,7 @@ function Composer({
             ? "Choose what to send"
             : reach.reached.length === 0
               ? "Choose who"
-              : `Send to ${reach.reached.length} ${reach.reached.length === 1 ? "screen" : "screens"}`}
+              : `${later ? "Schedule for" : "Send to"} ${reach.reached.length} ${reach.reached.length === 1 ? "screen" : "screens"}`}
         </button>
       </div>
     </section>

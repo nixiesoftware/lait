@@ -25,6 +25,12 @@ use world_interface::display::{
 use world_interface::{ClientAccess, ClientInvocation, Failure};
 
 const SURFACE_ID: &str = "signage.program";
+/// How long an item plays when neither it nor its library entry says. The
+/// editor shows the same ten seconds, so what a person saw on the strip is
+/// what the screen does. Without this a video whose length nobody recorded
+/// went out open-ended, which the receiver contract allows only for a held
+/// last item — and one such clip in a loop failed the whole program.
+const DEFAULT_ITEM_DURATION_MS: u32 = 10_000;
 const MAX_RENDER_WIDTH: u32 = 4_096;
 const MAX_RENDER_HEIGHT: u32 = 2_160;
 
@@ -205,9 +211,10 @@ impl DisplayRenderer for SignageRenderer {
                 };
                 items.push(RenderedProgramItem {
                     id: item.id.clone(),
-                    duration_ms: item
-                        .duration_ms
-                        .or_else(|| live.as_ref().and_then(|entry| entry.duration_ms)),
+                    duration_ms: Some(item_duration_ms(
+                        item.duration_ms,
+                        live.as_ref().and_then(|entry| entry.duration_ms),
+                    )),
                     scene: drawn.scene,
                     assessment: DisplayAssessment::Current,
                     spoken_summary: spoken_summary(live.as_ref(), now_unix_ms),
@@ -260,6 +267,11 @@ impl DisplayRenderer for SignageRenderer {
             })
         })
     }
+}
+
+/// The item's own length, else its entry's, else the default — never open.
+fn item_duration_ms(item: Option<u32>, entry: Option<u32>) -> u32 {
+    item.or(entry).unwrap_or(DEFAULT_ITEM_DURATION_MS)
 }
 
 fn cycle(value: signage::ProgramCycle) -> ProgramCycle {
@@ -717,6 +729,13 @@ fn draw_character(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_item_of_unknown_length_plays_the_default_rather_than_open_ending_the_program() {
+        assert_eq!(item_duration_ms(Some(4_000), Some(9_700)), 4_000);
+        assert_eq!(item_duration_ms(None, Some(9_700)), 9_700);
+        assert_eq!(item_duration_ms(None, None), DEFAULT_ITEM_DURATION_MS);
+    }
 
     #[test]
     fn the_surface_lists_its_screens_as_choices_by_their_names() {

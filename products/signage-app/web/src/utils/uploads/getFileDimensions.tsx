@@ -1,11 +1,18 @@
-export async function getFileDimensions(file: File): Promise<{ width: number; height: number } | null> {
+export interface ProbedFile {
+  width: number;
+  height: number;
+  /** A video's length from its own header; null for an image. */
+  duration_ms: number | null;
+}
+
+export async function getFileDimensions(file: File): Promise<ProbedFile | null> {
   return new Promise((resolve) => {
     if (file.type.startsWith('image/')) {
       const img = new Image();
       const url = URL.createObjectURL(file);
       img.onload = () => {
         URL.revokeObjectURL(url);
-        resolve({ width: img.width, height: img.height });
+        resolve({ width: img.width, height: img.height, duration_ms: null });
       };
       img.onerror = () => {
         URL.revokeObjectURL(url);
@@ -27,7 +34,13 @@ export async function getFileDimensions(file: File): Promise<{ width: number; he
       };
 
       video.onloadedmetadata = () => {
-        const dimensions = { width: video.videoWidth, height: video.videoHeight };
+        const dimensions = {
+          width: video.videoWidth,
+          height: video.videoHeight,
+          duration_ms: Number.isFinite(video.duration) && video.duration > 0
+            ? Math.round(video.duration * 1000)
+            : null,
+        };
         cleanup();
         resolve(dimensions);
       };

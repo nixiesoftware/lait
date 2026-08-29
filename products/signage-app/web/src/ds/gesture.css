@@ -546,6 +546,24 @@
   color: var(--ds-alarm);
 }
 
+/* "Later": at a time, for some minutes. Reads as one phrase. */
+.ds-when {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--ds-fs-label);
+  color: var(--ds-muted);
+}
+
+.ds-when .ds-input {
+  width: auto;
+  min-height: 30px;
+}
+
+.ds-when-minutes {
+  width: 4.5em;
+}
+
 /* ── Programs: what carries it, legibly ────────────────────────────────── */
 
 .ds-carried {

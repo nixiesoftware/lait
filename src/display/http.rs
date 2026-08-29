@@ -407,7 +407,7 @@ async fn program_snapshot(
         Err(error) => {
             tracing::warn!(
                 device = %authorized.record.device,
-                %error,
+                error = %format_args!("{error:#}"),
                 "display program snapshot compilation failed"
             );
             consumed_refusal(
@@ -471,7 +471,7 @@ async fn program_changes(
         Err(error) => {
             tracing::warn!(
                 device = %authorized.record.device,
-                %error,
+                error = %format_args!("{error:#}"),
                 "display program change compilation failed"
             );
             return consumed_refusal(
@@ -528,7 +528,7 @@ async fn program_changes(
                 Err(error) => {
                     tracing::warn!(
                         device = %authorized.record.device,
-                        %error,
+                        error = %format_args!("{error:#}"),
                         "refreshed display program compilation failed"
                     );
                     return consumed_refusal(
@@ -547,7 +547,7 @@ async fn program_changes(
                 Err(error) => {
                     tracing::warn!(
                         device = %authorized.record.device,
-                        %error,
+                        error = %format_args!("{error:#}"),
                         "display playback realignment failed"
                     );
                     return consumed_refusal(
