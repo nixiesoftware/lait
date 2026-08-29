@@ -3011,6 +3011,47 @@ pub struct Rejected {
     pub device: DeviceId,
 }
 
+/// The evidence a third party cites when it presumes an Attempt dead.
+///
+/// A presumption is a suspicion, not a verdict: it names why the presumer
+/// stopped waiting, never that it observed the Attempt stop. Unreachability
+/// alone is never here — "could not be asked" is not "is not running".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PresumedEvidence {
+    /// The Attempt's admission-to-return budget elapsed on the presumer's
+    /// own clock, measured from when it first observed the lease.
+    Deadline,
+    /// A heartbeat the Spec led the presumer to expect did not arrive in time.
+    MissedHeartbeat,
+    /// The performing Station activation is known to have ended (its epoch is
+    /// gone) without a terminal fact.
+    DeadEpoch,
+}
+
+/// A third party's durable, **non-terminal** claim that an Attempt is presumed
+/// dead. It never resolves the Run: the original executor may still return,
+/// and a later `Returned` or `Failed` on the same Attempt reconciles over it.
+/// Written by a holder of the Spec's `control` demand other than the executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presumed {
+    pub run: RunId,
+    pub attempt: AttemptId,
+    pub evidence: PresumedEvidence,
+    pub presumer: ActorId,
+    pub device: DeviceId,
+}
+
+/// The executor's durable refresh of its own liveness: proof it is still on
+/// the Attempt, resetting the deadline a third party measures against. Written
+/// by the executor device only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Renewed {
+    pub run: RunId,
+    pub attempt: AttemptId,
+    pub executor: ActorId,
+    pub device: DeviceId,
+}
+
 /// Generation-1 predecessor-bound Run event kinds.
 ///
 /// Declaration order is wire order and therefore part of the protocol.
@@ -3026,6 +3067,8 @@ pub enum RunEventKind {
     Cancelled(Cancelled),
     Accepted(Accepted),
     Rejected(Rejected),
+    Presumed(Presumed),
+    Renewed(Renewed),
 }
 
 /// One immutable Run event and the exact prior events it advances from.
@@ -3072,6 +3115,8 @@ impl RunEvent {
             RunEventKind::Cancelled(event) => event.run,
             RunEventKind::Accepted(event) => event.run,
             RunEventKind::Rejected(event) => event.run,
+            RunEventKind::Presumed(event) => event.run,
+            RunEventKind::Renewed(event) => event.run,
         }
     }
 
@@ -3088,6 +3133,8 @@ impl RunEvent {
             RunEventKind::Cancelled(event) => event.attempt,
             RunEventKind::Accepted(event) => Some(event.attempt),
             RunEventKind::Rejected(event) => Some(event.attempt),
+            RunEventKind::Presumed(event) => Some(event.attempt),
+            RunEventKind::Renewed(event) => Some(event.attempt),
         }
     }
 
@@ -3203,6 +3250,14 @@ impl RunEvent {
             RunEventKind::Rejected(event) => {
                 require_predecessors(&self.predecessors)?;
                 valid_actor_device(&event.actor, &event.device)?;
+            }
+            RunEventKind::Presumed(event) => {
+                require_predecessors(&self.predecessors)?;
+                valid_actor_device(&event.presumer, &event.device)?;
+            }
+            RunEventKind::Renewed(event) => {
+                require_predecessors(&self.predecessors)?;
+                valid_actor_device(&event.executor, &event.device)?;
             }
         }
         Ok(())
@@ -3420,6 +3475,11 @@ pub struct Attempt {
     pub outcomes: Vec<Outcome>,
     pub failures: Vec<Fact<Failed>>,
     pub cancellations: Vec<Fact<Cancelled>>,
+    /// Third-party suspicions this Attempt is dead. Non-terminal: their
+    /// presence never resolves the Run, and an Outcome reconciles over them.
+    pub presumptions: Vec<Fact<Presumed>>,
+    /// The executor's own liveness refreshes.
+    pub renewals: Vec<Fact<Renewed>>,
 }
 
 /// Derived view of one durable logical request.
@@ -3763,6 +3823,8 @@ impl Attempt {
             outcomes: Vec::new(),
             failures: Vec::new(),
             cancellations: Vec::new(),
+            presumptions: Vec::new(),
+            renewals: Vec::new(),
         })
     }
 
@@ -3772,6 +3834,8 @@ impl Attempt {
         self.outcomes.sort_by_key(|outcome| outcome.event);
         self.failures.sort_by_key(|fact| fact.event);
         self.cancellations.sort_by_key(|fact| fact.event);
+        self.presumptions.sort_by_key(|fact| fact.event);
+        self.renewals.sort_by_key(|fact| fact.event);
     }
 }
 
@@ -3901,6 +3965,27 @@ impl Run {
                         return Err(Invalid::InvalidEvent("unbound rejection"));
                     }
                     rejected.push(fact(event, value)?);
+                }
+                RunEventKind::Presumed(value) => {
+                    let attempt = attempts
+                        .get_mut(&value.attempt)
+                        .ok_or(Invalid::InvalidEvent("unbound presumption"))?;
+                    // A presumption is a third party's: the executor refreshes
+                    // its own liveness with a Renewal, it does not presume
+                    // itself dead.
+                    if value.device == attempt.device {
+                        return Err(Invalid::InvalidEvent("self presumption"));
+                    }
+                    attempt.presumptions.push(fact(event, value)?);
+                }
+                RunEventKind::Renewed(value) => {
+                    let attempt = attempts
+                        .get_mut(&value.attempt)
+                        .ok_or(Invalid::InvalidEvent("unbound renewal"))?;
+                    if value.executor != attempt.executor || value.device != attempt.device {
+                        return Err(Invalid::InvalidEvent("renewal executor"));
+                    }
+                    attempt.renewals.push(fact(event, value)?);
                 }
             }
         }
@@ -6562,13 +6647,26 @@ mod tests {
             RunEventKind::Rejected(Rejected {
                 run,
                 attempt: attempt(1),
-                actor,
+                actor: actor.clone(),
+                device: device.clone(),
+            }),
+            RunEventKind::Presumed(Presumed {
+                run,
+                attempt: attempt(1),
+                evidence: PresumedEvidence::Deadline,
+                presumer: actor.clone(),
+                device: device.clone(),
+            }),
+            RunEventKind::Renewed(Renewed {
+                run,
+                attempt: attempt(1),
+                executor: actor,
                 device,
             }),
         ];
         assert_eq!(
             kinds.iter().map(tag).collect::<Vec<_>>(),
-            (0..10).collect::<Vec<_>>()
+            (0..12).collect::<Vec<_>>()
         );
 
         for kind in kinds.into_iter().skip(1) {
@@ -6928,6 +7026,70 @@ mod tests {
         assert_eq!(
             Run::project(&[root, lease, duplicate]),
             Err(Invalid::InvalidEvent("duplicate event"))
+        );
+    }
+
+    #[test]
+    fn a_presumption_is_non_terminal_and_an_outcome_reconciles_over_it() {
+        let root = RunEvent::started(started()).unwrap();
+        let run = root.run();
+        let root_id = root.id().unwrap();
+        let lease = leased_event(run, root_id, 0x51);
+        let attempt_id = AttemptId::of_event(lease.id().unwrap());
+        // The helper leases under the device derived from its station byte.
+        let executor_device = mechanics::actor::device_from_seed(&[0x51; 32]);
+
+        // A third party — a different device — presumes the Attempt dead.
+        let presumer = ActorId::from_incept_hash(&"e".repeat(64));
+        let presumer_device = mechanics::actor::device_from_seed(&[0x99; 32]);
+        let presumed = RunEvent::new(
+            vec![lease.id().unwrap()],
+            RunEventKind::Presumed(Presumed {
+                run,
+                attempt: attempt_id,
+                evidence: PresumedEvidence::Deadline,
+                presumer: presumer.clone(),
+                device: presumer_device.clone(),
+            }),
+        )
+        .unwrap();
+
+        // The presumption attaches, but the Run is still unresolved: a
+        // suspicion is not a verdict.
+        let projection = Run::project(&[root.clone(), lease.clone(), presumed.clone()]).unwrap();
+        assert!(projection.is_unresolved());
+        assert_eq!(projection.attempts.len(), 1);
+        assert_eq!(projection.attempts[0].presumptions.len(), 1);
+        assert_eq!(
+            projection.attempts[0].presumptions[0].value.evidence,
+            PresumedEvidence::Deadline
+        );
+        assert!(projection.attempts[0].outcomes.is_empty());
+
+        // The original executor returns after being presumed: the Outcome
+        // reconciles over the presumption, on the same Attempt.
+        let returned = returned_event(run, attempt_id, presumed.id().unwrap(), 0x61);
+        let reconciled =
+            Run::project(&[root.clone(), lease.clone(), presumed.clone(), returned]).unwrap();
+        assert_eq!(reconciled.attempts[0].presumptions.len(), 1);
+        assert_eq!(reconciled.attempts[0].outcomes.len(), 1);
+        assert!(reconciled.is_unresolved());
+
+        // The executor cannot presume itself: a self-presumption is malformed.
+        let self_presumed = RunEvent::new(
+            vec![lease.id().unwrap()],
+            RunEventKind::Presumed(Presumed {
+                run,
+                attempt: attempt_id,
+                evidence: PresumedEvidence::Deadline,
+                presumer,
+                device: executor_device,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            Run::project(&[root, lease, self_presumed]),
+            Err(Invalid::InvalidEvent("self presumption"))
         );
     }
 
