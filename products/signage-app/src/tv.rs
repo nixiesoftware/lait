@@ -1,23 +1,23 @@
-//! Televisions, as Signage speaks of them.
+//! The television that shows a screen, as Signage speaks of it.
 //!
-//! A TV belongs to a screen. Adding one, pointing it at a screen, taking it
-//! off, forgetting it — those are this World's acts, done in its own words,
-//! and they land on the host's display family, which scopes every one of
-//! them to this World: the surface is always this product's, the input is
-//! always a screen, and the host names the World. Nothing here can reach a
-//! receiver another World holds, and nothing here can take over the machine's
-//! own screen — that stays with the linked-devices manager.
+//! Signage has one word for hardware, and it is "screen". A screen is a real
+//! screen; the only question about it is whether a television is showing it
+//! yet. So the acts here are a screen's: get a code for its TV, withdraw it,
+//! say which screen a TV that connected by words is, disconnect the TV. Each
+//! lands on the host's display family, which scopes it to this World: the
+//! surface is always this product's, the input is always a screen, and the
+//! host names the World. Nothing here can reach a receiver another World
+//! holds, and nothing here can take over the machine's own screen — that
+//! stays with the linked-devices manager.
 //!
-//! The one policy this product adds: **a screen's TVs play in step.** Every TV
-//! pointed at a screen joins the sync group named for it, so a wall of three
-//! panels showing one screen is one clock, not three.
+//! A TV has no name of its own here. The label the host keeps for it is the
+//! screen's name, so the linked-devices manager lists it the way Signage
+//! does.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use world_interface::display::DisplaySurfaceId;
-use world_interface::{
-    ClientAccess, ClientHost, Failure, HostControlRequest, HostDisplaySync, HostDisplaySyncMode,
-};
+use world_interface::{ClientAccess, ClientHost, Failure, HostControlRequest};
 
 /// The local operation these ride on, for the host's `execute`.
 pub const LOCAL_TV: &str = "signage.tv";
@@ -28,7 +28,8 @@ pub enum TvRequest {
     /// This World's TVs, the ones nobody holds, and the codes and word-pairings
     /// waiting.
     TvList,
-    /// A code for a new TV that will show `screen` the moment it connects.
+    /// A code for the TV that will show `screen` the moment it connects.
+    /// `label` is the screen's name — the TV is known by it everywhere else.
     TvCodeMint {
         screen: String,
         label: String,
@@ -36,20 +37,16 @@ pub enum TvRequest {
     TvCodeRevoke {
         rendezvous: String,
     },
-    /// Point a TV at a screen — one this World holds, or one nobody holds.
+    /// A TV that shows no screen, or a screen that is gone, is this one.
     TvAssign {
         device: String,
         screen: String,
     },
-    /// Leave a TV showing nothing.
-    TvUnassign {
-        device: String,
-    },
-    /// Forget a TV.
+    /// Disconnect a TV: it asks for a code again.
     TvForget {
         device: String,
     },
-    /// Trust a TV asking to connect by words, name it, and point it at a screen.
+    /// Trust a TV asking to connect by words: it is `screen`.
     TvPairingApprove {
         pairing: String,
         label: String,
@@ -82,19 +79,10 @@ fn surface() -> Result<DisplaySurfaceId, Failure> {
 fn screen_input(screen: &str) -> Result<Value, Failure> {
     if replica::body::BodyId::parse(screen).is_none() {
         return Err(Failure::new(
-            "a TV is pointed at a screen by the screen's id",
+            "a TV shows a screen, named by the screen's id",
         ));
     }
     Ok(serde_json::json!({ "screen": screen }))
-}
-
-/// A screen's TVs are one clock: the sync group is the screen.
-fn screen_sync(screen: &str) -> HostDisplaySync {
-    HostDisplaySync {
-        group: format!("screen-{screen}"),
-        mode: HostDisplaySyncMode::StayInSync,
-        static_delay_ms: 0,
-    }
 }
 
 pub async fn run(host: &dyn ClientHost, request: TvRequest) -> Result<Value, Failure> {
@@ -105,13 +93,13 @@ pub async fn run(host: &dyn ClientHost, request: TvRequest) -> Result<Value, Fai
         }
         TvRequest::TvCodeMint { screen, label } => {
             if label.trim().is_empty() {
-                return Err(Failure::new("a TV needs a name before it gets a code"));
+                return Err(Failure::new("a code is labelled by the screen's name"));
             }
             host.call_control(HostControlRequest::DisplayCodeMint {
                 label,
                 surface: surface()?,
                 input: screen_input(&screen)?,
-                sync: Some(screen_sync(&screen)),
+                sync: None,
             })
             .await
         }
@@ -120,10 +108,6 @@ pub async fn run(host: &dyn ClientHost, request: TvRequest) -> Result<Value, Fai
                 .await
         }
         TvRequest::TvAssign { device, screen } => assign(host, device, &screen).await,
-        TvRequest::TvUnassign { device } => {
-            host.call_control(HostControlRequest::DisplayUnassign { device })
-                .await
-        }
         TvRequest::TvForget { device } => {
             host.call_control(HostControlRequest::DisplayForget { device })
                 .await
@@ -159,7 +143,7 @@ async fn assign(host: &dyn ClientHost, device: String, screen: &str) -> Result<V
         device,
         surface: surface()?,
         input: screen_input(screen)?,
-        sync: Some(screen_sync(screen)),
+        sync: None,
     })
     .await
 }
@@ -181,19 +165,21 @@ mod tests {
         assert_eq!(mint.access(), ClientAccess::Command);
         assert!(TvRequest::is_tv_command("tv_assign"));
         assert!(!TvRequest::is_tv_command("screen_list"));
+        // A TV is never left showing nothing on purpose: there is no such act.
+        assert!(serde_json::from_value::<TvRequest>(
+            serde_json::json!({ "cmd": "tv_unassign", "device": "dev" })
+        )
+        .is_err());
     }
 
     #[test]
-    fn a_screen_is_the_input_and_its_tvs_are_one_clock() {
+    fn a_screen_is_the_input_and_the_surface_is_this_products() {
         let input = screen_input("z6d2vyxarb6rqqnhtm2iy6i7mq").unwrap();
         assert_eq!(
             input,
             serde_json::json!({ "screen": "z6d2vyxarb6rqqnhtm2iy6i7mq" })
         );
         assert!(screen_input("not a screen").is_err());
-        let sync = screen_sync("z6d2vyxarb6rqqnhtm2iy6i7mq");
-        assert_eq!(sync.group, "screen-z6d2vyxarb6rqqnhtm2iy6i7mq");
-        assert_eq!(sync.mode, HostDisplaySyncMode::StayInSync);
         assert_eq!(surface().unwrap().as_str(), "signage.program");
     }
 }

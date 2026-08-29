@@ -1,22 +1,26 @@
 /**
- * Televisions that are not yet a screen.
+ * Televisions that are no screen.
  *
  * Two kinds arrive here: a TV asking to connect by words — somebody at a
- * television typed this site's name — and a TV that is linked but idle,
- * detached from whatever it was. Each is one question, asked once, on the
- * page that lists screens: which screen is this? Answering makes it that
- * screen, and it leaves this list for that screen's page.
+ * television typed this site's name — and a TV that shows no screen, because
+ * it was linked without one or the screen it showed was removed. Each is one
+ * question, asked once, on the page that lists screens: which screen is
+ * this? Answering makes it that screen, and it leaves this list.
  */
 
 import { Tv } from "lucide-react";
 import { ChoiceMenu, haptic, useToast } from "@/ds";
-import { approveTvPairing, assignTv, platformName, rejectTvPairing, useTvs } from "@/utils/tv/api";
+import { approveTvPairing, assignTv, platformName, rejectTvPairing, screenOf, useTvs } from "@/utils/tv/api";
 import type { SignageScreen } from "@/utils/lait/types";
 
 export function UnlinkedTvs({ screens }: { screens: SignageScreen[] }) {
   const toast = useToast();
   const { fleet, refresh } = useTvs();
-  const idle = (fleet?.receivers ?? []).filter((tv) => tv.assignment === null);
+  const known = new Set(screens.map((screen) => screen.id));
+  const idle = (fleet?.receivers ?? []).filter((tv) => {
+    const shown = screenOf(tv.assignment?.input);
+    return shown === null || !known.has(shown);
+  });
   const pairings = fleet?.pairings ?? [];
   if (idle.length === 0 && pairings.length === 0) return null;
 
@@ -61,7 +65,7 @@ export function UnlinkedTvs({ screens }: { screens: SignageScreen[] }) {
         <div className="ds-tv-row is-free" key={tv.device}>
           <span className="ds-tv-copy">
             <strong>{tv.label}</strong>
-            <span>{platformName(tv.platform)} · linked, not a screen yet</span>
+            <span>{platformName(tv.platform)} · shows no screen</span>
           </span>
           <span className="ds-tv-acts">
             <ChoiceMenu label={`Which screen is ${tv.label}?`} className="ds-btn" items={items} align="end"

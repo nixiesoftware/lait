@@ -42,13 +42,13 @@ import type { SignageScreen } from "@/utils/lait/types";
 
 export default function ScreenList() {
   const { fleet: tvs } = useTvs();
+  /** Whether a TV shows the screen, in a word; unknown until the host answers. */
   const tvSummary = (screenId: string): { label: string; tone: string } | null => {
-    const mine = (tvs?.receivers ?? []).filter((tv) => screenOf(tv.assignment?.input) === screenId);
-    if (mine.length === 0) return null;
+    if (tvs === null) return null;
+    const mine = tvs.receivers.filter((tv) => screenOf(tv.assignment?.input) === screenId);
+    if (mine.length === 0) return { label: "No TV", tone: "none" };
     const rank = { crit: 3, warn: 2, neutral: 1, good: 0 } as const;
-    const worst = mine.map((tv) => tvStatus(tv)).sort((a, b) => rank[b.tone] - rank[a.tone])[0];
-    const count = mine.length === 1 ? "1 TV" : `${mine.length} TVs`;
-    return { label: worst.tone === "good" ? count : `${count} · ${worst.label}`, tone: worst.tone };
+    return mine.map((tv) => tvStatus(tv)).sort((a, b) => rank[b.tone] - rank[a.tone])[0];
   };
   const navigate = useNavigate();
   const toast = useToast();

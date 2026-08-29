@@ -1,11 +1,12 @@
 /**
- * Televisions, as this World sees them.
+ * The television that shows a screen, as this World sees it.
  *
- * A TV belongs to a screen. The host holds the receivers and their trust; this
- * World asks it, in its own words (`tv_*`), for the ones it holds and the ones
- * nobody holds, and tells it which screen each should show. Nothing here can
- * see another World's TVs, and nothing here can take over the machine's own
- * screen — that stays with the linked-devices manager.
+ * Signage has one word for hardware, and it is "screen". The host holds the
+ * receivers and their trust; this World asks it, in its own words (`tv_*`),
+ * which screen each one shows, and gets a code for a screen no TV shows yet.
+ * A TV has no name here — the host's label for it is the screen's name.
+ * Nothing here can see another World's TVs, and nothing here can take over
+ * the machine's own screen — that stays with the linked-devices manager.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -76,13 +77,12 @@ export const mintTvCode = (screen: string, label: string) =>
   });
 export const revokeTvCode = (rendezvous: string) => rpc({ cmd: 'tv_code_revoke', rendezvous });
 export const assignTv = (device: string, screen: string) => rpc({ cmd: 'tv_assign', device, screen });
-export const unassignTv = (device: string) => rpc({ cmd: 'tv_unassign', device });
 export const forgetTv = (device: string) => rpc({ cmd: 'tv_forget', device });
 export const approveTvPairing = (pairing: string, label: string, screen: string) =>
   rpc<{ device: string }>({ cmd: 'tv_pairing_approve', pairing, label, screen });
 export const rejectTvPairing = (pairing: string) => rpc({ cmd: 'tv_pairing_reject', pairing });
 
-/** The screen a receiver or code is pointed at, or null. */
+/** The screen a receiver or code shows, or null. */
 export function screenOf(input: { screen?: string } | null | undefined): string | null {
   return typeof input?.screen === 'string' ? input.screen : null;
 }

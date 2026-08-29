@@ -382,9 +382,8 @@
   font-size: 1em;
 }
 
-.ds-tvchip-none {
-  color: var(--ds-faint);
-  font-size: var(--ds-fs-label);
+.ds-tvchip.is-absent .ds-tvchip-dot {
+  display: none;
 }
 
 /* ── TVs that are no screen yet: rows on the Screens page ─────────────── */
@@ -451,6 +450,7 @@
   gap: 4px;
 }
 
+.ds-tv-count.is-none { color: var(--ds-faint); }
 .ds-tv-count.is-warn { color: var(--ds-miss); }
 .ds-tv-count.is-crit { color: var(--ds-alarm); }
 

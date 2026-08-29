@@ -53,7 +53,7 @@ import {
   type Segment,
 } from "@/ds";
 import { fetchAsRun } from "@/utils/screens/api";
-import { TvChips } from "./TvChips";
+import { ScreenTv } from "./ScreenTv";
 import { putScreen, removeScreen, tune, useFleet } from "@/utils/screens/fleet";
 import { explain, reaches, type Context } from "@/utils/lait/resolve";
 import { KIND_PANELS } from "@/program-editor/kinds/registry";
@@ -291,6 +291,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
               <Tv size={14} />
               {channel ? channel.name : "Not tuned"}
             </ChoiceMenu>
+            <ScreenTv screenId={screen.id} screenName={screen.name} />
             <span>
               <Clock size={14} />
               {heard == null ? (
@@ -300,7 +301,6 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
               )}
             </span>
           </div>
-          <TvChips screenId={screen.id} screenName={screen.name} />
           <Labels screen={screen} put={put} onRefused={refused("Could not label")} />
         </div>
       </section>

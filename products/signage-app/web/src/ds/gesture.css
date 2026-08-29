@@ -194,7 +194,8 @@
   gap: 6px;
 }
 
-.ds-tag .ds-tag-x {
+.ds-tag .ds-tag-x,
+.ds-tvchip .ds-tag-x {
   appearance: none;
   border: 0;
   width: 16px;
@@ -209,7 +210,8 @@
   cursor: pointer;
 }
 
-.ds-tag .ds-tag-x:hover {
+.ds-tag .ds-tag-x:hover,
+.ds-tvchip .ds-tag-x:hover {
   background: var(--ds-hover-strong);
   color: var(--ds-ink);
 }
