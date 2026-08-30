@@ -10,8 +10,8 @@ import {
   type ClientView, type Marker, type MarkerStanding, type OwnDevice, type ProfileFacts,
 } from "./client";
 import {
-  answeringOffer, canAddDevice, certification, codeToEnter, deviceStanding, devicesAbsence,
-  expiryLabel, markerName, markerStanding, pairEnter, spacesHeld,
+  answeringOffer, canAddDevice, canRetire, certification, codeToEnter, deviceStanding,
+  devicesAbsence, expiryLabel, markerName, markerStanding, pairEnter, retireWarning, spacesHeld,
 } from "./devices";
 
 function device(overrides: Partial<OwnDevice> & { device: string }): OwnDevice {
@@ -152,6 +152,29 @@ describe("the rules for a person's own devices", () => {
     expect(certification(unlisted, [])).toEqual([]);
     expect(devicesAbsence(profile({ devices: [unlisted] }))).toBeNull();
     expect(deviceStanding(unlisted).tone).not.toBe("warn");
+  });
+
+  it("offers Retire on another device only, and says what it costs before it happens", () => {
+    const pi = device({ device: "dev_pi", held: ["spc_a", "spc_b"] });
+    expect(canRetire(view(), pi)).toBe(true);
+    // Never the machine a person is sitting at: it cannot sign away its own
+    // place, and the daemon refuses it — offering the control would be
+    // offering a refusal.
+    expect(canRetire(view(), device({ device: "dev_laptop", me: true }))).toBe(false);
+    // Disabled on the frame it is pressed, keyed the way `Action::key`
+    // spells it in tools/astrolabe/src/runtime.rs.
+    expect(keyFor({ type: "deviceRetire", device: "dev_pi" })).toBe("device.retire:dev_pi");
+    expect(canRetire(view({ inFlight: ["device.retire:dev_pi"] }), pi)).toBe(false);
+    expect(canRetire(view({ inFlight: ["device.retire:dev_other"] }), pi)).toBe(true);
+
+    // What is lost is named, and so is what is not: the fear this control
+    // raises is "have I just wiped that machine", and the answer is no.
+    const warning = retireWarning(pi);
+    expect(warning).toContain("2 Spaces");
+    expect(warning).toContain("Nothing on it is deleted");
+    expect(warning).toMatch(/rotated/);
+    expect(retireWarning(device({ device: "dev_pi", held: ["spc_a"] }))).toContain("1 Space");
+    expect(retireWarning(device({ device: "dev_pi" }))).toContain("not listed in any Space");
   });
 
   it("counts a code's remaining life down, and says plainly when it is over", () => {

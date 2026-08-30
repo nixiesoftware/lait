@@ -179,6 +179,35 @@ export function spacesHeld(device: OwnDevice): string {
 }
 
 /**
+ * What retiring one device costs, said before it happens.
+ *
+ * Named rather than counted away: the Spaces it holds stop listing it, and
+ * — the part a person cannot undo by clicking again — anything already
+ * sealed to it stays readable there until an admin rotates that Space's key.
+ * Nothing on the machine is deleted, and saying so is half the sentence: the
+ * fear this control raises is "have I just wiped my laptop", and the answer
+ * is no.
+ */
+export function retireWarning(device: OwnDevice): string {
+  const spaces = device.held.length === 1 ? "1 Space" : `${device.held.length} Spaces`;
+  const listed = device.held.length === 0
+    ? "It is not listed in any Space."
+    : `It stops being listed in ${spaces}.`;
+  return `${listed} Nothing on it is deleted, and it is not asked first — it may be off. `
+    + "Anything already shared with it stays readable there until a Space key is rotated.";
+}
+
+/**
+ * Whether this device can be retired from here. Never this one: the machine
+ * you are sitting at cannot sign away its own place in the profile, and the
+ * daemon refuses it too — a control that offered it would be offering a
+ * refusal.
+ */
+export function canRetire(view: ClientView, device: OwnDevice): boolean {
+  return !device.me && !view.inFlight.includes(actionKey.deviceRetire(device.device));
+}
+
+/**
  * Why there are no device rows to draw, when there are none — and never
  * "you have no devices", which no person can be: a list that has not been
  * read is a question nobody answered, and saying it plainly is the whole
@@ -323,7 +352,8 @@ export function DevicesSurface({ view, dispatch, onBack, ownedWindow = false }: 
             ? <Empty said={absence} />
             : <div className={styles.cards}>
               {profile?.devices.map((device) =>
-                <DeviceRow key={device.device} device={device} markers={profile.markers} />)}
+                <DeviceRow key={device.device} device={device} markers={profile.markers}
+                  view={view} dispatch={dispatch} />)}
             </div>}
         </section>
         {/* Only when this person weighs any. A device with no markers in its
@@ -361,8 +391,11 @@ function WaitingToBeAdded({ code, expiresAtMs }: { code: string; expiresAtMs: nu
   </Card>;
 }
 
-function DeviceRow({ device, markers }: { device: OwnDevice; markers: Marker[] }) {
+function DeviceRow({ device, markers, view, dispatch }: {
+  device: OwnDevice; markers: Marker[]; view: ClientView; dispatch: Dispatch;
+}) {
   const styles = useStyles();
+  const [asking, setAsking] = useState(false);
   const standing = deviceStanding(device);
   // Drawn beside the device, never in front of it: this row is complete
   // whether or not anybody has ever listed the device, and the chips add to
@@ -382,7 +415,19 @@ function DeviceRow({ device, markers }: { device: OwnDevice; markers: Marker[] }
         {listings.length > 0 && <div className={styles.rowTitle}>
           {listings.map((listing) => <Chip key={listing.marker} label={listing.label} tone={listing.tone} />)}
         </div>}
+        {asking && <Caption1 className={styles.muted}>{retireWarning(device)}</Caption1>}
       </div>
+      {/* Asked twice on purpose. Retiring is reversible only by pairing the
+          machine again, and the sentence it costs is worth reading. */}
+      {!device.me && (asking
+        ? <div className={styles.rowTitle}>
+          <Button appearance="primary" disabled={!canRetire(view, device)}
+            onClick={() => { setAsking(false); void dispatch({ type: "deviceRetire", device: device.device }); }}>
+            Retire it
+          </Button>
+          <Button appearance="subtle" onClick={() => setAsking(false)}>Keep it</Button>
+        </div>
+        : <Button appearance="subtle" onClick={() => setAsking(true)}>Retire</Button>)}
     </div>
   </Card>;
 }

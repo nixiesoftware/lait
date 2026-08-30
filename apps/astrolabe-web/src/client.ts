@@ -459,6 +459,7 @@ export type ClientAction =
   | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
   | { type: "devicePairEnter"; code: string } | { type: "devicePairConfirm"; pairing: string; accept: boolean }
+  | { type: "deviceRetire"; device: string }
   | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
   | { type: "openInvitation"; message: string }
   | { type: "sendInvitation"; to: string; link: string }
@@ -515,6 +516,7 @@ export const actionKey = {
   // key per answer would leave the other control live while this one was in
   // flight.
   devicePairConfirm: (pairing: string) => `device.pair.confirm:${pairing}`,
+  deviceRetire: (device: string) => `device.retire:${device}`,
   // Spelled to match `Action::key` in tools/astrolabe/src/runtime.rs. A key that
   // disagrees does not fail — it silently never matches `inFlight`, so the
   // control stays live through its own action and can be pressed twice.
@@ -584,6 +586,7 @@ export function keyFor(action: ClientAction): string {
     case "collectMail": return actionKey.collectMail;
     case "devicePairEnter": return actionKey.devicePairEnter;
     case "devicePairConfirm": return actionKey.devicePairConfirm(action.pairing);
+    case "deviceRetire": return actionKey.deviceRetire(action.device);
     case "blockSender": return actionKey.blockSender(action.person);
     case "acceptContact": return actionKey.acceptContact(action.person);
     case "openConversation": return actionKey.openConversation(action.person);

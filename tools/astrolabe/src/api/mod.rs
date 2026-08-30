@@ -1228,6 +1228,14 @@ pub enum ActionRequest {
         pairing: String,
         accept: bool,
     },
+    /// Retire a device of this profile, from another one.
+    ///
+    /// The profile stops naming it, and every Space this daemon holds that
+    /// listed it stops listing it. Nothing on that machine is deleted and
+    /// nothing is asked of it — it may be off, or gone.
+    DeviceRetire {
+        device: String,
+    },
     /// Block a person at the carrier, so no device of theirs lands again. Also
     /// how an incoming stranger is dismissed.
     BlockSender {
@@ -1434,6 +1442,7 @@ impl ActionRequest {
             Self::DevicePairConfirm { pairing, accept } => {
                 Action::DevicePairConfirm { pairing, accept }
             }
+            Self::DeviceRetire { device } => Action::DeviceRetire { device },
             Self::BlockSender { person } => Action::BlockSender(person),
             Self::AcceptContact { person } => Action::AcceptContact(person),
             Self::OpenConversation { person } => Action::OpenConversation(person),

@@ -181,7 +181,9 @@ pub fn is_read(req: &Request) -> bool {
         | Request::CorrespondInvite { .. }
         // Pairing signs a link as this identity and adopts a device into it.
         | Request::DevicePairEnter { .. }
-        | Request::DevicePairConfirm { .. } => false,
+        | Request::DevicePairConfirm { .. }
+        // Retiring signs a kinship entry and an actor op per Space.
+        | Request::DeviceRetire { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -278,6 +280,9 @@ pub fn is_host_plane(req: &Request) -> bool {
         // and no Space exists yet on the device being paired.
         | Request::DevicePairEnter { .. }
         | Request::DevicePairConfirm { .. }
+        // Retirement is the profile's too: it names a device, not a Space,
+        // and the Spaces it de-lists in are whichever ones this daemon holds.
+        | Request::DeviceRetire { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -444,6 +449,13 @@ mod tests {
         assert!(is_host_plane(&confirm));
         assert!(!is_read(&enter));
         assert!(!is_read(&confirm));
+        // Retirement rides the same plane and is no more a read than
+        // pairing: it signs a kinship entry and an actor op per Space.
+        let retire = Request::DeviceRetire {
+            device: String::new(),
+        };
+        assert!(is_host_plane(&retire));
+        assert!(!is_read(&retire));
     }
 
     /// Minting Coordinates signs as this device, so it is not a read even

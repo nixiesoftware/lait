@@ -175,6 +175,14 @@ pub enum Action {
         pairing: String,
         accept: bool,
     },
+    /// Retire a device of this profile, from another device of it. The
+    /// profile stops naming it, and every Space this daemon holds that
+    /// listed it stops listing it — one signed act per Space. Nothing on the
+    /// retired machine is deleted, and it is never asked first: it may be
+    /// off, lost, or stolen.
+    DeviceRetire {
+        device: String,
+    },
     /// Enter the Space an arriving invitation names, by its deposit id.
     OpenInvitation {
         message: String,
@@ -316,6 +324,7 @@ impl Action {
             // two answers to one question, and a key per answer would leave
             // the other control live while this one was in flight.
             Self::DevicePairConfirm { pairing, .. } => format!("device.pair.confirm:{pairing}"),
+            Self::DeviceRetire { device } => format!("device.retire:{device}"),
             Self::OpenInvitation { message } => format!("invitation.open:{message}"),
             Self::SendInvitation { to, .. } => format!("invitation.send:{to}"),
             Self::BlockSender(person) => format!("correspondence.block:{person}"),
@@ -388,6 +397,7 @@ impl Action {
             Self::DevicePairEnter { .. } => "add a device to your profile".into(),
             Self::DevicePairConfirm { accept: true, .. } => "add the waiting device".into(),
             Self::DevicePairConfirm { accept: false, .. } => "turn the waiting device away".into(),
+            Self::DeviceRetire { .. } => "retire that device".into(),
             Self::OpenInvitation { .. } => "enter the Space you were invited to".into(),
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
@@ -1549,6 +1559,15 @@ impl Worker {
                 } else {
                     "turned away; nothing was written".into()
                 }))
+            }
+            // Answered with what it cost, per Space: a device can be
+            // de-listed in a Space nobody can rotate the key of, and saying
+            // so is the difference between "removed" and "removed and
+            // fenced". The device rows themselves come back on the re-read
+            // every action takes.
+            Action::DeviceRetire { device } => {
+                let retired = client.device_retire(device).await?;
+                Ok(Outcome::Said(retired.said()))
             }
             Action::SendInvitation { to, link } => {
                 self.corresponding(

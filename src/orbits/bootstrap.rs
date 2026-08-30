@@ -956,6 +956,18 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 Err(error) => Response::err(format!("{error:#}")),
             }
         }
+        Request::DeviceRetire { device } => {
+            // The fan-out's memory when a loop is running, and a scratch
+            // record when none is: a daemon that never asked anything has no
+            // memory of asking to clear, and must still be able to retire a
+            // device.
+            let facts = router
+                .correspondence()
+                .fanout()
+                .cloned()
+                .unwrap_or_else(crate::daemon::fanout::Facts::new);
+            crate::daemon::fanout::retire(router, &facts, &device).await
+        }
         Request::HostContext => match config::list_identities() {
             Ok(identities) => Response::Host(HostReply::Context {
                 version: crate::VERSION.to_string(),

@@ -1560,6 +1560,10 @@ enum WebAction {
         pairing: String,
         accept: bool,
     },
+    /// Retire a device of this profile, from another device of it.
+    DeviceRetire {
+        device: String,
+    },
     BlockSender {
         person: String,
     },
@@ -1820,6 +1824,7 @@ impl From<WebAction> for ActionRequest {
             WebAction::SendMessage { to, body } => Self::SendMessage { to, body },
             WebAction::CollectMail => Self::CollectMail,
             WebAction::DevicePairEnter { code } => Self::DevicePairEnter { code },
+            WebAction::DeviceRetire { device } => Self::DeviceRetire { device },
             WebAction::DevicePairConfirm { pairing, accept } => {
                 Self::DevicePairConfirm { pairing, accept }
             }

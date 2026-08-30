@@ -56,6 +56,14 @@ pub enum Failure {
     /// nothing to seal to. Never rendered as "the message failed"; it is "we do
     /// not know how to reach them yet".
     NotReachable,
+    /// The device named is not one this profile resolves to — already retired,
+    /// or never linked here. Appending a retirement for it would change
+    /// nothing while reading like something happened.
+    NotOwn,
+    /// The device asked to be retired is the one being asked. The seed that
+    /// signs is the seed that would go, so the act belongs on another device
+    /// of the profile.
+    RetireHere,
     /// The kinship layer refused.
     Kinship(registry::Failure),
     /// The carrier refused.
@@ -80,6 +88,8 @@ impl std::fmt::Display for Failure {
                 "this device has already corresponded as its own profile and cannot be adopted"
             ),
             Self::NotReachable => write!(f, "we do not know how to reach them yet"),
+            Self::NotOwn => write!(f, "that device is not one of this profile's"),
+            Self::RetireHere => write!(f, "retire this device from another one"),
             Self::Kinship(failure) => write!(f, "the kinship plane refused: {failure:?}"),
             Self::Carrier(refused) => write!(f, "the carrier refused: {refused:?}"),
             Self::Seal(refused) => write!(f, "the letter could not be sealed: {refused:?}"),
@@ -609,6 +619,43 @@ impl ReachPlane {
     #[must_use]
     pub fn canonical_device(&self) -> DeviceId {
         device_from_seed(&self.seed)
+    }
+
+    /// Retire a device of this profile: append a signed retirement, so the
+    /// set this identity resolves to stops naming it.
+    ///
+    /// Supersedes, never erases — the link that admitted the device stays in
+    /// the log, because an artifact already handed to a correspondent cannot
+    /// be unsaid and a local view that disagreed with what they hold would be
+    /// worse than none. What changes is who the profile resolves to, which is
+    /// what every admission on this side reads.
+    ///
+    /// Refuses this machine's own device: the seed that signs the retirement
+    /// is the seed being retired, so the act would leave a machine holding
+    /// the key to a device the profile no longer names — retiring it is
+    /// another device's to do, and saying so is more use than a set that
+    /// quietly excludes the only device that can still sign.
+    pub fn retire_device(&mut self, device: &DeviceId) -> Result<(), Failure> {
+        if *device == self.canonical_device() {
+            return Err(Failure::RetireHere);
+        }
+        if !self.my_devices().contains(device) {
+            return Err(Failure::NotOwn);
+        }
+        let seed = mechanics::actor::random_seed()
+            .map_err(|e| Failure::Egress(format!("no randomness for the retirement: {e}")))?;
+        let mut nonce = [0u8; 16];
+        nonce.copy_from_slice(&seed[..16]);
+        // Past every entry this log carries, so a reader that orders by epoch
+        // sees the retirement after the link it supersedes.
+        let epoch = self.epoch.saturating_add(1);
+        let retirement =
+            mechanics::kinship::Retirement::seal(&self.seed, device.clone(), epoch, nonce)
+                .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        self.registry
+            .extend(&self.profile, Entry::Retire(retirement))?;
+        self.epoch = epoch;
+        Ok(())
     }
 
     /// Adopt a device this identity does not hold the seed for — a placement
@@ -1556,6 +1603,74 @@ mod tests {
         assert!(joiner
             .become_device_of(again, sponsor_device, unrelated, NOW)
             .is_err());
+    }
+
+    /// A retirement drops the device from the set this profile resolves to,
+    /// stays in the log that admitted it, and rides the next announcement so
+    /// a correspondent stops sealing to a machine that is gone. Retiring the
+    /// device this plane signs as is refused — that seed is the one that
+    /// would have to sign its own absence — and so is a device this profile
+    /// never named.
+    #[test]
+    fn a_retirement_drops_the_device_from_the_set_and_never_this_one() {
+        let mut plane = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("found");
+        let me = device_from_seed(&ALICE_A);
+        let other = device_from_seed(&ALICE_B);
+        let (nonce, epoch) = ([31u8; 16], 2);
+        let link = DeviceLink::assemble(
+            (me.clone(), DeviceLink::half(&ALICE_A, &other, nonce, epoch)),
+            (other.clone(), DeviceLink::half(&ALICE_B, &me, nonce, epoch)),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        plane.adopt_device(link).expect("adopt");
+        assert!(plane.my_devices().contains(&other));
+
+        assert!(
+            matches!(plane.retire_device(&me), Err(Failure::RetireHere)),
+            "a machine retired its own device and kept the seed that signs"
+        );
+        assert!(matches!(
+            plane.retire_device(&device_from_seed(&BOB_A)),
+            Err(Failure::NotOwn)
+        ));
+
+        plane.retire_device(&other).expect("retire");
+        assert_eq!(plane.my_devices(), vec![me.clone()], "the set dropped it");
+        assert!(
+            plane
+                .registry()
+                .authored()
+                .next()
+                .is_some_and(|profile| profile == plane.profile()),
+            "the retirement went onto this profile's own log"
+        );
+        // Retiring it again says so rather than appending a second entry
+        // that changes nothing.
+        assert!(matches!(plane.retire_device(&other), Err(Failure::NotOwn)));
+
+        // The set a correspondent reads is the retired one — the link stays
+        // in the log, and what changed is who the profile resolves to.
+        let reader = Standing {
+            device: Some(device_from_seed(&BOB_A)),
+            ..Standing::default()
+        };
+        let announced = plane.announce(Audience::Public, &reader).expect("announce");
+        let mut theirs = Registry::new();
+        theirs
+            .absorb(announced.projection, &announced.genesis, &reader)
+            .expect("a correspondent takes the head");
+        assert_eq!(
+            theirs.resolve(plane.profile()),
+            Some(vec![me]),
+            "a correspondent went on sealing to a retired device"
+        );
+
+        // And it survives the round trip through the durable envelope, which
+        // is what makes the retirement outlive this process.
+        let restored = ReachPlane::restore(ALICE_A, plane.state(), NOW).expect("restore");
+        assert!(!restored.my_devices().contains(&other));
     }
 
     /// A joiner that has spoken as its own profile keeps it. Learning

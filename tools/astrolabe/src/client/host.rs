@@ -58,6 +58,40 @@ pub enum PairEntered {
     AlreadyAdded,
 }
 
+/// What retiring a device cost, per Space.
+///
+/// Two lists rather than a count, because they are different facts: a Space
+/// the device was de-listed in, and a Space where nobody could rotate the key
+/// afterwards — where the device is off the list and can still read what it
+/// already held. Folding the second into the first would report a fence that
+/// was never raised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retired {
+    pub device: String,
+    pub revoked_in: Vec<String>,
+    pub unfenced: Vec<String>,
+}
+
+impl Retired {
+    /// What happened, in one sentence a person can act on.
+    #[must_use]
+    pub fn said(&self) -> String {
+        let spaces = match self.revoked_in.len() {
+            0 => "no Space listed it".to_string(),
+            1 => "removed from 1 Space".to_string(),
+            n => format!("removed from {n} Spaces"),
+        };
+        if self.unfenced.is_empty() {
+            return format!("retired — {spaces}");
+        }
+        format!(
+            "retired — {spaces}; it can still read what it already held in {} \
+             (an admin has to rotate the key there)",
+            self.unfenced.join(", ")
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrbitEntry {
     pub space: String,
@@ -206,6 +240,37 @@ impl Client {
             return Ok(Some(device));
         }
         Ok(None)
+    }
+
+    /// Retire a device of this profile, from another device of it.
+    ///
+    /// Never asks the device first: it may be off, lost or stolen, and a
+    /// retirement that needed the machine's cooperation would be one that
+    /// could not be used when it is most needed. Nothing on it is deleted —
+    /// what it loses is being spoken to.
+    pub async fn device_retire(&self, device: &str) -> ClientResult<Retired> {
+        if device.trim().is_empty() {
+            return Err(ClientError::invalid("retiring a device needs its id"));
+        }
+        let reply = self
+            .host_reply(Request::DeviceRetire {
+                device: device.trim().to_owned(),
+            })
+            .await?;
+        match reply {
+            Some(HostReply::DeviceRetired {
+                device,
+                revoked_in,
+                unfenced,
+            }) => Ok(Retired {
+                device,
+                revoked_in,
+                unfenced,
+            }),
+            other => Err(ClientError::internal(format!(
+                "unexpected answer to a retirement: {other:?}"
+            ))),
+        }
     }
 
     /// Forget an Orbit's registration without touching what is on disk.
