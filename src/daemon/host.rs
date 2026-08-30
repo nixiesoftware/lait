@@ -1242,13 +1242,11 @@ impl Daemon {
         self.router.correspondence().hook_fanout(facts.clone());
         let own = self.router.correspondence().own_devices();
         let stop = self.endpoint.subscribe_stop();
-        let wake = Arc::new(tokio::sync::Notify::new());
         tokio::spawn(crate::daemon::fanout::serve(
             self.router.clone(),
             transport,
             own,
             facts,
-            wake,
             stop,
         ))
     }

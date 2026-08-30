@@ -72,10 +72,7 @@ impl Catalog {
         )
     }
 
-    /// A catalog over a caller-supplied registry read. The loader is what a
-    /// test injects to give two Routers in one process two registries — the
-    /// file itself is process-global.
-    pub(crate) fn with_loader(
+    fn with_loader(
         identity: PathBuf,
         agents_base: PathBuf,
         self_contained: bool,
@@ -94,6 +91,21 @@ impl Catalog {
             self_contained,
             load_bindings,
         }
+    }
+
+    /// A catalog over a caller-supplied registry read.
+    ///
+    /// Test-only, and gated so it stays that way: the registry is one file
+    /// per machine, and this is what lets two Routers in one test process
+    /// each see the stores that are theirs. Production reads the file.
+    #[cfg(test)]
+    pub(crate) fn with_registry_view(
+        identity: PathBuf,
+        agents_base: PathBuf,
+        self_contained: bool,
+        load_bindings: Arc<dyn Fn() -> Vec<Entry> + Send + Sync>,
+    ) -> Self {
+        Self::with_loader(identity, agents_base, self_contained, load_bindings)
     }
 
     #[cfg(test)]

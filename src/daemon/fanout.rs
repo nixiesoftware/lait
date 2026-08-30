@@ -30,7 +30,7 @@ use mechanics::ids::{DeviceId, SpaceId};
 use runtime::correspondence::{MAX_OWN_FRAME, OWN_ALPN};
 use runtime::poison::LockRecovering;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{watch, Notify, Semaphore};
+use tokio::sync::{watch, Semaphore};
 
 use crate::control::{
     ControlRoute, DeviceStanding, FanoutStanding, Liveness, Request, Response, SpaceFanout,
@@ -52,10 +52,11 @@ const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
 const RETRY_FLOOR: Duration = Duration::from_secs(30);
 const RETRY_CEILING: Duration = Duration::from_secs(4 * 3600 + 30 * 60);
 const RETRY_SPREAD: Duration = Duration::from_secs(10);
-/// How long an answer stands before the device is asked again. An answer is
-/// not a fact about the Space — only the ledger is — so it is remembered,
-/// not kept.
-const STANDING_LIFETIME: Duration = Duration::from_secs(3600);
+/// How long a refusal stands before the device is asked again. A refusal is
+/// a condition that passes — an unplaced Station, a consent the Space would
+/// not take yet — so it is remembered, not kept. A *decline* is not on this
+/// clock: see [`Facts::due`].
+const REFUSAL_LIFETIME: Duration = Duration::from_secs(3600);
 /// How many Spaces an offered device enters at once. Each entry drives
 /// admission for up to thirty seconds; a new device receiving every Space
 /// must not serialize them, and must not place all of them either.
@@ -77,8 +78,6 @@ pub(crate) enum OwnFrame {
         coordinates: String,
         routes: Vec<SocketAddr>,
     },
-    /// "What do you hold?"
-    Probe { routes: Vec<SocketAddr> },
 }
 
 /// What the offered device answers.
@@ -96,22 +95,6 @@ pub(crate) enum OwnAnswer {
     Refused {
         why: String,
     },
-    Report(Report),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Report {
-    pub version: String,
-    pub excluded: Vec<String>,
-    pub spaces: Vec<(String, Membership)>,
-    pub routes: Vec<SocketAddr>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum Membership {
-    Member,
-    Pending,
-    Absent,
 }
 
 /// One answer as remembered: what it was, when, and how many times in a row
@@ -156,6 +139,14 @@ impl Facts {
             .get(device)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Forget what a probe last learned, because a fresher answer arrived.
+    /// A dial that failed writes `CouldNotAsk`; leaving it there after the
+    /// device answered would render a stale measurement as the current one,
+    /// which is the same defect as calling an unmeasured device down.
+    fn answered(&self, device: &DeviceId) {
+        self.liveness.lock_recovering().remove(device);
     }
 
     /// The Spaces whose ledger, as last read here, names `device`.
@@ -248,7 +239,13 @@ impl Facts {
     /// names is `Held`, and a device it stopped naming is forgotten so the
     /// next tick offers again — holding is the default, and the ledger is
     /// what decides it.
-    fn note_ledger(&self, space: &str, devices: Vec<DeviceId>, now_ms: u64) {
+    fn note_ledger(
+        &self,
+        space: &str,
+        devices: Vec<DeviceId>,
+        own: Option<&OwnDevices>,
+        now_ms: u64,
+    ) {
         {
             let mut standings = self.standings.lock_recovering();
             standings.retain(|(device, s), recorded| {
@@ -257,7 +254,12 @@ impl Facts {
                     || !matches!(recorded.standing, FanoutStanding::Held)
             });
         }
-        for device in &devices {
+        // A standing is a record of asking, and this daemon asks its own
+        // devices and never itself: the ledger names both, and a row for
+        // either would be a row nothing on this side ever wrote.
+        for device in devices.iter().filter(|device| {
+            own.is_some_and(|own| own.me != **device && own.devices.contains(device))
+        }) {
             self.record(device, space, FanoutStanding::Held, now_ms);
         }
         self.ledger
@@ -267,8 +269,13 @@ impl Facts {
 
     /// Whether `(device, space)` is worth asking now. Nothing recorded is
     /// due; `Held` never is; a device that could not be asked is due at its
-    /// retry time, or at once when woken; an answer is due again only after
-    /// it has stood its lifetime — a wake does not re-ask a no.
+    /// retry time, or at once when woken.
+    ///
+    /// A `Declined` is due never. A person said no on that device, and a
+    /// loop that asked again every hour would be a loop that overrules
+    /// them on the second hour; the standing is memory, so a restart asks
+    /// once more and takes the answer again. A `Refused` is a condition
+    /// rather than an answer, and does come round again.
     fn due(&self, device: &DeviceId, space: &str, now_ms: u64, woken: bool) -> bool {
         let recorded = self
             .standings
@@ -278,31 +285,30 @@ impl Facts {
         let Some(recorded) = recorded else {
             return true;
         };
-        let lifetime = u64::try_from(STANDING_LIFETIME.as_millis()).unwrap_or(u64::MAX);
+        let lifetime = u64::try_from(REFUSAL_LIFETIME.as_millis()).unwrap_or(u64::MAX);
         let floor = u64::try_from(RETRY_FLOOR.as_millis()).unwrap_or(u64::MAX);
         match &recorded.standing {
-            FanoutStanding::Held => false,
+            FanoutStanding::Held | FanoutStanding::Declined { .. } => false,
             FanoutStanding::CouldNotAsk { retry_at_ms, .. } => woken || now_ms >= *retry_at_ms,
             FanoutStanding::Deferred { .. } => {
                 woken || now_ms >= recorded.at_ms.saturating_add(floor)
             }
-            FanoutStanding::Declined { .. } | FanoutStanding::Refused { .. } => {
-                now_ms >= recorded.at_ms.saturating_add(lifetime)
-            }
+            FanoutStanding::Refused { .. } => now_ms >= recorded.at_ms.saturating_add(lifetime),
         }
     }
 }
 
 /// The fan-out, both sides: the holder's reconcile loop, and the answerer
-/// on the Own lane. Runs until `stop`; `wake` skips the current backoff
-/// once. `own` is `None` until the set is restored, and then nothing is
-/// offered or answered — the hub admits nobody on the lane either.
+/// on the Own lane. Runs until `stop`. A device set that changed is the
+/// one thing that skips a backoff: whatever moved in it is worth asking
+/// about now rather than at the end of somebody's retry delay. `own` is
+/// `None` until the set is restored, and then nothing is offered or
+/// answered — the hub admits nobody on the lane either.
 pub(crate) async fn serve(
     router: Arc<Router>,
     transport: Arc<dyn Transport>,
     mut own: watch::Receiver<Option<OwnDevices>>,
     facts: Arc<Facts>,
-    wake: Arc<Notify>,
     mut stop: watch::Receiver<bool>,
 ) {
     let answerer = tokio::spawn(answer_loop(router.clone(), transport.clone(), stop.clone()));
@@ -318,7 +324,6 @@ pub(crate) async fn serve(
                     break;
                 }
             }
-            () = wake.notified() => woken = true,
             changed = own.changed() => {
                 if changed.is_err() {
                     break;
@@ -338,7 +343,14 @@ pub(crate) async fn serve(
                     continue;
                 };
                 let skip_backoff = std::mem::take(&mut woken);
-                step(&router, transport.as_ref(), &set, &facts, skip_backoff).await;
+                // A step dials, and a dial can sit for the answer deadline.
+                // Selected against the stop so a shutdown lands inside the
+                // bound the daemon joins this task with, rather than after
+                // whatever the network was doing when it was asked to end.
+                tokio::select! {
+                    () = step(&router, transport.as_ref(), &set, &facts, skip_backoff) => {}
+                    _ = stop.changed() => break,
+                }
             }
         }
     }
@@ -382,7 +394,13 @@ async fn read_ledger(
     {
         Response::Text { text } => {
             let devices = parse_device_list(&text);
-            facts.note_ledger(space, devices.clone(), crate::daemon::pair::now_ms());
+            let own = router.correspondence().own_devices().borrow().clone();
+            facts.note_ledger(
+                space,
+                devices.clone(),
+                own.as_ref(),
+                crate::daemon::pair::now_ms(),
+            );
             Ok(devices)
         }
         Response::Error { message, .. } => Err(anyhow!(message)),
@@ -575,6 +593,9 @@ async fn offer_one(
                 return;
             }
         };
+    // Whatever it said, it answered: the dial-failure measurement that may
+    // be sitting on this device is now stale, and stale is not current.
+    facts.answered(device);
     let standing = match answer {
         OwnAnswer::Consent { binding } => {
             match router
@@ -606,18 +627,6 @@ async fn offer_one(
         OwnAnswer::Held => FanoutStanding::Held,
         OwnAnswer::Declined { why } => FanoutStanding::Declined { why },
         OwnAnswer::Refused { why } => FanoutStanding::Refused { why },
-        OwnAnswer::Report(report) => {
-            facts.liveness.lock_recovering().insert(
-                device.clone(),
-                Liveness::Reported {
-                    version: report.version,
-                    at: now,
-                },
-            );
-            FanoutStanding::Deferred {
-                why: "answered an offer with a report".into(),
-            }
-        }
     };
     tracing::info!(
         target: "lait::fanout",
@@ -652,6 +661,57 @@ async fn exchange(
     postcard::from_bytes(&reply).context("decode the answer")
 }
 
+/// The Spaces this device is entering right now, and how many it may enter
+/// at once.
+///
+/// The set is what keeps one Space out of two entries at the same time.
+/// `bootstrap::enter` is idempotent only once the store exists, so two
+/// tasks aimed at one directory would both run `enter_space` on it — and a
+/// duplicate offer is ordinary, not exotic: the holder gives up at its
+/// answer deadline and asks again, and a third Space queues behind the
+/// permits long enough for the offer to be repeated.
+struct Entering {
+    permits: Semaphore,
+    in_flight: Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl Entering {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            permits: Semaphore::new(ENTER_CONCURRENCY),
+            in_flight: Mutex::new(std::collections::BTreeSet::new()),
+        })
+    }
+
+    /// Claim `space` for this task, or `None` when another task holds it.
+    fn claim(self: &Arc<Self>, space: &str) -> Option<Claim> {
+        self.in_flight
+            .lock_recovering()
+            .insert(space.to_string())
+            .then(|| Claim {
+                entering: self.clone(),
+                space: space.to_string(),
+            })
+    }
+}
+
+/// One Space's claim on the entering set, released when the task ends —
+/// including when it ends by panicking, which is the whole reason it is a
+/// guard rather than a pair of calls.
+struct Claim {
+    entering: Arc<Entering>,
+    space: String,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.entering
+            .in_flight
+            .lock_recovering()
+            .remove(&self.space);
+    }
+}
+
 /// The other side of the lane. Everything that arrives here was admitted
 /// by the hub against the device set; what is checked here is the offer
 /// itself — that the ticket was signed by the device offering it, for the
@@ -661,7 +721,7 @@ async fn answer_loop(
     transport: Arc<dyn Transport>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let entering = Arc::new(Semaphore::new(ENTER_CONCURRENCY));
+    let entering = Entering::new();
     let mut said_nothing = false;
     loop {
         let incoming = tokio::select! {
@@ -701,7 +761,7 @@ async fn answer_loop(
 async fn answer_one(
     router: Arc<Router>,
     transport: Arc<dyn Transport>,
-    entering: Arc<Semaphore>,
+    entering: Arc<Entering>,
     mut incoming: Incoming,
 ) {
     let from = incoming.from.clone();
@@ -726,10 +786,6 @@ async fn answer_one(
         } => {
             transport.learn(from.clone(), &routes);
             answer_offer(router, &from, &space, &actor, coordinates, entering).await
-        }
-        OwnFrame::Probe { routes } => {
-            transport.learn(from.clone(), &routes);
-            report(&router, transport.as_ref()).await
         }
     };
     let Ok(bytes) = postcard::to_stdvec(&answer) else {
@@ -768,8 +824,17 @@ fn verified_offer(
     Ok(verified)
 }
 
-fn is_member(membership: &str) -> bool {
-    matches!(membership, "admin" | "member")
+/// The actor this device already answers as in a Space it holds — `None`
+/// until it is a member of one, which a device that has entered but not yet
+/// been admitted is not.
+async fn member_actor(router: &Router, home: &std::path::Path, space: &SpaceId) -> Option<String> {
+    let route = ControlRoute::Orbit {
+        address: OrbitAddress::for_store(home, space.clone()),
+    };
+    match router.request_routed(route, &Request::Whoami, None).await {
+        Ok(Response::Whoami(who)) => who.member.then_some(who.actor).flatten(),
+        _ => None,
+    }
 }
 
 async fn answer_offer(
@@ -778,7 +843,7 @@ async fn answer_offer(
     space: &str,
     actor: &str,
     coordinates: String,
-    entering: Arc<Semaphore>,
+    entering: Arc<Entering>,
 ) -> OwnAnswer {
     let verified = match verified_offer(from, space, &coordinates) {
         Ok(verified) => verified,
@@ -789,19 +854,23 @@ async fn answer_offer(
             why: "the offer names a malformed actor".into(),
         };
     }
-    // Already held here as a member: nothing to consent to. Only a store
-    // this machine registered is asked, and asking places it.
+    // Already a member here: nothing to consent to — but only under the
+    // actor the offer names. A device that entered this Space as a person
+    // of its own before it was ever paired is a member under a different
+    // actor, and answering `Held` would put a hold on the holder's books
+    // that its ledger will never name and nothing will ever ask about
+    // again. Only a store this machine registered is asked, and asking
+    // places it.
     let registered = bootstrap::registered_home(&router, space);
     if let Some(home) = &registered {
-        let route = ControlRoute::Orbit {
-            address: OrbitAddress::for_store(home, verified.space.clone()),
-        };
-        if let Ok(Response::Status(info)) =
-            router.request_routed(route, &Request::Status, None).await
-        {
-            if is_member(&info.membership) {
-                return OwnAnswer::Held;
+        match member_actor(&router, home, &verified.space).await {
+            Some(mine) if mine == actor => return OwnAnswer::Held,
+            Some(_) => {
+                return OwnAnswer::Refused {
+                    why: "held under another actor".into(),
+                }
             }
+            None => {}
         }
     }
     let identity = router.catalog().identity().to_path_buf();
@@ -827,8 +896,20 @@ async fn answer_offer(
     // of the two lands first.
     let home = registered.unwrap_or_else(|| bootstrap::allocated_home(space));
     let space = space.to_string();
+    // Consent is owed either way — the holder asked and this device agrees —
+    // but the entry is not started twice. A repeat offer while the first
+    // entry is still in flight is answered and dropped here.
+    let Some(claim) = entering.claim(&space) else {
+        tracing::debug!(
+            target: "lait::fanout",
+            space,
+            "already entering this Space; consenting again without a second entry"
+        );
+        return OwnAnswer::Consent { binding };
+    };
     tokio::spawn(async move {
-        let Ok(_permit) = entering.acquire_owned().await else {
+        let _claim = claim;
+        let Ok(_permit) = entering.permits.acquire().await else {
             return;
         };
         let home = home.to_string_lossy().into_owned();
@@ -851,40 +932,6 @@ async fn answer_offer(
         }
     });
     OwnAnswer::Consent { binding }
-}
-
-/// What this device holds, for a probe. A Space whose Station could not be
-/// asked is left out and said so in the log — never reported as absent.
-async fn report(router: &Router, transport: &dyn Transport) -> OwnAnswer {
-    let mut spaces = Vec::new();
-    for (space, path) in own_spaces(router) {
-        let Some(route) = route_for(&space, &path) else {
-            continue;
-        };
-        match router.request_routed(route, &Request::Status, None).await {
-            Ok(Response::Status(info)) => spaces.push((
-                space,
-                if is_member(&info.membership) {
-                    Membership::Member
-                } else {
-                    Membership::Pending
-                },
-            )),
-            Ok(_) | Err(_) => {
-                tracing::debug!(space, "this Space could not be asked for a report");
-            }
-        }
-    }
-    let routes = transport
-        .advertised_routes(ROUTES_DEADLINE)
-        .await
-        .unwrap_or_default();
-    OwnAnswer::Report(Report {
-        version: crate::VERSION.to_string(),
-        excluded: Vec::new(),
-        spaces,
-        routes,
-    })
 }
 
 #[cfg(test)]
@@ -958,7 +1005,6 @@ mod tests {
         router: Arc<Router>,
         transport: Arc<dyn Transport>,
         facts: Arc<Facts>,
-        wake: Arc<Notify>,
         stop: watch::Sender<bool>,
         task: Option<tokio::task::JoinHandle<()>>,
     }
@@ -971,7 +1017,7 @@ mod tests {
             crate::config::identity_profile(&home).expect("profile");
             let mut roots = roots;
             roots.push(home.clone());
-            let catalog = crate::orbits::Catalog::with_loader(
+            let catalog = crate::orbits::Catalog::with_registry_view(
                 home.clone(),
                 home.join("agents"),
                 false,
@@ -1003,7 +1049,6 @@ mod tests {
                 router,
                 transport,
                 facts,
-                wake: Arc::new(Notify::new()),
                 stop: watch::Sender::new(false),
                 task: None,
             }
@@ -1041,7 +1086,6 @@ mod tests {
                 self.transport.clone(),
                 self.router.correspondence().own_devices(),
                 self.facts.clone(),
-                self.wake.clone(),
                 self.stop.subscribe(),
             )));
         }
@@ -1137,7 +1181,14 @@ mod tests {
         let d_store = poll_until(Duration::from_secs(90), || async {
             let store = bootstrap::registered_home(&d.router, &space)?;
             match d.ask(&space, &store, Request::Status).await {
-                Response::Status(info) if is_member(&info.membership) => Some(store),
+                // A device of the founder's actor reads `admin`, because
+                // that is the actor's standing: the fact under test is that
+                // it is a member at all, under one actor.
+                Response::Status(info)
+                    if matches!(info.membership.as_str(), "member" | "admin") =>
+                {
+                    Some(store)
+                }
                 _ => None,
             }
         })
@@ -1249,22 +1300,42 @@ mod tests {
         );
 
         net.heal();
-        a.wake.notify_one();
+        // What a set change does in production, and the only thing that
+        // skips a backoff: republished here with nothing altered.
+        a.own(&[a.me(), d.me()]);
         // Well inside the thirty-second floor the retry was scheduled at.
         poll_until(Duration::from_secs(20), || async {
             (a.facts.standing(&d.me(), &space) == Some(FanoutStanding::Held)).then_some(())
         })
         .await
         .expect("healed and woken, the Space is held on D before the backoff would have run");
+        // The measurement that said "could not be asked" was taken before
+        // the device answered. It is not the current one, and a view that
+        // kept showing it would be reporting a stale reading as fresh.
+        assert_eq!(
+            a.facts.liveness_of(&d.me()),
+            Liveness::NotProbed,
+            "a device that answered still reads as one that could not be asked"
+        );
+        assert!(matches!(
+            a.reach()
+                .await
+                .devices
+                .iter()
+                .find(|row| row.device == d.me().as_str())
+                .map(|row| &row.liveness),
+            Some(Liveness::NotProbed)
+        ));
 
         a.stop().await;
         d.stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_declined_offer_is_not_retried_until_the_standing_expires() {
-        // D answers no. A records the no verbatim and does not ask again on
-        // the next ticks — nor on a wake, which only skips a backoff.
+    async fn a_declined_offer_is_never_asked_again_while_this_daemon_runs() {
+        // D answers no. A records the no verbatim and does not ask again —
+        // not on the next ticks, and not on a wake. A person's no is not
+        // re-put to them by a loop; a restart may ask once more.
         let root = ScopedRoot::new("declined");
         let net = MemNet::new();
         let a = Side::stand("a", &net, &root, Vec::new()).await;
@@ -1285,10 +1356,9 @@ mod tests {
                         .await
                         .unwrap()
                         .unwrap();
-                    match postcard::from_bytes::<OwnFrame>(&frame).unwrap() {
-                        OwnFrame::Offer { space: offered, .. } => assert_eq!(offered, space),
-                        other => panic!("not an offer: {other:?}"),
-                    }
+                    let OwnFrame::Offer { space: offered, .. } =
+                        postcard::from_bytes::<OwnFrame>(&frame).unwrap();
+                    assert_eq!(offered, space);
                     offers.fetch_add(1, Ordering::SeqCst);
                     let answer = postcard::to_stdvec(&OwnAnswer::Declined {
                         why: "not on this box".into(),
@@ -1317,12 +1387,12 @@ mod tests {
                 why: "not on this box".into()
             })
         );
-        a.wake.notify_one();
+        a.own(&[a.me(), d_id.clone()]);
         tokio::time::sleep(Duration::from_secs(4)).await;
         assert_eq!(
             offers.load(Ordering::SeqCst),
             1,
-            "a declined offer was asked again before its standing expired"
+            "a declined offer was put to the device a second time"
         );
         assert!(
             a.reach()
@@ -1387,5 +1457,102 @@ mod tests {
 
         d.stop().await;
         stranger.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_second_offer_of_a_space_already_being_entered_consents_without_entering_twice() {
+        // The holder gives up at its answer deadline and offers again while
+        // the first entry is still running. Consent is owed both times —
+        // the holder asked and this device agrees — but `enter` is
+        // idempotent only once the store exists, so the second entry must
+        // not start on the same directory.
+        let claims = Entering::new();
+        let held = claims.claim("ws_one").expect("the first claim is granted");
+        assert!(
+            claims.claim("ws_one").is_none(),
+            "two tasks claimed one Space's entry at the same time"
+        );
+        assert!(
+            claims.claim("ws_two").is_some(),
+            "a claim on one Space blocked an unrelated one"
+        );
+        drop(held);
+        assert!(
+            claims.claim("ws_one").is_some(),
+            "a finished entry did not release its Space"
+        );
+
+        let root = ScopedRoot::new("twice");
+        let net = MemNet::new();
+        let a = Side::stand("a", &net, &root, Vec::new()).await;
+        let mut d = Side::stand("d", &net, &root, vec![crate::config::spaces_root()]).await;
+        link(&[&a, &d]);
+        let (space, store) = a.found("Twice");
+        let (link_text, actor) = match a.ask(&space, &store, Request::Coordinates).await {
+            Response::Coordinates { link, actor, .. } => (link, actor),
+            other => panic!("no ticket: {other:?}"),
+        };
+        d.start();
+
+        // A's own loop is not running: these are the only two offers made,
+        // and the second lands while the first entry is still in flight.
+        let offer = OwnFrame::Offer {
+            space: space.clone(),
+            actor,
+            coordinates: link_text,
+            routes: Vec::new(),
+        };
+        for attempt in 1..=2 {
+            let answer = tokio::time::timeout(
+                Duration::from_secs(10),
+                exchange(a.transport.as_ref(), &d.me(), &offer),
+            )
+            .await
+            .expect("answered")
+            .expect("an answer came back");
+            assert!(
+                matches!(answer, OwnAnswer::Consent { .. }),
+                "offer {attempt} was answered with {answer:?} rather than a consent"
+            );
+        }
+
+        d.stop().await;
+        a.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_frame_over_the_lane_bound_is_dropped_unread() {
+        // The bound is the lane's, not the sender's: an own device that
+        // sent more than `MAX_OWN_FRAME` gets nothing back and reaches no
+        // consent. Nothing is owed to a frame that did not arrive whole.
+        let root = ScopedRoot::new("oversize");
+        let net = MemNet::new();
+        let mut d = Side::stand("d", &net, &root, Vec::new()).await;
+        let a_id = device_from_seed(&[79; 32]);
+        d.own(&[d.me(), a_id.clone()]);
+        d.start();
+
+        let a_peer: Arc<dyn Transport> = Arc::new(net.peer(a_id));
+        let mut stream = a_peer
+            .connect(d.me(), OWN_ALPN)
+            .await
+            .expect("the lane admits an own device");
+        let bloated = postcard::to_stdvec(&OwnFrame::Offer {
+            space: "ws_nonsense".into(),
+            actor: "act_nonsense".into(),
+            coordinates: "x".repeat(MAX_OWN_FRAME + 1),
+            routes: Vec::new(),
+        })
+        .expect("encode");
+        assert!(bloated.len() > MAX_OWN_FRAME);
+        stream.send(&bloated).await.expect("send");
+        let answered =
+            tokio::time::timeout(Duration::from_secs(3), stream.recv_bounded(MAX_OWN_FRAME)).await;
+        assert!(
+            !matches!(answered, Ok(Ok(Some(_)))),
+            "an oversized frame was answered: {answered:?}"
+        );
+
+        d.stop().await;
     }
 }
