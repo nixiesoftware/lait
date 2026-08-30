@@ -632,8 +632,10 @@ mod tests {
         }
         assert!(!unit.contains("KillMode"), "KillMode must stay the default");
         // The net plane needs exactly one capability, and holding it ambiently
-        // is what lets the daemon open a TUN without being root. Bounded to
-        // the same one so nothing it starts can gain anything else.
+        // is what lets the daemon open a TUN without being root. Ambient is
+        // also what a child inherits, which is why every spawn path clears it
+        // (`disinherit_capabilities`); the bounding set caps what may ever be
+        // gained here rather than dropping anything.
         assert!(unit
             .lines()
             .any(|l| l == "AmbientCapabilities=CAP_NET_ADMIN"));

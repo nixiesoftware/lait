@@ -151,6 +151,58 @@ mod imp {
     use super::*;
     use std::process::{Command, Stdio};
 
+    /// Hand the child none of this process's capabilities.
+    ///
+    /// A daemon under the service unit holds `CAP_NET_ADMIN` **ambiently**, so the
+    /// net plane can open its interface without being root — and ambient is
+    /// precisely the set that survives `execve`. `CapabilityBoundingSet=` bounds
+    /// what may ever be gained; it drops nothing. So without this, a daemon
+    /// spawned by a head starts holding the spawner's authority over the
+    /// machine's network — and the supervised daemon is started by systemd, which
+    /// grants it its capability there rather than through this path.
+    ///
+    /// Cleared in the child rather than in the spawner: `netstack::tun`'s route
+    /// changes shell out to `ip`, which needs the capability in *its* child, and
+    /// clearing it process-wide around a spawn would be a race every other thread
+    /// could lose. `pre_exec` runs after the fork, so it reaches this child only.
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::as_conversions,
+        reason = "prctl's variadic arguments are `unsigned long` by kernel contract"
+    )]
+    fn disinherit_capabilities(command: &mut Command) {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: the closure runs between fork and exec and must be
+        // async-signal-safe; a bare `prctl` syscall is.
+        unsafe {
+            command.pre_exec(|| {
+                // SAFETY: a documented prctl option taking no pointers.
+                let cleared = libc::prctl(
+                    libc::PR_CAP_AMBIENT,
+                    libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                );
+                if cleared < 0 {
+                    let error = std::io::Error::last_os_error();
+                    // A kernel too old for ambient capabilities has none to
+                    // clear — `PR_CAP_AMBIENT` and the unit option that fills it
+                    // arrived together, in 4.3. Any other failure refuses the
+                    // spawn: a child that kept the spawner's authority is worse
+                    // than a child that never started.
+                    if error.raw_os_error() != Some(libc::EINVAL) {
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn disinherit_capabilities(_command: &mut Command) {}
+
     pub fn spawn(
         exe: &Path,
         log: Option<std::fs::File>,
@@ -189,6 +241,7 @@ mod imp {
             use std::os::unix::process::CommandExt as _;
             cmd.process_group(0);
         }
+        disinherit_capabilities(&mut cmd);
         // `--home` is a global flag the child turns into its own `LAIT_HOME`,
         // selecting a self-contained daemon identity.
         if let Some(identity) = identity {

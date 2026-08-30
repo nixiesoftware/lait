@@ -173,6 +173,14 @@ impl Carry {
         }
     }
 
+    /// How one device is reached, or `None` when this run has no row for it.
+    /// A caller asking per device gets a lookup rather than a copy of the
+    /// whole table, which is what a view drawing every device would otherwise
+    /// pay for once per row.
+    pub fn reach_of(&self, peer: &DeviceId) -> Option<Reach> {
+        lock(&self.table).get(peer).map(|(_, reach)| *reach)
+    }
+
     /// Every device the set has named in the current run, its tunnel address,
     /// and its reach. Per run: a stop empties the table, so a row never
     /// outlives the links it described.
@@ -295,23 +303,45 @@ impl Fabric {
         lock(&self.table).get(peer).map(|row| row.1)
     }
 
-    fn raise_route(&self, ula: Ipv6Addr, tx: mpsc::UnboundedSender<Vec<u8>>) {
+    /// The route table first, the kernel second. `ip` is a whole process, and
+    /// forking one on the runtime's own thread would stall every other plane
+    /// this daemon carries for as long as it takes — so the kernel half runs
+    /// on a blocking thread while the table is already correct.
+    async fn raise_route(&self, ula: Ipv6Addr, tx: mpsc::UnboundedSender<Vec<u8>>) {
         lock(&self.routes).insert(ula, tx);
-        if let Interface::Up { name, .. } = &self.interface {
-            if let Err(error) = crate::tun::add_route(name, ula) {
-                tracing::warn!(%ula, dev = %name, %error, "route not added");
-            }
-        }
+        self.route(ula, true).await;
     }
 
-    fn lower_route(&self, ula: Ipv6Addr) {
-        if lock(&self.routes).remove(&ula).is_none() {
+    async fn lower_route(&self, ula: Ipv6Addr) {
+        let held = lock(&self.routes).remove(&ula).is_some();
+        if !held {
             return;
         }
-        if let Interface::Up { name, .. } = &self.interface {
-            if let Err(error) = crate::tun::del_route(name, ula) {
-                tracing::warn!(%ula, dev = %name, %error, "route not removed");
+        self.route(ula, false).await;
+    }
+
+    /// Add or remove one host route on the interface, if there is one. A
+    /// failure is a degraded tunnel, never a dead daemon: the flow is already
+    /// live either way, and what is missing is the kernel's opinion about
+    /// which packets belong to it.
+    async fn route(&self, ula: Ipv6Addr, add: bool) {
+        let Interface::Up { name, .. } = &self.interface else {
+            return;
+        };
+        let dev = name.clone();
+        let changed = tokio::task::spawn_blocking(move || {
+            if add {
+                crate::tun::add_route(&dev, ula)
+            } else {
+                crate::tun::del_route(&dev, ula)
             }
+        })
+        .await;
+        let verb = if add { "added" } else { "removed" };
+        match changed {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%ula, dev = %name, %error, "route not {verb}"),
+            Err(error) => tracing::warn!(%ula, dev = %name, %error, "route change did not run"),
         }
     }
 }
@@ -445,7 +475,7 @@ impl Running {
             return;
         };
         Self::close_slot(link.slot, RETIRED, b"retired").await;
-        self.fabric.lower_route(link.ula);
+        self.fabric.lower_route(link.ula).await;
         self.fabric.set_reach(peer, Reach::Retired);
         tracing::info!(peer = %peer.short(), "retired from the carry");
     }
@@ -473,7 +503,7 @@ impl Running {
         for peer in peers {
             if let Some(link) = self.links.remove(&peer) {
                 Self::close_slot(link.slot, 0, b"stopping").await;
-                self.fabric.lower_route(link.ula);
+                self.fabric.lower_route(link.ula).await;
             }
         }
         lock(&self.fabric.table).clear();
@@ -549,7 +579,7 @@ impl Running {
         // one connection too many.
         if let Some(link) = self.links.remove(&from) {
             Self::close_slot(link.slot, 0, b"replaced").await;
-            self.fabric.lower_route(link.ula);
+            self.fabric.lower_route(link.ula).await;
         }
         let generation = self.next_generation();
         let connection: Arc<dyn Connection> = Arc::from(connection);
@@ -729,7 +759,7 @@ async fn serve(
     inbound: &std::sync::mpsc::Sender<Vec<u8>>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    fabric.raise_route(ula, tx);
+    fabric.raise_route(ula, tx).await;
     fabric.set_reach(peer, Reach::Connected { via });
     tracing::info!(peer = %peer.short(), %ula, ?via, "carrying");
 
@@ -754,7 +784,7 @@ async fn serve(
         () = writer => {}
         () = reader => {}
     }
-    fabric.lower_route(ula);
+    fabric.lower_route(ula).await;
     tracing::info!(peer = %peer.short(), %ula, "flow ended");
 }
 

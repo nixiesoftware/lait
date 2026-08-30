@@ -137,6 +137,11 @@ mod imp {
                 if ready == 0 {
                     continue;
                 }
+                // `revents` is not consulted: the only descriptor polled is
+                // this one, so anything but a timeout means "ask the file",
+                // and `read` reports `POLLERR`/`POLLHUP` as itself. Reading
+                // the bitmask here would be a second, weaker copy of what the
+                // next line already finds out.
                 return self.file.read(buf);
             }
         }
@@ -162,7 +167,7 @@ mod imp {
     fn unsupported<T>() -> io::Result<T> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "lait-net's TUN interface is Linux-only in this prototype",
+            "a TUN interface is Linux-only for now",
         ))
     }
 

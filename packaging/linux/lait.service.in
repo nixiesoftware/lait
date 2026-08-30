@@ -21,10 +21,13 @@ TimeoutStopSec=45
 KillSignal=SIGTERM
 NoNewPrivileges=yes
 # The net plane's TUN and its routes. Ambient so the daemon holds it without
-# being root, bounded so nothing it starts can gain anything else. A daemon
-# without this reports `interface: not permitted` and carries on — which is
-# why a user-manager install, which cannot grant capabilities at all, simply
-# drops these two lines.
+# being root — and ambient is exactly the set that survives execve, so the
+# daemon clears it in every child it spawns (`disinherit_capabilities`) and
+# leaves it only for the `ip` invocations that need it. The bounding set caps
+# what may ever be gained here; it drops nothing on its own. A daemon without
+# either line reports `interface: not permitted` and carries on — which is why
+# a user-manager install, which cannot grant capabilities at all, simply drops
+# them both.
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 ProtectSystem=strict

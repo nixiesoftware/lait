@@ -80,11 +80,7 @@ impl Facts {
     /// it — a device the set named after this run began, or one with no
     /// endpoint key. An absent row is not an unreachable one.
     pub(crate) fn reach_of(&self, device: &DeviceId) -> Option<ReachKind> {
-        self.carry
-            .peers()
-            .into_iter()
-            .find(|(peer, _, _)| peer == device)
-            .map(|(_, _, reach)| spell(reach))
+        self.carry.reach_of(device).map(spell)
     }
 }
 
@@ -116,7 +112,7 @@ fn spell(reach: Reach) -> ReachKind {
 /// device's id carries no key to derive an address from — both degradations,
 /// never a reason for the daemon not to exist. The returned handle is joined
 /// on stop like every other service the daemon owns.
-pub(crate) fn mount(
+pub(crate) async fn mount(
     transport: Arc<dyn Transport>,
     own: watch::Receiver<Option<OwnDevices>>,
     stop: watch::Receiver<bool>,
@@ -126,7 +122,7 @@ pub(crate) fn mount(
         tracing::warn!("this device's id carries no endpoint key; no tunnel address to serve");
         return None;
     };
-    let (interface, packets) = raise(address, &stop);
+    let (interface, packets) = raise(address, &stop).await;
     match &interface {
         Interface::Up { name, .. } => tracing::info!(dev = %name, %address, "interface up"),
         Interface::NotPermitted => tracing::info!(
@@ -189,16 +185,24 @@ fn devices_in(own: &Option<OwnDevices>) -> Vec<DeviceId> {
 /// packet source that is immediately done and a sink that discards, so it
 /// still dials, admits and keeps its peer table. That is the difference
 /// between "this machine cannot route" and "you have no devices".
-fn raise(address: Ipv6Addr, stop: &watch::Receiver<bool>) -> (Interface, Packets) {
+async fn raise(address: Ipv6Addr, stop: &watch::Receiver<bool>) -> (Interface, Packets) {
     if !crate::daemon::host::net_hosting() {
         return (Interface::Off, nowhere());
     }
-    match open(address, stop) {
-        Ok(up) => up,
-        Err(error) => {
+    // `configure` shells out to `ip`, and this runs while the daemon is
+    // coming up: forking a process on the runtime's own thread would hold
+    // every other service's start behind it.
+    let stop = stop.clone();
+    match tokio::task::spawn_blocking(move || open(address, &stop)).await {
+        Ok(Ok(up)) => up,
+        Ok(Err(error)) => {
             let absent = absence(&error);
             tracing::info!(%error, "the tunnel interface was not opened");
             (absent, nowhere())
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the tunnel interface could not be asked for");
+            (Interface::Unsupported, nowhere())
         }
     }
 }
@@ -297,6 +301,7 @@ mod tests {
                 .expect("the identity endpoint is raised");
             let stop = watch::Sender::new(false);
             let (facts, task) = mount(transport, own.subscribe(), stop.subscribe())
+                .await
                 .expect("the net lane is there to take");
             Self {
                 seed,
@@ -344,7 +349,9 @@ mod tests {
     async fn a_stranger_never_becomes_a_route_and_a_retired_device_loses_the_one_it_had() {
         // No interface is asked for: this is about who is carried, not about
         // what a kernel does with the packets, and a test that raised `lait0`
-        // would depend on the machine it ran on.
+        // would depend on the machine it ran on. Set process-wide, which is
+        // safe because nextest gives every test its own process — the same
+        // ground `LAIT_CONFIG_ROOT` is set on across this suite.
         std::env::set_var("LAIT_NET", "off");
         let net = MemNet::new().with_planes();
         let (a_seed, b_seed, stranger_seed) = ([21; 32], [22; 32], [23; 32]);
@@ -419,6 +426,7 @@ mod tests {
             "a box with no /dev/net/tun does not offer the interface either"
         );
 
+        // Process-wide, and safe for the reason above: one process per test.
         std::env::set_var("LAIT_NET", "off");
         let net = MemNet::new().with_planes();
         let (a_seed, b_seed) = ([31; 32], [32; 32]);

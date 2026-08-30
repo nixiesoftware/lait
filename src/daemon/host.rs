@@ -1071,9 +1071,10 @@ impl Daemon {
         // reason: a Pi under the service unit is the node with
         // `LAIT_DISPLAY=off`, and mounting this inside the display branch
         // below would skip exactly the device the plane exists for.
-        let netplane = identity_transport
-            .as_ref()
-            .and_then(|transport| self.spawn_netplane(transport.clone()));
+        let netplane = match identity_transport.as_ref() {
+            Some(transport) => self.spawn_netplane(transport.clone()).await,
+            None => None,
+        };
 
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
@@ -1282,13 +1283,13 @@ impl Daemon {
     ///
     /// `None` when the endpoint has no net lane to hand over — a degradation
     /// the daemon goes on without, like a missing display lane.
-    fn spawn_netplane(
+    async fn spawn_netplane(
         &self,
         transport: Arc<dyn comms::Transport>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let own = self.router.correspondence().own_devices();
         let stop = self.endpoint.subscribe_stop();
-        let (facts, task) = crate::daemon::netplane::mount(transport, own, stop)?;
+        let (facts, task) = crate::daemon::netplane::mount(transport, own, stop).await?;
         self.router.correspondence().hook_netplane(facts);
         Some(task)
     }
