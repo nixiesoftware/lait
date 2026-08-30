@@ -3881,6 +3881,7 @@ name = "lait-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "comms",
  "mechanics",
  "netstack",
  "tokio",
@@ -4591,9 +4592,13 @@ dependencies = [
  "anyhow",
  "blake3",
  "comms",
+ "getrandom 0.3.4",
  "libc",
  "mechanics",
+ "postcard",
+ "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -18,7 +18,13 @@ comms = { path = "../comms" }
 mechanics = { path = "../mechanics" }
 blake3 = "1"
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tracing = "0.1"
+# The opening on every flow is postcard, the workspace's canonical codec.
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+# Dial backoff jitter, as `correspondence::watch` draws its own.
+getrandom = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

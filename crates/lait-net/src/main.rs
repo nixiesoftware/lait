@@ -15,14 +15,24 @@
 //! ```
 
 use std::net::{Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use comms::{DefaultFactory, Protocols, Transport, TransportFactory};
 use mechanics::ids::DeviceId;
 
-use netstack::carry::{Config, Peer};
+use netstack::carry::{Carry, Interface, Packets, NET_ALPN};
 use netstack::{parse_key_hex, ula_from_key, LocalNet, Network};
 
 const DEFAULT_DEV: &str = "lait0";
+
+/// One named peer: who it is, where its packets are addressed, and — under
+/// `Isolated` — how to reach it directly.
+struct Peer {
+    id: DeviceId,
+    ula: Ipv6Addr,
+    direct: Vec<SocketAddr>,
+}
 
 struct Cli {
     seed: [u8; 32],
@@ -166,19 +176,62 @@ async fn main() -> Result<()> {
     }
 
     let (tun_reader, actual) = netstack::tun::open(&cli.dev).context("open TUN")?;
-    let peer_addrs: Vec<Ipv6Addr> = cli.peers.iter().map(|peer| peer.ula).collect();
-    netstack::tun::configure(&actual, address, &peer_addrs).context("configure TUN")?;
+    netstack::tun::configure(&actual, address).context("configure TUN")?;
     let tun_writer = tun_reader.try_clone().context("clone TUN handle")?;
     println!("interface {actual} up; carrying over lait transport");
 
-    netstack::carry::run(
-        Config {
-            seed: cli.seed,
-            network: cli.network,
-            peers: cli.peers,
+    // The carry borrows a transport; standalone, this front builds it. Under
+    // Isolated there is no discovery, so teach it each peer's direct
+    // addresses before the carry dials.
+    let transport: Arc<dyn Transport> = DefaultFactory
+        .build(
+            &cli.seed,
+            &cli.network,
+            Protocols {
+                framed: &[],
+                session: &[NET_ALPN],
+            },
+        )
+        .await
+        .context("build transport")?;
+    for peer in &cli.peers {
+        if !peer.direct.is_empty() {
+            transport.learn(peer.id.clone(), &peer.direct);
+        }
+    }
+    // The endpoint has one undivided session door; the carry wants its lane.
+    let (lane_tx, lane_rx) = tokio::sync::mpsc::channel(16);
+    {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            while let Some(incoming) = transport.accept_connection().await {
+                if lane_tx.send(incoming).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // A static own set: this device and every peer named on the command line.
+    let mut own: Vec<DeviceId> = cli.peers.iter().map(|peer| peer.id.clone()).collect();
+    own.push(device);
+    own.sort();
+    let (_own_tx, own_rx) = tokio::sync::watch::channel(own);
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+    Carry::new(Interface::Up {
+        name: actual,
+        address,
+    })
+    .run(
+        transport,
+        lane_rx,
+        own_rx,
+        Packets {
+            read: Box::new(tun_reader),
+            write: Box::new(tun_writer),
         },
-        tun_reader,
-        tun_writer,
+        stop_rx,
     )
     .await
 }

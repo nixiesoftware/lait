@@ -73,15 +73,20 @@ mod imp {
         Ok(())
     }
 
-    /// Assign `address` to `dev`, bring it up, and route each peer's address
-    /// into it. Uses iproute2 (`ip`) and therefore needs `CAP_NET_ADMIN`.
-    pub fn configure(dev: &str, address: Ipv6Addr, peers: &[Ipv6Addr]) -> io::Result<()> {
+    /// Assign `address` to `dev` and bring it up. Uses iproute2 (`ip`) and
+    /// therefore needs `CAP_NET_ADMIN`. Peer routes are not taken here: they
+    /// follow the own set as it changes, through `add_route`/`del_route`.
+    pub fn configure(dev: &str, address: Ipv6Addr) -> io::Result<()> {
         run(&["-6", "addr", "add", &format!("{address}/128"), "dev", dev])?;
-        run(&["link", "set", dev, "up"])?;
-        for peer in peers {
-            run(&["-6", "route", "add", &format!("{peer}/128"), "dev", dev])?;
-        }
-        Ok(())
+        run(&["link", "set", dev, "up"])
+    }
+
+    pub fn add_route(dev: &str, ula: Ipv6Addr) -> io::Result<()> {
+        run(&["-6", "route", "add", &format!("{ula}/128"), "dev", dev])
+    }
+
+    pub fn del_route(dev: &str, ula: Ipv6Addr) -> io::Result<()> {
+        run(&["-6", "route", "del", &format!("{ula}/128"), "dev", dev])
     }
 }
 
@@ -102,7 +107,15 @@ mod imp {
         unsupported()
     }
 
-    pub fn configure(_dev: &str, _address: Ipv6Addr, _peers: &[Ipv6Addr]) -> io::Result<()> {
+    pub fn configure(_dev: &str, _address: Ipv6Addr) -> io::Result<()> {
+        unsupported()
+    }
+
+    pub fn add_route(_dev: &str, _ula: Ipv6Addr) -> io::Result<()> {
+        unsupported()
+    }
+
+    pub fn del_route(_dev: &str, _ula: Ipv6Addr) -> io::Result<()> {
         unsupported()
     }
 }
@@ -113,7 +126,18 @@ pub fn open(requested: &str) -> io::Result<(std::fs::File, String)> {
     imp::open(requested)
 }
 
-/// Assign `address`, bring `dev` up, and route each peer address into it.
-pub fn configure(dev: &str, address: Ipv6Addr, peers: &[Ipv6Addr]) -> io::Result<()> {
-    imp::configure(dev, address, peers)
+/// Assign `address` and bring `dev` up.
+pub fn configure(dev: &str, address: Ipv6Addr) -> io::Result<()> {
+    imp::configure(dev, address)
+}
+
+/// Route one peer's tunnel address into `dev`. Called as a device joins the
+/// own set, so a route exists exactly as long as the device that owns it.
+pub fn add_route(dev: &str, ula: Ipv6Addr) -> io::Result<()> {
+    imp::add_route(dev, ula)
+}
+
+/// The inverse of [`add_route`], for a device retired from the set.
+pub fn del_route(dev: &str, ula: Ipv6Addr) -> io::Result<()> {
+    imp::del_route(dev, ula)
 }
