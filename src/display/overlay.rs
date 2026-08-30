@@ -15,7 +15,7 @@
 //! stronger than the self-signed certificate the TCP path pins.
 
 use anyhow::Result;
-use comms::{FlowIo, Transport};
+use comms::{ConnectionQueue, FlowIo};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -32,13 +32,14 @@ pub const DISPLAY_ALPN: &[u8] = b"lait/display/1";
 /// Ceiling for one overlay read. A pre-allocation bound, not a target.
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Serve the display router over every connection arriving on the transport.
+/// Serve the display router over every connection arriving on the queue.
 ///
-/// The transport is expected to register only [`DISPLAY_ALPN`]; anything else
-/// is refused by closing, never half-served. Runs until `stop` says so or the
-/// transport shuts.
+/// The queue is the identity endpoint's [`DISPLAY_ALPN`] lane, taken once
+/// from the transport hub: everything on it is this plane's by construction,
+/// and there is no second endpoint under the identity's key for a dialer to
+/// reach instead of this one. Runs until `stop` says so or the lane closes.
 pub async fn serve_display_overlay(
-    transport: std::sync::Arc<dyn Transport>,
+    mut queue: ConnectionQueue,
     app: axum::Router,
     mut stop: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -53,12 +54,8 @@ pub async fn serve_display_overlay(
                     break;
                 }
             }
-            incoming = transport.accept_connection() => {
+            incoming = queue.recv() => {
                 let Some(incoming) = incoming else { break };
-                if incoming.alpn != DISPLAY_ALPN {
-                    incoming.connection.close(0, b"unknown display plane");
-                    continue;
-                }
                 let app = app.clone();
                 connections.spawn(async move {
                     let connection = incoming.connection;
@@ -95,31 +92,32 @@ pub async fn serve_display_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::transport_hub::TransportHubFactory;
     use comms::policy::Network;
-    use comms::{DefaultTransport, Protocols};
+    use comms::{DefaultFactory, DefaultTransport, Protocols, Transport, TransportFactory};
     use std::sync::Arc;
     use std::time::Duration;
 
-    /// The plane end to end, with no relay and no listener: an Isolated
-    /// overlay pair, a dial by direct address, one bidirectional flow, and an
-    /// ordinary HTTP/1.1 exchange over it against a real axum router. This is
-    /// what the daemon serves and what the router will splice into; the
+    /// The plane end to end, with no relay and no listener: the identity's
+    /// hub endpoint on one side, a dial by direct address on the other, one
+    /// bidirectional flow, and an ordinary HTTP/1.1 exchange over it against
+    /// a real axum router. This is what the daemon serves — the overlay is a
+    /// lane of the identity endpoint, not an endpoint of its own — and the
     /// coordinator's own routes ride it unchanged because they are the same
     /// `axum::Router` type this test hands in.
     #[tokio::test]
     async fn the_display_router_answers_over_the_overlay() {
-        let serving = Arc::new(
-            DefaultTransport::new(
-                &[81u8; 32],
-                &Network::Isolated,
-                Protocols {
-                    framed: &[],
-                    session: &[DISPLAY_ALPN],
-                },
-            )
-            .await
-            .expect("bind serving overlay endpoint"),
+        let hub = TransportHubFactory::new(
+            Arc::new(DefaultFactory),
+            tokio::sync::watch::channel(None).1,
         );
+        let serving = hub
+            .identity_transport(&[81u8; 32], &Network::Isolated)
+            .await
+            .expect("raise the identity endpoint");
+        let queue = serving
+            .take_session_queue(DISPLAY_ALPN)
+            .expect("the display lane is taken once");
         let dialing = DefaultTransport::new(
             &[82u8; 32],
             &Network::Isolated,
@@ -136,7 +134,7 @@ mod tests {
             axum::routing::get(|| async { "overlay-coordinator" }),
         );
         let (stop_tx, stop_rx) = watch::channel(false);
-        let server = tokio::spawn(serve_display_overlay(serving.clone(), app, stop_rx));
+        let server = tokio::spawn(serve_display_overlay(queue, app, stop_rx));
 
         // Isolated: the dialer learns the server's direct addresses, exactly
         // as a ticket would carry them.
@@ -182,5 +180,6 @@ mod tests {
 
         stop_tx.send(true).ok();
         let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+        hub.shutdown().await;
     }
 }

@@ -663,22 +663,7 @@ impl StationHost {
             .build_scoped(
                 &device_seed,
                 &network,
-                comms::Protocols {
-                    framed: &[
-                        runtime::plane::contact::CONTACT_ALPN,
-                        runtime::neighbor::PRESENCE_ALPN,
-                        // Registered before anything dials it: a client refuses
-                        // an unknown ALPN before reading a byte, so an ALPN that
-                        // ships with the feature using it only ever works
-                        // between two already-updated machines.
-                        runtime::correspondence::CORRESPONDENCE_ALPN,
-                    ],
-                    session: &[
-                        runtime::plane::FREIGHT_ALPN,
-                        runtime::plane::LIVE_ALPN,
-                        runtime::plane::EXEC_ALPN,
-                    ],
-                },
+                crate::daemon::transport_hub::STATION_PROTOCOLS,
                 &space,
             )
             .await?;

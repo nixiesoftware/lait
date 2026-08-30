@@ -978,9 +978,9 @@ pub struct Daemon {
     endpoint: Arc<Endpoint>,
     display: Arc<crate::display::DisplayRuntime>,
     relaunch_requested: Arc<AtomicBool>,
-    /// The identity's own seed, held for the overlay endpoint the serve path
-    /// stands up. The display custodian already carries it, so this is a
-    /// second reference to material this process necessarily holds, not a new
+    /// The identity's own seed, held for the identity endpoint the serve path
+    /// raises. The display custodian already carries it, so this is a second
+    /// reference to material this process necessarily holds, not a new
     /// exposure.
     device_seed: [u8; 32],
 }
@@ -1028,6 +1028,34 @@ impl Daemon {
         let staging = self.spawn_staging();
         let world_upgrades = self.spawn_world_upgrades();
 
+        // The identity's own endpoint, raised here rather than by the first
+        // Station: the lanes the daemon serves itself — the Own lane, the
+        // display overlay — have no Space to wait for, and a device with no
+        // Space yet is exactly the one that needs to be reachable. Every
+        // Station placed later joins this endpoint. A refusal is a
+        // degradation, never a reason for the daemon not to exist.
+        let identity_transport = match crate::config::Settings::load(Some(home)).network() {
+            Ok(network) => match self
+                .router
+                .hub()
+                .identity_transport(&self.device_seed, &network)
+                .await
+            {
+                Ok(transport) => Some(transport),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the identity endpoint could not be raised; serving without its lanes"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "no network policy; serving without the identity's lanes");
+                None
+            }
+        };
+
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
         // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
@@ -1074,12 +1102,17 @@ impl Daemon {
             }
         };
         // The same router the TCP path serves, reachable over the overlay:
-        // addressed by endpoint id, no port, no inbound hole. A failure here
-        // is a degradation — the LAN listener is already up — never a reason
-        // for the daemon not to exist.
-        let overlay_task = match crate::config::Settings::load(Some(home)).network() {
-            Ok(network) => {
-                let seed = self.device_seed;
+        // addressed by endpoint id, no port, no inbound hole. The overlay is
+        // one lane of the identity endpoint above — one endpoint per key —
+        // so a missing lane is a degradation: the LAN listener is already
+        // up, and the daemon goes on.
+        let overlay = identity_transport.as_ref().and_then(|transport| {
+            transport
+                .take_session_queue(crate::display::overlay::DISPLAY_ALPN)
+                .map(|queue| (transport.clone(), queue))
+        });
+        let overlay_task = match overlay {
+            Some((transport, queue)) => {
                 let state = crate::display::DisplayHttpState {
                     coordinator: self.display.coordinator.clone(),
                     pairing: self.display.pairing.clone(),
@@ -1091,25 +1124,6 @@ impl Daemon {
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| home.to_path_buf());
                 Some(tokio::spawn(async move {
-                    let transport = match comms::DefaultTransport::new(
-                        &seed,
-                        &network,
-                        comms::Protocols {
-                            framed: &[],
-                            session: &[crate::display::overlay::DISPLAY_ALPN],
-                        },
-                    )
-                    .await
-                    {
-                        Ok(transport) => std::sync::Arc::new(transport),
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "display overlay endpoint could not bind;                                  serving the LAN listener only"
-                            );
-                            return;
-                        }
-                    };
                     // Say where this identity answers, when it has a label and
                     // a registry to say it to. Publication is evidence signed
                     // by this device; a refusal is logged and serving goes on,
@@ -1145,7 +1159,7 @@ impl Daemon {
                         }
                     }
                     if let Err(error) = crate::display::overlay::serve_display_overlay(
-                        transport,
+                        queue,
                         crate::display::display_http_router(state),
                         overlay_stop,
                     )
@@ -1155,8 +1169,10 @@ impl Daemon {
                     }
                 }))
             }
-            Err(error) => {
-                tracing::warn!(%error, "no overlay network policy; serving the LAN listener only");
+            None => {
+                tracing::warn!(
+                    "no display lane on the identity endpoint; serving the LAN listener only"
+                );
                 None
             }
         };

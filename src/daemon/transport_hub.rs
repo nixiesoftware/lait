@@ -1,11 +1,20 @@
 //! Identity-keyed transport ownership and inbound Space demultiplexing.
 //!
-//! One device identity owns one concrete transport endpoint. Each active
-//! StationHost receives a scoped view: outbound work and gossip delegate to the
-//! shared endpoint, while inbound Contact/presence connections arrive only on
-//! that Space's queue. The hub reads the bounded opening frame solely to select
-//! the queue, then replays it unchanged; Runtime remains the authority that
-//! verifies the protocol, peer, signature, and Space binding.
+//! One device identity owns one concrete transport endpoint — one, under one
+//! key: a second endpoint under the same key is two discovery records that
+//! overwrite each other and a relay asked to hold two clients for one id. Each
+//! active StationHost receives a scoped view: outbound work and gossip delegate
+//! to the shared endpoint, while inbound Contact/presence connections arrive
+//! only on that Space's queue. The hub reads the bounded opening frame solely
+//! to select the queue, then replays it unchanged; Runtime remains the
+//! authority that verifies the protocol, peer, signature, and Space binding.
+//!
+//! The identity also serves lanes of its own — protocols with no Space to be
+//! keyed by, raised at boot rather than by the first placement, because a
+//! device that holds no Space yet is exactly the one that has to be reachable.
+//! An `Own` lane is admitted on the profile's device set before a byte is
+//! read; that admission is the whole of it, and it fails closed while the set
+//! is unknown.
 
 use runtime::poison::LockRecovering;
 use std::collections::HashMap;
@@ -25,7 +34,13 @@ use comms::{
 };
 use mechanics::ids::{DeviceId, SpaceId};
 
+use super::correspondence::OwnDevices;
+
 const SPACE_INCOMING_BUFFER: usize = 16;
+/// Depth of one identity lane. Nothing waits behind a full lane: the pump
+/// refuses rather than parks, because a lane nobody is reading — the display
+/// lane on a daemon told `LAIT_DISPLAY=off` — must not stall every session.
+const IDENTITY_LANE_BUFFER: usize = 16;
 const MAX_PENDING_OPENERS: usize = 64;
 const OPENING_FRAME_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -44,19 +59,131 @@ const PUMP_JOIN_DEADLINE: Duration = Duration::from_secs(5);
 type SpaceBytes = [u8; 29];
 type HubSlot = Arc<Mutex<Option<Arc<IdentityTransportHub>>>>;
 
+/// The net plane's session ALPN.
+///
+/// Registered by the hub before anything speaks it, for the reason
+/// `CORRESPONDENCE_ALPN` was: a client refuses an unknown ALPN before reading
+/// a byte, so an ALPN that ships with the feature using it only ever works
+/// between two already-updated machines. The crate that speaks it asserts
+/// equality with this one.
+pub(crate) const NET_ALPN: &[u8] = b"lait/net/1";
+
+/// What every Station registers, as one literal.
+///
+/// The set is pinned per identity (`require_compatible`), so two composition
+/// sites that could drift apart would refuse each other's Stations the day
+/// one of them gained a plane. One constant, one site.
+pub(crate) const STATION_PROTOCOLS: comms::Protocols<'static> = comms::Protocols {
+    framed: &[
+        runtime::plane::contact::CONTACT_ALPN,
+        runtime::neighbor::PRESENCE_ALPN,
+        // Registered before anything dials it: a client refuses an unknown
+        // ALPN before reading a byte, so an ALPN that ships with the feature
+        // using it only ever works between two already-updated machines.
+        runtime::correspondence::CORRESPONDENCE_ALPN,
+    ],
+    session: &[
+        runtime::plane::FREIGHT_ALPN,
+        runtime::plane::LIVE_ALPN,
+        runtime::plane::EXEC_ALPN,
+    ],
+};
+
+/// How an identity lane is delivered: one bounded frame at a time through
+/// `accept`, or a whole connection through its own queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneKind {
+    Framed,
+    Session,
+}
+
+/// Who may open an identity lane.
+///
+/// `Own` is decided by [`admit_own`] in the hub, before any byte is read or
+/// any task spent. `Any` is a lane whose protocol admits for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Own,
+    Any,
+}
+
+/// A protocol the identity serves itself, routed without a Space.
+pub(crate) struct IdentityLane {
+    pub alpn: comms::Alpn,
+    pub kind: LaneKind,
+    pub admission: Admission,
+}
+
+pub(crate) const IDENTITY_LANES: &[IdentityLane] = &[
+    IdentityLane {
+        alpn: runtime::correspondence::OWN_ALPN,
+        kind: LaneKind::Framed,
+        admission: Admission::Own,
+    },
+    IdentityLane {
+        alpn: NET_ALPN,
+        kind: LaneKind::Session,
+        admission: Admission::Own,
+    },
+    IdentityLane {
+        alpn: crate::display::overlay::DISPLAY_ALPN,
+        kind: LaneKind::Session,
+        admission: Admission::Any,
+    },
+];
+
+/// The entire own-admission.
+///
+/// The transport has proved the dialer holds the key `from`; the device set
+/// says whether that key is one of this profile's. No Space, no membership,
+/// no capability — and `None` is "the set is not known", which admits nobody:
+/// an unrestored daemon that let anyone through would be open exactly while
+/// it could not tell.
+pub(crate) fn admit_own(from: &PeerId, own: Option<&OwnDevices>) -> bool {
+    own.is_some_and(|own| own.devices.contains(from))
+}
+
+fn identity_lane(alpn: &[u8], kind: LaneKind) -> Option<&'static IdentityLane> {
+    IDENTITY_LANES
+        .iter()
+        .find(|lane| lane.kind == kind && lane.alpn == alpn)
+}
+
+/// Everything the endpoint registers: the Station set and the identity lanes.
+/// Built here, once, so `build_scoped` and `identity_transport` cannot raise
+/// the endpoint with two different sets depending on which came first.
+fn endpoint_protocols() -> (Vec<comms::Alpn>, Vec<comms::Alpn>) {
+    let mut framed = STATION_PROTOCOLS.framed.to_vec();
+    let mut session = STATION_PROTOCOLS.session.to_vec();
+    for lane in IDENTITY_LANES {
+        match lane.kind {
+            LaneKind::Framed => framed.push(lane.alpn),
+            LaneKind::Session => session.push(lane.alpn),
+        }
+    }
+    (framed, session)
+}
+
 /// A process-level factory that shares one transport endpoint per device key.
 pub(crate) struct TransportHubFactory {
     inner: Arc<dyn TransportFactory>,
     hubs: StdMutex<HashMap<DeviceId, HubSlot>>,
     stopping: AtomicBool,
+    /// The device set every hub admits `Own` lanes on. Published by the
+    /// correspondence service; `None` until it is, and `None` admits nobody.
+    own: watch::Receiver<Option<OwnDevices>>,
 }
 
 impl TransportHubFactory {
-    pub(crate) fn new(inner: Arc<dyn TransportFactory>) -> Self {
+    pub(crate) fn new(
+        inner: Arc<dyn TransportFactory>,
+        own: watch::Receiver<Option<OwnDevices>>,
+    ) -> Self {
         Self {
             inner,
             hubs: StdMutex::new(HashMap::new()),
             stopping: AtomicBool::new(false),
+            own,
         }
     }
 
@@ -66,6 +193,64 @@ impl TransportHubFactory {
             .entry(identity)
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone()
+    }
+
+    /// The hub for one key, raised if it is not up yet. Idempotent per seed:
+    /// every caller gets the same endpoint, registered with the same set.
+    async fn hub_for(
+        &self,
+        identity_seed: &[u8; 32],
+        network: &Network,
+    ) -> Result<Arc<IdentityTransportHub>> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(anyhow!("the identity transport hub is shutting down"));
+        }
+        let identity = mechanics::actor::device_from_seed(identity_seed);
+        let slot = self.slot(identity.clone());
+        let mut occupied = slot.lock().await;
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(anyhow!("the identity transport hub is shutting down"));
+        }
+        if let Some(hub) = occupied.as_ref() {
+            return Ok(hub.clone());
+        }
+        let (framed, session) = endpoint_protocols();
+        let transport = self
+            .inner
+            .build(
+                identity_seed,
+                network,
+                comms::Protocols {
+                    framed: &framed,
+                    session: &session,
+                },
+            )
+            .await?;
+        if transport.my_id() != identity {
+            transport.shutdown().await;
+            return Err(anyhow!(
+                "transport factory returned identity {}, expected {}",
+                transport.my_id(),
+                identity
+            ));
+        }
+        let hub = IdentityTransportHub::start(transport, network, self.own.clone());
+        *occupied = Some(hub.clone());
+        Ok(hub)
+    }
+
+    /// Raise this identity's endpoint and return the identity's own view of
+    /// it: the lanes the daemon serves itself, and the shared endpoint to
+    /// dial from. Idempotent per seed; a Station placed before or after joins
+    /// the same endpoint.
+    pub(crate) async fn identity_transport(
+        &self,
+        identity_seed: &[u8; 32],
+        network: &Network,
+    ) -> Result<Arc<dyn Transport>> {
+        let hub = self.hub_for(identity_seed, network).await?;
+        hub.require_network(network)?;
+        Ok(Arc::new(IdentityTransport { hub }))
     }
 }
 
@@ -89,36 +274,8 @@ impl TransportFactory for TransportHubFactory {
         protocols: comms::Protocols<'_>,
         space: &SpaceId,
     ) -> Result<Arc<dyn Transport>> {
-        if self.stopping.load(Ordering::Acquire) {
-            return Err(anyhow!("the identity transport hub is shutting down"));
-        }
-        let identity = mechanics::actor::device_from_seed(identity_seed);
-        let slot = self.slot(identity.clone());
-        let mut occupied = slot.lock().await;
-        if self.stopping.load(Ordering::Acquire) {
-            return Err(anyhow!("the identity transport hub is shutting down"));
-        }
-
-        let hub = match occupied.as_ref() {
-            Some(hub) => {
-                hub.require_compatible(network, protocols)?;
-                hub.clone()
-            }
-            None => {
-                let transport = self.inner.build(identity_seed, network, protocols).await?;
-                if transport.my_id() != identity {
-                    transport.shutdown().await;
-                    return Err(anyhow!(
-                        "transport factory returned identity {}, expected {}",
-                        transport.my_id(),
-                        identity
-                    ));
-                }
-                let hub = IdentityTransportHub::start(transport, network, protocols);
-                *occupied = Some(hub.clone());
-                hub
-            }
-        };
+        let hub = self.hub_for(identity_seed, network).await?;
+        hub.require_compatible(network, protocols)?;
         hub.register(space)
     }
 
@@ -203,13 +360,43 @@ impl RouteTarget {
     }
 }
 
+/// The identity's lanes as the pumps see them: the admission input and one
+/// sender per lane. Shared with both pumps by `Arc`, the way `routes` is.
+struct IdentityLanes {
+    own: watch::Receiver<Option<OwnDevices>>,
+    /// The one framed identity lane, `OWN_ALPN`.
+    framed: mpsc::Sender<Incoming>,
+    session: Vec<(comms::Alpn, mpsc::Sender<IncomingConnection>)>,
+}
+
+impl IdentityLanes {
+    fn admits(&self, lane: &IdentityLane, from: &PeerId) -> bool {
+        match lane.admission {
+            Admission::Own => admit_own(from, self.own.borrow().as_ref()),
+            Admission::Any => true,
+        }
+    }
+
+    fn session_lane(&self, alpn: &[u8]) -> Option<&mpsc::Sender<IncomingConnection>> {
+        self.session
+            .iter()
+            .find(|(lane, _)| *lane == alpn)
+            .map(|(_, sender)| sender)
+    }
+}
+
 struct IdentityTransportHub {
     transport: Arc<dyn Transport>,
     network: NetworkKey,
-    alpns: Vec<Vec<u8>>,
-    /// The session ALPNs, still distinguishable.
+    /// The Station set, normalized — what `build_scoped` is checked against.
     ///
-    /// `alpns` above is the flattened union used for the endpoint-compatibility
+    /// Not the endpoint's whole registration: the identity lanes ride the same
+    /// endpoint, and a Station that had to name them to be compatible would be
+    /// a Station that knew about the daemon's own business.
+    station_alpns: Vec<Vec<u8>>,
+    /// The session ALPNs a Station serves, still distinguishable.
+    ///
+    /// `station_alpns` above is the flattened union used for the compatibility
     /// check; once flattened, which of them carry sessions is unrecoverable —
     /// and that is exactly the question every route now has to answer.
     session_alpns: Arc<[comms::Alpn]>,
@@ -218,28 +405,51 @@ struct IdentityTransportHub {
     stopping: watch::Sender<bool>,
     accept_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     session_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The Own lane's receive half. Every identity view reads it through one
+    /// lock, so two views are two readers of one lane rather than two lanes.
+    own_lane: Mutex<mpsc::Receiver<Incoming>>,
+    /// One un-taken queue per identity session lane, handed over once.
+    identity_session_queues: StdMutex<Vec<(comms::Alpn, Option<comms::ConnectionQueue>)>>,
 }
 
 impl IdentityTransportHub {
     fn start(
         transport: Arc<dyn Transport>,
         network: &Network,
-        protocols: comms::Protocols<'_>,
+        own: watch::Receiver<Option<OwnDevices>>,
     ) -> Arc<Self> {
+        let (framed_tx, framed_rx) = mpsc::channel(IDENTITY_LANE_BUFFER);
+        let mut session = Vec::new();
+        let mut queues = Vec::new();
+        for lane in IDENTITY_LANES {
+            if lane.kind == LaneKind::Session {
+                let (tx, rx) = mpsc::channel(IDENTITY_LANE_BUFFER);
+                session.push((lane.alpn, tx));
+                queues.push((lane.alpn, Some(rx)));
+            }
+        }
+        let lanes = Arc::new(IdentityLanes {
+            own,
+            framed: framed_tx,
+            session,
+        });
         let hub = Arc::new(Self {
             transport: transport.clone(),
             network: NetworkKey::from(network),
-            alpns: normalized_alpns(protocols),
-            session_alpns: protocols.session.to_vec().into(),
+            station_alpns: normalized_alpns(STATION_PROTOCOLS),
+            session_alpns: STATION_PROTOCOLS.session.to_vec().into(),
             routes: Arc::new(StdMutex::new(HashMap::new())),
             next_token: AtomicU64::new(1),
             stopping: watch::Sender::new(false),
             accept_task: StdMutex::new(None),
             session_task: StdMutex::new(None),
+            own_lane: Mutex::new(framed_rx),
+            identity_session_queues: StdMutex::new(queues),
         });
         let task = tokio::spawn(run_accept_pump(
             transport.clone(),
             hub.routes.clone(),
+            lanes.clone(),
             hub.stopping.subscribe(),
         ));
         *hub.accept_task.lock_recovering() = Some(task);
@@ -247,13 +457,14 @@ impl IdentityTransportHub {
             transport,
             hub.routes.clone(),
             hub.session_alpns.clone(),
+            lanes,
             hub.stopping.subscribe(),
         ));
         *hub.session_task.lock_recovering() = Some(session_task);
         hub
     }
 
-    fn require_compatible(&self, network: &Network, protocols: comms::Protocols<'_>) -> Result<()> {
+    fn require_network(&self, network: &Network) -> Result<()> {
         let requested_network = NetworkKey::from(network);
         if self.network != requested_network {
             return Err(anyhow!(
@@ -263,13 +474,26 @@ impl IdentityTransportHub {
                 requested_network
             ));
         }
+        Ok(())
+    }
+
+    fn require_compatible(&self, network: &Network, protocols: comms::Protocols<'_>) -> Result<()> {
+        self.require_network(network)?;
         let requested_alpns = normalized_alpns(protocols);
-        if self.alpns != requested_alpns {
+        if self.station_alpns != requested_alpns {
             return Err(anyhow!(
                 "one device identity requested incompatible protocol sets"
             ));
         }
         Ok(())
+    }
+
+    fn take_identity_queue(&self, alpn: comms::Alpn) -> Option<comms::ConnectionQueue> {
+        self.identity_session_queues
+            .lock_recovering()
+            .iter_mut()
+            .find(|(lane, _)| *lane == alpn)
+            .and_then(|(_, queue)| queue.take())
     }
 
     fn register(self: &Arc<Self>, space: &SpaceId) -> Result<Arc<dyn Transport>> {
@@ -390,6 +614,7 @@ impl IdentityTransportHub {
 async fn run_accept_pump(
     transport: Arc<dyn Transport>,
     routes: Arc<StdMutex<HashMap<SpaceBytes, RouteTarget>>>,
+    lanes: Arc<IdentityLanes>,
     mut stopping: watch::Receiver<bool>,
 ) {
     let permits = Arc::new(Semaphore::new(MAX_PENDING_OPENERS));
@@ -423,6 +648,7 @@ async fn run_accept_pump(
                 dispatches.spawn(dispatch_incoming(
                     incoming,
                     routes.clone(),
+                    lanes.clone(),
                     stopping.clone(),
                     permit,
                 ));
@@ -453,6 +679,7 @@ async fn run_session_pump(
     transport: Arc<dyn Transport>,
     routes: Arc<StdMutex<HashMap<SpaceBytes, RouteTarget>>>,
     session_alpns: Arc<[comms::Alpn]>,
+    lanes: Arc<IdentityLanes>,
     mut stopping: watch::Receiver<bool>,
 ) {
     // One budget per plane, not one per device. A shared pool lets a stalled
@@ -478,6 +705,13 @@ async fn run_session_pump(
                 let Some(incoming) = incoming else {
                     break;
                 };
+                // An identity lane first: it names no Space, so there is no
+                // opening to read and no dispatcher to spend — admission is
+                // decided on the ALPN and the peer alone, before any byte.
+                if let Some(lane) = identity_lane(&incoming.alpn, LaneKind::Session) {
+                    route_identity_session(&lanes, lane, incoming);
+                    continue;
+                }
                 // The ALPN is known before anything is read or spent, and the
                 // registered set is the hub's own — so an unregistered protocol
                 // is refused here rather than after a dispatcher task and an
@@ -522,6 +756,39 @@ async fn run_session_pump(
         if let Err(error) = result {
             tracing::debug!(%error, "identity transport session dispatcher failed during shutdown");
         }
+    }
+}
+
+/// Hand a whole connection to an identity lane, or refuse it.
+///
+/// No opening is read: the lane's protocol speaks first on its own terms, and
+/// what admits the peer is the device set, not anything it could send. No
+/// permit either — nothing pending is being held for it. The send does not
+/// wait: a lane nobody has taken (the display lane under `LAIT_DISPLAY=off`)
+/// would otherwise park the pump, and every Station's sessions behind it.
+fn route_identity_session(
+    lanes: &IdentityLanes,
+    lane: &IdentityLane,
+    incoming: IncomingConnection,
+) {
+    if !lanes.admits(lane, &incoming.from) {
+        dropped(&incoming.alpn, "not one of this identity's devices");
+        incoming.connection.close(REFUSED_CODE, b"");
+        return;
+    }
+    let Some(sender) = lanes.session_lane(&incoming.alpn) else {
+        dropped(&incoming.alpn, "no queue serves this identity lane");
+        incoming.connection.close(REFUSED_CODE, b"");
+        return;
+    };
+    let routed = IncomingConnection {
+        opening: Vec::new(),
+        ..incoming
+    };
+    if let Err(refused) = sender.try_send(routed) {
+        let refused = refused.into_inner();
+        dropped(&refused.alpn, "that identity lane is full or closed");
+        refused.connection.close(REFUSED_CODE, b"");
     }
 }
 
@@ -742,10 +1009,28 @@ fn decoded_or_reported<T, E: std::fmt::Debug>(decoded: Result<T, E>) -> Option<T
 async fn dispatch_incoming(
     mut incoming: Incoming,
     routes: Arc<StdMutex<HashMap<SpaceBytes, RouteTarget>>>,
+    lanes: Arc<IdentityLanes>,
     mut hub_stopping: watch::Receiver<bool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     if *hub_stopping.borrow() {
+        return;
+    }
+    // The Own lane before any read. Its admission is the device set, so a
+    // stranger's stream is dropped with nothing read off it — not a byte
+    // spent on somebody the set does not name — and an own device's stream
+    // is forwarded whole, first frame and all, for the plane above to read.
+    if let Some(lane) = identity_lane(&incoming.alpn, LaneKind::Framed) {
+        if !lanes.admits(lane, &incoming.from) {
+            dropped(&incoming.alpn, "not one of this identity's devices");
+            return;
+        }
+        tokio::select! {
+            _ = lanes.framed.send(incoming) => {}
+            changed = hub_stopping.changed() => {
+                let _ = changed;
+            }
+        }
         return;
     }
     let Some(opening_limit) = opening_limit(&incoming.alpn) else {
@@ -819,6 +1104,10 @@ fn opening_limit(alpn: &[u8]) -> Option<usize> {
         Some(runtime::neighbor::MAX_MESSAGE)
     } else if alpn == runtime::correspondence::CORRESPONDENCE_ALPN {
         Some(runtime::correspondence::MAX_MESSAGE)
+    } else if alpn == runtime::correspondence::OWN_ALPN {
+        // Never consulted on the way in — the Own lane is forwarded unread —
+        // but the bounds table is where a reader looks for every ceiling.
+        Some(runtime::correspondence::MAX_OWN_FRAME)
     } else {
         None
     }
@@ -990,6 +1279,100 @@ impl Transport for ScopedTransport {
     }
 }
 
+/// The identity's own view of its endpoint: `ScopedTransport`'s shape with the
+/// Space removed. Outbound work delegates to the shared endpoint; inbound is
+/// the identity lanes only — the Own lane through `accept`, each session lane
+/// through its queue. It never owns the endpoint, so it never closes it.
+struct IdentityTransport {
+    hub: Arc<IdentityTransportHub>,
+}
+
+impl IdentityTransport {
+    fn ensure_running(&self) -> Result<()> {
+        if *self.hub.stopping.borrow() {
+            Err(anyhow!("the identity transport is shut down"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait]
+impl Transport for IdentityTransport {
+    fn my_id(&self) -> PeerId {
+        self.hub.transport.my_id()
+    }
+
+    fn learn(&self, peer: PeerId, addrs: &[SocketAddr]) {
+        if self.ensure_running().is_ok() {
+            self.hub.transport.learn(peer, addrs);
+        }
+    }
+
+    async fn connect(&self, peer: PeerId, alpn: Alpn) -> Result<Box<dyn Stream>> {
+        self.ensure_running()?;
+        self.hub.transport.connect(peer, alpn).await
+    }
+
+    /// The Own lane, pre-admitted: everything here came from a device in the
+    /// profile's set, or the hub would not have forwarded it.
+    async fn accept(&self) -> Option<Incoming> {
+        let mut stopping = self.hub.stopping.subscribe();
+        if *stopping.borrow() {
+            return None;
+        }
+        let mut incoming = self.hub.own_lane.lock().await;
+        tokio::select! {
+            value = incoming.recv() => value,
+            _ = stopping.wait_for(|value| *value) => None,
+        }
+    }
+
+    async fn connect_session(
+        &self,
+        peer: PeerId,
+        alpn: Alpn,
+    ) -> Result<Box<dyn comms::Connection>> {
+        self.ensure_running()?;
+        self.hub.transport.connect_session(peer, alpn).await
+    }
+
+    /// No undivided door here either — see [`ScopedTransport::accept_connection`].
+    async fn accept_connection(&self) -> Option<IncomingConnection> {
+        None
+    }
+
+    fn take_session_queue(&self, alpn: comms::Alpn) -> Option<comms::ConnectionQueue> {
+        self.hub.take_identity_queue(alpn)
+    }
+
+    fn advertised_addrs(&self) -> Vec<SocketAddr> {
+        self.hub.transport.advertised_addrs()
+    }
+
+    async fn advertised_routes(&self, deadline: Duration) -> Result<Vec<SocketAddr>> {
+        self.ensure_running()?;
+        self.hub.transport.advertised_routes(deadline).await
+    }
+
+    fn is_isolated(&self) -> bool {
+        self.hub.transport.is_isolated()
+    }
+
+    async fn subscribe(
+        &self,
+        topic: Topic,
+        bootstrap: &[PeerId],
+    ) -> Result<(Box<dyn GossipSender>, Box<dyn GossipReceiver>)> {
+        self.ensure_running()?;
+        self.hub.transport.subscribe(topic, bootstrap).await
+    }
+
+    /// Nothing to do: the hub owns the endpoint, and a view that could close
+    /// it would take every Station on this key down with it.
+    async fn shutdown(&self) {}
+}
+
 #[cfg(test)]
 mod tests {
     /// The Freight queue for a scoped view.
@@ -1037,20 +1420,20 @@ mod tests {
         SpaceBytes::try_from(space.as_str().as_bytes()).unwrap()
     }
 
-    const ALPNS: &[Alpn] = &[
-        runtime::plane::contact::CONTACT_ALPN,
-        runtime::neighbor::PRESENCE_ALPN,
-        runtime::correspondence::CORRESPONDENCE_ALPN,
-    ];
-    const SESSION_ALPNS: &[Alpn] = &[
-        runtime::plane::FREIGHT_ALPN,
-        runtime::plane::LIVE_ALPN,
-        runtime::plane::EXEC_ALPN,
-    ];
-    fn protocols() -> comms::Protocols<'static> {
-        comms::Protocols {
-            framed: ALPNS,
-            session: SESSION_ALPNS,
+    /// The device set nobody has published yet — what every hub starts on.
+    fn unrestored() -> watch::Receiver<Option<OwnDevices>> {
+        watch::channel(None).1
+    }
+
+    /// A published set: `me` and `peer`, sorted, under a throwaway profile.
+    fn own_set(me_seed: &[u8; 32], peer_seed: &[u8; 32]) -> OwnDevices {
+        let me = mechanics::actor::device_from_seed(me_seed);
+        let mut devices = vec![me.clone(), mechanics::actor::device_from_seed(peer_seed)];
+        devices.sort();
+        OwnDevices {
+            profile: mechanics::kinship::ProfileId::from_digest([9; 16]),
+            me,
+            devices,
         }
     }
 
@@ -1141,6 +1524,226 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_identity_lane_routes_without_a_space_and_only_to_own_devices() {
+        // Raised before any Station: a device that holds no Space yet is the
+        // one that has to be reachable. An own device's session lands on the
+        // lane's queue with nothing read off it; a stranger's is closed; and
+        // a Space-scoped dial still takes the Space path, so the lane check
+        // sitting before the plane permits cannot have swallowed it.
+        let net = MemNet::new().with_planes();
+        let inner = Arc::new(MemFactory {
+            net: net.clone(),
+            builds: AtomicUsize::new(0),
+        });
+        let me_seed = [91; 32];
+        let peer_seed = [92; 32];
+        let me = mechanics::actor::device_from_seed(&me_seed);
+        let peer = mechanics::actor::device_from_seed(&peer_seed);
+        let (_own_tx, own_rx) = watch::channel(Some(own_set(&me_seed, &peer_seed)));
+        let factory = TransportHubFactory::new(inner.clone(), own_rx);
+
+        let identity = factory
+            .identity_transport(&me_seed, &Network::Isolated)
+            .await
+            .expect("the identity endpoint is raised with no Station placed");
+        assert_eq!(inner.builds.load(Ordering::SeqCst), 1);
+        let mut net_queue = identity
+            .take_session_queue(NET_ALPN)
+            .expect("the net lane is taken once");
+        assert!(
+            identity.take_session_queue(NET_ALPN).is_none(),
+            "a second taker got a second handle on the net lane"
+        );
+
+        let own_device: Arc<dyn Transport> = Arc::new(net.peer(peer.clone()));
+        let dialed = own_device
+            .connect_session(me.clone(), NET_ALPN)
+            .await
+            .expect("dial");
+        let arrived = tokio::time::timeout(Duration::from_secs(5), net_queue.recv())
+            .await
+            .expect("an own device's session is routed")
+            .expect("the lane is open");
+        assert_eq!(arrived.from, peer);
+        assert_eq!(arrived.alpn, NET_ALPN.to_vec());
+        assert!(
+            arrived.opening.is_empty(),
+            "nothing is read off an identity lane before it is handed over"
+        );
+        dialed.close(0, b"done");
+
+        // The framed Own lane, forwarded whole: the first frame is still there
+        // for the plane above to read.
+        let mut own_stream = own_device
+            .connect(me.clone(), runtime::correspondence::OWN_ALPN)
+            .await
+            .expect("dial the Own lane");
+        own_stream.send(b"a ticket").await.expect("send");
+        let mut incoming = tokio::time::timeout(Duration::from_secs(5), identity.accept())
+            .await
+            .expect("an own device's frame is routed")
+            .expect("the Own lane is open");
+        assert_eq!(incoming.from, peer);
+        assert_eq!(incoming.alpn, runtime::correspondence::OWN_ALPN);
+        assert_eq!(
+            incoming.stream.recv().await.expect("read"),
+            Some(b"a ticket".to_vec())
+        );
+
+        // A stranger holds a key the set does not name.
+        let stranger: Arc<dyn Transport> =
+            Arc::new(net.peer(mechanics::actor::device_from_seed(&[93; 32])));
+        let refused = stranger
+            .connect_session(me.clone(), NET_ALPN)
+            .await
+            .expect("the dial itself is accepted by the network");
+        tokio::time::timeout(Duration::from_secs(5), refused.closed())
+            .await
+            .expect("a stranger's session is closed, not parked");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), net_queue.recv())
+                .await
+                .is_err(),
+            "a stranger's session reached the lane"
+        );
+
+        // A Space-scoped dial is still the Space's business: no Station is
+        // placed, so it is refused there — never handed to an identity lane.
+        let space_dial = dial_session(&own_device, me.clone(), &space(5)).await;
+        tokio::time::timeout(Duration::from_secs(5), space_dial.closed())
+            .await
+            .expect("a Freight dial with no Station is refused");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), net_queue.recv())
+                .await
+                .is_err(),
+            "a Space-scoped session reached an identity lane"
+        );
+        factory.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_station_placed_after_the_identity_endpoint_is_compatible() {
+        // The trap: the endpoint registers the Station set plus the identity
+        // lanes, and a compatibility check against the endpoint's whole
+        // registration would refuse every Station placed after boot.
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new().with_planes(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
+        let seed = [94; 32];
+        factory
+            .identity_transport(&seed, &Network::Isolated)
+            .await
+            .expect("raise the identity endpoint");
+        let station = factory
+            .build_scoped(&seed, &Network::Isolated, STATION_PROTOCOLS, &space(3))
+            .await
+            .expect("a Station joins the endpoint raised at boot");
+        assert_eq!(
+            inner.builds.load(Ordering::SeqCst),
+            1,
+            "one endpoint per key: the Station joined rather than built"
+        );
+        assert!(
+            station
+                .take_session_queue(runtime::plane::FREIGHT_ALPN)
+                .is_some(),
+            "the Station's own planes are served"
+        );
+        assert!(
+            station.take_session_queue(NET_ALPN).is_none(),
+            "an identity lane is not a Station's to take"
+        );
+
+        let foreign = comms::Protocols::framed(&[runtime::plane::contact::CONTACT_ALPN]);
+        let refused = factory
+            .build_scoped(&seed, &Network::Isolated, foreign, &space(4))
+            .await
+            .err()
+            .expect("a foreign protocol set is refused");
+        assert!(refused.to_string().contains("incompatible protocol sets"));
+        let other_policy = factory
+            .build_scoped(&seed, &Network::Public, STATION_PROTOCOLS, &space(4))
+            .await
+            .err()
+            .expect("a second network policy is refused");
+        assert!(other_policy.to_string().contains("two network policies"));
+        factory.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_own_lane_admits_nobody_while_the_set_is_unrestored() {
+        // `None` is "the set is not known", and not knowing admits nobody: a
+        // frame on the Own lane is dropped unread, a session on the net lane
+        // is closed. Publishing the set is what opens the lane — the same
+        // dial, from the same key, then lands.
+        let net = MemNet::new().with_planes();
+        let inner = Arc::new(MemFactory {
+            net: net.clone(),
+            builds: AtomicUsize::new(0),
+        });
+        let me_seed = [95; 32];
+        let peer_seed = [96; 32];
+        let me = mechanics::actor::device_from_seed(&me_seed);
+        let peer = mechanics::actor::device_from_seed(&peer_seed);
+        let (own_tx, own_rx) = watch::channel(None);
+        let factory = TransportHubFactory::new(inner, own_rx);
+        let identity = factory
+            .identity_transport(&me_seed, &Network::Isolated)
+            .await
+            .expect("raise the identity endpoint");
+        let mut net_queue = identity.take_session_queue(NET_ALPN).expect("the net lane");
+        let dialer: Arc<dyn Transport> = Arc::new(net.peer(peer.clone()));
+
+        let mut own_stream = dialer
+            .connect(me.clone(), runtime::correspondence::OWN_ALPN)
+            .await
+            .expect("dial the Own lane");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), identity.accept())
+                .await
+                .is_err(),
+            "an own-shaped frame was admitted with no set to admit it on"
+        );
+        // Dropped unread: the dialer's stream ends without a byte having
+        // been taken off it.
+        let ended = tokio::time::timeout(Duration::from_secs(5), own_stream.recv())
+            .await
+            .expect("the dropped stream ends rather than parks");
+        assert!(
+            matches!(ended, Ok(None) | Err(_)),
+            "the Own lane answered a stranger: {ended:?}"
+        );
+        let session = dialer
+            .connect_session(me.clone(), NET_ALPN)
+            .await
+            .expect("dial");
+        tokio::time::timeout(Duration::from_secs(5), session.closed())
+            .await
+            .expect("an unrestored set closes every net session");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), net_queue.recv())
+                .await
+                .is_err()
+        );
+
+        // The set arrives, and the same key is now one of this identity's.
+        own_tx.send_replace(Some(own_set(&me_seed, &peer_seed)));
+        let _admitted = dialer
+            .connect_session(me.clone(), NET_ALPN)
+            .await
+            .expect("dial");
+        let arrived = tokio::time::timeout(Duration::from_secs(5), net_queue.recv())
+            .await
+            .expect("the published set admits its own device")
+            .expect("the lane is open");
+        assert_eq!(arrived.from, peer);
+        factory.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn each_plane_gets_its_own_queue_and_neither_drains_the_other() {
         // The reason the split exists. One queue per Space meant two drivers
         // racing one receiver: each would take strictly alternating connections
@@ -1156,18 +1759,18 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [71; 32];
         let seed_b = [72; 32];
         let space = space(7);
 
         let dialer = factory
-            .build_scoped(&seed_a, &network, protocols(), &space)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space)
             .await
             .unwrap();
         let listener = factory
-            .build_scoped(&seed_b, &network, protocols(), &space)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space)
             .await
             .unwrap();
         let peer_b = mechanics::actor::device_from_seed(&seed_b);
@@ -1217,9 +1820,9 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let view = factory
-            .build_scoped(&[73; 32], &Network::Isolated, protocols(), &space(8))
+            .build_scoped(&[73; 32], &Network::Isolated, STATION_PROTOCOLS, &space(8))
             .await
             .unwrap();
         assert!(view
@@ -1244,7 +1847,7 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [51; 32];
         let seed_b = [52; 32];
@@ -1252,15 +1855,15 @@ mod tests {
         let space_b = space(2);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_b = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_b)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_b)
             .await
             .unwrap();
 
@@ -1310,18 +1913,18 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [61; 32];
         let seed_b = [62; 32];
         let space_a = space(1);
 
         let a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
 
@@ -1361,7 +1964,7 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [53; 32];
         let seed_b = [54; 32];
@@ -1369,11 +1972,11 @@ mod tests {
         let unknown = space(9);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
 
@@ -1400,18 +2003,18 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [55; 32];
         let seed_b = [56; 32];
         let space_a = space(1);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
 
@@ -1436,18 +2039,18 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [57; 32];
         let seed_b = [58; 32];
         let space_a = space(1);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
 
@@ -1482,7 +2085,7 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner.clone());
+        let factory = TransportHubFactory::new(inner.clone(), unrestored());
         let network = Network::Isolated;
         let seed_a = [31; 32];
         let seed_b = [32; 32];
@@ -1490,19 +2093,19 @@ mod tests {
         let space_b = space(2);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let a_space_b = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_b)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_b)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_b = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_b)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_b)
             .await
             .unwrap();
         assert_eq!(
@@ -1570,7 +2173,7 @@ mod tests {
             net: MemNet::new(),
             builds: AtomicUsize::new(0),
         });
-        let factory = TransportHubFactory::new(inner);
+        let factory = TransportHubFactory::new(inner, unrestored());
         let network = Network::Isolated;
         let seed_a = [41; 32];
         let seed_b = [42; 32];
@@ -1578,23 +2181,23 @@ mod tests {
         let space_b = space(4);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let a_space_b = factory
-            .build_scoped(&seed_a, &network, protocols(), &space_b)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_b)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_a)
             .await
             .unwrap();
         let b_space_b = factory
-            .build_scoped(&seed_b, &network, protocols(), &space_b)
+            .build_scoped(&seed_b, &network, STATION_PROTOCOLS, &space_b)
             .await
             .unwrap();
         let duplicate = match factory
-            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .build_scoped(&seed_a, &network, STATION_PROTOCOLS, &space_a)
             .await
         {
             Ok(_) => panic!("duplicate identity/Space registration must fail"),

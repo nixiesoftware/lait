@@ -36,6 +36,19 @@ pub const CORRESPONDENCE_PROTOCOL: u16 = 1;
 /// The correspondence v1 ALPN.
 pub const CORRESPONDENCE_ALPN: &[u8] = b"lait/correspondence/1";
 
+/// The Own lane: framed, identity-scoped, and admitted only from a device in
+/// this profile's own set — the hub decides that before a byte is read.
+///
+/// Registered beside the dial tone for the dial tone's reason: an ALPN that
+/// ships in the same release as the feature using it only ever works between
+/// two already-updated machines.
+pub const OWN_ALPN: &[u8] = b"lait/own/1";
+
+/// Ceiling for one Own frame. A Space ticket is at most
+/// `coordinates::MAX_DECODED` (64 KiB); this leaves room for the frame that
+/// carries it and nothing like room for a payload.
+pub const MAX_OWN_FRAME: usize = 96 * 1024;
+
 /// Maximum encoded message size. Small on purpose: nothing here carries
 /// payloads, and a generous bound on a plane that answers everything with a
 /// refusal is a free amplifier.

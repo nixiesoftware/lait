@@ -29,7 +29,9 @@ use std::sync::Mutex;
 
 use correspondence::Contractor;
 use lait_directory::Directory;
+use mechanics::ids::DeviceId;
 use mechanics::kinship::{Audience, ProfileId};
+use tokio::sync::watch;
 
 use crate::control::{Request, Response};
 
@@ -98,9 +100,26 @@ pub fn is_correspondence_request(request: &Request) -> bool {
     )
 }
 
+/// The profile's live device set as this daemon holds it.
+///
+/// `None` on the watch is "not restored, not held" — unmeasured is absent, and
+/// an empty `Vec` would read as a profile with no devices, which no profile
+/// is. The hub's own-admission fails closed on `None` for exactly that reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnDevices {
+    pub profile: ProfileId,
+    pub me: DeviceId,
+    /// Sorted, and includes `me`.
+    pub devices: Vec<DeviceId>,
+}
+
 /// The identity's correspondence plane, and the durable state under it.
 pub struct CorrespondenceService {
     identity: PathBuf,
+    /// The device set, published to whoever admits on it. `None` until the
+    /// plane is restored; nothing here publishes yet, so today it is the
+    /// fail-closed input and nothing more.
+    own: watch::Sender<Option<OwnDevices>>,
     /// `None` until a carrier is configured. Correspondence with no carrier is
     /// not an empty mailbox — every operation refuses in words, because the two
     /// are different facts and only one is worth acting on.
@@ -133,9 +152,17 @@ impl CorrespondenceService {
     pub fn open(identity: &Path) -> Self {
         Self {
             identity: identity.to_path_buf(),
+            own: watch::Sender::new(None),
             plane: Mutex::new(None),
             book: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The device set as it is republished: by restore, and by every act that
+    /// changes it. A reader sees `None` until the first publication.
+    #[must_use]
+    pub fn own_devices(&self) -> watch::Receiver<Option<OwnDevices>> {
+        self.own.subscribe()
     }
 
     /// Hook the identity's book, once, at wiring time.

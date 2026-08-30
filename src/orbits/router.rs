@@ -603,7 +603,9 @@ pub struct Router {
     catalog: Catalog,
     occupancy: OrbitOccupancy<Placement>,
     doorbells: broadcast::Sender<OrbitDoorbell>,
-    factory: Arc<dyn TransportFactory>,
+    /// Concrete, not `dyn`: the daemon reaches the identity's own lanes
+    /// through it, and those are the hub's alone.
+    factory: Arc<TransportHubFactory>,
     packages: WorldPackages,
     /// One process-owned admission lane for blocking host/lifecycle work.
     /// Acquiring is a try operation: a control request gets bounded feedback
@@ -653,11 +655,18 @@ impl Router {
             }
         }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
+        // The hub admits own devices on the set correspondence publishes, so
+        // the service stands first and the hub takes its watch — `None` until
+        // restored, and the hub fails closed on `None`.
+        let factory = Arc::new(TransportHubFactory::new(
+            factory,
+            correspondence.own_devices(),
+        ));
         Self {
             catalog,
             occupancy: OrbitOccupancy::default(),
             doorbells,
-            factory: Arc::new(TransportHubFactory::new(factory)),
+            factory,
             packages,
             blocking: Arc::new(Semaphore::new(HOST_BLOCKING_CAPACITY)),
             lifecycle: RwLock::new(()),
@@ -683,6 +692,11 @@ impl Router {
 
     pub(crate) fn correspondence(&self) -> &crate::daemon::correspondence::CorrespondenceService {
         &self.correspondence
+    }
+
+    /// The identity's transport hub — where the daemon raises its own lanes.
+    pub(crate) fn hub(&self) -> &Arc<TransportHubFactory> {
+        &self.factory
     }
 
     pub(crate) fn asks(&self) -> &crate::daemon::sponsorship::SponsorshipAsks {
@@ -825,7 +839,7 @@ impl Router {
     ) -> Result<(ResolvedOrbit, Arc<Placement>)> {
         let orbit = resolved.address.orbit.clone();
         let doorbells = self.doorbells.clone();
-        let factory = self.factory.clone();
+        let factory: Arc<dyn TransportFactory> = self.factory.clone();
         let packages = self.packages.clone();
         let blocking = self.blocking.clone();
         let placement = self
