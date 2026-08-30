@@ -77,6 +77,7 @@ const PAIR_CODE_LIFETIME_MS: u64 = RENDEZVOUS_LIFETIME_MS;
 const HINT_CHARS: usize = RENDEZVOUS_CODE_CHARS / 2;
 const ENDPOINT_CONTEXT: &str = "lait/pair/endpoint/v1";
 const PHRASE_DOMAIN: &[u8] = b"lait/pair/confirmation-phrase/v2";
+const PHRASE_KEY_CONTEXT: &str = "lait/pair/confirmation-phrase-key/v1";
 const PAIR_PROTOCOL: u16 = 2;
 const ROUTE_DEADLINE: Duration = Duration::from_secs(3);
 const DIAL_DEADLINE: Duration = Duration::from_secs(10);
@@ -1200,7 +1201,12 @@ pub(crate) fn confirmation_phrase(
     framed(&mut preimage, PHRASE_DOMAIN);
     framed(&mut preimage, &PAIR_PROTOCOL.to_be_bytes());
     framed(&mut preimage, profile.as_str().as_bytes());
-    framed(&mut preimage, session_key);
+    // A subkey, not `Ke` itself: the words are shown to people and logged,
+    // and the session key stays a key.
+    framed(
+        &mut preimage,
+        &blake3::derive_key(PHRASE_KEY_CONTEXT, session_key),
+    );
     framed(&mut preimage, nonce);
     framed(&mut preimage, joiner_nonce);
     framed(&mut preimage, lo.as_str().as_bytes());
@@ -1591,6 +1597,29 @@ pub(crate) mod tests {
             "two wrong tries: the code is still on show"
         );
 
+        // The joiner's password is the secret half and nothing else: a
+        // dialer holding just those four symbols verifies the joiner's
+        // confirmation. Stopping there is still a dial that never confirmed
+        // — one guess, and the code stays on show.
+        {
+            let joiner = Side::stand("joiner-secret", &net);
+            joiner.mint().await;
+            let code = code_of(&joiner);
+            let derived = derive_code(&code).expect("derive");
+            let serving = joiner.serve();
+            let stranger_id = device_from_seed(&stranger_seed);
+            assert!(matches!(
+                raw_start(&net, &stranger_seed, &code, &stranger_id, &derived.password).await,
+                Started::Share { verified: true }
+            ));
+            wait_until("the unconfirmed dial is counted", || {
+                joiner.pair.attempts() == 1
+            })
+            .await;
+            assert!(joiner.pair.status(now_ms()).is_some());
+            serving.abort();
+        }
+
         // The sponsor with the right password spends it.
         let offer = match sponsor.pair.enter(&code, now_ms()).await.expect("enter") {
             SponsorOutcome::Offer(offer) => offer,
@@ -1862,13 +1891,13 @@ pub(crate) mod tests {
     }
 
     /// The threat the PAKE closes. A stranger inverts the hint, stands up the
-    /// same endpoint key and takes the sponsor's dial. What it records is the
-    /// sponsor's share and nothing after it: the sponsor sends no
-    /// confirmation, no card and no nonce, because the stranger's own
-    /// confirmation — made with a guess — does not verify. Offline, every
-    /// candidate password yields a session with nothing recorded to check it
-    /// against, the true one included: one online guess, nothing to grind.
-    /// And the real joiner, which never saw the dial, is untouched.
+    /// same endpoint key and takes the sponsor's dial. With a wrong guess it
+    /// records the sponsor's share and nothing after it: no confirmation, no
+    /// card, no nonce, because its own confirmation does not verify — one
+    /// online guess, nothing to grind. With the right four symbols it is
+    /// confirmed, which pins that the sponsor's password is the secret half
+    /// and nothing else. And the real joiner, which never saw either dial,
+    /// is untouched.
     #[tokio::test]
     async fn an_impostor_endpoint_learns_one_guess_and_nothing_to_grind() {
         let net = MemNet::new();
@@ -1879,10 +1908,15 @@ pub(crate) mod tests {
         let derived = derive_code(&code).expect("derive");
         let pair_id = derived.pair_id.clone();
 
-        // The impostor stands up the hint-derived key; on this network that
-        // takes the sponsor's next dial.
-        let impostor: Arc<dyn Transport> = Arc::new(net.peer(pair_id.clone()));
-        let recorder = {
+        /// Stand up the hint-derived key — on this network that takes the
+        /// sponsor's next dial — answer its `Start` with `guess`, and keep
+        /// whatever it sends after that.
+        fn record(
+            net: &MemNet,
+            pair_id: &DeviceId,
+            guess: String,
+        ) -> tokio::task::JoinHandle<(DeviceId, [u8; 32], Option<PairFrame>)> {
+            let impostor: Arc<dyn Transport> = Arc::new(net.peer(pair_id.clone()));
             let pair_id = pair_id.clone();
             tokio::spawn(async move {
                 let incoming = impostor.accept().await.expect("the sponsor's dial");
@@ -1892,12 +1926,11 @@ pub(crate) mod tests {
                 else {
                     panic!("the first frame is a Start");
                 };
-                // Answer with a guess, as the protocol allows exactly once.
                 let (exchange, mine) = pake::Exchange::start(
                     pake::Role::B,
                     sponsor.as_str().as_bytes(),
                     pair_id.as_str().as_bytes(),
-                    b"0000",
+                    guess.as_bytes(),
                 )
                 .expect("start");
                 let session = exchange.finish(&share).expect("finish");
@@ -1907,51 +1940,37 @@ pub(crate) mod tests {
                 })
                 .expect("encode");
                 stream.send(&reply).await.expect("send");
-                // Everything the sponsor sends after that is the transcript
-                // the impostor gets to keep.
                 let further = recv_frame::<PairFrame>(stream.as_mut()).await;
                 (sponsor, share, further)
             })
-        };
+        }
+
+        // A wrong guess: the sponsor's confirmation fails on its side, and
+        // it sends nothing more. The transcript is the sponsor's share.
+        let recorder = record(&net, &pair_id, "0000".to_owned());
         let entered = sponsor.pair.enter(&code, now_ms()).await;
         assert!(entered.is_err(), "the sponsor did not accept the impostor");
-        let (sponsor_id, share, further) = recorder.await.expect("recorded");
+        let (_, _, further) = recorder.await.expect("recorded");
         assert!(
             further.is_none(),
             "the sponsor sent nothing after the failed confirmation: {further:?}"
         );
         assert!(sponsor.pair.offers(now_ms()).is_empty());
 
-        // Offline, against the transcript: the sponsor's share alone. Every
-        // candidate — a sample, and the true password among it — makes a
-        // session; none has a confirmation on record to verify against.
-        let alphabet = display_protocol::pairing::RENDEZVOUS_CODE_ALPHABET;
-        let mut candidates: Vec<String> = (0u32..512)
-            .map(|n| {
-                (0..HINT_CHARS)
-                    .map(|i| {
-                        let index = usize::try_from((n >> (5 * i)) & 0x1f).expect("small");
-                        char::from(alphabet[index])
-                    })
-                    .collect()
-            })
-            .collect();
-        candidates.push(derived.password.clone());
-        let recorded_confirmation = [0u8; 32];
-        for candidate in &candidates {
-            let (exchange, _) = pake::Exchange::start(
-                pake::Role::B,
-                sponsor_id.as_str().as_bytes(),
-                pair_id.as_str().as_bytes(),
-                candidate.as_bytes(),
-            )
-            .expect("start");
-            let session = exchange.finish(&share).expect("finish");
-            assert!(
-                session.confirm(&recorded_confirmation).is_err(),
-                "candidate {candidate} confirmed against a transcript that holds no confirmation"
-            );
-        }
+        // The sponsor's password is the secret half and nothing else: an
+        // endpoint holding just those four symbols is confirmed, and gets
+        // the `Confirm` that follows. (Holding them is holding the code —
+        // and it is still not adopted, having answered no offer.)
+        let recorder = record(&net, &pair_id, derived.password.clone());
+        let entered = sponsor.pair.enter(&code, now_ms()).await;
+        assert!(entered.is_err(), "no offer came back");
+        let (_, _, further) = recorder.await.expect("recorded");
+        assert!(
+            matches!(further, Some(PairFrame::Confirm { .. })),
+            "the right password is confirmed: {further:?}"
+        );
+        assert!(sponsor.pair.offers(now_ms()).is_empty());
+
         // The real joiner never saw the dial.
         assert_eq!(joiner.pair.attempts(), 0);
         assert!(joiner.pair.status(now_ms()).is_some());

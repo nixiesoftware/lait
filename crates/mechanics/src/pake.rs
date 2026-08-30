@@ -97,10 +97,21 @@ pub struct Session {
     key: [u8; 16],
     mine: [u8; 32],
     theirs: [u8; 32],
+    /// The shared point `K`, compressed — kept only so a test can hold both
+    /// sides' group arithmetic against `h·x·y·G`.
+    #[cfg(test)]
+    shared: [u8; 32],
 }
 
 /// The password as a scalar. Domain-separated so the same symbols in another
 /// protocol are another scalar.
+///
+/// A plain hash, deliberately not the memory-hard MHF RFC 9382 §3.2 calls
+/// for: the password here is four symbols — twenty bits — and no MHF makes
+/// twenty bits survive an offline attack. What protects it is that there is
+/// no offline attack: the exchange yields one online guess per dial, and the
+/// joiner counts them. Hardening the hash would cost every honest dial and
+/// buy nothing.
 #[must_use]
 pub fn password_scalar(password: &[u8]) -> Scalar {
     let mut wide = [0u8; 64];
@@ -172,9 +183,12 @@ impl Exchange {
             Role::A => (self.mine, *theirs),
             Role::B => (*theirs, self.mine),
         };
+        // The RFC encodes `w` in the transcript as a big-endian number padded
+        // to the field length; dalek's scalar bytes are little-endian.
         let mut w = self.w.to_bytes();
         w.reverse();
-        let keys = schedule(&self.a, &self.b, &pa, &pb, &k.compress().to_bytes(), &w);
+        let shared = k.compress().to_bytes();
+        let keys = schedule(&self.a, &self.b, &pa, &pb, &shared, &w);
         let (mine, theirs) = match self.role {
             Role::A => (keys.mac_a, keys.mac_b),
             Role::B => (keys.mac_b, keys.mac_a),
@@ -183,6 +197,8 @@ impl Exchange {
             key: keys.ke,
             mine,
             theirs,
+            #[cfg(test)]
+            shared,
         })
     }
 }
@@ -228,7 +244,10 @@ struct Keys {
 /// RFC 9382 §3.3–§4: the transcript, `Ke || Ka = Hash(TT)`,
 /// `KcA || KcB = HKDF(Ka, "ConfirmationKeys")`, `cA = MAC(KcA, TT)`,
 /// `cB = MAC(KcB, TT)`. Group-independent, which is what lets the P-256
-/// vectors pin it.
+/// vectors pin it. `w` arrives already big-endian (the caller reverses
+/// dalek's little-endian scalar bytes); for edwards25519 that encoding is
+/// self-consistent between the two sides and pinned by no vector, the RFC
+/// shipping none for this group.
 fn schedule(a: &[u8], b: &[u8], pa: &[u8], pb: &[u8], k: &[u8], w: &[u8]) -> Keys {
     let mut tt = Vec::new();
     for field in [a, b, pa, pb, k, w] {
@@ -289,6 +308,64 @@ mod tests {
             keys.mac_b.to_vec(),
             hex("d3e2e547f1ae04f2dbdbf0fc4b79f8ecff2dff314b5d32fe9fcef2fb26dc459b")
         );
+    }
+
+    /// RFC 9382 Appendix A, for edwards25519: hash the seed string with
+    /// SHA-256 iterated `i` times, take the 32 bytes unmodified as a point
+    /// encoding, and accept the first that decodes, is not the identity, and
+    /// has the prime order. Both constants fall out of it, so a byte that
+    /// drifted in either would not.
+    #[test]
+    fn the_points_are_generated_from_the_rfcs_seeds() {
+        fn generate(seed: &[u8]) -> [u8; 32] {
+            for i in 1..1000 {
+                let mut block = seed.to_vec();
+                for _ in 0..i {
+                    block = Sha256::digest(&block).to_vec();
+                }
+                let mut encoded = [0u8; 32];
+                encoded.copy_from_slice(&block);
+                if let Some(point) = CompressedEdwardsY(encoded).decompress() {
+                    if !point.is_identity() && point.is_torsion_free() {
+                        return encoded;
+                    }
+                }
+            }
+            panic!("no point within the RFC's bound");
+        }
+        assert_eq!(generate(b"edwards25519 point generation seed (M)"), M);
+        assert_eq!(generate(b"edwards25519 point generation seed (N)"), N);
+    }
+
+    /// The group half, white-box: with `w`, `x` and `y` fixed, `A` sends
+    /// `w·M + x·G`, `B` sends `w·N + y·G`, and both sides arrive at
+    /// `h·x·y·G` — the password cancelled, the cofactor applied.
+    #[test]
+    fn the_shares_and_the_shared_point_are_the_rfcs_arithmetic() {
+        let w = Scalar::from(7u64);
+        let x = Scalar::from(11u64);
+        let y = Scalar::from(13u64);
+        let alice = Exchange::with(Role::A, b"alice", b"bob", w, x);
+        let bob = Exchange::with(Role::B, b"alice", b"bob", w, y);
+        assert_eq!(
+            alice.mine,
+            (w * point(&M) + x * G).compress().to_bytes(),
+            "pA = w·M + x·G"
+        );
+        assert_eq!(
+            bob.mine,
+            (w * point(&N) + y * G).compress().to_bytes(),
+            "pB = w·N + y·G"
+        );
+        let share_a = alice.mine;
+        let share_b = bob.mine;
+        let alice = alice.finish(&share_b).expect("finish");
+        let bob = bob.finish(&share_a).expect("finish");
+        let expected = (x * y * G).mul_by_cofactor().compress().to_bytes();
+        assert_eq!(alice.shared, expected, "A's K = h·x·y·G");
+        assert_eq!(bob.shared, expected, "B's K = h·x·y·G");
+        alice.confirm(&bob.confirmation()).expect("confirm");
+        bob.confirm(&alice.confirmation()).expect("confirm");
     }
 
     /// The RFC's points decompress and are not small-order: a constant that
