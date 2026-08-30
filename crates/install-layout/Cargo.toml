@@ -1,0 +1,17 @@
+[package]
+name = "install-layout"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "The names in an installed client's root, spelled once. The stub swaps trees by these names and the daemon recognises an installation by them; two spellings of one layout is a drift nobody sees until an installed machine."
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+# Deliberately dependency-free. The stub must stay free of the engine — that is
+# why the layout was duplicated in the first place — so the shared spelling can
+# only live somewhere that costs the stub nothing to depend on. A leaf crate
+# with no dependencies is that place.
+[dependencies]
+
+[lints]
+workspace = true

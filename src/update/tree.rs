@@ -33,21 +33,15 @@ use super::feed;
 /// The bundle name of the swap-consumable tree artifact.
 pub const TREE_BUNDLE: &str = "astrolabe-tree";
 
-/// The stage manifest's file name in the install root. Must agree with the
-/// stub's constant of the same name; the chain test asserts the agreement.
-pub const STAGE_MANIFEST: &str = "staged.manifest.json";
-
-/// The staged tree's directory name in the install root.
-pub const STAGED_DIR: &str = "staged";
-
-/// Held while `staged/` is written here or consumed by the stub. Must agree
-/// with the stub's constant of the same name.
-pub const STAGING_LOCK: &str = "staging.lock";
-
-/// The live tree's directory name in the install root. Must agree with the
-/// stub's `CURRENT_DIR`; it is spelled here because the daemon recognises an
-/// installation by this shape.
-pub const LIVE_DIR: &str = "current";
+// The install root's layout, re-exported from the crate that owns the one
+// spelling of it. These were spelled here *and* in the stub, with a test
+// asserting the two agreed — which held for the three names somebody
+// remembered to add to it and silently did not for the rest. There is now one
+// definition and nothing to drift.
+pub use install_layout::{
+    Tree, CURRENT_DIR as LIVE_DIR, PREVIOUS_DIR, STAGED_DIR, STAGE_MANIFEST, STAGING_LOCK,
+    STEWARD_LOCK, STEWARD_RECORD,
+};
 
 /// What was staged, for the caller's report.
 #[derive(Debug)]

@@ -130,6 +130,42 @@ pub fn registry_file() -> Result<PathBuf> {
     Ok(config_root()?.join("spaces.json"))
 }
 
+/// The registry belonging to one stack, whichever stack this process is.
+fn registry_file_for(profile: &crate::config::Profile) -> Result<PathBuf> {
+    Ok(profile.config_root()?.join("spaces.json"))
+}
+
+/// Which stack registered this store, when one did.
+///
+/// A store is registered in exactly one profile's catalog — founding refuses
+/// an occupied directory, and entering bootstraps a fresh home — so this is a
+/// single answer, not a preference.
+///
+/// It is what makes an agent's discovery work across stacks. An editor spawns
+/// `lait mcp` with an environment the editor controls, so the process cannot
+/// be told which stack its repository belongs to; but the *store on disk* was
+/// registered by exactly one of them, and asking which is a read of files that
+/// are true whether or not any client is running. Without it, an agent that
+/// found a store by walking up from its working directory would then route its
+/// every call to whichever stack the editor happened to launch it in — and be
+/// answered "no such local Orbit" by a daemon that has never heard of the
+/// directory the agent is sitting in.
+pub fn owner_of(store: &Path) -> Option<crate::config::Profile> {
+    let wanted = crate::config::canonical(store);
+    crate::config::profile::all().into_iter().find(|profile| {
+        let Ok(path) = registry_file_for(profile) else {
+            return false;
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let entries: Vec<Entry> = serde_json::from_str(&raw).unwrap_or_default();
+        entries
+            .iter()
+            .any(|entry| crate::config::canonical(Path::new(&entry.path)) == wanted)
+    })
+}
+
 /// Read the registry, newest-first. Best-effort: a missing or corrupt file
 /// yields an empty list rather than an error (navigation state, never a gate).
 pub fn list() -> Vec<Entry> {

@@ -145,8 +145,21 @@ impl DaemonDriver for LaitDriver {
         let log = std::fs::File::create(&log_path)
             .with_context(|| format!("create daemon log {}", log_path.display()))?;
         let identity = selection.self_contained_home();
-        let child = lait::daemon_spawn::spawn(&self.executable, Some(log), identity.as_deref())
-            .with_context(|| format!("spawn {}", self.executable.display()))?;
+        // The stack this daemon serves, named on its argv like `--home` is.
+        // This spawn is how the client starts the identity daemon, so leaving
+        // it to be inherited from the environment is exactly the ambient
+        // selection every other call site was changed to avoid — a client and
+        // the daemon it started could then disagree about which identity they
+        // are on, which is the seam this tree has already got wrong twice.
+        let profile = selection.profile()?;
+        let profile_name = profile.name().map(|name| name.to_string());
+        let child = lait::daemon_spawn::spawn(
+            &self.executable,
+            Some(log),
+            identity.as_deref(),
+            profile_name.as_deref(),
+        )
+        .with_context(|| format!("spawn {}", self.executable.display()))?;
         Ok(Box::new(LaitChild(child)))
     }
 

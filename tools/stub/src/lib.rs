@@ -70,15 +70,15 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 
-/// The stage manifest's file name, beside — never inside — `staged/`, so a
-/// tree without its manifest is inert bytes the stub ignores.
-pub const STAGE_MANIFEST: &str = "staged.manifest.json";
-/// The staged tree waiting to become current.
-pub const STAGED_DIR: &str = "staged";
-/// The live tree.
-pub const CURRENT_DIR: &str = "current";
-/// The prior live tree, kept as the local rollback target.
-pub const PREVIOUS_DIR: &str = "previous";
+// The layout, from the crate that owns its one spelling. It used to be
+// duplicated here and in `lait::update::tree` because the stub must stay free
+// of the engine; `install-layout` is dependency-free, so the stub can share
+// the names without taking on the engine, and there is nothing left to drift.
+pub use install_layout::{
+    Tree, CANONICAL_LAYOUT, CURRENT_DIR, INSTANCE_LOCK, LAUNCHED_FROM, PREVIOUS_DIR, STAGED_DIR,
+    STAGE_MANIFEST, STAGING_LOCK, STEWARD_LOCK, STEWARD_RECORD, STUB_LOG,
+};
+
 /// A client asking for the apply window: it writes the version it is
 /// yielding to here and exits, and the stub consumes the file and loops —
 /// apply, then start what is then current — instead of exiting with it.
@@ -87,26 +87,16 @@ pub const RELAUNCH_REQUEST: &str = "relaunch.requested";
 /// requested version, so that client can tell "my window happened and the
 /// apply was refused" from "nobody tried".
 pub const RELAUNCHED_ENV: &str = "ASTROLABE_RELAUNCHED";
-/// The claim: held for as long as a client started here is alive.
-pub const INSTANCE_LOCK: &str = "instance.lock";
-/// Held while `staged/` is written (by the stager) or consumed (here).
-pub const STAGING_LOCK: &str = "staging.lock";
-/// Where every named refusal and recovery is appended.
-pub const STUB_LOG: &str = "stub.log";
 
 /// Prefixes of the scratch both halves leave behind when a delete loses a
 /// race with a scanner. Swept on every claim.
 const SWEEPABLE: &[&str] = &[
     "previous.trash-",
+    "current.failed-trash-",
     "staged.tmp-",
     "staged.manifest.json.tmp-",
     "canonical-install.trash-",
 ];
-
-/// Receipt written only after a canonical installer has replaced every owned
-/// release tree. A client crossed below the compatibility floor by the old
-/// sparse updater has no receipt and must refuse with reinstall instructions.
-pub const CANONICAL_LAYOUT: &str = "canonical-layout-v1";
 
 /// What `staged/` must contain, byte for byte. Written by the stager
 /// (`lait::update::tree`), proven again here before any rename.
@@ -519,6 +509,41 @@ fn swap(root: &Path) -> Result<(), String> {
     let current = root.join(CURRENT_DIR);
     let staged = root.join(STAGED_DIR);
 
+    // The last launch fell back, so the live tree is the one that would not
+    // start and the rollback tree is the only one known to work. Rotating
+    // normally here would make the broken tree the rollback target and delete
+    // the working one — and the usual reasons a live tree will not spawn
+    // (a runtime missing, an anti-virus quarantine, damaged ACLs) carry
+    // forward, so the incoming release may not start either. Discard the tree
+    // that failed instead, and leave `previous/` untouched.
+    if launched_from(root) == Some(Tree::Previous) && current.exists() {
+        let failed = root.join(scratch_name("current.failed-trash-"));
+        fs::rename(&current, &failed).map_err(|error| {
+            format!("the tree that failed to start could not be set aside: {error}")
+        })?;
+        if let Err(error) = fs::rename(&staged, &current) {
+            let _ = fs::rename(&failed, &current);
+            return Err(format!(
+                "the staged tree could not be moved into place, and the tree that failed to \
+                 start was restored: {error}"
+            ));
+        }
+        say(
+            root,
+            "the previous launch fell back, so the tree that would not start was discarded and \
+             the rollback tree was kept",
+        );
+        if fs::remove_file(root.join(STAGE_MANIFEST)).is_err() {
+            say(
+                root,
+                "the consumed stage manifest could not be removed; it will be cleared at the \
+                 next launch",
+            );
+        }
+        let _ = fs::remove_dir_all(&failed);
+        return Ok(());
+    }
+
     let aside = if previous.exists() {
         let aside = root.join(scratch_name("previous.trash-"));
         fs::rename(&previous, &aside)
@@ -738,6 +763,13 @@ pub fn launch_answering(
         command.spawn()
     };
     let entry = root.join(CURRENT_DIR).join(entry_name());
+    // Recorded *before* the spawn, and again before the fallback spawn,
+    // because the next swap needs to know which tree actually ran. Without it,
+    // a swap that follows a fallback rotates the live (broken) tree into
+    // `previous/` and deletes the rollback tree that works — turning a
+    // degraded-but-recoverable installation into one with two broken trees, on
+    // the machine least able to recover from that.
+    record_launched(root, Tree::Current);
     match spawn(&entry) {
         Ok(child) => Ok(child),
         Err(error) => {
@@ -752,9 +784,25 @@ pub fn launch_answering(
                      tree"
                 ),
             );
+            record_launched(root, Tree::Previous);
             spawn(&fallback)
         }
     }
+}
+
+/// Record which tree is about to be started, before it is.
+///
+/// Best-effort: a root that cannot hold this note still launches, and a swap
+/// that cannot read it takes the ordinary path — which is exactly what
+/// happened everywhere before this existed.
+fn record_launched(root: &Path, tree: Tree) {
+    let _ = fs::write(root.join(LAUNCHED_FROM), tree.dir());
+}
+
+/// Which tree the last launch actually started, when the note survived.
+fn launched_from(root: &Path) -> Option<Tree> {
+    let raw = fs::read_to_string(root.join(LAUNCHED_FROM)).ok()?;
+    Tree::from_dir(raw.trim())
 }
 
 /// Take the pending relaunch request, if the client left one.
@@ -788,6 +836,80 @@ mod tests {
         fs::create_dir(root.path().join(CURRENT_DIR)).expect("a live tree");
         fs::write(root.path().join(CURRENT_DIR).join(entry_name()), b"live").expect("a live entry");
         root
+    }
+
+    /// The rollback tree is the last thing that works on a machine whose live
+    /// tree will not start. A swap that follows a fallback must discard the
+    /// tree that failed, never the one that is still bootable.
+    ///
+    /// Without this the sequence is: `current/` will not spawn, the stub falls
+    /// back to `previous/`, the daemon from that tree stages a release, and
+    /// the next swap rotates the *broken* tree into `previous/` and deletes
+    /// the working one. Two broken trees, on exactly the machine that cannot
+    /// afford it — and the causes of "will not spawn" are environmental and
+    /// usually carry forward, so the incoming release is no guarantee.
+    #[test]
+    fn a_swap_after_a_fallback_launch_discards_the_failed_tree_and_never_the_good_one() {
+        let root = root_with_current();
+        fs::write(root.path().join(CURRENT_DIR).join(entry_name()), b"broken")
+            .expect("a live tree that will not start");
+        fs::create_dir(root.path().join(PREVIOUS_DIR)).expect("a rollback tree");
+        fs::write(
+            root.path().join(PREVIOUS_DIR).join(entry_name()),
+            b"the last tree known to work",
+        )
+        .expect("a good rollback entry");
+        fs::create_dir(root.path().join(STAGED_DIR)).expect("a staged tree");
+        fs::write(root.path().join(STAGED_DIR).join(entry_name()), b"incoming")
+            .expect("a staged entry");
+        fs::write(root.path().join(STAGE_MANIFEST), b"{}").expect("a stage manifest");
+
+        // The last launch fell back — the fact `launch_answering` records
+        // before it spawns anything.
+        record_launched(root.path(), Tree::Previous);
+
+        swap(root.path()).expect("the swap lands");
+
+        assert_eq!(
+            fs::read(root.path().join(PREVIOUS_DIR).join(entry_name()))
+                .expect("the rollback tree still exists"),
+            b"the last tree known to work",
+            "the swap rotated away the only tree known to start, leaving the machine with two \
+             broken trees and no way back"
+        );
+        assert_eq!(
+            fs::read(root.path().join(CURRENT_DIR).join(entry_name())).expect("a new live tree"),
+            b"incoming",
+            "the staged tree did not become live"
+        );
+        assert!(
+            !root.path().join(STAGE_MANIFEST).exists(),
+            "the consumed stage manifest was left behind"
+        );
+    }
+
+    /// The ordinary swap is unchanged: an ordinary launch rotates live into
+    /// rollback, which is the whole point of keeping a rollback tree.
+    #[test]
+    fn an_ordinary_swap_still_rotates_the_live_tree_into_the_rollback_slot() {
+        let root = root_with_current();
+        fs::create_dir(root.path().join(STAGED_DIR)).expect("a staged tree");
+        fs::write(root.path().join(STAGED_DIR).join(entry_name()), b"incoming")
+            .expect("a staged entry");
+        fs::write(root.path().join(STAGE_MANIFEST), b"{}").expect("a stage manifest");
+        record_launched(root.path(), Tree::Current);
+
+        swap(root.path()).expect("the swap lands");
+
+        assert_eq!(
+            fs::read(root.path().join(PREVIOUS_DIR).join(entry_name()))
+                .expect("the prior live tree became the rollback tree"),
+            b"live"
+        );
+        assert_eq!(
+            fs::read(root.path().join(CURRENT_DIR).join(entry_name())).expect("a new live tree"),
+            b"incoming"
+        );
     }
 
     #[test]

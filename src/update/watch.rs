@@ -159,22 +159,261 @@ impl Standing {
 /// true of every binary everywhere: a developer's `target/debug/lait` must
 /// not be read as an installation and staged into.
 pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
+    installation_of(executable).map(|(root, _)| root)
+}
+
+/// The install root *and* which of its trees this executable is in.
+///
+/// `previous/` counts. The stub starts the rollback tree when the live one
+/// will not run, and a daemon that comes up there is still this
+/// installation's resident updater — running, in fact, on the machine that
+/// most needs the next release, because this one did not start. Recognising
+/// only `current/` left such a machine never updating again and saying
+/// nothing about why.
+///
+/// `staged/` never counts: those are bytes waiting for a swap, and stewarding
+/// an installation from a tree nothing ever launched would be claiming
+/// authority from bytes nobody accepted.
+pub fn installation_of(executable: &Path) -> Option<(PathBuf, tree::Tree)> {
     let live = executable.parent()?;
-    if live.file_name()? != tree::LIVE_DIR {
-        return None;
-    }
+    let which = tree::Tree::from_dir(live.file_name()?.to_str()?)?;
     let root = live.parent()?;
     let stub = root.join(if cfg!(windows) {
         "astrolabe.exe"
     } else {
         "astrolabe"
     });
-    stub.is_file().then(|| root.to_path_buf())
+    stub.is_file().then(|| (root.to_path_buf(), which))
 }
 
 /// The install root of the running binary, when it is stub-managed.
 pub fn install_root() -> Option<PathBuf> {
     install_root_of(&std::env::current_exe().ok()?)
+}
+
+/// Who is stewarding an install root, as they recorded it when they took the
+/// lock.
+///
+/// Beside the lock rather than inside it, for the reason the daemon's pid does
+/// not live inside `daemon.lock`: Windows locks are mandatory, so a reader
+/// would fail there while passing on unix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StewardRecord {
+    /// Schema version of this record.
+    pub format: u8,
+    /// The stewarding daemon's process id.
+    pub pid: u32,
+    /// The executable it is running, as *it* resolved it. A hint for a person
+    /// reading a report — never the authority, which is the held lock.
+    pub exe: String,
+    /// Which tree that executable is in.
+    pub tree: String,
+    /// The identity home it serves, so a report can say which stack holds this
+    /// installation.
+    pub identity: String,
+    /// When the lock was taken, unix seconds.
+    pub taken_at: u64,
+}
+
+/// The exclusive right to stage releases into one install root.
+///
+/// Held for the daemon's lifetime and released by the kernel when it exits,
+/// whatever happens to it. This is the whole authority model, and it is
+/// deliberately the same shape Chrome's `SingletonLock` and Omaha's
+/// registration have: **a held lock that names its holder**, living in the
+/// directory it protects.
+///
+/// What it replaces was an inference — "my executable's parent is named
+/// `current`, so I may stage here" — which had two failures a lock does not
+/// have. A path is a claim a process makes about itself, so a second process
+/// could make the same one; and a path shape says nothing about whether
+/// anybody *else* is already acting on that root, so two daemons could stage
+/// into one directory and each record a different standing.
+#[derive(Debug)]
+pub struct StewardLock {
+    file: std::fs::File,
+    root: PathBuf,
+}
+
+impl Drop for StewardLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+        // Best-effort: the lock is the authority, and the record is only how a
+        // reader says who holds it. A record left behind by a crash names a
+        // pid that no longer holds the lock, and every reader checks the lock.
+        let _ = std::fs::remove_file(self.root.join(tree::STEWARD_RECORD));
+    }
+}
+
+impl StewardLock {
+    /// The root this lock covers.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// Why this daemon is not the steward of an installation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotSteward {
+    /// This process is not running inside a recognised installation at all —
+    /// a developer's tree, a standalone `lait`. The ordinary answer, and not a
+    /// defect.
+    NoInstallation,
+    /// This daemon serves a profile. An installation belongs to the device
+    /// that installed it; a profile is a second device sharing the hardware,
+    /// and letting it stage into the default stack's install root would have
+    /// two devices writing one tree.
+    Profiled {
+        /// Which profile.
+        profile: String,
+    },
+    /// Somebody else holds the lock.
+    HeldBy {
+        /// What they recorded when they took it, when it could be read.
+        record: Option<StewardRecord>,
+    },
+    /// The root exists but could not be claimed — unwritable, full, or a lock
+    /// that could not be opened. Never silently "not the steward": a machine
+    /// that cannot take the lock it should hold is a fact worth saying.
+    Unavailable {
+        /// What the filesystem said.
+        why: String,
+    },
+}
+
+impl std::fmt::Display for NotSteward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoInstallation => {
+                f.write_str("this daemon is not running inside a recognised installation")
+            }
+            Self::Profiled { profile } => write!(
+                f,
+                "this daemon serves profile {profile}, and an installation is updated by the \
+                 device that installed it"
+            ),
+            Self::HeldBy { record: Some(held) } => write!(
+                f,
+                "another daemon (pid {}, {}) is stewarding this installation",
+                held.pid, held.exe
+            ),
+            Self::HeldBy { record: None } => {
+                f.write_str("another daemon is stewarding this installation")
+            }
+            Self::Unavailable { why } => {
+                write!(
+                    f,
+                    "this installation could not be claimed for staging: {why}"
+                )
+            }
+        }
+    }
+}
+
+/// Take the right to stage into this installation, or say why not.
+///
+/// Called once at daemon start, on an [`Installation`] the caller already
+/// recognised. Taking the *shape* rather than re-deriving it is what keeps
+/// this from narrowing the gate: every shape that can receive a release —
+/// a stub tree, a macOS bundle staging beside the identity, a headless
+/// service — is stewarded through the root it stages into, so adding a fourth
+/// shape adds it here for free. An earlier cut re-derived a stub tree from the
+/// executable and thereby silently excluded bundles, which stopped macOS
+/// updating and reported it as the ordinary answer.
+///
+/// The returned lock is held for the process's life; dropping it releases the
+/// root to whatever starts next.
+pub fn take_stewardship(
+    installation: &Installation,
+    executable: &Path,
+    identity: &Path,
+    profile: &crate::config::Profile,
+) -> std::result::Result<StewardLock, NotSteward> {
+    if let Some(name) = profile.name() {
+        return Err(NotSteward::Profiled {
+            profile: name.to_string(),
+        });
+    }
+    let root = installation.root().to_path_buf();
+    // Which tree this is, when the shape has trees at all. A bundle and a
+    // service have one binary and no rollback tree, so there is nothing to
+    // name and the record says so.
+    let which = installation_of(executable)
+        .map(|(_, tree)| tree.dir().to_string())
+        .unwrap_or_else(|| match installation {
+            Installation::Bundle { .. } => "bundle".to_string(),
+            Installation::Service { .. } => "service".to_string(),
+            Installation::StubTree { .. } => tree::LIVE_DIR.to_string(),
+        });
+    if let Err(error) = std::fs::create_dir_all(&root) {
+        return Err(NotSteward::Unavailable {
+            why: error.to_string(),
+        });
+    }
+    let path = root.join(tree::STEWARD_LOCK);
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(NotSteward::Unavailable {
+                why: error.to_string(),
+            })
+        }
+    };
+    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+        return Err(NotSteward::HeldBy {
+            record: read_steward_record(&root),
+        });
+    }
+    let record = StewardRecord {
+        format: 1,
+        pid: std::process::id(),
+        exe: executable.display().to_string(),
+        tree: which,
+        identity: identity.display().to_string(),
+        taken_at: now(),
+    };
+    // Best-effort, and deliberately after the lock: the lock is the authority,
+    // and a record that could not be written costs a reader its explanation,
+    // never the right to stage.
+    if let Ok(encoded) = serde_json::to_vec_pretty(&record) {
+        let _ = std::fs::write(root.join(tree::STEWARD_RECORD), encoded);
+    }
+    Ok(StewardLock { file, root })
+}
+
+/// What the steward of an install root recorded, when one did.
+pub fn read_steward_record(root: &Path) -> Option<StewardRecord> {
+    let bytes = std::fs::read(root.join(tree::STEWARD_RECORD)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Whether an install root's steward lock is currently held.
+///
+/// A pure probe: it opens the lock read-only, tries a *shared* acquisition,
+/// and releases immediately. It creates nothing and writes nothing — which is
+/// the difference from asking the same question by trying to take the lock for
+/// real, and the reason `daemon_gone`'s equivalent stopped stamping the
+/// probing process's own pid into the file it was inspecting.
+pub fn stewardship_held(root: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .open(root.join(tree::STEWARD_LOCK))
+    else {
+        return false;
+    };
+    match fs2::FileExt::try_lock_shared(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 /// The application bundle this binary ships inside, on macOS.
@@ -515,8 +754,13 @@ fn check_worlds(identity: &Path) -> bool {
 pub struct Checked {
     pub standing: Standing,
     /// Only a fresh daemon generation can serve what this check took: a
-    /// World release was staged and selected, or a service's binary was
-    /// swapped and the running image is the old one.
+    /// service's binary was swapped and the running image is the old one.
+    ///
+    /// A staged and selected World release needs a generation too, and asks
+    /// for one through the same callback — but from [`serve_worlds`], not from
+    /// here. World channels are checked on their own loop precisely because
+    /// they must not be gated on this one having an installation to stage
+    /// into.
     pub relaunch: bool,
 }
 
@@ -538,10 +782,17 @@ fn check(identity: &Path, installation: &Installation) -> Checked {
     apply_if_this_platform_has_no_stub(installation.root());
     let swapped = matches!(installation, Installation::Service { .. })
         && swapped_this_check(previous.as_ref(), &standing);
-    let worlds_staged = check_worlds(identity);
+    // World channels are **not** checked here. This loop only runs where
+    // there is an installation to stage into, and a World's channel is not
+    // that installation's business: gating the two together meant a machine
+    // whose client half was not recognised — a developer's tree, a profile —
+    // silently stopped updating every World it served, for a reason about
+    // neither the Worlds nor their channels. `serve_worlds` runs them
+    // unconditionally and carries the same relaunch signal, so a staged World
+    // release still crosses the generation boundary.
     Checked {
         standing,
-        relaunch: worlds_staged || swapped,
+        relaunch: swapped,
     }
 }
 
@@ -641,6 +892,107 @@ pub async fn serve(
         check,
     )
     .await;
+}
+
+/// Keep this identity's installed Worlds level with their own channels.
+///
+/// Separate from [`serve`] and **not gated on stewardship**, because a World's
+/// channel has nothing to do with whether this client tree may update itself.
+/// The two shared a loop once, behind the staging gate, so a machine whose
+/// client half was not recognised — a developer's tree, a rolled-back install,
+/// a profile — silently stopped updating every World it served, for a reason
+/// that was about neither the Worlds nor their channels. Nothing here consults
+/// an install root, so no shape of client installation can switch it off.
+///
+/// It *is* gated on the network being one that reaches anything. A daemon told
+/// `LAIT_NETWORK=isolated` has no relay and no discovery by contract, and a
+/// loop that reached the real World feed from inside an isolated test would be
+/// a non-deterministic writer in a directory the test is asserting on.
+pub async fn serve_worlds(
+    identity: PathBuf,
+    isolated: bool,
+    stop: tokio::sync::watch::Receiver<bool>,
+    on_relaunch_needed: OnWorldsStaged,
+) {
+    serve_worlds_checking(
+        identity,
+        isolated,
+        stop,
+        on_relaunch_needed,
+        CHECK_PERIOD,
+        MAX_SPREAD,
+        check_worlds,
+    )
+    .await;
+}
+
+/// [`serve_worlds`]'s loop, with its period and its check supplied.
+///
+/// Split for one reason, and the reason has a test this time: the parts of
+/// this module were unit-tested and the *loop* was not, so nothing asserted
+/// that a running daemon ever reaches its check — the composition, which is
+/// the half this tree keeps getting wrong while every part is correct.
+async fn serve_worlds_checking(
+    identity: PathBuf,
+    isolated: bool,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    on_relaunch_needed: OnWorldsStaged,
+    period: Duration,
+    spread: Duration,
+    check: fn(&Path) -> bool,
+) {
+    if isolated {
+        tracing::info!(
+            "this daemon's network is isolated; World channels will not be checked from here"
+        );
+        return;
+    }
+    let mut delay = spread.mul_f64(draw()).min(period);
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            _ = stop.changed() => return,
+        }
+        if *stop.borrow() {
+            return;
+        }
+        let identity = identity.clone();
+        match tokio::task::spawn_blocking(move || check(&identity)).await {
+            // A selected World release is served only by a fresh daemon
+            // generation, exactly as it is when the client-release check takes
+            // one. Moving the World check out of that check must not drop the
+            // signal with it — that would leave a staged release selected on
+            // disk and the old generation still serving it.
+            Ok(true) => {
+                tracing::info!(
+                    "a World release was staged and selected; relaunching the daemon generation"
+                );
+                on_relaunch_needed();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "the World channel check panicked"),
+        }
+        delay = next_delay(period, spread);
+    }
+}
+
+/// Whether a node's network reaches anything outside the machine.
+///
+/// `Isolated` is "no relay, no discovery — direct reach only", which is what
+/// `ci/bench-two-node.sh` and the real-process suites run under. Reaching the
+/// live World feed from there would be egress a test daemon never used to
+/// make.
+///
+/// Answered by the caller and passed in, rather than resolved inside the loop
+/// from a directory the loop had to be handed for no other purpose. The
+/// daemon already reads its own network policy from the home it serves, and
+/// two readings of the same policy from two different directories is the kind
+/// of near-miss that is inert until the day the two disagree.
+pub fn reaches_nothing(home: &Path) -> bool {
+    matches!(
+        crate::config::Settings::load(Some(home)).network(),
+        Ok(comms::policy::Network::Isolated)
+    )
 }
 
 /// The loop itself, with its period and its check supplied.
@@ -1181,6 +1533,8 @@ mod tests {
     /// A static rather than a captured counter because the loop takes a `fn`
     /// pointer, which is what keeps `spawn_blocking` free of a generic.
     static REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static WAKE_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static STAGED_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     fn counting_check(_identity: &Path, _installation: &Installation) -> Checked {
         REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1195,12 +1549,22 @@ mod tests {
     /// A check that staged a World, once: the first call moves, the rest do
     /// not, which is what a real channel does after a relaunch.
     fn staging_check(_identity: &Path, _installation: &Installation) -> Checked {
-        let first = REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        let first = STAGED_REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
         Checked {
             standing: Standing::Current {
                 channel_version: "0.0.0".into(),
             },
             relaunch: first,
+        }
+    }
+
+    fn wake_counting_check(_identity: &Path, _installation: &Installation) -> Checked {
+        WAKE_REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Checked {
+            standing: Standing::Current {
+                channel_version: "0.0.0".into(),
+            },
+            relaunch: false,
         }
     }
 
@@ -1270,7 +1634,7 @@ mod tests {
     /// one gap (the first, and the one permit `Notify` keeps).
     #[tokio::test]
     async fn a_wake_checks_now_and_a_burst_of_wakes_is_spaced_by_the_gap() {
-        REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        WAKE_REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
         let identity = tempfile::tempdir().expect("an identity directory");
         let root = tempfile::tempdir().expect("an install root");
         let (stop, receiver) = tokio::sync::watch::channel(false);
@@ -1287,13 +1651,13 @@ mod tests {
             period,
             Duration::ZERO,
             gap,
-            counting_check,
+            wake_counting_check,
         ));
 
         // The first check is spread by zero, so it lands at once. Wait for it,
         // then ring three times inside one gap.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+        while WAKE_REACHED.load(std::sync::atomic::Ordering::SeqCst) < 1 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the first check never ran"
@@ -1304,7 +1668,7 @@ mod tests {
         wake.notify_one();
         wake.notify_one();
         wake.notify_one();
-        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+        while WAKE_REACHED.load(std::sync::atomic::Ordering::SeqCst) < 2 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "a wake did not reach the check inside an hour-long period"
@@ -1319,7 +1683,7 @@ mod tests {
         // Let every permit drain and count: `Notify` coalesces to one, so a
         // burst of three is one more check, spaced by the gap, and not three.
         tokio::time::sleep(gap * 3).await;
-        let reached = REACHED.load(std::sync::atomic::Ordering::SeqCst);
+        let reached = WAKE_REACHED.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
             reached <= 3,
             "three wakes became {reached} checks; the gap is not spacing them"
@@ -1337,7 +1701,7 @@ mod tests {
     /// for the next reboot.
     #[tokio::test]
     async fn a_staged_world_asks_for_the_generation_relaunch_once() {
-        REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        STAGED_REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
         let identity = tempfile::tempdir().expect("an identity directory");
         let root = tempfile::tempdir().expect("an install root");
         let (stop, receiver) = tokio::sync::watch::channel(false);
@@ -1361,7 +1725,7 @@ mod tests {
             staging_check,
         ));
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+        while STAGED_REACHED.load(std::sync::atomic::Ordering::SeqCst) < 3 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the loop did not come back round"
@@ -1378,5 +1742,316 @@ mod tests {
             .await
             .expect("the loop did not end on the stop signal")
             .expect("the loop panicked");
+    }
+
+    static WORLDS_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static WORLDS_STAGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_world_check(_identity: &Path) -> bool {
+        WORLDS_REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }
+
+    fn one_world_staged(_identity: &Path) -> bool {
+        WORLDS_STAGED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+    }
+
+    /// The World loop is a second composition, and it gets the same assertion
+    /// the client loop does: a daemon wired to a watcher that never reaches
+    /// its check would pass every unit test around it.
+    #[tokio::test]
+    async fn the_world_loop_comes_back_round_on_its_period_and_stops_when_told() {
+        WORLDS_REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        let identity = tempfile::tempdir().expect("an identity directory");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+
+        let loops = tokio::spawn(serve_worlds_checking(
+            identity.path().to_path_buf(),
+            false,
+            receiver,
+            nothing_on_staged(),
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+            counting_world_check,
+        ));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while WORLDS_REACHED.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the World loop reached its check {} time(s) in ten seconds at a 5ms period",
+                WORLDS_REACHED.load(std::sync::atomic::Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        stop.send(true).expect("the stop signal is received");
+        tokio::time::timeout(Duration::from_secs(10), loops)
+            .await
+            .expect("the World loop did not end on the stop signal")
+            .expect("the World loop panicked");
+    }
+
+    /// Moving the World check out of the client check must not drop the
+    /// signal with it: a selected World release is served only by a fresh
+    /// generation, whichever loop took it. Without this the release sits
+    /// selected on disk while the old generation keeps serving the old one.
+    #[tokio::test]
+    async fn a_staged_world_release_still_asks_for_a_fresh_generation() {
+        WORLDS_STAGED.store(0, std::sync::atomic::Ordering::SeqCst);
+        let identity = tempfile::tempdir().expect("an identity directory");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        let on_staged: OnWorldsStaged = Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let loops = tokio::spawn(serve_worlds_checking(
+            identity.path().to_path_buf(),
+            false,
+            receiver,
+            on_staged,
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+            one_world_staged,
+        ));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while asked.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a staged World release never asked for a generation"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        stop.send(true).expect("the stop signal is received");
+        let _ = tokio::time::timeout(Duration::from_secs(10), loops).await;
+    }
+
+    /// An isolated node has no relay and no discovery by contract. A loop that
+    /// reached the live World feed from inside an isolated test would be a
+    /// non-deterministic writer in a directory that test is asserting on.
+    #[tokio::test]
+    async fn an_isolated_node_never_reaches_out_for_world_channels() {
+        WORLDS_REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        let identity = tempfile::tempdir().expect("an identity directory");
+        let (_stop, receiver) = tokio::sync::watch::channel(false);
+
+        // The gate is a parameter rather than an env read inside the loop:
+        // two tests that each set a process-global variable race each other,
+        // and the policy belongs to the caller that knows the node's network.
+        let loops = tokio::spawn(serve_worlds_checking(
+            identity.path().to_path_buf(),
+            true,
+            receiver,
+            nothing_on_staged(),
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+            counting_world_check,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), loops)
+            .await
+            .expect("an isolated loop must return rather than idle")
+            .expect("the World loop panicked");
+        assert_eq!(
+            WORLDS_REACHED.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an isolated daemon reached out to a World channel"
+        );
+    }
+
+    /// An install root with the stub beside it, in whichever tree.
+    fn fake_installation(root: &Path, tree_dir: &str) -> PathBuf {
+        let live = root.join(tree_dir);
+        std::fs::create_dir_all(&live).expect("a tree");
+        let lait = live.join(if cfg!(windows) { "lait.exe" } else { "lait" });
+        std::fs::write(&lait, b"a daemon").expect("stage lait");
+        std::fs::write(
+            root.join(if cfg!(windows) {
+                "astrolabe.exe"
+            } else {
+                "astrolabe"
+            }),
+            b"a stub",
+        )
+        .expect("stage the stub");
+        lait
+    }
+
+    /// The authority to stage is a held lock, so a second daemon on one root
+    /// gets a refusal that names who holds it — not a second right to write
+    /// the same directory.
+    #[test]
+    fn a_second_daemon_on_one_root_stages_nothing_and_names_the_holder() {
+        let root = tempfile::tempdir().expect("an install root");
+        let identity = tempfile::tempdir().expect("an identity");
+        let lait = fake_installation(root.path(), tree::LIVE_DIR);
+        let installation = stub_tree(root.path());
+
+        let held = take_stewardship(
+            &installation,
+            &lait,
+            identity.path(),
+            &crate::config::Profile::Default,
+        )
+        .expect("the first daemon takes the installation");
+        assert!(
+            stewardship_held(root.path()),
+            "the lock reads as free while it is held"
+        );
+
+        match take_stewardship(
+            &installation,
+            &lait,
+            identity.path(),
+            &crate::config::Profile::Default,
+        ) {
+            Err(NotSteward::HeldBy { record }) => {
+                let record = record.expect("the holder recorded itself");
+                assert_eq!(record.pid, std::process::id());
+                assert_eq!(record.tree, tree::LIVE_DIR);
+            }
+            other => panic!(
+                "a second daemon was granted the same installation, so two would stage into one \
+                 directory: {other:?}"
+            ),
+        }
+
+        drop(held);
+        assert!(
+            !stewardship_held(root.path()),
+            "the lock outlived its holder, so nothing could ever steward this root again"
+        );
+    }
+
+    /// Every shape that can receive a release is stewarded, not just the stub
+    /// tree. An earlier cut re-derived a stub tree from the executable and so
+    /// excluded bundles, which stopped macOS updating and reported it as the
+    /// ordinary answer.
+    #[test]
+    fn every_installation_shape_can_be_stewarded() {
+        let identity = tempfile::tempdir().expect("an identity");
+        let exe = identity.path().join("lait");
+        for installation in [
+            Installation::StubTree {
+                root: identity.path().join("stub-root"),
+            },
+            Installation::Bundle {
+                staging: identity.path().join("client-update"),
+            },
+            Installation::Service {
+                root: identity.path().join("service-root"),
+            },
+        ] {
+            let held = take_stewardship(
+                &installation,
+                &exe,
+                identity.path(),
+                &crate::config::Profile::Default,
+            )
+            .unwrap_or_else(|why| {
+                panic!("{installation:?} could not be stewarded, so it will never update: {why}")
+            });
+            assert!(
+                stewardship_held(installation.root()),
+                "{installation:?} reported no steward while one was held"
+            );
+            drop(held);
+        }
+    }
+
+    /// A released lock is immediately claimable by the next daemon.
+    ///
+    /// This is the half a generation relaunch depends on. The successor starts
+    /// while the outgoing process may still be finishing a check, so it will
+    /// meet `HeldBy` once — and then the lock must actually become available,
+    /// or the host's retry would wait forever and that generation would never
+    /// stage anything. A lock that outlived its holder would turn this
+    /// design's own mechanism into the silent never-updates it exists to
+    /// prevent.
+    #[test]
+    fn a_released_installation_is_claimable_again_at_once() {
+        let root = tempfile::tempdir().expect("an install root");
+        let identity = tempfile::tempdir().expect("an identity");
+        let lait = fake_installation(root.path(), tree::LIVE_DIR);
+        let installation = stub_tree(root.path());
+        let claim = || {
+            take_stewardship(
+                &installation,
+                &lait,
+                identity.path(),
+                &crate::config::Profile::Default,
+            )
+        };
+
+        let held = claim().expect("the first daemon takes the installation");
+        assert!(
+            matches!(claim(), Err(NotSteward::HeldBy { .. })),
+            "a contended installation did not report the holder"
+        );
+        drop(held);
+
+        let successor = claim().expect(
+            "the released installation could not be claimed, so a relaunched daemon would never \
+             stage a release again",
+        );
+        let record = read_steward_record(root.path()).expect("the successor recorded itself");
+        assert_eq!(record.pid, std::process::id());
+        drop(successor);
+    }
+
+    /// A profile is a second device sharing hardware. The installation belongs
+    /// to the device that installed it, so a profiled daemon never stages into
+    /// it — which is also what stops a locally built macOS bundle from being
+    /// overwritten by a release it did not ask for.
+    #[test]
+    fn a_profiled_daemon_never_stewards_an_installation() {
+        let root = tempfile::tempdir().expect("an install root");
+        let identity = tempfile::tempdir().expect("an identity");
+        let lait = fake_installation(root.path(), tree::LIVE_DIR);
+
+        let profile = crate::config::Profile::Named {
+            name: "dev".parse().expect("a name"),
+            config: identity.path().join("config"),
+            state: identity.path().join("state"),
+        };
+        match take_stewardship(&stub_tree(root.path()), &lait, identity.path(), &profile) {
+            Err(NotSteward::Profiled { profile }) => assert_eq!(profile, "dev"),
+            other => panic!("a profiled daemon claimed an installation it does not own: {other:?}"),
+        }
+    }
+
+    /// The rollback tree stewards. A daemon started there is running on the
+    /// machine that most needs the next release, because this one did not
+    /// start; refusing it left such a machine never updating again.
+    #[test]
+    fn a_daemon_in_the_rollback_tree_stewards_its_installation() {
+        let root = tempfile::tempdir().expect("an install root");
+        let lait = fake_installation(root.path(), tree::PREVIOUS_DIR);
+
+        let (found, which) = installation_of(&lait).expect("the rollback tree is an installation");
+        assert_eq!(found, root.path());
+        assert_eq!(which, tree::Tree::Previous);
+        assert!(
+            matches!(
+                Installation::of(&lait, root.path()),
+                Some(Installation::StubTree { .. })
+            ),
+            "a daemon in the rollback tree was not recognised as its installation"
+        );
+    }
+
+    /// `staged/` is bytes waiting for a swap. Stewarding from it would be
+    /// claiming authority over an installation from a tree nothing launched.
+    #[test]
+    fn the_staged_tree_is_never_an_installation_to_steward() {
+        let root = tempfile::tempdir().expect("an install root");
+        let lait = fake_installation(root.path(), tree::STAGED_DIR);
+        assert!(
+            installation_of(&lait).is_none(),
+            "the staged tree was read as a tree something runs from"
+        );
     }
 }

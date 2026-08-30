@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/display-protocol",
+    "crates/install-layout",
     "crates/journal",
     "crates/mechanics",
     "crates/netstack",
@@ -113,6 +114,10 @@ path = "src/main.rs"
 # scaffold; re-exported at this crate's root so the app layer reaches it by its
 # historical paths (`crate::acl`, `lait::ids`, …).
 mechanics = { path = "crates/mechanics" }
+# The names in an installed client's root, shared with the stub. Dependency-free
+# on purpose: the stub must stay free of the engine, and one spelling of the
+# layout is the only thing that keeps the two from drifting apart.
+install-layout = { path = "crates/install-layout" }
 # The fabric — the shared world; Loro sealed behind typed wrappers. The app
 # depends on this, not on Loro: `loro` is intentionally absent from THIS
 # manifest, so `loro::*` cannot be named in the app layer. The seal is the

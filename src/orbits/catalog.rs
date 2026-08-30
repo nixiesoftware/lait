@@ -205,7 +205,17 @@ impl Catalog {
         let selected = bindings
             .into_iter()
             .find(|binding| LocalOrbitId::for_store(Path::new(&binding.entry.path)) == id)
-            .ok_or_else(|| anyhow!("no such local Orbit"))?;
+            // Named with the stack it looked in. A store registered by
+            // another stack on this machine is present on disk and absent
+            // from this catalog, and "no such local Orbit" alone reads as
+            // "that Space does not exist" when the truth is "that Space
+            // belongs to another device here".
+            .ok_or_else(|| {
+                let stack = crate::config::profile::current()
+                    .map(|profile| profile.label())
+                    .unwrap_or_else(|_| "default".into());
+                anyhow!("no such local Orbit in the {stack} stack")
+            })?;
         let space = SpaceId::parse(&selected.entry.space)
             .ok_or_else(|| anyhow!("registered local Orbit has an invalid Space id"))?;
         let address = OrbitAddress { orbit: id, space };

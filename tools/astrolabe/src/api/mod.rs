@@ -1751,6 +1751,19 @@ static WOKEN: OnceLock<Sender<()>> = OnceLock::new();
 static INSTANCE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SUMMON: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
+/// The client stack this process belongs to.
+///
+/// Established once from `$LAIT_PROFILE`, and every root the client derives —
+/// the managed state root, the instance guard, and the identity its daemon
+/// serves — comes from this one answer. A profile that was never founded
+/// refuses here, naming itself, rather than resolving to a freshly made empty
+/// directory that every surface would then report as a healthy machine.
+fn client_profile() -> Result<lait::config::Profile, String> {
+    lait::config::profile::current()
+        .map(Clone::clone)
+        .map_err(|error| format!("{error:#}"))
+}
+
 /// Claim the single instance, before any window exists.
 ///
 /// `false` means a client is already running and now holds this launch's
@@ -1760,7 +1773,10 @@ static SUMMON: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// [`ActionRequest::OpenLink`], and the host's [`on_second_launch`] hook is
 /// called either way.
 pub fn claim_single_instance() -> Result<bool, String> {
-    match crate::single_instance::claim(std::env::args()).map_err(|error| format!("{error:#}"))? {
+    let profile = client_profile()?;
+    match crate::single_instance::claim(&profile, std::env::args())
+        .map_err(|error| format!("{error:#}"))?
+    {
         crate::single_instance::Claim::Primary { guard, channel } => {
             // Forgotten, not stored: held for the life of the process.
             std::mem::forget(guard);
@@ -1823,9 +1839,10 @@ pub fn start_with_catalog(
     // keeps its things, and the two would differ on exactly the machine where
     // it mattered. The arguments exist so a test can point the core somewhere
     // disposable, and for nothing else.
+    let profile = client_profile()?;
     let state_root = match state_root {
         Some(given) => PathBuf::from(given),
-        None => crate::sidecar::state_root().map_err(|error| format!("{error:#}"))?,
+        None => crate::sidecar::state_root(&profile).map_err(|error| format!("{error:#}"))?,
     };
     let sidecar = match sidecar {
         Some(given) => PathBuf::from(given),
@@ -1845,7 +1862,7 @@ pub fn start_with_catalog(
 
     // The backstop for a host that never called [`claim_single_instance`].
     if !INSTANCE_HELD.load(std::sync::atomic::Ordering::Acquire) {
-        match crate::single_instance::acquire().map_err(|error| format!("{error:#}"))? {
+        match crate::single_instance::acquire(&profile).map_err(|error| format!("{error:#}"))? {
             // Forgotten, not stored: held for the life of the process, and
             // the kernel releases it however that ends.
             crate::single_instance::Outcome::Held(guard) => {

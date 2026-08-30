@@ -101,7 +101,7 @@ fn spawn_daemon(home: &Path) -> lait::daemon_spawn::DaemonChild {
     let exe = PathBuf::from(bin());
     let log_path = home.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("daemon log");
-    lait::daemon_spawn::spawn(&exe, Some(log), Some(home)).expect("spawn lait daemon")
+    lait::daemon_spawn::spawn(&exe, Some(log), Some(home), None).expect("spawn lait daemon")
 }
 
 fn cards_named(response: &Response, name: &str) -> usize {

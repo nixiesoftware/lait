@@ -41,6 +41,51 @@ use astrolabe::Config;
 /// `cargo build --workspace --all-targets` first, as CI does. A stale binary
 /// fails these tests in ways that name everything except its own age; a
 /// stale receiver once read as a broken media pipeline for most of a day.
+/// Keep every daemon this suite starts off the network.
+///
+/// These tests install Worlds under the **real** first-party ids, and the
+/// daemon now checks World channels on a loop that is deliberately not gated
+/// on the client installation — so without this, each test daemon reaches the
+/// production feed at a random point in its first minute, writes what it
+/// learned into the identity the test is asserting on, and can stage and
+/// select a real release underneath it.
+///
+/// Set on the test process, because these daemons are started through
+/// `Client::start` and inherit its environment rather than taking a
+/// `Command`. Idempotent and always the same value, so the concurrent tests
+/// here cannot disagree about it. `tests/it/head.rs` and
+/// `tests/it/launcher_safety.rs` do the same thing one layer down.
+fn isolate_network() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("LAIT_NETWORK", "isolated"));
+}
+
+/// Retire the profiles a test founded, so a suite run leaves the machine's
+/// list of stacks as it found it.
+///
+/// The row *and* the directories. `profile::forget` deliberately leaves data
+/// on disk, because in the product a stack's directories hold somebody's
+/// identity and Spaces and removing them is its own deliberate act — but
+/// these were made by this test, moments ago, and hold nothing else. A suite
+/// that left a keypair behind on every run would be the untidy one.
+struct ProfilesRetired(Vec<lait::config::ProfileName>);
+
+impl Drop for ProfilesRetired {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            if let Ok(profile) = lait::config::Profile::resolve(name) {
+                if let Ok(config) = profile.config_root() {
+                    let _ = std::fs::remove_dir_all(config);
+                }
+                if let Some(state) = profile.state_root() {
+                    let _ = std::fs::remove_dir_all(state);
+                }
+            }
+            let _ = lait::config::profile::forget(name);
+        }
+    }
+}
+
 fn sidecar() -> Option<PathBuf> {
     built_binary("lait")
 }
@@ -1120,6 +1165,7 @@ async fn stop_daemon(home: &Path) {
 /// state over the control socket, so this runs beside a live daemon.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_daemon_serves_the_identity_profile_of_the_home_it_was_given() {
+    isolate_network();
     let Some(executable) = sidecar() else {
         panic!(
             "no lait binary beside the test binary, so the identity seam was not exercised.              Build it first: `cargo build -p lait`."
@@ -1164,6 +1210,184 @@ async fn the_daemon_serves_the_identity_profile_of_the_home_it_was_given() {
     client.stop_identity_daemon().await;
 }
 
+/// Two stacks, two daemons, side by side — the thing this feature exists for.
+///
+/// The composition, not the parts: a profile that resolves to the right
+/// directories and a guard that admits two holders are both useless if the
+/// daemons they start end up on one identity. Every prior failure at this seam
+/// had correct components and a wrong composition, which is why this asserts
+/// against real processes.
+///
+/// Deliberately independent of the display port: whichever daemon loses 7443
+/// degrades to serving without display coordination, so this runs beside a
+/// live daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_profiles_run_two_daemons_that_never_touch_each_other() {
+    isolate_network();
+    let Some(executable) = sidecar() else {
+        panic!(
+            "no lait binary beside the test binary, so the profile seam was not exercised. \
+             Build it first: `cargo build -p lait`."
+        );
+    };
+
+    // Two *founded* stacks. Founding is the act that creates one, and it has
+    // to be the real thing here: the child daemon receives `--profile <name>`
+    // and resolves it through the registry, so a profile this test merely
+    // invented would be refused by the process under test — which is the
+    // point. `t<pid>` names keep concurrent runs apart, and the guard retires
+    // both rows afterwards.
+    let tag = std::process::id();
+    let first_name: lait::config::ProfileName = format!("t{tag}a").parse().expect("a profile name");
+    let second_name: lait::config::ProfileName =
+        format!("t{tag}b").parse().expect("a profile name");
+    let _retired = ProfilesRetired(vec![first_name.clone(), second_name.clone()]);
+
+    let first_profile = lait::config::profile::found(&first_name)
+        .expect("found the first stack")
+        .profile;
+    let second_profile = lait::config::profile::found(&second_name)
+        .expect("found the second stack")
+        .profile;
+
+    let first = lait::config::Selection::for_profile(first_profile.clone());
+    let second = lait::config::Selection::for_profile(second_profile.clone());
+    let _first_stopped = DaemonStopped(first.identity_dir().expect("a config root"));
+    let _second_stopped = DaemonStopped(second.identity_dir().expect("a config root"));
+
+    lait::host_client::ensure_lait_daemon_with_executable(&first, &executable)
+        .await
+        .expect("the first stack's daemon");
+    lait::host_client::ensure_lait_daemon_with_executable(&second, &executable)
+        .await
+        .expect("the second stack's daemon");
+
+    // Both answer, and each answers for its own home. The failure this guards
+    // against is the second `ensure` attaching to the first daemon and
+    // reporting success — every request would then be served by an identity
+    // nobody asked for, which is exactly the defect this suite was created for.
+    let first_client = lait::daemon::Client::for_selection(&first).expect("a client");
+    let second_client = lait::daemon::Client::for_selection(&second).expect("a client");
+    assert!(
+        matches!(
+            first_client.probe().await,
+            lait::control::Probe::Healthy { .. }
+        ),
+        "the first stack's daemon is not answering"
+    );
+    assert!(
+        matches!(
+            second_client.probe().await,
+            lait::control::Probe::Healthy { .. }
+        ),
+        "the second stack's daemon is not answering"
+    );
+    assert_ne!(
+        first_client.home(),
+        second_client.home(),
+        "two stacks resolved to one daemon home, so they share a lock and an identity"
+    );
+
+    // Each daemon serves the stack it was named, not the machine's default.
+    // A daemon that dropped `--profile` on the way would come up healthy on
+    // the default identity and pass every assertion above.
+    //
+    // Compared as whole directories, not by prefix: a profile's config root
+    // lives *inside* the product's config directory on purpose — its keypair
+    // belongs where the default stack's keypair belongs — so every profile
+    // root starts with the default one, and a prefix test would call a
+    // correct daemon wrong.
+    let default_home = lait::config::Selection::default()
+        .daemon_home()
+        .expect("the default daemon home");
+    for (name, client) in [(&first_name, &first_client), (&second_name, &second_client)] {
+        let root = lait::config::Profile::resolve(name)
+            .expect("the profile is founded")
+            .config_root()
+            .expect("its config root");
+        assert!(
+            client.home().starts_with(&root),
+            "the daemon for {name} does not serve that profile's root"
+        );
+        assert_ne!(
+            client.home(),
+            default_home,
+            "the daemon for {name} came up on the machine's default identity"
+        );
+    }
+
+    // And two device identities: a stack is a device, so peers see two.
+    let first_key =
+        lait::config::load_or_create_identity(&first_profile.config_root().expect("a config root"))
+            .expect("the first identity");
+    let second_key = lait::config::load_or_create_identity(
+        &second_profile.config_root().expect("a config root"),
+    )
+    .expect("the second identity");
+    assert_ne!(
+        first_key, second_key,
+        "two stacks minted one device identity, so they are one device wearing two names"
+    );
+}
+
+/// A client attached to a daemon that stewards nothing says so, from the
+/// holder's own record — and does not kill it.
+///
+/// This replaces an eviction rule. The right to stage is a held lock in the
+/// install root, so the question "is this installation being kept current" is
+/// answered by reading who holds that lock, not by inferring it from a path
+/// and then stopping a healthy process on the strength of the inference.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_outside_an_installation_stewards_nothing_and_is_left_alone() {
+    isolate_network();
+    let Some(executable) = sidecar() else {
+        panic!("no lait binary beside the test binary. Build it: `cargo build -p lait`.");
+    };
+    let identity = tempfile::tempdir().expect("an identity home");
+    let _daemon_stopped = DaemonStopped(identity.path().to_path_buf());
+    let selection = lait::config::Selection::for_identity(identity.path());
+
+    // A daemon from the build tree: a perfectly good daemon that stewards
+    // nothing, which is what a development client leaves behind.
+    lait::host_client::ensure_lait_daemon_with_executable(&selection, &executable)
+        .await
+        .expect("a daemon from the build tree");
+    let client = lait::daemon::Client::for_selection(&selection).expect("a client");
+    let before = lait::config::daemon_pid(client.home());
+
+    // An installed-shaped client now attaches to the same identity.
+    let install = tempfile::tempdir().expect("an install root");
+    let live = install.path().join("current");
+    std::fs::create_dir_all(&live).expect("a live tree");
+    let installed = live.join(tree_sidecar_name());
+    std::fs::copy(&executable, &installed).expect("stage a lait into the live tree");
+    std::fs::write(install.path().join(installed_stub_name()), b"a stub")
+        .expect("stage the stub beside it");
+
+    lait::host_client::ensure_lait_daemon_with_executable(&selection, &installed)
+        .await
+        .expect("the installed client attaches");
+
+    // The daemon that was there is still there. Nothing was evicted on a
+    // judgement about what it could or could not do.
+    assert!(
+        matches!(client.probe().await, lait::control::Probe::Healthy { .. }),
+        "the daemon holding this identity was stopped"
+    );
+    assert_eq!(
+        lait::config::daemon_pid(client.home()),
+        before,
+        "the daemon holding this identity was replaced, or the probe rewrote its pid file"
+    );
+
+    // And nobody is stewarding that install root, which is the fact a client
+    // reports rather than acts on.
+    assert!(
+        !lait::update::watch::stewardship_held(install.path()),
+        "an installation nothing runs from reported a steward"
+    );
+}
+
 /// The whole handoff, minus the browser.
 ///
 /// One test rather than four, because the value is in the chain: a head that
@@ -1171,6 +1395,7 @@ async fn the_daemon_serves_the_identity_profile_of_the_home_it_was_given() {
 /// both failures of `Open` rather than of a component.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
+    isolate_network();
     let Some(executable) = sidecar() else {
         // A failure, not a skip. This is the one test that exercises the
         // client-to-process seam against a real binary, and that seam has been
@@ -2090,6 +2315,7 @@ fn wait_for_announcement(root: &Path) -> String {
 /// and rollback arms asserted on the same install root.
 #[test]
 fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
+    isolate_network();
     let stub = stub_binary();
     let probe = probe_binary();
     let probe_bytes = std::fs::read(&probe).expect("the probe binary's bytes");
@@ -2247,6 +2473,7 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
 /// vocabulary: the stub honouring this request is the two crates agreeing.
 #[test]
 fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
+    isolate_network();
     let stub = stub_binary();
     let probe = probe_binary();
     let probe_bytes = std::fs::read(&probe).expect("the probe binary's bytes");
@@ -2333,6 +2560,7 @@ fn a_relaunch_request_reaches_the_apply_window_under_one_stub() {
 /// secondary startup nor after the secondary client exits.
 #[test]
 fn a_secondary_stub_cannot_consume_the_primary_relaunch_request() {
+    isolate_network();
     let stub = stub_binary();
     let probe = probe_binary();
 
@@ -2390,6 +2618,7 @@ fn a_secondary_stub_cannot_consume_the_primary_relaunch_request() {
 /// the loop, and the plain exit then passes through.
 #[test]
 fn a_request_with_nothing_staged_relaunches_once_and_is_consumed() {
+    isolate_network();
     let stub = stub_binary();
     let probe = probe_binary();
 

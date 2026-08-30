@@ -26,15 +26,45 @@ pub enum Outcome {
 /// The held instance. Releases on drop, and on process death whether or not
 /// anything gets to drop.
 pub struct Guard {
+    /// The shipped guard's Windows mutex handle. `None` for a profile, which
+    /// holds a lock file on every platform instead.
     #[cfg(windows)]
-    _handle: imp::Handle,
-    #[cfg(not(windows))]
-    _lock: std::fs::File,
+    _handle: Option<imp::Handle>,
+    /// An advisory lock: the shipped guard's on unix, and a profile's
+    /// in-directory lock on every platform.
+    _lock: Option<std::fs::File>,
 }
 
-/// Take the single-instance guard for this machine.
-pub fn acquire() -> Result<Outcome> {
-    imp::acquire_named(INSTANCE)
+/// Take the single-instance guard for this stack.
+pub fn acquire(profile: &lait::config::Profile) -> Result<Outcome> {
+    match instance_of(profile) {
+        Instance::Shipped => imp::acquire_named(INSTANCE),
+        Instance::InProfile { root } => in_profile::acquire(&root),
+    }
+}
+
+/// Which guard a stack takes.
+///
+/// The exclusion this guard performs is not "one Astrolabe per machine" for
+/// its own sake — the header says what it protects: two clients taking the
+/// same managed state root, whose registry is single-writer locked. Two
+/// clients that do not share a root do not have that problem, and excluding
+/// them buys nothing while costing the ability to run a development client
+/// beside an installed one.
+enum Instance {
+    /// The default stack: the shipped, machine-and-user-wide name, unchanged.
+    Shipped,
+    /// A profile: a lock file inside the profile's own state root.
+    InProfile { root: std::path::PathBuf },
+}
+
+fn instance_of(profile: &lait::config::Profile) -> Instance {
+    match profile.state_root() {
+        Some(root) => Instance::InProfile {
+            root: root.to_path_buf(),
+        },
+        None => Instance::Shipped,
+    }
 }
 
 /// The base name every artifact of the guard derives from — the Windows
@@ -97,8 +127,17 @@ impl Channel {
 /// The channel is what makes `AlreadyRunning` an answer instead of a dead
 /// end: a `lait:` link opens a fresh process on the stub platforms, and
 /// without the handoff the link died with it.
-pub fn claim(args: impl IntoIterator<Item = String>) -> Result<Claim> {
-    claim_named(INSTANCE, args)
+pub fn claim(
+    profile: &lait::config::Profile,
+    args: impl IntoIterator<Item = String>,
+) -> Result<Claim> {
+    match instance_of(profile) {
+        Instance::Shipped => claim_named(INSTANCE, args),
+        // A profile's channel is named from its own root, so a `lait:` link
+        // opened into one stack reaches that stack's client rather than
+        // whichever one happens to be up.
+        Instance::InProfile { root } => in_profile::claim(&root, args),
+    }
 }
 
 fn claim_named(instance: &str, args: impl IntoIterator<Item = String>) -> Result<Claim> {
@@ -220,6 +259,139 @@ fn forward(instance: &str, args: impl IntoIterator<Item = String>) -> Result<()>
     Ok(())
 }
 
+/// A profile's guard: a lock file **inside the profile's own state root**.
+///
+/// This is the shape Chrome (`SingletonLock`) and Firefox (`parent.lock`) both
+/// use, and it is the right one for the same reasons. The lock lives with the
+/// thing it protects, so it moves when that directory moves and disappears
+/// when it is deleted; it names its holder, so a stale one is diagnosable
+/// rather than opaque; and computing its name costs nothing and creates
+/// nothing.
+///
+/// The alternative — a machine-wide name derived by hashing the directory's
+/// path — was considered and is worse in every one of those places: a renamed
+/// profile derives a different name and admits a second client onto the same
+/// registry, a deleted profile leaves an orphan nothing can interpret, and
+/// the hash has to canonicalize a path (and create it first) just to be
+/// computed.
+mod in_profile {
+    use super::{Channel, Claim, Guard, Outcome};
+    use anyhow::{Context, Result};
+    use fs2::FileExt as _;
+    use std::path::Path;
+
+    /// Named for what it holds, beside the state it protects.
+    const LOCK: &str = "instance.lock";
+    const CHANNEL: &str = "instance.sock";
+
+    pub fn acquire(root: &Path) -> Result<Outcome> {
+        std::fs::create_dir_all(root)
+            .with_context(|| format!("create the profile state root {}", root.display()))?;
+        let path = root.join(LOCK);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                // Who holds it, so a stale lock can be reasoned about instead
+                // of merely being in the way. Best-effort: the lock is the
+                // guard, this is only its explanation.
+                let _ = std::fs::write(
+                    root.join("instance.holder"),
+                    format!(
+                        "{}:{}",
+                        hostname().unwrap_or_else(|| "unknown-host".into()),
+                        std::process::id()
+                    ),
+                );
+                Ok(Outcome::Held(Guard {
+                    #[cfg(windows)]
+                    _handle: None,
+                    _lock: Some(file),
+                }))
+            }
+            Err(_) => Ok(Outcome::AlreadyRunning),
+        }
+    }
+
+    pub fn claim(root: &Path, args: impl IntoIterator<Item = String>) -> Result<Claim> {
+        match acquire(root)? {
+            Outcome::Held(guard) => {
+                let channel = match bind(root) {
+                    Ok(channel) => Some(channel),
+                    Err(error) => {
+                        eprintln!("astrolabe: no instance channel this session: {error:#}");
+                        None
+                    }
+                };
+                Ok(Claim::Primary { guard, channel })
+            }
+            Outcome::AlreadyRunning => {
+                if let Err(error) = forward(root, args) {
+                    eprintln!("astrolabe: the running client could not be reached: {error:#}");
+                }
+                Ok(Claim::Forwarded)
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn address(root: &Path) -> Result<interprocess::local_socket::Name<'static>> {
+        use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
+        // A Windows pipe is a namespace entry, not a file, so it cannot live
+        // in the directory. Named from the profile's own name, which is a
+        // validated identifier and therefore already a legal pipe name.
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("profile");
+        format!("lait-astrolabe-{name}-instance")
+            .to_ns_name::<GenericNamespaced>()
+            .context("name the instance channel")
+    }
+
+    #[cfg(not(windows))]
+    fn address(root: &Path) -> Result<interprocess::local_socket::Name<'static>> {
+        use interprocess::local_socket::{GenericFilePath, ToFsName as _};
+        root.join(CHANNEL)
+            .to_fs_name::<GenericFilePath>()
+            .context("name the instance channel")
+    }
+
+    fn bind(root: &Path) -> Result<Channel> {
+        use interprocess::local_socket::ListenerOptions;
+        #[cfg(not(windows))]
+        let _ = std::fs::remove_file(root.join(CHANNEL));
+        let listener = ListenerOptions::new()
+            .name(address(root)?)
+            .create_sync()
+            .context("bind the instance channel")?;
+        Ok(Channel { listener })
+    }
+
+    fn forward(root: &Path, args: impl IntoIterator<Item = String>) -> Result<()> {
+        use interprocess::local_socket::traits::Stream as _;
+        use interprocess::local_socket::Stream;
+        use std::io::Write as _;
+        let mut stream = Stream::connect(address(root)?).context("reach the running client")?;
+        let blob = args.into_iter().collect::<Vec<_>>().join("\n");
+        stream
+            .write_all(blob.as_bytes())
+            .context("hand the arguments over")?;
+        Ok(())
+    }
+
+    fn hostname() -> Option<String> {
+        std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .ok()
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{Guard, Outcome};
@@ -264,7 +436,8 @@ mod imp {
             return Ok(Outcome::AlreadyRunning);
         }
         Ok(Outcome::Held(Guard {
-            _handle: Handle(owned),
+            _handle: Some(Handle(owned)),
+            _lock: None,
         }))
     }
 }
@@ -288,7 +461,7 @@ mod imp {
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Outcome::Held(Guard { _lock: file })),
+            Ok(()) => Ok(Outcome::Held(Guard { _lock: Some(file) })),
             Err(_) => Ok(Outcome::AlreadyRunning),
         }
     }
@@ -298,18 +471,39 @@ mod imp {
 mod tests {
     use super::*;
 
+    /// A scratch profile, so a live client on the machine running this suite
+    /// is neither reached nor blocked.
+    fn scratch_profile(tag: &str) -> (lait::config::Profile, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a scratch profile root");
+        let name: lait::config::ProfileName = format!("t{tag}").parse().expect("a profile name");
+        (
+            lait::config::Profile::Named {
+                name,
+                config: dir.path().join("config"),
+                state: dir.path().join("state"),
+            },
+            dir,
+        )
+    }
+
     /// The property the whole module exists for, and the one that is easy to
     /// get backwards: the *first* holder keeps it, and the second is told so
     /// rather than being handed a second guard.
+    ///
+    /// Run against a scratch profile rather than the shipped guard, because
+    /// the shipped guard is machine-and-user-wide: asserting on it failed
+    /// whenever the person running the suite had their own client open, which
+    /// reads as the guard being broken and is the guard working.
     #[test]
     fn a_second_acquire_is_told_somebody_else_holds_it() {
-        let first = acquire().expect("first acquire");
+        let (profile, _dir) = scratch_profile(&format!("a{}", std::process::id()));
+        let first = acquire(&profile).expect("first acquire");
         assert!(
             matches!(first, Outcome::Held(_)),
             "the first launch was refused"
         );
 
-        let second = acquire().expect("second acquire");
+        let second = acquire(&profile).expect("second acquire");
         assert!(
             matches!(second, Outcome::AlreadyRunning),
             "two launches both believed they were the only one"
@@ -318,10 +512,70 @@ mod tests {
         // And releasing lets the next launch in — a crashed client must not
         // lock the machine out of its own application.
         drop(first);
-        let third = acquire().expect("third acquire");
+        let third = acquire(&profile).expect("third acquire");
         assert!(
             matches!(third, Outcome::Held(_)),
             "the guard was not released, so no later launch can ever start"
+        );
+    }
+
+    /// The whole point of the feature: two stacks that share no root do not
+    /// exclude each other.
+    ///
+    /// The guard protects a shared managed state root, so two clients that do
+    /// not share one have nothing to collide over — and excluding them cost
+    /// the ability to run a development client beside an installed one, which
+    /// is exactly what this exists to restore.
+    #[test]
+    fn two_profiles_do_not_exclude_each_other() {
+        let (one, _one_dir) = scratch_profile(&format!("b{}", std::process::id()));
+        let (two, _two_dir) = scratch_profile(&format!("c{}", std::process::id()));
+
+        let first = acquire(&one).expect("the first stack's guard");
+        let second = acquire(&two).expect("the second stack's guard");
+
+        assert!(
+            matches!(first, Outcome::Held(_)) && matches!(second, Outcome::Held(_)),
+            "two stacks with separate roots excluded each other, which is the defect that kept \
+             a development client from running beside an installed one"
+        );
+    }
+
+    /// A profile's lock lives inside the profile, the way Chrome's
+    /// `SingletonLock` and Firefox's `parent.lock` do — so it moves when the
+    /// directory moves, vanishes when it is deleted, and names its holder.
+    #[test]
+    fn a_profiles_guard_lives_in_its_own_root_and_names_its_holder() {
+        let (profile, _dir) = scratch_profile(&format!("d{}", std::process::id()));
+        let root = profile
+            .state_root()
+            .expect("a named profile has a state root")
+            .to_path_buf();
+        let _held = acquire(&profile).expect("the guard");
+
+        assert!(
+            root.join("instance.lock").is_file(),
+            "the lock is not inside the directory it protects"
+        );
+        let holder = std::fs::read_to_string(root.join("instance.holder"))
+            .expect("the holder is named beside the lock");
+        assert!(
+            holder.ends_with(&format!(":{}", std::process::id())),
+            "the lock does not name its holder, so a stale one cannot be reasoned about: {holder}"
+        );
+    }
+
+    /// The default stack keeps the exact name it shipped with. If this moves,
+    /// clients on either side of an upgrade stop excluding each other.
+    #[test]
+    fn the_default_guard_spelling_has_not_moved() {
+        assert_eq!(INSTANCE, "lait-astrolabe");
+        assert!(
+            matches!(
+                instance_of(&lait::config::Profile::Default),
+                Instance::Shipped
+            ),
+            "the default stack stopped using the shipped guard"
         );
     }
 

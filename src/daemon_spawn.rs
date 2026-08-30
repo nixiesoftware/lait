@@ -98,8 +98,9 @@ pub fn spawn(
     exe: &Path,
     log: Option<std::fs::File>,
     identity: Option<&Path>,
+    profile: Option<&str>,
 ) -> io::Result<DaemonChild> {
-    imp::spawn(exe, log, identity)
+    imp::spawn(exe, log, identity, profile)
 }
 
 impl DaemonChild {
@@ -207,6 +208,7 @@ mod imp {
         exe: &Path,
         log: Option<std::fs::File>,
         identity: Option<&Path>,
+        profile: Option<&str>,
     ) -> io::Result<DaemonChild> {
         let stderr = match log {
             Some(f) => Stdio::from(f),
@@ -246,6 +248,14 @@ mod imp {
         // selecting a self-contained daemon identity.
         if let Some(identity) = identity {
             cmd.arg("--home").arg(identity);
+        }
+        // The stack this daemon serves, for the same reason `--home` is an
+        // argv and not an env pin: the environment block is inherited
+        // wholesale, so an ambient selector would let a daemon and the client
+        // that started it disagree about which identity they are on. An argv
+        // is the child's alone.
+        if let Some(profile) = profile {
+            cmd.arg("--profile").arg(profile);
         }
         let child = cmd.spawn()?;
         let pid = child.id();
@@ -358,6 +368,7 @@ mod imp {
         exe: &Path,
         log: Option<std::fs::File>,
         identity: Option<&Path>,
+        profile: Option<&str>,
     ) -> io::Result<DaemonChild> {
         // Held to the end of the call: these must outlive `CreateProcessW`, which
         // duplicates them into the child. Our copies close on drop.
@@ -422,10 +433,17 @@ mod imp {
         // `--home` rather than an env override: the block below is inherited
         // wholesale, so an env pin would have to be process-wide and would race
         // any other spawn in flight. An argv is the child's alone.
-        let mut cmdline = wide(OsStr::new(&match identity {
-            Some(id) => format!("\"{}\" daemon --home \"{}\"", exe.display(), id.display()),
-            None => format!("\"{}\" daemon", exe.display()),
-        }));
+        let mut line = format!("\"{}\" daemon", exe.display());
+        if let Some(id) = identity {
+            line.push_str(&format!(" --home \"{}\"", id.display()));
+        }
+        // A profile name is `[a-z0-9-]+` by construction (`ProfileName`), so
+        // there is nothing here to quote or escape — the validation at the
+        // type is what makes this safe to interpolate.
+        if let Some(profile) = profile {
+            line.push_str(&format!(" --profile {profile}"));
+        }
+        let mut cmdline = wide(OsStr::new(&line));
 
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: every pointer is valid for the call. `bInheritHandles` must be
@@ -640,7 +658,7 @@ mod group_isolation {
                 .expect("make it executable");
         }
 
-        let mut child = super::spawn(&script, None, None).expect("spawn a daemon");
+        let mut child = super::spawn(&script, None, None, None).expect("spawn a daemon");
         let pid = i32::try_from(child.id()).expect("a pid fits an i32");
 
         // SAFETY: the documented POSIX form; `getpgid` only reads.

@@ -135,24 +135,65 @@ pub fn no_store_here() -> String {
 
     let mut out =
         String::from("no lait space in this directory (nothing is created implicitly).\n");
+
+    // Which stack was searched, and every stack that exists. An absence has to
+    // say which kind it is: "you have no Spaces" and "you have Spaces, in a
+    // stack this process is not in" are different facts and only one of them
+    // is true of a person looking at a window full of Spaces.
+    let stacks = crate::config::profile::all();
+    let here = crate::config::profile::current().ok().cloned();
+    if let Some(here) = &here {
+        let root = here
+            .config_root()
+            .map(|root| root.display().to_string())
+            .unwrap_or_else(|_| "(unreadable)".into());
+        let _ = writeln!(out, "\nsearched the {} stack ({root}).", here.label());
+    }
+
     let known = orbits::list();
-    if known.is_empty() {
+    if !known.is_empty() {
+        out.push_str("\nlocal Orbits in this stack:\n");
+        for entry in &known {
+            let name = if entry.name.is_empty() {
+                "(unnamed)"
+            } else {
+                &entry.name
+            };
+            let _ = writeln!(out, "  \u{2022} {name}  \u{2192}  {}", entry.path);
+        }
+        out.push_str(
+            "\nset LAIT_STORE to one of these paths (an agent config cannot cd), or run `lait` \
+             to see them all in the local app.",
+        );
+        return out;
+    }
+
+    // Nothing here — but say plainly whether there is something elsewhere,
+    // rather than telling somebody with Spaces open on screen that they have
+    // none.
+    let elsewhere: Vec<_> = stacks
+        .iter()
+        .filter(|stack| Some(*stack) != here.as_ref())
+        .filter(|stack| {
+            stack
+                .config_root()
+                .map(|root| root.join("spaces.json").is_file())
+                .unwrap_or(false)
+        })
+        .collect();
+    if elsewhere.is_empty() {
         out.push_str(
             "\nrun `lait` to open the local app, then found a space or join one from an invite.",
         );
         return out;
     }
-    out.push_str("\nlocal Orbits on this machine:\n");
-    for entry in &known {
-        let name = if entry.name.is_empty() {
-            "(unnamed)"
-        } else {
-            &entry.name
-        };
-        let _ = writeln!(out, "  \u{2022} {name}  \u{2192}  {}", entry.path);
+    out.push_str("\nother stacks on this machine do hold Spaces:\n");
+    for stack in elsewhere {
+        let _ = writeln!(out, "  \u{2022} the {} stack", stack.label());
     }
     out.push_str(
-        "\nset LAIT_STORE to one of these paths (an agent config cannot cd), or run `lait` to see them all in the local app.",
+        "\nan agent binds the stack that registered its store. Open this directory's Space from \
+         the client for that stack, or set LAIT_STORE to a store this stack owns.",
     );
     out
 }
@@ -281,8 +322,18 @@ pub async fn ensure_lait_daemon_with_executable(
     // global catalog into a self-contained identity, so pin only an explicitly
     // self-contained home — the one this invocation selected, or an ambient one.
     let identity = selection.self_contained_home();
-    let mut child = crate::daemon_spawn::spawn(executable, log, identity.as_deref())
-        .context("spawn Lait daemon")?;
+    // The stack this daemon must serve, named on its argv. A selection that
+    // addresses another profile — an agent routed to the profile that owns its
+    // store — starts *that* profile's daemon, never this process's.
+    let profile = selection.profile()?;
+    let profile_name = profile.name().map(|name| name.to_string());
+    let mut child = crate::daemon_spawn::spawn(
+        executable,
+        log,
+        identity.as_deref(),
+        profile_name.as_deref(),
+    )
+    .context("spawn Lait daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if matches!(client.probe().await, control::Probe::Healthy { .. }) {
@@ -439,7 +490,7 @@ async fn replace_foreign_daemon(client: &crate::daemon::Client) -> Result<()> {
 async fn daemon_gone(home: &Path) -> bool {
     for _ in 0..100 {
         if matches!(control::probe(home).await, control::Probe::Absent)
-            && crate::config::acquire_daemon_lock(home).is_ok()
+            && crate::config::daemon_lock_free(home)
         {
             return true;
         }

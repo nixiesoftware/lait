@@ -265,7 +265,8 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     // the display coordinator (see `serve` above). Process-wide is safe here:
     // nextest runs each test in its own process, and every test wants it off.
     std::env::set_var("LAIT_DISPLAY", "off");
-    let mut child = lait::daemon_spawn::spawn(&exe, None, Some(&home)).expect("spawn live daemon");
+    let mut child =
+        lait::daemon_spawn::spawn(&exe, None, Some(&home), None).expect("spawn live daemon");
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     runtime.block_on(async {
         let client = lait::daemon::Client::at(daemon_home.clone());
@@ -291,7 +292,7 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     let log_path = home.join("duplicate.log");
     let log = std::fs::File::create(&log_path).expect("create duplicate log");
     let mut duplicate =
-        lait::daemon_spawn::spawn(&exe, Some(log), Some(&home)).expect("spawn duplicate");
+        lait::daemon_spawn::spawn(&exe, Some(log), Some(&home), None).expect("spawn duplicate");
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         match duplicate.try_wait().expect("try_wait duplicate") {

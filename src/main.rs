@@ -45,10 +45,29 @@ use lait::config::Selection;
 
 /// What this process is going to be.
 enum Mode {
-    /// The identity-scoped host, optionally pinned to a self-contained home.
-    Daemon { home: Option<String> },
+    /// The identity-scoped host, optionally pinned to a self-contained home
+    /// or to one of this machine's founded profiles.
+    Daemon {
+        home: Option<String>,
+        /// Which client stack this daemon serves.
+        ///
+        /// Passed explicitly by whoever spawns it rather than inherited from
+        /// the environment, for the reason `--home` is: a daemon and the
+        /// client that started it must not be able to disagree about which
+        /// identity they are serving, and an ambient variable is exactly how
+        /// they would.
+        profile: Option<String>,
+    },
     /// The stdio MCP head, on whatever Orbit the environment selects.
     Mcp,
+    /// Make a new client stack on this machine, and say what it lacks.
+    ///
+    /// The one act that creates a profile. Every other path *reads* one, and
+    /// reading never creates: a name nobody founded refuses and names itself,
+    /// because the failure this design replaces resolved an unrecognised name
+    /// into a fresh directory holding a fresh keypair and then reported the
+    /// empty machine as a healthy one.
+    FoundProfile { name: String },
     /// Print this build and exit.
     ///
     /// Not a command coming back. It is the one question that has to be
@@ -72,6 +91,8 @@ enum Mode {
         /// because it selects the same thing: the daemon this head starts or
         /// attaches to is the one at that home.
         home: Option<String>,
+        /// Which client stack this head and the daemon under it belong to.
+        profile: Option<String>,
         /// The one World this head serves.
         ///
         /// `None` falls back to `$LAIT_WORLD`, and then to the sole World this
@@ -137,14 +158,15 @@ impl Mode {
         let mode = match args.peek().copied() {
             Some("daemon") => {
                 args.next();
-                let mut home = None;
+                let (mut home, mut profile) = (None, None);
                 while let Some(flag) = args.next() {
                     match flag {
                         "--home" => home = Some(next(&mut args, "--home")?),
+                        "--profile" => profile = Some(next(&mut args, "--profile")?),
                         other => return Err(unknown(other)),
                     }
                 }
-                Mode::Daemon { home }
+                Mode::Daemon { home, profile }
             }
             Some("mcp") => {
                 args.next();
@@ -186,7 +208,8 @@ impl Mode {
             _ => {
                 let (mut json, mut open) = (false, false);
                 let (mut port, mut orbit, mut home) = (None, None, None);
-                let mut world = None;
+                let (mut world, mut profile) = (None, None);
+                let mut found_profile = None;
                 while let Some(flag) = args.next() {
                     match flag {
                         "--json" => json = true,
@@ -194,6 +217,16 @@ impl Mode {
                         "--port" => port = Some(next(&mut args, "--port")?),
                         "--orbit" => orbit = Some(next(&mut args, "--orbit")?),
                         "--home" => home = Some(next(&mut args, "--home")?),
+                        "--profile" => profile = Some(next(&mut args, "--profile")?),
+                        // Founding is an explicit act, and this is where a
+                        // person performs it. Reading a profile never creates
+                        // one — a name nobody founded refuses and says so —
+                        // so there has to be exactly one way to say "yes,
+                        // make this stack", and it says what the new stack
+                        // will not have before anything else happens.
+                        "--found-profile" => {
+                            found_profile = Some(next(&mut args, "--found-profile")?)
+                        }
                         // The same pin `lait mcp` takes, on the other head
                         // kind. One head, one World — so stopping a head is a
                         // statement about that World and not about whatever
@@ -202,13 +235,17 @@ impl Mode {
                         other => return Err(unknown(other)),
                     }
                 }
-                Mode::Serve {
-                    json,
-                    port,
-                    orbit,
-                    open,
-                    home,
-                    world,
+                match found_profile {
+                    Some(name) => Mode::FoundProfile { name },
+                    None => Mode::Serve {
+                        json,
+                        port,
+                        orbit,
+                        open,
+                        home,
+                        profile,
+                        world,
+                    },
                 }
             }
         };
@@ -221,7 +258,29 @@ impl Mode {
                 println!("lait {}", lait::VERSION);
                 Ok(())
             }
-            Mode::Daemon { home } => {
+            Mode::FoundProfile { name } => {
+                let parsed: lait::config::ProfileName = name.parse()?;
+                let founded = lait::config::profile::found(&parsed)?;
+                println!(
+                    "founded profile {parsed} — its own device, Spaces and Worlds\n  config {}\n  state  {}",
+                    founded.profile.config_root()?.display(),
+                    founded
+                        .profile
+                        .state_root()
+                        .map(|root| root.display().to_string())
+                        .unwrap_or_default(),
+                );
+                // Said before anything runs under it. A new stack is a new
+                // device to every peer, and a person who is not told that
+                // reads an empty Library as a broken one.
+                println!("\nit starts with:");
+                for lacks in founded.lacks {
+                    println!("  - {}", lacks.says());
+                }
+                println!("\nrun it with:  lait --profile {parsed}");
+                Ok(())
+            }
+            Mode::Daemon { home, profile } => {
                 // To **stderr**, because that is the only stream a spawned
                 // daemon still owns. `daemon_spawn` hands the log file to
                 // stderr and nulls stdout, and `fmt()` writes to stdout by
@@ -243,9 +302,13 @@ impl Mode {
                             .unwrap_or_else(|_| "lait=info,warn".into()),
                     )
                     .init();
+                // Fixed before anything resolves a root, so every later read
+                // in this process answers for the same stack.
+                establish_profile(profile.as_deref(), home.is_some())?;
                 let selection = Selection {
                     identity: home.map(std::path::PathBuf::from),
                     store: None,
+                    profile: None,
                 };
                 let identity = selection.identity_dir()?;
                 let installation = lait::world::installed::load(
@@ -266,20 +329,40 @@ impl Mode {
                 lait::daemon::run_lait_daemon(packages, clients, selection).await
             }
             Mode::Mcp => {
+                // This mode takes no flags — an editor spawns it and owns its
+                // environment — so the stack can only come from `$LAIT_PROFILE`.
+                // Established here anyway, and with the same refusals every
+                // other entry point gets: a profile named beside a
+                // self-contained home is a contradiction wherever it appears,
+                // and this was the one path where the two would both have been
+                // honoured. The store still decides which stack an agent binds
+                // (`bind_for_agent`); this only settles the fallback.
+                establish_profile(None, std::env::var_os("LAIT_HOME").is_some())?;
                 let selection = Selection::default();
                 // The one mode that needs a store before it can speak: its tools
                 // address an Orbit. `resolve_for_agent` adds the registry's
                 // sole-Orbit fallback — an agent config cannot cd — and still
                 // creates nothing implicitly, so a miss stays a refusal that
                 // names what exists instead.
-                let home =
-                    selection.resolve_for_agent().map_err(|error| match error
-                        .downcast_ref::<lait::config::NoStoreHere>(
-                    ) {
+                let bound =
+                    selection.bind_for_agent().map_err(|error| match error
+                        .downcast_ref::<lait::config::NoStoreHere>()
+                    {
                         Some(_) => anyhow::anyhow!(lait::host_client::no_store_here()),
                         None => error,
                     })?;
-                lait::mcp::run_mcp(&home, selection).await
+                // The stack that registered this store, not the one the editor
+                // happened to launch this process in. `lait mcp` takes no
+                // flags and its environment is the editor's, so the store on
+                // disk is the only thing here that reliably says which
+                // identity this session belongs to — and signing with the
+                // wrong one would have every write refused as a permission
+                // problem rather than named as the wrong device.
+                if let Some(profile) = bound.profile.clone() {
+                    tracing::debug!(profile = %profile.label(), "binding this agent to the stack that owns its store");
+                }
+                let home = bound.store.clone();
+                lait::mcp::run_mcp(&home, bound.selection()).await
             }
             Mode::Serve {
                 json,
@@ -287,6 +370,7 @@ impl Mode {
                 orbit,
                 open,
                 home,
+                profile,
                 world,
             } => {
                 // The head had no subscriber at all, so every `warn!` and
@@ -309,6 +393,7 @@ impl Mode {
                             .unwrap_or_else(|_| "lait=warn,warn".into()),
                     )
                     .try_init();
+                establish_profile(profile.as_deref(), home.is_some())?;
                 let port = match port {
                     Some(p) => p.parse::<u16>().map_err(|_| {
                         anyhow::anyhow!("--port must be a number 0-65535, got {p:?}")
@@ -326,6 +411,7 @@ impl Mode {
                 let selection = Selection {
                     identity: home.map(std::path::PathBuf::from),
                     store,
+                    profile: None,
                 };
                 // Resolved before the listener binds, so a build that cannot
                 // say which World this head is refuses to be one — rather than
@@ -372,6 +458,22 @@ impl Mode {
             }
         }
     }
+}
+
+/// Fix this process's client stack before anything reads a root.
+///
+/// One call, at the top of each mode that can be told which stack it serves.
+/// A refusal here — a value that is not a name, a profile nobody founded, a
+/// profile named alongside `--home` — ends the process saying so, which is the
+/// whole point: the failure this replaces resolved an unrecognised name to a
+/// freshly created directory and then reported the empty machine as healthy.
+fn establish_profile(profile: Option<&str>, self_contained_home: bool) -> anyhow::Result<()> {
+    let selected = lait::config::Profile::select(profile, self_contained_home)?;
+    if let Some(name) = selected.name() {
+        tracing::info!(profile = %name, "serving a profile of this machine");
+    }
+    lait::config::profile::establish(selected);
+    Ok(())
 }
 
 /// The value that follows a flag, or a message naming the flag that wanted one.
@@ -433,6 +535,46 @@ mod tests {
             "the MCP head accepted a flag it has no use for"
         );
         assert!(parse(&["--nonsense"]).is_err());
+
+        // The stack a process serves is named on its argv, never inherited.
+        // The daemon must accept it because that is how a client tells the
+        // daemon it spawns which identity to serve — an ambient variable
+        // would let the two disagree.
+        assert!(
+            matches!(
+                parse(&["daemon", "--profile", "dev"]),
+                Ok(Mode::Daemon {
+                    profile: Some(_),
+                    ..
+                })
+            ),
+            "the daemon cannot be told which stack it serves"
+        );
+        assert!(
+            matches!(
+                parse(&["--profile", "dev"]),
+                Ok(Mode::Serve {
+                    profile: Some(_),
+                    ..
+                })
+            ),
+            "the app cannot be told which stack it is"
+        );
+        // And `mcp` still takes none. Its stack comes from the store it
+        // finds, because an editor owns its environment and the store on disk
+        // is the only thing that reliably says which identity a repository
+        // belongs to.
+        assert!(
+            parse(&["mcp", "--profile", "dev"]).is_err(),
+            "the MCP head grew a flag; its stack must come from the store it binds"
+        );
+        assert!(
+            matches!(
+                parse(&["--found-profile", "dev"]),
+                Ok(Mode::FoundProfile { .. })
+            ),
+            "there is no way to found a profile, so every read of one refuses forever"
+        );
     }
 
     /// `--seed` was a no-op kept because a container CMD spelled it. The

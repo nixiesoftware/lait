@@ -35,6 +35,12 @@ path = "src/lib.rs"
 # reason it might have to change; nothing async, nothing that talks to a
 # network, nothing that parses anything but its own stage manifest.
 [dependencies]
+# The layout names, shared with the daemon that stages into this root. This is
+# the one dependency edge the stub may take toward the rest of the tree: the
+# crate is dependency-free, so "the stub stays free of the engine" still holds,
+# and one spelling of the layout is what keeps the swap and the stager
+# describing the same directories.
+install-layout = { path = "../../crates/install-layout" }
 blake3 = "1"
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }

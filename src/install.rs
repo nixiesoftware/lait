@@ -106,6 +106,21 @@ fn config_path(client: Client, scope: Scope, project: &Path) -> Result<PathBuf> 
 /// it, and because a home is created on demand it resolves to a freshly-made
 /// empty directory — reported as "no local Orbit here", which reads like a
 /// broken store rather than a stale config.
+///
+/// **No profile is captured either, and for a better reason than the rule.**
+/// A machine can run more than one client stack, and a binding that named one
+/// would go stale exactly the way `$LAIT_HOME` does. It does not have to: a
+/// store is registered in exactly one stack's catalog, so `orbits::owner_of`
+/// answers "whose daemon owns this directory" from files on disk, and the
+/// agent binds that stack whichever one the editor happened to launch it in.
+/// The store is the durable fact; the environment is not. One entry still
+/// serves every Space on the machine, across every stack.
+///
+/// The one case the store cannot answer is an agent started outside any
+/// repository, where the sole-Orbit fallback reads this process's own stack.
+/// That is what `LAIT_STORE` is for, and `host_client::no_store_here` names
+/// the stack it searched and any other stack that holds Spaces, rather than
+/// reporting an empty machine.
 fn server_entry(agent: Option<&str>, world: Option<&str>) -> Value {
     let mut entry = Map::new();
     entry.insert("command".into(), json!("lait"));

@@ -30,18 +30,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::registry::{agents_base, Registry, SessionMap};
 
+pub mod profile;
+
+pub use profile::{Lacks, Profile, ProfileName, ProfileRefused, ProfileUnfounded};
+
 /// The base config directory (ignoring `$LAIT_HOME`) — where the named
 /// identity registry (`agents/`) and the session map live.
+///
+/// Answers for **this process's stack**: the default installation, or the
+/// profile it was started under. The profile is resolved once per process
+/// (`profile::current`) rather than read here, so two calls in one process can
+/// never disagree, and a stack is never split by a variable changing mid-run.
+/// A selection that addresses a *different* stack — an agent binding routed to
+/// the profile that owns a store — carries its own [`Profile`] and does not
+/// come through here.
 pub fn config_root() -> Result<PathBuf> {
-    let dir = match std::env::var_os("LAIT_CONFIG_ROOT") {
-        Some(p) => PathBuf::from(p),
-        None => directories::ProjectDirs::from("dev", "nixi", "lait")
-            .context("could not determine config directory")?
-            .config_dir()
-            .to_path_buf(),
-    };
-    fs::create_dir_all(&dir).with_context(|| format!("create config dir {}", dir.display()))?;
-    Ok(dir)
+    // `$LAIT_CONFIG_ROOT` is the test hook, and it is read live rather than
+    // through the memoized profile because the suites that use it relocate it
+    // between tests inside one process. It relocates this one root and nothing
+    // else, which is why `Profile::select` refuses it in combination with a
+    // named profile: a stack whose identity moved while its client state did
+    // not is the defect profiles exist to prevent, and it is refused where it
+    // would be introduced rather than asserted in prose here.
+    if let Some(root) = std::env::var_os("LAIT_CONFIG_ROOT") {
+        let dir = PathBuf::from(root);
+        fs::create_dir_all(&dir).with_context(|| format!("create config dir {}", dir.display()))?;
+        return Ok(dir);
+    }
+    profile::current()?.config_root()
 }
 
 /// The registry of named identities, and the session→identity map beside it.
@@ -146,6 +162,15 @@ pub struct Selection {
     pub identity: Option<PathBuf>,
     /// An already-resolved store directory (`--orbit`).
     pub store: Option<PathBuf>,
+    /// The stack this selection addresses, when it is not this process's own.
+    ///
+    /// `None` means "whatever stack this process belongs to" — the ordinary
+    /// case, resolved through [`config_root`]. `Some` is how one process
+    /// addresses *another* profile's identity: an agent that found a store on
+    /// disk resolves which profile registered it and binds a selection for
+    /// that profile, so the daemon it reaches is the store's owner rather than
+    /// whichever stack the editor happened to launch it in.
+    pub profile: Option<Profile>,
 }
 
 impl Selection {
@@ -154,23 +179,58 @@ impl Selection {
         Self {
             identity: Some(identity.into()),
             store: None,
+            profile: None,
+        }
+    }
+
+    /// A selection that addresses one profile's whole stack.
+    ///
+    /// Not self-contained: a profile is an ordinary many-Space identity that
+    /// happens to live somewhere else, so it keeps its own catalog, its own
+    /// registry and its own `.lait` discovery. That is the difference from
+    /// `--home`, which collapses a stack into a single store with a single
+    /// Orbit, and it is why the two are refused in combination.
+    pub fn for_profile(profile: Profile) -> Self {
+        Self {
+            identity: None,
+            store: None,
+            profile: Some(profile),
+        }
+    }
+
+    /// The stack this selection addresses.
+    pub fn profile(&self) -> Result<Profile> {
+        match &self.profile {
+            Some(profile) => Ok(profile.clone()),
+            None => Ok(profile::current()?.clone()),
         }
     }
 
     /// Where this invocation's selection came from, for orientation readouts.
-    pub fn source(&self) -> &'static str {
+    pub fn source(&self) -> String {
         if self.identity.is_some() {
-            "--home"
+            "--home".into()
         } else if self.store.is_some() {
-            "--orbit"
+            "--orbit".into()
         } else if std::env::var_os("LAIT_HOME").is_some() {
-            "LAIT_HOME"
+            "LAIT_HOME".into()
         } else if std::env::var_os("LAIT_STORE").is_some() {
-            "LAIT_STORE"
+            "LAIT_STORE".into()
+        } else if let Some(profile) = self
+            .profile
+            .clone()
+            .or_else(|| profile::current().ok().cloned())
+            .filter(|profile| !profile.is_default())
+        {
+            // Named, because an orientation readout that could not say which
+            // stack it was reading answered "none" for a profiled client and
+            // for an ordinary one alike — the same word for two different
+            // machines.
+            format!("profile {}", profile.label())
         } else if self.existing_home().is_some() {
-            "cwd"
+            "cwd".into()
         } else {
-            "none"
+            "none".into()
         }
     }
 
@@ -224,7 +284,16 @@ impl Selection {
     pub fn identity_dir(&self) -> Result<PathBuf> {
         match self.prepared_self_contained_home()? {
             Some(dir) => Ok(dir),
-            None => config_root(),
+            // A selection that names a profile answers for *that* stack; one
+            // that does not answers for this process's. Routing already flows
+            // from here — `daemon_home` is derived from it, and
+            // `daemon::Client::for_selection` from that — so carrying the
+            // profile in the selection is what makes an agent reach the
+            // daemon that owns its store rather than the default one.
+            None => match &self.profile {
+                Some(profile) => profile.config_root(),
+                None => config_root(),
+            },
         }
     }
 
@@ -286,18 +355,44 @@ impl Selection {
     /// store is gone stay the typed refusal: this is selection among what
     /// exists, never a guess between candidates and never a creation.
     pub fn resolve_for_agent(&self) -> Result<PathBuf> {
+        self.bind_for_agent().map(|bound| bound.store)
+    }
+
+    /// The store an agent binds, **and the stack that owns it**.
+    ///
+    /// The store comes first and the environment second, because only one of
+    /// them is reliable here. An editor parents `lait mcp` with an environment
+    /// the editor controls; the store on disk was registered by exactly one
+    /// stack, and that registration is true whether or not any client is
+    /// running. So a store found by walking up from the working directory
+    /// decides which daemon this session talks to — never the reverse.
+    pub fn bind_for_agent(&self) -> Result<AgentBinding> {
         let miss = match self.resolve_existing_store() {
-            Ok(store) => return Ok(store),
+            Ok(store) => {
+                // Found on disk. Whichever stack registered it is the stack
+                // whose daemon can answer for it; routing to this process's
+                // own would reach a catalog that has never seen this
+                // directory and be told "no such local Orbit" about a store
+                // the agent is standing in.
+                let profile = crate::orbits::owner_of(&store);
+                return Ok(AgentBinding { store, profile });
+            }
             Err(error) if error.downcast_ref::<NoStoreHere>().is_some() => error,
             Err(error) => return Err(error),
         };
+        // No store on disk, so the environment's stack is all there is — and
+        // its registry alone, never a union across stacks. Two profiles each
+        // holding one Space must not add up to "exactly one".
         let entries = crate::orbits::list();
         let [entry] = entries.as_slice() else {
             return Err(miss);
         };
         let store = PathBuf::from(&entry.path);
         match crate::orbital::discover_space(&store) {
-            crate::orbital::SpaceStore::One(_) => Ok(canonical(&store)),
+            crate::orbital::SpaceStore::One(_) => Ok(AgentBinding {
+                store: canonical(&store),
+                profile: None,
+            }),
             _ => Err(miss),
         }
     }
@@ -332,6 +427,28 @@ impl std::fmt::Display for NoStoreHere {
     }
 }
 impl std::error::Error for NoStoreHere {}
+
+/// What an agent session binds: a store, and the stack whose daemon owns it.
+#[derive(Debug, Clone)]
+pub struct AgentBinding {
+    /// The store this session addresses.
+    pub store: PathBuf,
+    /// The stack that registered it. `None` means "this process's own" —
+    /// either the store is registered here, or the sole-Orbit fallback
+    /// answered from this stack's registry.
+    pub profile: Option<Profile>,
+}
+
+impl AgentBinding {
+    /// A selection that reaches the daemon owning this store.
+    pub fn selection(&self) -> Selection {
+        Selection {
+            identity: None,
+            store: Some(self.store.clone()),
+            profile: self.profile.clone(),
+        }
+    }
+}
 
 /// Resolve the **existing** space store for this invocation — never
 /// creating one. Precedence:
@@ -557,6 +674,39 @@ pub fn acquire_daemon_lock(home: &Path) -> Result<DaemonLock> {
     Ok(DaemonLock { _file: file })
 }
 
+/// Whether this home's daemon lock is free, without taking it.
+///
+/// A **pure probe**: it opens the lock read-only, tries a shared acquisition,
+/// and releases at once. It creates nothing and writes nothing.
+///
+/// That is the whole difference from asking the same question with
+/// [`acquire_daemon_lock`], which is what the wait-for-a-daemon-to-leave path
+/// used to do — and which, on every call, stamped the *probing* process's pid
+/// into `daemon.pid`. The file whose entire purpose is naming the daemon that
+/// holds this home would then name a process that is not a daemon and is about
+/// to exit, and pids are reused. A probe that answers a question must not
+/// change the answer to a different one.
+pub fn daemon_lock_free(home: &Path) -> bool {
+    use fs2::FileExt;
+    let path = lock_path(home);
+    if !path.exists() {
+        return true;
+    }
+    let Ok(file) = fs::File::open(&path) else {
+        // Unreadable is not free. Reporting "nobody holds it" because the file
+        // could not be opened is exactly the kind of absence-read-as-zero this
+        // tree refuses everywhere else.
+        return false;
+    };
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// The pid of the daemon that last held this home, if one recorded itself.
 ///
 /// Only meaningful once a caller has *independently* established that a daemon is
@@ -570,6 +720,46 @@ pub fn daemon_pid(home: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe must answer a question without changing the answer to another
+    /// one.
+    ///
+    /// The path this replaces asked "has the daemon left?" by *taking* the
+    /// daemon lock — and taking it stamps the caller's own pid into
+    /// `daemon.pid`. The file whose only purpose is naming the daemon that
+    /// holds this home would then name a process that is not a daemon and is
+    /// about to exit, on every launch that met a daemon it wanted gone. Pids
+    /// are reused, and the next reader has no way to know.
+    #[test]
+    fn the_daemon_lock_probe_never_writes_the_pid_file() {
+        let dir = std::env::temp_dir().join(format!("gc-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a scratch home");
+        let _ = fs::remove_file(pid_path(&dir));
+
+        assert!(daemon_lock_free(&dir), "an unheld home read as occupied");
+        assert!(
+            !pid_path(&dir).exists(),
+            "probing a free home wrote a pid file, inventing a daemon that does not exist"
+        );
+
+        let held = acquire_daemon_lock(&dir).expect("take the home");
+        let stamped = daemon_pid(&dir).expect("the holder named itself");
+        for _ in 0..20 {
+            assert!(
+                !daemon_lock_free(&dir),
+                "a held home read as free, so a second daemon would start over the first"
+            );
+        }
+        assert_eq!(
+            daemon_pid(&dir),
+            Some(stamped),
+            "probing overwrote the pid of the daemon actually holding this home"
+        );
+
+        drop(held);
+        assert!(daemon_lock_free(&dir), "the lock outlived its holder");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// A home founded under the two-seed derivation keeps its address when the
     /// genesis is carried: the witness in `kinship.key` co-signs the same link,

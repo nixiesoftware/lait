@@ -44,7 +44,19 @@ pub const EXPECTED: &str = lait::VERSION;
 /// the interface must not be the one answering it. A path computed on the far
 /// side of the bridge would be a second opinion about where the client's state
 /// lives, and the two would differ on exactly the machine where it mattered.
-pub fn state_root() -> Result<PathBuf> {
+pub fn state_root(profile: &lait::config::Profile) -> Result<PathBuf> {
+    // A profile owns every root its stack has, this one included — and it
+    // arrives as a *parameter*, resolved once by the process that knows which
+    // stack it is. Not read from the environment here: the rule two functions
+    // up applies to this one, and an env read would also let the client and
+    // the daemon it starts disagree about which stack they are on, which is
+    // precisely how one client's staged daemon images ended up under another
+    // client's root.
+    if let Some(state) = profile.state_root() {
+        std::fs::create_dir_all(state)
+            .with_context(|| format!("create the managed state root {}", state.display()))?;
+        return Ok(state.to_path_buf());
+    }
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))

@@ -1026,6 +1026,13 @@ impl Daemon {
         // never fails the daemon — the worst a check can do is leave the
         // standing unchanged.
         let staging = self.spawn_staging();
+        // World channels are checked whatever shape this daemon is in.
+        // `spawn_staging` answers `None` for anything that is not an
+        // installation — a developer's tree, a profile — and folding the World
+        // check into it meant those machines silently stopped updating every
+        // World they served, for a reason about neither the Worlds nor their
+        // channels.
+        let world_channels = self.spawn_world_channels(home);
         let world_upgrades = self.spawn_world_upgrades();
         // Ungated, and mounted here rather than behind the display gate for
         // the same reason the fan-out is: the headless box that publishes
@@ -1090,6 +1097,7 @@ impl Daemon {
         if embedded() || !display_hosting() {
             let served = self.endpoint.clone().serve(home).await;
             Self::join_staging(staging).await;
+            Self::join_world_channels(world_channels).await;
             Self::join_world_upgrades(world_upgrades).await;
             Self::join_fanout(fanout).await;
             Self::join_markers(markers).await;
@@ -1122,6 +1130,7 @@ impl Daemon {
                 );
                 let served = self.endpoint.clone().serve(home).await;
                 Self::join_staging(staging).await;
+                Self::join_world_channels(world_channels).await;
                 Self::join_world_upgrades(world_upgrades).await;
                 Self::join_fanout(fanout).await;
                 Self::join_markers(markers).await;
@@ -1131,6 +1140,7 @@ impl Daemon {
             Err(error) => {
                 self.endpoint.begin_stop();
                 Self::join_staging(staging).await;
+                Self::join_world_channels(world_channels).await;
                 Self::join_world_upgrades(world_upgrades).await;
                 Self::join_fanout(fanout).await;
                 Self::join_markers(markers).await;
@@ -1249,6 +1259,7 @@ impl Daemon {
             }
         }
         Self::join_staging(staging).await;
+        Self::join_world_channels(world_channels).await;
         Self::join_world_upgrades(world_upgrades).await;
         Self::join_fanout(fanout).await;
         Self::join_markers(markers).await;
@@ -1341,16 +1352,41 @@ impl Daemon {
 
     /// Start the continuous staging watcher, when this daemon runs inside an
     /// installation of any shape — a stub-managed tree, a macOS bundle
-    /// staging beside the identity, or a headless service.
+    /// staging beside the identity, or a headless service — **and** holds the
+    /// right to stage into it.
     ///
     /// `None` everywhere else — a developer's build tree and a bare `lait`
     /// have nowhere for a release to go, and inventing a root would drop
     /// bytes beside somebody's `target/`. The watcher stops with the
     /// endpoint, on the same signal every other service here uses.
+    ///
+    /// The right is a held lock in the root, not a shape inferred from a
+    /// path. Recognising the shape says a release *could* go here; the lock
+    /// says nobody else is already putting one here. Two daemons on one root
+    /// — a second launch, a profile pointed at the same installation — would
+    /// otherwise both stage into it and each record a standing the other
+    /// never sees.
     fn spawn_staging(&self) -> Option<tokio::task::JoinHandle<()>> {
         let identity = self.router.catalog().identity().to_path_buf();
         let current_exe = std::env::current_exe().ok()?;
         let installation = crate::update::watch::Installation::of(&current_exe, &identity)?;
+        // The stack this daemon serves, from its own argv rather than a field:
+        // `profile::current` is the single place that answer lives. (Not the
+        // `ProfileId` this type carries — that is a `prf_` correspondence
+        // address, a different thing wearing the same word.)
+        let stack = crate::config::profile::current()
+            .cloned()
+            .unwrap_or_default();
+        // A profile does not own the installation it runs beside, and that
+        // answer never changes while this process lives. Settled here so the
+        // claiming loop below only ever has to deal with contention.
+        if let Some(name) = stack.name() {
+            tracing::info!(
+                profile = %name,
+                "this daemon serves a profile, so it does not stage client releases"
+            );
+            return None;
+        }
         if let Err(error) = std::fs::create_dir_all(installation.root()) {
             // Said, not skipped: an unwritable staging path is a fact about
             // this machine, and silence here is a client that never updates
@@ -1363,10 +1399,11 @@ impl Daemon {
             return None;
         }
         let stop = self.endpoint.subscribe_stop();
-        // What a check takes is served only by a fresh generation — a
-        // selected World release, or a service's swapped binary — the same
-        // crossing the consented upgrade makes; the watcher asks for it the
-        // moment a check needs one.
+        // What a check takes is served only by a fresh generation — here, a
+        // service's swapped binary; the same crossing the consented upgrade
+        // makes. The watcher asks for it the moment a check needs one. A
+        // selected World release needs the same crossing and asks through the
+        // same callback, from `spawn_world_channels`.
         let relaunch = GenerationRelaunch {
             requested: self.relaunch_requested.clone(),
             endpoint: self.endpoint.clone(),
@@ -1375,13 +1412,61 @@ impl Daemon {
             Arc::new(move || relaunch.request());
         let wake = Arc::new(tokio::sync::Notify::new());
         self.spawn_notify(&identity, stop.clone(), wake.clone());
-        Some(tokio::spawn(crate::update::watch::serve(
+        Some(tokio::spawn(async move {
+            // Claimed here rather than before the spawn, and **retried**,
+            // because the lock is routinely contended for a moment at exactly
+            // the point it matters. A generation relaunch starts the successor
+            // as soon as this process's `run()` returns, and a check still in
+            // flight can hold the lock past that instant. Deciding once at
+            // boot would answer "somebody else has it" and then never stage
+            // again for that generation's whole life — the same silent
+            // never-updates this lock exists to prevent, reintroduced by the
+            // lock itself.
+            let Some(_held) =
+                claim_stewardship(&installation, &current_exe, &identity, &mut stop.clone()).await
+            else {
+                return;
+            };
+            // The lock rides with the task from here, so the right to stage
+            // into this root is released exactly when the staging stops — not
+            // earlier, which would let a second daemon in under a check in
+            // flight, and not later, which would strand the root after this
+            // one exits.
+            crate::update::watch::serve(identity, installation, stop, wake, on_relaunch_needed)
+                .await;
+        }))
+    }
+
+    /// Keep this identity's installed Worlds level with their own channels.
+    ///
+    /// Unconditional, unlike [`Self::spawn_staging`]: a World's channel is not
+    /// this client installation's business. The two shared a loop once, behind
+    /// the staging gate, so a machine whose client half was not recognised —
+    /// a developer's tree, a profile, a rolled-back install — silently stopped
+    /// updating every World it served, for a reason about neither the Worlds
+    /// nor their channels.
+    ///
+    /// It carries the same relaunch signal the staging watcher does, because a
+    /// selected World release is served only by a fresh generation whichever
+    /// loop took it.
+    fn spawn_world_channels(&self, home: &Path) -> tokio::task::JoinHandle<()> {
+        let identity = self.router.catalog().identity().to_path_buf();
+        let relaunch = GenerationRelaunch {
+            requested: self.relaunch_requested.clone(),
+            endpoint: self.endpoint.clone(),
+        };
+        let on_relaunch_needed: crate::update::watch::OnWorldsStaged =
+            Arc::new(move || relaunch.request());
+        // The same home this daemon reads every other network decision from,
+        // so "isolated" cannot mean one thing to the overlay and another to
+        // the World feed.
+        let isolated = crate::update::watch::reaches_nothing(home);
+        tokio::spawn(crate::update::watch::serve_worlds(
             identity,
-            installation,
-            stop,
-            wake,
+            isolated,
+            self.endpoint.subscribe_stop(),
             on_relaunch_needed,
-        )))
+        ))
     }
 
     /// Show a pairing code while this device is nobody's but its own, and
@@ -1437,11 +1522,11 @@ impl Daemon {
     fn spawn_world_upgrades(&self) -> tokio::task::JoinHandle<()> {
         let router = self.router.clone();
         let worlds = crate::serve::head::installations_root(router.catalog().identity());
-        let stop = self.endpoint.subscribe_stop();
         let relaunch = GenerationRelaunch {
             requested: self.relaunch_requested.clone(),
             endpoint: self.endpoint.clone(),
         };
+        let stop = self.endpoint.subscribe_stop();
         tokio::spawn(serve_world_upgrades(router, worlds, stop, relaunch))
     }
 
@@ -1456,6 +1541,17 @@ impl Daemon {
             Ok(Err(error)) => tracing::warn!(%error, "the staging watcher ended abnormally"),
             Err(_) => tracing::debug!(
                 "the staging watcher did not finish in time; leaving it to the process exit"
+            ),
+        }
+    }
+
+    /// The same, for the World channel watcher.
+    async fn join_world_channels(channels: tokio::task::JoinHandle<()>) {
+        match tokio::time::timeout(Duration::from_secs(5), channels).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the World channel watcher ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the World channel watcher did not finish in time; leaving it to the process exit"
             ),
         }
     }
@@ -1532,6 +1628,74 @@ async fn serve_pairing(
         }
     }
     pair.close().await;
+}
+
+/// How long to wait before asking again for a contended installation.
+///
+/// Short, because the contention this is for lasts as long as one process
+/// takes to exit: a generation relaunch starts the successor while the
+/// outgoing daemon may still be finishing a check. Long enough that a root
+/// genuinely held by another live daemon is asked about a couple of times a
+/// minute rather than spun on.
+const STEWARD_RETRY: Duration = Duration::from_secs(20);
+
+/// Take the right to stage into this installation, waiting out contention.
+///
+/// `None` only when the daemon is stopping, or when the answer is one that
+/// waiting cannot change. Every refusal is said once at the level it deserves
+/// — a machine that will not update itself is a fact about that machine, and
+/// the silence there is what once cost two days — and then repeated only if
+/// it is still true after a wait, so a contended root does not fill a log.
+async fn claim_stewardship(
+    installation: &crate::update::watch::Installation,
+    executable: &Path,
+    identity: &Path,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<crate::update::watch::StewardLock> {
+    let mut said = false;
+    loop {
+        match crate::update::watch::take_stewardship(
+            installation,
+            executable,
+            identity,
+            &crate::config::Profile::Default,
+        ) {
+            Ok(lock) => {
+                if said {
+                    tracing::info!(
+                        root = %installation.root().display(),
+                        "the installation was released; staging client releases again"
+                    );
+                }
+                return Some(lock);
+            }
+            // Waiting cannot change these, and neither reaches here: a profile
+            // is refused before the task is spawned, and an installation this
+            // process is not inside was never recognised.
+            Err(why @ crate::update::watch::NotSteward::NoInstallation)
+            | Err(why @ crate::update::watch::NotSteward::Profiled { .. }) => {
+                tracing::info!(%why, "this daemon does not stage client releases");
+                return None;
+            }
+            Err(why) => {
+                if !said {
+                    tracing::warn!(
+                        %why,
+                        "this daemon does not stage client releases yet; waiting for the \
+                         installation"
+                    );
+                    said = true;
+                }
+            }
+        }
+        tokio::select! {
+            () = tokio::time::sleep(STEWARD_RETRY) => {}
+            _ = stop.changed() => return None,
+        }
+        if *stop.borrow() {
+            return None;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2021,9 +2185,18 @@ pub async fn run_lait_daemon(
             let home = selection.daemon_home()?;
             let log = std::fs::File::create(crate::host_client::daemon_log_path(&home)).ok();
             let identity = selection.self_contained_home();
-            crate::daemon_spawn::spawn(&executable, log, identity.as_deref())
-                .context("spawn the next World daemon generation")?
-                .reap();
+            // The next generation serves the stack this one does; a relaunch
+            // that dropped the profile would come up on the default identity.
+            let profile = selection.profile()?;
+            let profile_name = profile.name().map(|name| name.to_string());
+            crate::daemon_spawn::spawn(
+                &executable,
+                log,
+                identity.as_deref(),
+                profile_name.as_deref(),
+            )
+            .context("spawn the next World daemon generation")?
+            .reap();
         }
         Successor::LeaveToSupervisor => {
             tracing::info!("leaving the restart to the supervisor");

@@ -387,6 +387,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fs2",
+ "install-layout",
  "libc",
  "serde",
  "serde_json",
@@ -3228,6 +3229,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "install-layout"
+version = "0.1.0"
+
+[[package]]
 name = "interprocess"
 version = "2.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3725,6 +3730,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hyper",
  "hyper-util",
+ "install-layout",
  "interprocess",
  "lait-directory",
  "lait-feed-notify",
