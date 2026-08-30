@@ -1699,11 +1699,13 @@ export type WorldRequest = Exclude<Request, SpaceRequest>;
 export type HostRequest =
   /** `home` is the exact store directory, on the machine running the daemon —
    *  not a directory to put a `.lait` inside. */
-  | { cmd: "host_space_found"; home: string; name: string; nick?: string | null }
+  /** `home` names the store directory; omitted, the daemon places the store
+   *  under its spaces root by the Space's id and reports where. */
+  | { cmd: "host_space_found"; home?: string | null; name: string; nick?: string | null }
   /** Bootstraps the store from an invite link *and* drives admission before it
    *  answers, so `admitted` distinguishes "you're in" from "the board stays
    *  encrypted until they come online". */
-  | { cmd: "host_space_enter"; link: string; home: string; nick?: string | null }
+  | { cmd: "host_space_enter"; link: string; home?: string | null; nick?: string | null }
   /** Sign this machine's consent to join an existing actor. Store-free: the
    *  machine running it holds no membership anywhere yet. */
   | { cmd: "host_device_consent"; token: string }

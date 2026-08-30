@@ -19,9 +19,15 @@ import { InlineError } from "./AppState";
  * app, then found a space or join one from an invite") names a remedy nobody
  * can carry out.
  *
- * Everything it sends carries an explicit store directory, because the daemon's
- * working directory is not the person's and nothing is created implicitly. The
- * node proposes one (`host_context.spaces_root`) so the path box is never empty.
+ * It names no store directory. Where the replica lives is the daemon's
+ * placement — under its spaces root, by the Space's id — and a fact it reports
+ * afterwards, not a question a founding form has to put to someone who has
+ * not yet seen what a Space is. There used to be a path box here, prefilled
+ * from `host_context.spaces_root` with a slug of the name; it made two Spaces
+ * with one name collide, put a stale copy of the name in the filesystem, and
+ * in the invite tab slugged the invite link itself, because the Space's id is
+ * not known until the ticket is read — which is exactly why the daemon, which
+ * reads it, is the party that places.
  */
 export function Welcome({
   onArrived,
@@ -44,10 +50,6 @@ export function Welcome({
   const [name, setName] = useState("");
   const [link, setLink] = useState("");
   const [nick, setNick] = useState("");
-  const [home, setHome] = useState("");
-  // True once the person edits the path themselves: after that, typing a name
-  // must not silently move the store they chose.
-  const [pinnedHome, setPinnedHome] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [waiting, setWaiting] = useState("");
@@ -66,9 +68,6 @@ export function Welcome({
     };
   }, []);
 
-  const suggested = context ? join(context.spaces_root, slug(mode === "found" ? name : link)) : "";
-  const target = pinnedHome ? home : suggested;
-
   const submit = async () => {
     setError("");
     setBusy(true);
@@ -79,8 +78,8 @@ export function Welcome({
     try {
       const reply = await hostRpc(
         mode === "found"
-          ? { cmd: "host_space_found", home: target, name: name.trim(), nick: nick.trim() || null }
-          : { cmd: "host_space_enter", link: link.trim(), home: target, nick: nick.trim() || null },
+          ? { cmd: "host_space_found", name: name.trim(), nick: nick.trim() || null }
+          : { cmd: "host_space_enter", link: link.trim(), nick: nick.trim() || null },
       );
       if (reply.kind !== "host") throw new Error("unexpected reply");
       if (reply.host === "founded") {
@@ -108,7 +107,7 @@ export function Welcome({
     }
   };
 
-  const ready = target.trim() !== "" && (mode === "found" ? name.trim() !== "" : link.trim() !== "");
+  const ready = mode === "found" ? name.trim() !== "" : link.trim() !== "";
 
   return (
     /**
@@ -210,21 +209,6 @@ export function Welcome({
             />
           )}
 
-          {/* The helper line is `description`, not a second span: Astryx's field
-              owns label, description and status, so it places and associates them
-              for the screen reader instead of us stacking three siblings. */}
-          <TextInput
-            label="Store directory"
-            description="On the machine running lait. It holds the encrypted replica."
-            value={target}
-            placeholder={context ? context.spaces_root : "Loading…"}
-            onChange={(value) => {
-              setPinnedHome(true);
-              setHome(value);
-            }}
-            width="100%"
-          />
-
           <TextInput
             label="Your name in this space"
             value={nick}
@@ -277,27 +261,4 @@ export function Welcome({
       )}
     </div>
   );
-}
-
-/** A directory name from free text: what a person typed, minus what a path
- *  separator would turn into a second directory. */
-function slug(text: string): string {
-  const cleaned = text
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return cleaned.slice(0, 40) || "space";
-}
-
-/** Join with the separator the *daemon's* OS uses, which is the only one that
- *  matters — the path is resolved there, not here, and the browser may be on a
- *  different machine's convention entirely. */
-function join(root: string, leaf: string): string {
-  // One backslash anywhere is enough to say which OS wrote this: a Windows
-  // config root reached through a forward-slash `$LAIT_CONFIG_ROOT` comes back
-  // mixed, and appending `/` to it would hand the person a path spelled two
-  // ways in one line.
-  const sep = root.includes("\\") ? "\\" : "/";
-  return `${root.replace(/[\\/]+$/, "")}${sep}${leaf}`;
 }

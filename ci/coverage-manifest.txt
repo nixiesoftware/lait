@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2803
+pr             2805
 pr-platform    2291
-nightly        2832
+nightly        2834
 mutants        106
 
 [gates]
@@ -1414,6 +1414,7 @@ lait::it frost_interop::a_trusted_dealer_group_signature_verifies_as_ed25519
 lait::it guided_join::diagnose_flags_expected_space_mismatch
 lait::it guided_join::diagnose_tracks_join_lifecycle_from_pending_to_all_pass
 lait::it guided_join::entering_refuses_a_directory_bound_to_another_space
+lait::it guided_join::entering_without_a_home_reuses_the_store_this_device_already_holds
 lait::it guided_join::stop_kills_the_daemon_even_with_a_live_subscriber
 lait::it guided_join::the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none
 lait::it guided_join::the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_store
@@ -1423,6 +1424,7 @@ lait::it host_plane::a_fresh_identity_with_no_store_forms_a_space_and_is_then_re
 lait::it host_plane::a_self_contained_home_is_the_same_orbit_on_the_next_request
 lait::it host_plane::deleting_an_issue_needs_confirmation_it_can_actually_ask_for
 lait::it host_plane::forgetting_an_orbit_leaves_its_store_on_disk
+lait::it host_plane::founding_without_a_home_lands_the_store_under_the_spaces_root_by_id
 lait::it host_plane::installing_the_mcp_server_writes_a_portable_entry_into_the_directory_it_was_given
 lait::it host_plane::rebuilding_does_not_lose_a_lock_race_with_a_live_daemon
 lait::it host_plane::restarting_the_daemon_leaves_the_head_able_to_stand_a_new_one_up
