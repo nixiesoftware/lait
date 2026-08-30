@@ -72,7 +72,10 @@ impl Catalog {
         )
     }
 
-    fn with_loader(
+    /// A catalog over a caller-supplied registry read. The loader is what a
+    /// test injects to give two Routers in one process two registries — the
+    /// file itself is process-global.
+    pub(crate) fn with_loader(
         identity: PathBuf,
         agents_base: PathBuf,
         self_contained: bool,

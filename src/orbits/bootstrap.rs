@@ -449,6 +449,72 @@ async fn await_admission(router: &Router, address: OrbitAddress, approach: &str)
     }
 }
 
+/// Enter a Space into `home` and drive admission — the whole of what a
+/// `HostSpaceEnter` does, shared with the fan-out that enters on this
+/// device's behalf, so the two cannot come to mean different things.
+///
+/// The custody gate runs before the nick write and before the first
+/// Connect: an entry may not spend a seed this daemon only hosts, whether or
+/// not the directory it names holds a Space yet. An `Err` is the refusal as
+/// the request would have answered it.
+pub(crate) async fn enter_and_await(
+    router: &Router,
+    home: &str,
+    link: &str,
+    nick: Option<&str>,
+) -> Result<(Entered, Admission), Response> {
+    let home = materialize_target(home)?;
+    if let Err(refusal) = admit_formation_target(router, &home) {
+        return Err(Response::err(format!("{refusal:#}")));
+    }
+    let identity = router.catalog().identity().to_path_buf();
+    let packages = router.packages();
+    let link = link.to_string();
+    let nick = nick.map(str::to_owned);
+    let bootstrapped = tokio::task::spawn_blocking(move || {
+        enter(&packages, &home, &identity, &link, nick.as_deref())
+    })
+    .await;
+    match bootstrapped {
+        Ok(Ok(entered)) => {
+            // Entering is not finished until the joiner holds standing:
+            // the store is bound to the Space, but every Body in it is
+            // still encrypted to a key admission delivers. Driving that
+            // here is what keeps "entered" from meaning "blank board".
+            let address = OrbitAddress::for_store(&entered.home, entered.space_id.clone());
+            let admission = await_admission(router, address, &entered.approach).await;
+            Ok((entered, admission))
+        }
+        Ok(Err(error)) => Err(target_error(error)),
+        Err(error) => Err(Response::err(format!("host task failed: {error}"))),
+    }
+}
+
+/// The store holding `space` that this identity signs for, when one is
+/// registered and its path still holds a Space store. Asked of the
+/// catalog rather than the registry file: a store an agent holds under its
+/// own key is registered on this machine too, and is not this identity's
+/// to enter or to speak for.
+pub(crate) fn registered_home(router: &Router, space: &str) -> Option<PathBuf> {
+    router
+        .catalog()
+        .bindings()
+        .into_iter()
+        .filter(|binding| binding.identity == crate::orbits::StationIdentity::Own)
+        .find(|binding| {
+            binding.entry.space == space
+                && orbits::presence(&binding.entry) == orbits::Presence::Present
+        })
+        .map(|binding| PathBuf::from(binding.entry.path))
+}
+
+/// Where a Space nobody has placed goes: under the node's own spaces root,
+/// named by the Space — one directory per Space, so entering twice lands
+/// in the same store rather than beside it.
+pub(crate) fn allocated_home(space: &str) -> PathBuf {
+    config::spaces_root().join(space)
+}
+
 /// Refuse a directory that already holds a store of any vintage.
 fn refuse_occupied(home: &Path) -> Result<()> {
     refuse_unsupported(home)?;
@@ -521,44 +587,19 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             .await
         }
         Request::HostSpaceEnter { link, home, nick } => {
-            // Before the nick write and before the first Connect: an entry may
-            // not spend a seed this daemon only hosts, whether or not the
-            // directory it names holds a Space yet.
-            let home = match materialize_target(&home) {
-                Ok(home) => home,
-                Err(refusal) => return Some(refusal),
-            };
-            if let Err(refusal) = admit_formation_target(router, &home) {
-                return Some(Response::err(format!("{refusal:#}")));
-            }
-            let identity = router.catalog().identity().to_path_buf();
-            let packages = router.packages();
-            let bootstrapped = tokio::task::spawn_blocking(move || {
-                enter(&packages, &home, &identity, &link, nick.as_deref())
-            })
-            .await;
-            match bootstrapped {
-                Ok(Ok(entered)) => {
-                    // Entering is not finished until the joiner holds standing:
-                    // the store is bound to the Space, but every Body in it is
-                    // still encrypted to a key admission delivers. Driving that
-                    // here is what keeps "entered" from meaning "blank board".
-                    let address = OrbitAddress::for_store(&entered.home, entered.space_id.clone());
-                    let admission = await_admission(router, address, &entered.approach).await;
-                    Response::Host(HostReply::Entered {
-                        space: entered.space,
-                        home: entered.home.display().to_string(),
-                        device: entered.device,
-                        approach: entered.approach,
-                        host_nick: entered.host_nick,
-                        fresh: entered.fresh,
-                        admitted: admission.admitted,
-                        contacted: admission.contacted,
-                        last_error: admission.last_error,
-                    })
-                }
-                Ok(Err(error)) => target_error(error),
-                Err(error) => Response::err(format!("host task failed: {error}")),
+            match enter_and_await(router, &home, &link, nick.as_deref()).await {
+                Ok((entered, admission)) => Response::Host(HostReply::Entered {
+                    space: entered.space,
+                    home: entered.home.display().to_string(),
+                    device: entered.device,
+                    approach: entered.approach,
+                    host_nick: entered.host_nick,
+                    fresh: entered.fresh,
+                    admitted: admission.admitted,
+                    contacted: admission.contacted,
+                    last_error: admission.last_error,
+                }),
+                Err(refusal) => refusal,
             }
         }
         Request::HostDeviceConsent { token } => {

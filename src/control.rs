@@ -2460,6 +2460,11 @@ pub struct ReachView {
     /// into `devices` being empty: no profile has no devices.
     #[serde(default)]
     pub device_set_unknown: bool,
+    /// Every Space this daemon holds, and where the fan-out to each own
+    /// device stands. Standing is this daemon's memory of asking; `on` is
+    /// the ledger's answer, and only the second is a fact about the Space.
+    #[serde(default)]
+    pub spaces: Vec<SpaceFanout>,
 }
 
 /// How a device came to hold its profile: founded on this machine, or
@@ -2503,6 +2508,46 @@ pub enum Liveness {
     },
     #[default]
     NotProbed,
+}
+
+/// One Space as the fan-out sees it: which own devices the ledger lists
+/// under my actor, and how the last offer to each of the others stood.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceFanout {
+    pub space: String,
+    /// Devices the ledger names — read from `DeviceList`, never inferred
+    /// from an offer's outcome.
+    pub on: Vec<String>,
+    #[serde(default)]
+    pub standings: Vec<DeviceStanding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceStanding {
+    pub device: String,
+    pub standing: FanoutStanding,
+}
+
+/// Where one offer of one Space to one own device stands, in this daemon's
+/// memory. Absence is a sixth thing — nothing has asked yet — and is never
+/// encoded here. `CouldNotAsk` is kept apart from `Declined` because only
+/// one of them is an answer: a device that could not be reached said
+/// nothing, and treating silence as refusal is the false-disconnection
+/// defect one layer down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "standing", rename_all = "snake_case")]
+pub enum FanoutStanding {
+    /// The ledger names the device.
+    Held,
+    /// The device answered no.
+    Declined { why: String },
+    /// One side refused the exchange — a ticket that did not verify, a
+    /// consent the Space would not take.
+    Refused { why: String },
+    /// Not askable yet for a reason on this side, such as no route to offer.
+    Deferred { why: String },
+    /// The device did not answer. Asked again at `retry_at_ms`.
+    CouldNotAsk { why: String, retry_at_ms: u64 },
 }
 
 /// Everything said with one correspondent.

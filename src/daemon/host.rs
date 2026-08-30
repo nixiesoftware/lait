@@ -1060,6 +1060,13 @@ impl Daemon {
             }
         };
 
+        // Every Space this person holds reaches every device they own, from
+        // here: mounted before the display gate below, because the headless
+        // box with no display is exactly the device the fan-out exists for.
+        let fanout = identity_transport
+            .as_ref()
+            .map(|transport| self.spawn_fanout(transport.clone()));
+
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
         // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
@@ -1070,6 +1077,7 @@ impl Daemon {
             let served = self.endpoint.clone().serve(home).await;
             Self::join_staging(staging).await;
             Self::join_world_upgrades(world_upgrades).await;
+            Self::join_fanout(fanout).await;
             return served;
         }
         // Take the port before committing to it, so "another daemon already holds
@@ -1098,10 +1106,15 @@ impl Daemon {
                 );
                 let served = self.endpoint.clone().serve(home).await;
                 Self::join_staging(staging).await;
+                Self::join_world_upgrades(world_upgrades).await;
+                Self::join_fanout(fanout).await;
                 return served;
             }
             Err(error) => {
+                self.endpoint.begin_stop();
                 Self::join_staging(staging).await;
+                Self::join_world_upgrades(world_upgrades).await;
+                Self::join_fanout(fanout).await;
                 return Err(error).context("serve daemon display HTTPS");
             }
         };
@@ -1217,7 +1230,40 @@ impl Daemon {
         }
         Self::join_staging(staging).await;
         Self::join_world_upgrades(world_upgrades).await;
+        Self::join_fanout(fanout).await;
         outcome
+    }
+
+    /// Start the fan-out over the identity's Own lane. Its facts are hooked
+    /// into the reach view here, so `ReachView.devices[].held` and
+    /// `spaces` read what the loop learned from the ledger.
+    fn spawn_fanout(&self, transport: Arc<dyn comms::Transport>) -> tokio::task::JoinHandle<()> {
+        let facts = crate::daemon::fanout::Facts::new();
+        self.router.correspondence().hook_fanout(facts.clone());
+        let own = self.router.correspondence().own_devices();
+        let stop = self.endpoint.subscribe_stop();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        tokio::spawn(crate::daemon::fanout::serve(
+            self.router.clone(),
+            transport,
+            own,
+            facts,
+            wake,
+            stop,
+        ))
+    }
+
+    async fn join_fanout(fanout: Option<tokio::task::JoinHandle<()>>) {
+        let Some(fanout) = fanout else {
+            return;
+        };
+        match tokio::time::timeout(Duration::from_secs(5), fanout).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the fan-out ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the fan-out did not finish in time; leaving it to the process exit"
+            ),
+        }
     }
 
     /// Start the continuous staging watcher, when this daemon runs inside an

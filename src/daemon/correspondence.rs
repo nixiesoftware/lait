@@ -150,6 +150,10 @@ pub struct CorrespondenceService {
     /// Absent (tests, a book that failed to open), both halves simply do not
     /// happen — reach itself never depends on the book.
     book: std::sync::OnceLock<std::sync::Arc<crate::daemon::address_book::AddressBookService>>,
+    /// What the fan-out knows about the own devices, hooked once at wiring
+    /// like the book. Absent, every device renders unprobed and holding
+    /// nothing known — a daemon that runs no fan-out has not asked.
+    fanout: std::sync::OnceLock<std::sync::Arc<crate::daemon::fanout::Facts>>,
 }
 
 /// What a restored plane holds: the identity's reach, and something to carry
@@ -178,6 +182,7 @@ impl CorrespondenceService {
             own: watch::Sender::new(None),
             plane: Mutex::new(None),
             book: std::sync::OnceLock::new(),
+            fanout: std::sync::OnceLock::new(),
         }
     }
 
@@ -191,6 +196,18 @@ impl CorrespondenceService {
     /// Hook the identity's book, once, at wiring time.
     pub fn hook_book(&self, book: std::sync::Arc<crate::daemon::address_book::AddressBookService>) {
         let _ = self.book.set(book);
+    }
+
+    /// Hook the fan-out's facts, once, when the daemon mounts the loop.
+    pub(crate) fn hook_fanout(&self, facts: std::sync::Arc<crate::daemon::fanout::Facts>) {
+        let _ = self.fanout.set(facts);
+    }
+
+    /// Publish a device set as if the plane held it. For tests that stand
+    /// two daemons as one profile without running the pairing ceremony.
+    #[cfg(test)]
+    pub(crate) fn set_own_for_test(&self, own: Option<OwnDevices>) {
+        self.own.send_replace(own);
     }
 
     /// Where this identity's durable correspondence state lives.
@@ -529,17 +546,23 @@ impl CorrespondenceService {
         // The device set as published, not re-read from the registry: the
         // view and the hub's admission must never disagree about who is own.
         let own = self.own.borrow().clone();
+        let facts = self.fanout.get();
         let devices = own.as_ref().map_or_else(Vec::new, |own| {
             own.devices
                 .iter()
                 .map(|device| crate::control::OwnDeviceView {
                     device: device.as_str().to_owned(),
                     me: device == &own.me,
-                    liveness: crate::control::Liveness::default(),
-                    held: Vec::new(),
+                    liveness: facts
+                        .map_or_else(Default::default, |facts| facts.liveness_of(device)),
+                    held: facts.map_or_else(Vec::new, |facts| facts.held_by(device)),
                 })
                 .collect()
         });
+        let spaces = match (facts, own.as_ref()) {
+            (Some(facts), Some(own)) => facts.view(own),
+            _ => Vec::new(),
+        };
         let origin = match plane.reach.origin() {
             addressbook::reach_store::Origin::Founded => crate::control::OriginView::Founded,
             addressbook::reach_store::Origin::Adopted { from, at } => {
@@ -563,6 +586,7 @@ impl CorrespondenceService {
             origin: Some(origin),
             devices,
             device_set_unknown: own.is_none(),
+            spaces,
         }))
     }
 
