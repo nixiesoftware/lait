@@ -1,10 +1,10 @@
 //! The daemon says where its identity answers.
 //!
 //! One act at overlay start: build a lean announcement from the identity's
-//! own seeds — the genesis is deterministic, the projection carries no
-//! avowal because the registry validates lineage and reads nothing else —
-//! sign the route with the identity's first device, and hand it to the
-//! registry over HTTP. Blocking, called through `spawn_blocking`.
+//! carried genesis — the projection carries no avowal because the registry
+//! validates lineage and reads nothing else — sign the route with the
+//! identity's device, and hand it to the registry over HTTP. Blocking, called
+//! through `spawn_blocking`.
 //!
 //! The epoch is the wall clock in milliseconds: monotonic across restarts
 //! without a counter to persist, and the registry's only use for it is
@@ -32,13 +32,17 @@ pub fn publish_route(
     let label = Label::parse(label).map_err(|refusal| {
         anyhow::anyhow!("identity.label is not a publishable label: {refusal}")
     })?;
-    let seeds = crate::config::load_or_create_kinship_seeds(identity_home)?;
-    let Some(first) = seeds.first().copied() else {
-        anyhow::bail!("this identity holds no kinship seed");
+    let first = crate::config::load_identity(identity_home)?;
+    // The genesis is read, never derived: the boot founded or carried it
+    // before anything served, and a route published under a re-derivation
+    // would name a profile no receiver is paired to.
+    let Some(genesis) = addressbook::ReachStore::at(identity_home)
+        .load()
+        .map_err(|error| anyhow::anyhow!("read the kinship store: {error}"))?
+        .and_then(|state| state.genesis)
+    else {
+        anyhow::bail!("this identity carries no genesis; the daemon founds it at boot");
     };
-    // The same fixed genesis every derivation of this identity uses.
-    let genesis = correspondence::plane::ReachPlane::genesis_for(&seeds)
-        .map_err(|error| anyhow::anyhow!("derive identity genesis: {error}"))?;
     let log = mechanics::kinship::KinshipLog::found(genesis.clone())
         .map_err(|error| anyhow::anyhow!("found log: {error:?}"))?;
     let profile = log.profile().clone();
@@ -219,8 +223,7 @@ mod tests {
     }
 
     fn profile_of(home: &std::path::Path) -> ProfileId {
-        let seeds = crate::config::load_or_create_kinship_seeds(home).expect("seeds");
-        correspondence::plane::ReachPlane::profile_for(&seeds).expect("profile")
+        crate::config::identity_profile(home).expect("profile")
     }
 
     fn endpoint() -> String {

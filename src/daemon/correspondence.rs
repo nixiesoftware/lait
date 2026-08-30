@@ -194,12 +194,17 @@ impl CorrespondenceService {
         directory: Option<Box<dyn Directory + Send>>,
         now: u64,
     ) -> Result<(), String> {
-        let seeds = crate::config::load_or_create_kinship_seeds(&self.identity)
-            .map_err(|error| error.to_string())?;
+        // The one derivation: founds or carries the genesis on a first call,
+        // and reads it back on every later one. The plane then restores from
+        // what was written and never derives.
+        crate::config::identity_profile(&self.identity).map_err(|error| error.to_string())?;
+        let seed =
+            crate::config::load_identity(&self.identity).map_err(|error| error.to_string())?;
         let held = addressbook::ReachStore::at(&self.identity)
             .load()
-            .map_err(|error| error.to_string())?;
-        let reach = correspondence::plane::ReachPlane::restore(seeds, held, now)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "this identity carries no kinship store".to_string())?;
+        let reach = correspondence::plane::ReachPlane::restore(seed, held, now)
             .map_err(|error| format!("{error}"))?;
         let mut plane = self
             .plane

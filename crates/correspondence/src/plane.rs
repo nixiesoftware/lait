@@ -23,25 +23,29 @@ use mechanics::actor::{
 };
 use mechanics::egress;
 use mechanics::ids::{ActorId, DeviceId, SpaceId, SystemUlidSource};
-use mechanics::kinship::{Audience, DeviceLink, Entry, ProfileId, Projection, Standing};
+use mechanics::kinship::{Audience, DeviceLink, Entry, ProfileId, Standing};
 
 use crate::{Carrier, Content, Letter, Mailbox, Missed, Refused};
 
 /// How long a letter is worth holding, from when it is sent.
 const RETENTION: u64 = 60 * 60 * 24 * 7;
 
-/// The genesis link's nonce and epoch. Fixed so a profile id is reproducible
-/// from its seeds; see [`ReachPlane::found`].
+/// The genesis link's nonce and epoch. Fixed so a legacy profile — founded
+/// when the genesis was derived from two seeds on one machine — is founded
+/// again as the *same* profile from the seed that survived; see
+/// [`ReachPlane::found_here`]. Changing either invalidates every issued
+/// address in existence.
 const GENESIS_NONCE: [u8; 16] = [7u8; 16];
 const GENESIS_EPOCH: u64 = 1;
 
 /// Why a plane operation did not apply.
 #[derive(Debug)]
 pub enum Failure {
-    /// The plane needs at least two device seeds to found a profile — a device
-    /// set is assembled by mutual link, and a single device cannot link to
-    /// itself.
-    TooFewDevices,
+    /// The durable state carries no genesis, and nothing here derives one.
+    /// A plane that re-founded in its place would answer a new profile under
+    /// an old log, and every address a person handed out would stop naming
+    /// them; the boot path decides what a genesis-less home is.
+    NoGenesis,
     /// The recipient profile is not held, or resolves to no device — there is
     /// nothing to seal to. Never rendered as "the message failed"; it is "we do
     /// not know how to reach them yet".
@@ -61,7 +65,10 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooFewDevices => write!(f, "a profile needs two devices to be founded"),
+            Self::NoGenesis => write!(
+                f,
+                "this store carries no genesis, and a profile is never re-derived"
+            ),
             Self::NotReachable => write!(f, "we do not know how to reach them yet"),
             Self::Kinship(failure) => write!(f, "the kinship plane refused: {failure:?}"),
             Self::Carrier(refused) => write!(f, "the carrier refused: {refused:?}"),
@@ -135,14 +142,18 @@ pub struct DeviceChange {
 }
 
 pub struct ReachPlane {
-    /// This identity's device seeds. All of them collect and open; the
-    /// **canonical** one composes letters and proves egress.
+    /// This identity's device seeds — exactly one since the genesis is carried:
+    /// a machine holds one device, and every other device of the profile holds
+    /// its own seed on its own machine. The `Vec` outlives its second element
+    /// only until the canonical/seed-for surface collapses onto it.
     seeds: Vec<[u8; 32]>,
     /// Which seed composes, signs and avows. Movable: `DeviceLink` is symmetric,
     /// so no device outranks another and the profile survives the handover.
     canonical: usize,
     profile: ProfileId,
+    /// Carried, never derived — the link the profile id is the hash of.
     genesis: DeviceLink,
+    origin: addressbook::reach_store::Origin,
     registry: Registry,
     // The egress-proving actor plane. The daemon supplies the identity's real
     // one; a self-incepted single-device plane stands in here.
@@ -161,121 +172,154 @@ pub struct ReachPlane {
 }
 
 impl ReachPlane {
-    /// Found this identity's profile from its device seeds and stand up the
-    /// plane. At least two seeds are required — the genesis is a mutual link
-    /// between the first two, and any further seed joins by another link.
+    /// Found this identity's profile from one seed, and stand up the plane.
     ///
-    /// `_now` is reserved: the genesis carries a fixed epoch today, and the
-    /// daemon-backed path will stamp it from the wall clock.
-    pub fn found(seeds: Vec<[u8; 32]>, now: u64) -> Result<Self, Failure> {
-        Self::restore(seeds, None, now)
+    /// A genesis is a mutual link between two distinct devices, and a machine
+    /// holds one. The second signer is a **witness**: it co-signs the birth
+    /// certificate and is retired in the same act, so the profile resolves to
+    /// `[identity]` from its first moment and the witness seed is never
+    /// written anywhere. `witness` is the legacy `kinship.key` seed when a home
+    /// is being carried forward — the fixed nonce and epoch then reproduce the
+    /// genesis that home already handed out as its address — and a random
+    /// in-memory seed otherwise.
+    ///
+    /// `held` is a pre-carriage store: its registry, sent letters and address
+    /// are kept and the retirement is appended to its authored log. A held
+    /// registry that authored a profile this seed and witness do not reproduce
+    /// is refused as [`Failure::NoGenesis`] rather than founded beside — that
+    /// is the home whose profile cannot be reconstructed, and answering a new
+    /// one under its log is the silent re-found this refusal exists to stop.
+    ///
+    /// `_now` is reserved: the genesis carries a fixed epoch today.
+    pub fn found_here(
+        identity: [u8; 32],
+        witness: Option<[u8; 32]>,
+        held: Option<addressbook::ReachState>,
+        _now: u64,
+    ) -> Result<Self, Failure> {
+        let witness = match witness {
+            Some(seed) => seed,
+            None => mechanics::actor::random_seed()
+                .map_err(|e| Failure::Egress(format!("no randomness for the witness: {e}")))?,
+        };
+        let genesis = DeviceLink::seal(&identity, &witness, GENESIS_NONCE, GENESIS_EPOCH)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        let retirement = mechanics::kinship::Retirement::seal(
+            &identity,
+            device_from_seed(&witness),
+            GENESIS_EPOCH.saturating_add(1),
+            GENESIS_NONCE,
+        )
+        .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+
+        let expected = mechanics::kinship::KinshipLog::found(genesis.clone())
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        let (mut registry, epoch, sent, address) = match held {
+            Some(held) => {
+                if held.registry.authored().any(|p| p != expected.profile()) {
+                    return Err(Failure::NoGenesis);
+                }
+                (held.registry, held.epoch, held.sent, held.address)
+            }
+            None => (Registry::new(), 1, std::collections::BTreeMap::new(), None),
+        };
+        let profile = registry.found(genesis.clone())?;
+        registry.extend(&profile, Entry::Retire(retirement))?;
+
+        Ok(Self::stand(
+            identity,
+            profile,
+            genesis,
+            addressbook::ReachState {
+                epoch,
+                canonical: 0,
+                registry,
+                sent,
+                address,
+                genesis: None,
+                origin: addressbook::reach_store::Origin::Founded,
+            },
+        ))
     }
 
-    /// The profile these seeds name, without founding a plane.
+    /// The profile two legacy seeds name, without founding a plane.
     ///
-    /// The one derivation, shared with [`ReachPlane::restore`]: same seeds,
-    /// same fixed genesis, same id on every call. It exists so a component
-    /// that needs only the identity's address — the display coordinator
-    /// anchoring receivers on it — does not stand up a whole reach plane, and
-    /// cannot drift from the plane's own derivation by re-implementing it.
+    /// Migration only: the derivation a home used before its genesis was
+    /// carried, kept so a boot path can check that a `kinship.key` still
+    /// found beside a carried genesis is the witness that signed it, and so a
+    /// test can pin that the carried id is the derived one. Nothing at run
+    /// time derives a profile from here.
     pub fn profile_for(seeds: &[[u8; 32]]) -> Result<mechanics::kinship::ProfileId, Failure> {
         let log = mechanics::kinship::KinshipLog::found(Self::genesis_for(seeds)?)
             .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
         Ok(log.profile().clone())
     }
 
-    /// The fixed genesis these seeds name — the artifact [`profile_for`]'s id
-    /// is the hash of, exposed for the caller that must *carry* it: a route
-    /// publication anchors on the genesis, not on its digest.
+    /// The fixed genesis two legacy seeds name — [`profile_for`]'s artifact.
+    /// Migration only, like it.
     ///
     /// [`profile_for`]: ReachPlane::profile_for
     pub fn genesis_for(seeds: &[[u8; 32]]) -> Result<DeviceLink, Failure> {
         let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
-            return Err(Failure::TooFewDevices);
+            return Err(Failure::NoGenesis);
         };
         DeviceLink::seal(first, second, GENESIS_NONCE, GENESIS_EPOCH)
             .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))
     }
 
-    /// Found the plane, reusing durable state when there is any.
+    /// Stand the plane up again from durable state.
     ///
-    /// The genesis is recomputed from the seeds either way — it is deterministic,
-    /// so the profile id is the same address across restarts. What `state` adds
-    /// is the correspondents this identity has learned, and the epoch its own
-    /// publications have reached.
+    /// The genesis is read from the state and never recomputed: `NoGenesis`
+    /// when it is absent, because the seed alone cannot name the profile the
+    /// log was authored under. `state.canonical` is ignored — a machine holds
+    /// one seed. Refuses a state whose profile does not resolve to this seed's
+    /// device: a store copied from another machine would otherwise sign heads
+    /// no reader takes, silently.
     pub fn restore(
-        seeds: Vec<[u8; 32]>,
-        state: Option<addressbook::ReachState>,
+        seed: [u8; 32],
+        state: addressbook::ReachState,
         _now: u64,
     ) -> Result<Self, Failure> {
-        if seeds.len() < 2 {
-            return Err(Failure::TooFewDevices);
+        let mut state = state;
+        let genesis = state.genesis.take().ok_or(Failure::NoGenesis)?;
+        let profile = state.registry.found(genesis.clone())?;
+        let me = device_from_seed(&seed);
+        if !state
+            .registry
+            .resolve(&profile)
+            .is_some_and(|devices| devices.contains(&me))
+        {
+            return Err(Failure::NotReachable);
         }
-        // Named rather than indexed: the length check above is what makes the
-        // pair present, and a bare index asks the reader to hold that in their
-        // head at every later edit.
-        let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
-            return Err(Failure::TooFewDevices);
-        };
-        let (first, second) = (*first, *second);
-        // The nonce and epoch are fixed, and that is load-bearing: the profile
-        // id is the hash of this link, so the same seeds must produce the same
-        // genesis on every launch or the address a person handed out stops
-        // naming them. Changing either constant invalidates every issued
-        // address in existence.
-        let genesis = DeviceLink::seal(&first, &second, GENESIS_NONCE, GENESIS_EPOCH)
-            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
-        let mut sent = std::collections::BTreeMap::new();
-        let mut address = None;
-        let (mut registry, epoch, canonical) = match state {
-            Some(held) => {
-                sent = held.sent;
-                address = held.address;
-                (held.registry, held.epoch, held.canonical)
-            }
-            None => (Registry::new(), 1, 0),
-        };
-        let profile = registry.found(genesis.clone())?;
-        // Deterministic like the genesis, and for the same reason: a restore
-        // re-seals the same links from the same seeds, so `Registry::extend`
-        // sees entries it already holds rather than duplicates. Break that
-        // determinism and every restart grows the log by one entry per device.
-        for (index, seed) in seeds.iter().enumerate().skip(2) {
-            let link = DeviceLink::seal(
-                &first,
-                seed,
-                GENESIS_NONCE,
-                GENESIS_EPOCH.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
-            )
-            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
-            registry.extend(&profile, Entry::Link(link))?;
-        }
+        Ok(Self::stand(seed, profile, genesis, state))
+    }
 
+    /// The one constructor. `genesis` is the link `profile` hashes to and
+    /// `state.registry` already holds it authored; `state.genesis` is not
+    /// read, the caller having taken it to prove exactly that.
+    fn stand(
+        seed: [u8; 32],
+        profile: ProfileId,
+        genesis: DeviceLink,
+        state: addressbook::ReachState,
+    ) -> Self {
         let egress_space = SpaceId::mint(&SystemUlidSource);
-        let (egress_events, egress_actor) = incept(&first, 1, &egress_space);
-
-        Ok(Self {
-            // Refuse rather than repair: durable state naming a device this
-            // identity does not hold would otherwise start composing under a
-            // different key than the state recorded, silently.
-            canonical: {
-                if canonical >= seeds.len() {
-                    return Err(Failure::NotReachable);
-                }
-                canonical
-            },
-            seeds,
+        let (egress_events, egress_actor) = incept(&seed, 1, &egress_space);
+        Self {
+            seeds: vec![seed],
+            canonical: 0,
             profile,
             genesis,
-            registry,
+            origin: state.origin,
+            registry: state.registry,
             egress_space,
             egress_actor,
             egress_events,
             mailbox: Mailbox::new(),
-            epoch,
-            sent,
-            address,
-        })
+            epoch: state.epoch,
+            sent: state.sent,
+            address: state.address,
+        }
     }
 
     /// What has to survive a restart: the learned correspondents and the epoch.
@@ -287,6 +331,8 @@ impl ReachPlane {
             registry: self.registry.clone(),
             sent: self.sent.clone(),
             address: self.address.clone(),
+            genesis: Some(self.genesis.clone()),
+            origin: self.origin.clone(),
         }
     }
 
@@ -854,10 +900,10 @@ pub struct PostReach {
 }
 
 impl PostReach {
-    /// Stand up the plane from this identity's device seeds, pointed at a Post.
-    pub fn found(seeds: Vec<[u8; 32]>, base: String, now: u64) -> Result<Self, Failure> {
+    /// Found this identity's profile from its seed, pointed at a Post.
+    pub fn found(identity: [u8; 32], base: String, now: u64) -> Result<Self, Failure> {
         Ok(Self {
-            plane: ReachPlane::found(seeds, now)?,
+            plane: ReachPlane::found_here(identity, None, None, now)?,
             base,
         })
     }
@@ -903,15 +949,15 @@ impl PostReach {
         )
     }
 
-    /// Reuse durable state when founding the hosted plane.
+    /// Stand the hosted plane up again from durable state.
     pub fn restore(
-        seeds: Vec<[u8; 32]>,
-        state: Option<addressbook::ReachState>,
+        seed: [u8; 32],
+        state: addressbook::ReachState,
         base: String,
         now: u64,
     ) -> Result<Self, Failure> {
         Ok(Self {
-            plane: ReachPlane::restore(seeds, state, now)?,
+            plane: ReachPlane::restore(seed, state, now)?,
             base,
         })
     }
@@ -1121,22 +1167,86 @@ mod tests {
     const ALICE_A: [u8; 32] = [11u8; 32];
     const ALICE_B: [u8; 32] = [12u8; 32];
     const BOB_A: [u8; 32] = [40u8; 32];
-    const BOB_B: [u8; 32] = [41u8; 32];
     const NOW: u64 = 1_800_000_000;
 
-    /// The standalone derivation and the plane agree on the address, or a
-    /// receiver anchored by one is unreachable through the other.
+    /// One seed founds a profile; the witness co-signs the genesis and is
+    /// retired in the same act; and standing the plane up again reads the
+    /// genesis back rather than deriving one. If restore still derived, the
+    /// second founding below would be indistinguishable from the first; if the
+    /// witness stayed live, the profile would resolve to a device nobody holds.
     #[test]
-    fn profile_for_is_the_plane_own_derivation() {
-        let seeds = vec![ALICE_A, ALICE_B];
-        let derived = ReachPlane::profile_for(&seeds).expect("derive");
-        let plane = ReachPlane::restore(seeds, None, NOW).expect("found");
-        assert_eq!(&derived, plane.profile());
-        assert!(derived.as_str().starts_with("prf_"));
+    fn a_profile_is_founded_by_one_seed_and_a_witness_that_leaves() {
+        let plane = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("found");
+        let me = device_from_seed(&ALICE_A);
+        assert_eq!(plane.my_devices(), vec![me.clone()], "the witness left");
+        assert!(plane.profile().as_str().starts_with("prf_"));
+
+        let state = plane.state();
+        let genesis = state.genesis.clone().expect("the genesis is carried");
+        assert!(genesis.names(&me));
+        let witness = genesis
+            .devices
+            .iter()
+            .find(|device| **device != me)
+            .expect("a witness co-signed the genesis");
         assert!(
-            ReachPlane::profile_for(&[ALICE_A]).is_err(),
-            "one seed is no circle"
+            !plane.my_devices().contains(witness),
+            "and was retired in the same act"
         );
+
+        let again = ReachPlane::restore(ALICE_A, state.clone(), NOW).expect("restore");
+        assert_eq!(
+            again.profile(),
+            plane.profile(),
+            "the same profile, from the file"
+        );
+        assert_eq!(again.my_devices(), vec![me]);
+
+        // Founding is an act, not a derivation: the same seed founded twice is
+        // two profiles, which is why the first has to be carried.
+        let other = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("found again");
+        assert_ne!(other.profile(), plane.profile());
+
+        let mut bare = state;
+        bare.genesis = None;
+        assert!(
+            matches!(
+                ReachPlane::restore(ALICE_A, bare, NOW),
+                Err(Failure::NoGenesis)
+            ),
+            "a state without a genesis is refused, never re-derived"
+        );
+    }
+
+    /// The legacy shape — two seeds on one machine — founds the *same* profile
+    /// when the second seed returns as the witness: same nonce, same epoch,
+    /// sorted pair, deterministic signatures. Every issued address depends on
+    /// this equality; the retirement rides on top of it.
+    #[test]
+    fn a_legacy_witness_founds_the_profile_its_two_seeds_derived() {
+        let derived = ReachPlane::profile_for(&[ALICE_A, ALICE_B]).expect("derive");
+        let plane = ReachPlane::found_here(ALICE_A, Some(ALICE_B), None, NOW).expect("found");
+        assert_eq!(&derived, plane.profile(), "the address survived the carry");
+        assert_eq!(plane.my_devices(), vec![device_from_seed(&ALICE_A)]);
+        assert!(matches!(
+            ReachPlane::profile_for(&[ALICE_A]),
+            Err(Failure::NoGenesis)
+        ));
+
+        // A held store from that legacy home is carried forward whole — and
+        // one whose authored log this seed cannot reproduce is refused, not
+        // founded beside.
+        let mut held = plane.state();
+        held.genesis = None;
+        held.address = Some("ada.example".into());
+        let carried = ReachPlane::found_here(ALICE_A, Some(ALICE_B), Some(held.clone()), NOW)
+            .expect("carried");
+        assert_eq!(carried.profile(), &derived);
+        assert_eq!(carried.address(), Some("ada.example"));
+        assert!(matches!(
+            ReachPlane::found_here(ALICE_A, None, Some(held), NOW),
+            Err(Failure::NoGenesis)
+        ));
     }
 
     /// The user-facing consequence of adoption: a correspondent's address
@@ -1146,9 +1256,9 @@ mod tests {
     /// are real but invisible, which is the worse defect.
     #[test]
     fn a_correspondents_address_book_learns_an_adopted_device() {
-        let (a, b) = ([81u8; 32], [82u8; 32]);
+        let a = [81u8; 32];
         let placement: [u8; 32] = [84u8; 32];
-        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+        let mut plane = ReachPlane::found_here(a, None, None, NOW).expect("found");
 
         let reader = Standing {
             device: Some(device_from_seed(&[91u8; 32])),
@@ -1211,9 +1321,9 @@ mod tests {
     /// full remote-join flow minus only the transport that carries the half.
     #[test]
     fn an_adopted_device_publishes_from_its_own_seed() {
-        let (a, b) = ([81u8; 32], [82u8; 32]);
+        let a = [81u8; 32];
         let placement: [u8; 32] = [84u8; 32];
-        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+        let mut plane = ReachPlane::found_here(a, None, None, NOW).expect("found");
 
         // The sponsor (a) and the placement each sign the same preimage where
         // their seed lives; nobody's seed crosses a machine boundary.
@@ -1226,7 +1336,7 @@ mod tests {
             mechanics::kinship::DeviceLink::half(&placement, &sponsor_device, nonce, epoch);
         let link = mechanics::kinship::DeviceLink::assemble(
             (sponsor_device, sponsor_half),
-            (placement_device.clone(), placement_half),
+            (placement_device, placement_half),
             nonce,
             epoch,
         )
@@ -1250,91 +1360,24 @@ mod tests {
             .project(plane.profile(), &placement, 11, &reader)
             .expect("project as the placement");
         let mut theirs = Registry::new();
-        let genesis = mechanics::kinship::DeviceLink::seal(
-            &a,
-            &b,
-            super::GENESIS_NONCE,
-            super::GENESIS_EPOCH,
-        )
-        .expect("the deterministic genesis");
+        let genesis = plane.state().genesis.expect("the carried genesis");
         theirs
             .absorb(projection, &genesis, &reader)
             .expect("an adopted placement's head is evidence to a stranger");
     }
 
-    /// **A joined device publishes, and every reader can verify it** — the
-    /// device-join the pinned form of this test named as the next piece of
-    /// work. `project` carries the signer's authority chain, `absorb` walks
-    /// it (`signer_rooted`), and the genesis anchor keeps its whole force: a
-    /// chain is co-signed by an already-rooted device at every hop, so a
-    /// stranger substituting a device set still has nothing to carry.
-    ///
-    /// `canonical` therefore stops conflating two authorities: composing was
-    /// always any live device's, and signing a head a correspondent accepts
-    /// is now any *rooted* device's.
-    #[test]
-    fn a_joined_device_publishes_a_head_every_reader_takes() {
-        let (a, b, c) = ([81u8; 32], [82u8; 32], [83u8; 32]);
-        let mut plane = ReachPlane::found(vec![a, b, c], NOW).expect("found");
-
-        let joined_later = device_from_seed(&c);
-        plane
-            .make_canonical(&joined_later)
-            .expect("it is a device this identity holds");
-
-        let reader = Standing {
-            device: Some(device_from_seed(&[91u8; 32])),
-            ..Standing::default()
-        };
-        let announcement = plane.announce(Audience::Public, &reader).expect("announce");
-
-        let mut theirs = Registry::new();
-        let absorbed = theirs
-            .absorb(announcement.projection, &announcement.genesis, &reader)
-            .expect("a chained head is evidence to a stranger");
-        assert_eq!(&absorbed, plane.profile(), "the same identity, verified");
-    }
-
-    /// Handing the canonical role to another device leaves the address alone.
-    ///
-    /// This is what lets a real second machine take over from the seed a client
-    /// founded with: the profile is the hash of a genesis link that names no
-    /// primary, so who composes is a local choice and not part of the identity.
-    #[test]
-    fn the_canonical_device_moves_and_the_profile_does_not() {
-        let mut plane = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("found");
-        let profile = plane.profile().clone();
-        let first = plane.canonical_device();
-        let second = device_from_seed(&ALICE_B);
-        assert_ne!(first, second);
-
-        plane.make_canonical(&second).expect("a device it holds");
-        assert_eq!(plane.canonical_device(), second);
-        assert_eq!(plane.standing().device, Some(second));
-        assert_eq!(plane.profile(), &profile, "the address is unchanged");
-
-        let stranger = device_from_seed(&BOB_A);
-        assert!(
-            plane.make_canonical(&stranger).is_err(),
-            "a device this identity holds no seed for cannot compose for it"
-        );
-    }
-
-    /// Every device this identity holds gets asked, not just the canonical one.
-    ///
-    /// A sender addresses whichever device resolution named, and the device set
-    /// this identity publishes has more than one in it. Asking only the
-    /// canonical device leaves the rest of the mail to expire unread — which a
-    /// surface cannot tell from nobody having written.
+    /// A device set that grew is a question, not a badge: the correspondent
+    /// who learned the old set is asked before the new one is sealed to.
     #[test]
     fn a_device_set_that_grew_is_a_change_a_person_has_to_answer_for() {
-        // Ada, on two devices, announced once and learned by Bob.
-        let mut ada = ReachPlane::found(vec![[71u8; 32], [72u8; 32]], NOW).expect("found");
-        let mut bob = ReachPlane::found(vec![[81u8; 32], [82u8; 32]], NOW).expect("found");
+        // Ada announced once and was learned by Bob.
+        let ada_seed = [71u8; 32];
+        let mut ada = ReachPlane::found_here(ada_seed, None, None, NOW).expect("found");
+        let mut bob = ReachPlane::found_here([81u8; 32], None, None, NOW).expect("found");
         let first = ada
             .announce(Audience::Public, &bob.standing())
             .expect("announce");
-        bob.learn(first.clone(), &bob.standing()).expect("learn");
+        bob.learn(first, &bob.standing()).expect("learn");
 
         // Nothing changed: re-announcing the same set is not a question.
         let unchanged = ada
@@ -1346,10 +1389,25 @@ mod tests {
             "an unchanged device set was raised as a change, which trains a person to say yes"
         );
 
-        // A third device joins, and now it is.
-        let mut wider =
-            ReachPlane::found(vec![[71u8; 32], [72u8; 32], [73u8; 32]], NOW).expect("found");
-        let grown = wider
+        // A second device joins by link, and now it is.
+        let joined: [u8; 32] = [73u8; 32];
+        let (ada_device, joined_device) = (device_from_seed(&ada_seed), device_from_seed(&joined));
+        let (nonce, epoch) = ([13u8; 16], 9);
+        let link = mechanics::kinship::DeviceLink::assemble(
+            (
+                ada_device.clone(),
+                mechanics::kinship::DeviceLink::half(&ada_seed, &joined_device, nonce, epoch),
+            ),
+            (
+                joined_device.clone(),
+                mechanics::kinship::DeviceLink::half(&joined, &ada_device, nonce, epoch),
+            ),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        ada.adopt_device(link).expect("adopt");
+        let grown = ada
             .announce(Audience::Public, &bob.standing())
             .expect("announce");
         let change = bob
@@ -1368,41 +1426,6 @@ mod tests {
             Some(change.held.len()),
             "asking about a change absorbed it"
         );
-    }
-
-    #[test]
-    fn a_collect_asks_every_device_the_identity_holds() {
-        let mut carrier = MemCarrier::new();
-        let mut alice = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("alice");
-        let mut bob = ReachPlane::found(vec![BOB_A, BOB_B], NOW).expect("bob");
-
-        let to_alice = alice
-            .announce(Audience::Public, &bob.standing())
-            .expect("announce");
-        bob.learn(to_alice, &bob.standing()).expect("learn");
-
-        // Address the device Alice does NOT compose on, which is exactly what a
-        // resolution may choose.
-        let elsewhere = device_from_seed(&ALICE_B);
-        assert_ne!(elsewhere, alice.canonical_device());
-        bob.send_addressed(
-            &mut carrier,
-            &alice.profile().clone(),
-            &elsewhere,
-            Content::Message {
-                body: "addressed to your other device".into(),
-            },
-            NOW,
-        )
-        .expect("send");
-
-        let collected = alice.collect(&mut carrier, NOW + 1);
-        assert_eq!(
-            collected.filed, 1,
-            "the letter was found on the other device"
-        );
-        assert_eq!(collected.unasked, None);
-        assert_eq!(alice.messages()[0].1, "addressed to your other device");
     }
 
     /// The client's own plane reaches over the **deployed** Post, when one is
@@ -1434,10 +1457,10 @@ mod tests {
             s[16] = tag;
             s
         };
-        let (a0, a1, b0, b1) = (mk(1), mk(2), mk(3), mk(4));
+        let (a0, b0) = (mk(1), mk(3));
 
-        let mut alice = ReachPlane::found(vec![a0, a1], now).expect("alice");
-        let mut bob = ReachPlane::found(vec![b0, b1], now).expect("bob");
+        let mut alice = ReachPlane::found_here(a0, None, None, now).expect("alice");
+        let mut bob = ReachPlane::found_here(b0, None, None, now).expect("bob");
 
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&b0)));
         let announcement = alice.announce(to_bob, &bob.standing()).expect("announce");
@@ -1471,8 +1494,8 @@ mod tests {
     /// announces to Bob, Bob learns her and sends, Alice collects and reads it.
     #[test]
     fn two_planes_reach_each_other_over_a_carrier() {
-        let mut alice = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("alice");
-        let mut bob = ReachPlane::found(vec![BOB_A, BOB_B], NOW).expect("bob");
+        let mut alice = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("alice");
+        let mut bob = ReachPlane::found_here(BOB_A, None, None, NOW).expect("bob");
 
         // Alice makes herself reachable to Bob; Bob learns her, anchored.
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB_A)));
@@ -1481,7 +1504,11 @@ mod tests {
         assert_eq!(&learned, alice.profile());
 
         // Bob resolves Alice and sends.
-        assert!(bob.resolve(alice.profile()).is_some_and(|d| d.len() == 2));
+        assert_eq!(
+            bob.resolve(alice.profile()),
+            Some(vec![device_from_seed(&ALICE_A)]),
+            "one device, and not the witness"
+        );
         let mut carrier = MemCarrier::new();
         bob.send(&mut carrier, &alice.profile().clone(), "reached you", NOW)
             .expect("send");
@@ -1500,8 +1527,8 @@ mod tests {
     /// a silent success.
     #[test]
     fn sending_to_an_unlearned_profile_is_not_reachable() {
-        let mut alice = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("alice");
-        let stranger = ReachPlane::found(vec![BOB_A, BOB_B], NOW).expect("bob");
+        let mut alice = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("alice");
+        let stranger = ReachPlane::found_here(BOB_A, None, None, NOW).expect("bob");
         let mut carrier = MemCarrier::new();
         assert!(matches!(
             alice.send(&mut carrier, &stranger.profile().clone(), "hi", NOW),
@@ -1535,7 +1562,7 @@ mod tests {
             s
         };
 
-        let mut me = PostReach::found(vec![mk(1), mk(2)], base, now).expect("found");
+        let mut me = PostReach::found(mk(1), base, now).expect("found");
         me.send_self("a note to future me", now).expect("send self");
         let collected = me.collect(now);
         assert_eq!(
@@ -1546,23 +1573,13 @@ mod tests {
         assert_eq!(me.messages()[0].1, "a note to future me");
     }
 
-    /// A single device cannot found a profile — a set is a mutual link.
-    #[test]
-    fn one_device_cannot_found_a_profile() {
-        assert!(matches!(
-            ReachPlane::found(vec![ALICE_A], NOW),
-            Err(Failure::TooFewDevices)
-        ));
-    }
-
     /// The portrait rides the announcement rail: whoever can learn the
     /// devices learns the presentation, from the same anchored projection,
     /// and a later announcement supersedes it the same way the device set
     /// does.
     #[test]
     fn an_announcement_carries_the_portrait_to_whoever_can_learn_it() {
-        let (a, b) = ([61u8; 32], [62u8; 32]);
-        let mut plane = ReachPlane::found(vec![a, b], NOW).expect("found");
+        let mut plane = ReachPlane::found_here([61u8; 32], None, None, NOW).expect("found");
         let reader = Standing {
             device: Some(device_from_seed(&[71u8; 32])),
             ..Standing::default()

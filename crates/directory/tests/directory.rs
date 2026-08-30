@@ -22,7 +22,7 @@ const NOW: u64 = 1_700_000_000;
 
 /// One identity home: two device seeds, a genesis link between them, and the
 /// registry that authored it. Two seeds because a kinship genesis needs two
-/// distinct devices — the shape `config::load_or_create_kinship_seeds` produces.
+/// distinct devices; the plane retires its witness, this fixture keeps both.
 struct Home {
     registry: Registry,
     profile: ProfileId,

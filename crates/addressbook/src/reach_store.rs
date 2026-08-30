@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use mechanics::ids::DeviceId;
+use mechanics::kinship::DeviceLink;
+
 use crate::durable::{atomic_replace, open_or_recover};
 use crate::{Error, Registry};
 
@@ -34,7 +37,8 @@ const MAX_REACH_BYTES: usize = 8 * 1024 * 1024;
 pub struct ReachState {
     /// The last epoch this identity published at. Never moves backwards.
     pub epoch: u64,
-    /// Which of this identity's device seeds composes and avows, by index.
+    /// Which seed composed, by index, when a home held several. Kept on disk
+    /// for the envelope's shape and ignored on read: a machine holds one seed.
     pub canonical: usize,
     /// The kinship registry: this identity's own log, and every correspondent
     /// profile it has absorbed.
@@ -55,6 +59,58 @@ pub struct ReachState {
     /// with no address whenever that service was unreachable.
     #[serde(default)]
     pub address: Option<String>,
+    /// The genesis link this profile is the content address of. Carried, never
+    /// derived: a profile is founded once and every later device joins by
+    /// link, so nothing that could recompute it from a seed exists any more.
+    /// `None` is a pre-carriage envelope, and the boot path decides what to do
+    /// with one — a plane never founds in its place.
+    #[serde(default)]
+    pub genesis: Option<DeviceLink>,
+    /// How this device came to hold the profile.
+    #[serde(default)]
+    pub origin: Origin,
+}
+
+/// How this device came to hold its profile: founded here, or adopted from a
+/// device that already held it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum Origin {
+    #[default]
+    Founded,
+    Adopted {
+        from: DeviceId,
+        at: u64,
+    },
+}
+
+/// The envelope body as it was written before the genesis was carried.
+///
+/// Postcard is positional and not self-describing, so `#[serde(default)]`
+/// cannot supply a trailing field the bytes never held; a body that ends after
+/// `address` is read in this shape and lifted with `genesis: None`.
+#[derive(Serialize, Deserialize)]
+struct PreCarriage {
+    epoch: u64,
+    canonical: usize,
+    registry: Registry,
+    #[serde(default)]
+    sent: std::collections::BTreeMap<String, Vec<Sent>>,
+    #[serde(default)]
+    address: Option<String>,
+}
+
+impl From<PreCarriage> for ReachState {
+    fn from(held: PreCarriage) -> Self {
+        Self {
+            epoch: held.epoch,
+            canonical: held.canonical,
+            registry: held.registry,
+            sent: held.sent,
+            address: held.address,
+            genesis: None,
+            origin: Origin::Founded,
+        }
+    }
 }
 
 /// One letter this identity composed.
@@ -155,7 +211,11 @@ fn decode(bytes: &[u8]) -> Result<ReachState, Error> {
     let body = bytes
         .get(PREFIX..body_end)
         .ok_or(Error::Corrupt("reach body"))?;
-    postcard::from_bytes(body).map_err(|_| Error::Corrupt("reach decode"))
+    // The digest above already vouched for the bytes, so a body the current
+    // shape cannot read is an older shape, not damage.
+    postcard::from_bytes::<ReachState>(body)
+        .or_else(|_| postcard::from_bytes::<PreCarriage>(body).map(ReachState::from))
+        .map_err(|_| Error::Corrupt("reach decode"))
 }
 
 #[cfg(test)]
@@ -166,13 +226,15 @@ mod tests {
     fn state(epoch: u64) -> ReachState {
         let genesis = DeviceLink::seal(&[51u8; 32], &[52u8; 32], [7u8; 16], 1).expect("genesis");
         let mut registry = Registry::new();
-        registry.found(genesis).expect("found");
+        registry.found(genesis.clone()).expect("found");
         ReachState {
             epoch,
             canonical: 0,
             registry,
             sent: std::collections::BTreeMap::new(),
             address: None,
+            genesis: Some(genesis),
+            origin: Origin::Founded,
         }
     }
 
@@ -196,6 +258,51 @@ mod tests {
         assert_eq!(
             read.registry.to_bytes().unwrap(),
             written.registry.to_bytes().unwrap()
+        );
+        assert_eq!(
+            read.genesis, written.genesis,
+            "the genesis is carried whole"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// An envelope written before the genesis was carried is the migration's
+    /// input, and it has to read as *held with no genesis* — not as corrupt,
+    /// which would refuse a working home, and not as absent, which would
+    /// re-found it under a new address.
+    #[test]
+    fn a_pre_carriage_envelope_loads_with_no_genesis_and_its_registry_intact() {
+        let home = dir("pre-carriage");
+        let store = ReachStore::at(&home);
+        let legacy = state(5);
+        let body = postcard::to_stdvec(&PreCarriage {
+            epoch: legacy.epoch,
+            canonical: 1,
+            registry: legacy.registry.clone(),
+            sent: legacy.sent.clone(),
+            address: Some("ada.example".into()),
+        })
+        .unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(ENVELOPE_FORMAT);
+        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+        fs::write(&store.path, &bytes).unwrap();
+
+        let read = store
+            .load()
+            .expect("an older shape is not corrupt")
+            .expect("present");
+        assert!(read.genesis.is_none(), "nothing invented a genesis");
+        assert!(matches!(read.origin, Origin::Founded));
+        assert_eq!(read.epoch, 5);
+        assert_eq!(read.address.as_deref(), Some("ada.example"));
+        assert_eq!(
+            read.registry.to_bytes().unwrap(),
+            legacy.registry.to_bytes().unwrap(),
+            "the authored log survived the lift"
         );
         let _ = fs::remove_dir_all(&home);
     }
