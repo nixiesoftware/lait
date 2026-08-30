@@ -2,7 +2,6 @@
 members = [
     "crates/display-protocol",
     "crates/journal",
-    "crates/lait-net",
     "crates/mechanics",
     "crates/netstack",
     "crates/mediabox",
@@ -146,6 +145,10 @@ mediabox = { path = "crates/mediabox" }
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor
 # behind it. Swapping the adapter is a manifest change, not a daemon rewrite.
 comms = { path = "crates/comms" }
+# The L3 packet layer. The daemon composes its carry as the net plane: the
+# tunnel is an identity's own devices reaching each other, so it is mounted
+# where the identity, its endpoint and its device set already live.
+netstack = { path = "crates/netstack" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 

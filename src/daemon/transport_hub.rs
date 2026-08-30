@@ -1567,6 +1567,17 @@ mod tests {
         connection
     }
 
+    /// The net plane's ALPN is spelled in two crates — here, where the
+    /// endpoint registers it, and in `netstack`, where the carry dials it.
+    /// Neither would fail if they disagreed: the hub would register a lane
+    /// nothing dials and the carry would dial a lane nothing serves, and the
+    /// symptom is a tunnel that silently never forms. So they are pinned
+    /// against each other rather than kept in step by memory.
+    #[test]
+    fn the_lane_the_hub_registers_is_the_one_the_carry_dials() {
+        assert_eq!(NET_ALPN, netstack::carry::NET_ALPN);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_lane_routes_without_a_space_and_only_to_own_devices() {
         // Raised before any Station: a device that holds no Space yet is the

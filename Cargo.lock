@@ -3738,6 +3738,7 @@ dependencies = [
  "mediabox",
  "mp4-atom",
  "n0-future",
+ "netstack",
  "postcard",
  "rand_core 0.6.4",
  "rcgen",
@@ -3800,6 +3801,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "world-interface",
@@ -3874,16 +3876,6 @@ dependencies = [
  "runtime",
  "world-runner",
  "world-sdk",
-]
-
-[[package]]
-name = "lait-net"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "mechanics",
- "netstack",
- "tokio",
 ]
 
 [[package]]
@@ -4591,9 +4583,13 @@ dependencies = [
  "anyhow",
  "blake3",
  "comms",
+ "getrandom 0.3.4",
  "libc",
  "mechanics",
+ "postcard",
+ "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

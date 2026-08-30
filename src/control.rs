@@ -2480,6 +2480,11 @@ pub struct ReachView {
     /// witnesses rather than a person who failed a check.
     #[serde(default)]
     pub markers: Vec<MarkerView>,
+    /// The tunnel interface on this machine. `None` when no net plane is
+    /// mounted at all; otherwise it always says something, including that
+    /// this machine will not give one.
+    #[serde(default)]
+    pub interface: Option<InterfaceView>,
 }
 
 /// How a device came to hold its profile: founded on this machine, or
@@ -2515,6 +2520,51 @@ pub struct OwnDeviceView {
     /// leaves whatever it last proved standing rather than emptying this.
     #[serde(default)]
     pub certified_by: Vec<String>,
+    /// How the tunnel reaches this device, if a net plane is carrying.
+    /// `None` is "nothing carried", which is not "unreachable".
+    #[serde(default)]
+    pub reach: Option<ReachKind>,
+}
+
+/// The tunnel interface as this machine gave it.
+///
+/// Three ways to have none, kept apart because only one of them is worth
+/// acting on: `NotPermitted` is a daemon holding no `CAP_NET_ADMIN` — install
+/// the service and it goes away; `Unsupported` is a platform whose TUN seam
+/// is not built yet; `Off` is the operator's own switch. None of the three is
+/// a failure, and none of them says anything about how many devices there
+/// are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "interface", rename_all = "snake_case")]
+pub enum InterfaceView {
+    Up { name: String, address: String },
+    NotPermitted,
+    Unsupported,
+    Off,
+}
+
+/// How the tunnel reaches one own device.
+///
+/// `NoRoute` (nothing ever taught this transport where the device is),
+/// `Unreachable` (a dial was made and failed) and `Retired` (the set no
+/// longer names it) are three different facts. Folding any two would render a
+/// revoked device as a flaky one, and a device nobody has looked for as one
+/// that is down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reach", rename_all = "snake_case")]
+pub enum ReachKind {
+    /// `via` is the path the transport selected: `direct`, `relay`, or
+    /// `unknown` when it does not report paths.
+    Connected {
+        via: String,
+    },
+    Dialing,
+    NoRoute,
+    /// `since` is unix seconds.
+    Unreachable {
+        since: u64,
+    },
+    Retired,
 }
 
 /// What a probe of an own device last learned. `NotProbed` is the default

@@ -6,25 +6,25 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2870
-pr-platform    2345
-nightly        2899
+pr             2968
+pr-platform    2433
+nightly        2997
 mutants        106
 
 [gates]
-orbital-boundaries           6
-orbital-clean-break          18
-orbital-authority            19
-orbital-formats              241
-core-fabric-foundations      56
-core-plane-shapes            89
-orbital-faults               38
-orbital-contact-real         6
-orbital-bootstrap-real       15
-orbital-ceremonies           12
-orbital-independent-world    6
-convergence-simulation       6
-orbital-product-parity       36
+orbital-boundaries 6
+orbital-clean-break 18
+orbital-authority 19
+orbital-formats 241
+core-fabric-foundations 56
+core-plane-shapes 89
+orbital-faults 38
+orbital-contact-real 6
+orbital-bootstrap-real 15
+orbital-ceremonies 12
+orbital-independent-world 6
+convergence-simulation 6
+orbital-product-parity 36
 
 [tests]
 addressbook announce::tests::a_substituted_device_set_is_caught_by_the_reader
@@ -604,6 +604,9 @@ lait daemon::markers::tests::an_unasked_marker_has_no_file_and_a_record_round_tr
 lait daemon::markers::tests::each_ratchet_outcome_is_its_own_standing
 lait daemon::markers::tests::irreconcilable_heads_from_one_signer_are_kept_as_evidence
 lait daemon::markers::tests::the_book_reads_as_a_tier_and_never_as_a_verdict
+lait daemon::netplane::tests::a_set_that_is_not_held_names_no_devices
+lait daemon::netplane::tests::a_stranger_never_becomes_a_route_and_a_retired_device_loses_the_one_it_had
+lait daemon::netplane::tests::an_interface_the_machine_will_not_give_is_never_read_as_no_peers
 lait daemon::pair::tests::a_code_is_spent_by_the_first_start_and_a_wrong_guess_burns_it
 lait daemon::pair::tests::a_complete_from_anyone_but_the_sponsor_is_refused
 lait daemon::pair::tests::a_lost_complete_is_recovered_by_entering_the_next_code
@@ -635,6 +638,7 @@ lait daemon::transport_hub::tests::each_plane_gets_its_own_queue_and_neither_dra
 lait daemon::transport_hub::tests::one_identity_endpoint_demultiplexes_and_replays_openers_by_space
 lait daemon::transport_hub::tests::scoped_shutdown_and_slow_openers_do_not_take_down_sibling_spaces
 lait daemon::transport_hub::tests::shutting_a_space_down_stops_routing_connections_to_it
+lait daemon::transport_hub::tests::the_lane_the_hub_registers_is_the_one_the_carry_dials
 lait daemon::transport_hub::tests::the_own_lane_admits_nobody_while_the_set_is_unrestored
 lait daemon::transport_hub::tests::the_own_lane_outlives_the_view_that_took_it
 lait daemon_spawn::group_isolation::a_spawned_daemon_leads_its_own_process_group
@@ -926,6 +930,8 @@ lait update::facts::tests::the_process_protocols_are_named_independently
 lait update::feed::tests::a_channel_resolves_to_the_release_its_pointer_names
 lait update::feed::tests::a_channel_resolves_when_a_successor_key_signed_it
 lait update::feed::tests::a_floor_is_carried_and_an_unsatisfiable_floor_is_ignored_and_flagged
+lait update::feed::tests::a_key_set_with_nothing_in_it_or_the_same_key_twice_is_refused
+lait update::feed::tests::a_manifest_may_carry_bundles_and_fields_this_build_never_asks_for
 lait update::feed::tests::a_pointer_and_manifest_that_disagree_on_version_are_refused
 lait update::feed::tests::a_pointer_may_not_drop_its_stamp_once_one_has_been_seen
 lait update::feed::tests::a_relocation_is_followed_once_and_a_chain_is_refused
@@ -936,6 +942,7 @@ lait update::feed::tests::an_unreachable_pointer_stays_unreachable_never_up_to_d
 lait update::feed::tests::any_pinned_key_opens_an_envelope_which_is_what_makes_rotation_an_overlap
 lait update::feed::tests::channel_parse_accepts_exactly_the_two_channels
 lait update::feed::tests::garbage_is_invalid_not_a_verification_failure
+lait update::feed::tests::the_feed_trust_root_moves_only_in_a_debug_build
 lait update::feed::tests::the_pinned_keys_are_well_formed_and_distinct
 lait update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
 lait update::feed::tests::the_stable_channel_refuses_a_prerelease_even_when_the_pointer_names_one
@@ -1070,13 +1077,20 @@ lait-feed-notify tests::a_key_is_a_channel_path_and_nothing_else
 lait-feed-notify tests::a_relay_with_no_keys_is_refused_rather_than_open
 lait-feed-notify tests::the_board_persists_across_a_restart
 lait-feed-notify tests::the_board_takes_only_verified_newer_stamped_pointers
+lait-feed::bin/lait-feed tests::a_base_url_that_would_escape_the_script_is_refused_before_it_is_written
 lait-feed::bin/lait-feed tests::a_bundle_that_declares_another_world_or_version_is_refused
 lait-feed::bin/lait-feed tests::a_bundle_with_no_declaration_is_refused_at_publish_time
+lait-feed::bin/lait-feed tests::a_manifest_lists_the_install_line_and_refuses_a_release_without_one
+lait-feed::bin/lait-feed tests::a_manifest_refuses_an_install_line_generated_for_another_release
 lait-feed::bin/lait-feed tests::a_stable_channel_never_takes_a_prerelease
 lait-feed::bin/lait-feed tests::a_world_id_that_is_not_a_reverse_domain_is_refused
 lait-feed::bin/lait-feed tests::a_world_publish_seals_a_manifest_naming_one_artifact_for_the_release
+lait-feed::bin/lait-feed tests::an_install_line_is_refused_for_an_archive_it_cannot_hash
 lait-feed::bin/lait-feed tests::packing_the_same_bundle_twice_produces_the_same_bytes
 lait-feed::bin/lait-feed tests::promoting_without_the_sealed_manifest_is_refused_rather_than_guessed
+lait-feed::bin/lait-feed tests::the_install_line_bakes_each_linux_archive_and_generates_the_same_bytes_twice
+lait-feed::bin/lait-feed tests::the_install_line_is_posix_sh_and_refuses_a_machine_it_holds_no_digest_for
+lait-feed::bin/lait-feed tests::the_install_line_unpacks_only_what_hashes_to_the_digest_it_pins
 lait-issues contract::product_bound_tests::issue_and_entity_text_bounds_are_utf8_byte_bounds
 lait-issues contract::product_bound_tests::migration_window_cursor_rejects_body_and_subitem_tampering
 lait-issues contract::product_bound_tests::page_continuation_pins_the_complete_world_publication
@@ -1474,6 +1488,7 @@ lait::it guided_join::the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_sto
 lait::it guided_join::the_mcp_head_refuses_to_guess_among_several_registered_orbits
 lait::it guided_join::the_mcp_head_with_an_empty_registry_still_refuses_and_names_the_way_in
 lait::it host_plane::a_fresh_identity_with_no_store_forms_a_space_and_is_then_reachable
+lait::it host_plane::a_headless_daemon_still_mounts_the_net_plane
 lait::it host_plane::a_self_contained_home_is_the_same_orbit_on_the_next_request
 lait::it host_plane::deleting_an_issue_needs_confirmation_it_can_actually_ask_for
 lait::it host_plane::forgetting_an_orbit_leaves_its_store_on_disk
@@ -1965,6 +1980,11 @@ mediabox tests::an_empty_track_has_no_samples_and_no_groups
 mediabox tests::bytes_that_are_not_a_container_are_refused_not_read_as_empty
 mediabox tests::composition_offsets_are_refused_because_neither_muxer_can_write_them
 mediabox tests::groups_start_on_sync_samples_and_respect_the_duration_budget
+netstack carry::tests::a_packet_crosses_between_two_own_devices_in_memory
+netstack carry::tests::a_stranger_on_the_net_plane_is_closed_before_a_route_exists
+netstack carry::tests::admission_is_the_own_set_and_nothing_else
+netstack carry::tests::retiring_a_device_drops_its_live_route
+netstack carry::tests::retiring_a_device_mid_dial_aborts_the_dial_and_a_stop_returns_promptly
 netstack tests::an_address_is_a_deterministic_function_of_the_key
 netstack tests::destination_is_read_only_from_a_well_formed_ipv6_packet
 netstack tests::different_keys_derive_different_addresses

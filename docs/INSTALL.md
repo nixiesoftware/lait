@@ -62,8 +62,35 @@ AppIndicator runtime libraries.
 ## Headless host
 
 A Pi, a NAS, a VPS: an always-on device that holds your Spaces and never draws
-a window. Download the host archive named for the machine's Rust target triple
-and run its `install` mode as root; for example, on x86_64 Linux:
+a window. One line, on x86_64 or aarch64 Linux:
+
+```sh
+curl -fsSL https://storage.googleapis.com/the-foundation-dist/releases/<version>/install.sh | sudo sh
+```
+
+To pass a flag, give `sh` its arguments explicitly — a piped script has none of
+its own:
+
+```sh
+curl -fsSL .../install.sh | sudo sh -s -- --channel test
+```
+
+The script is published with the release it names and never moves. What it
+proves is the archive: it bakes the sha256 of that version's two Linux archives
+and compares before it unpacks anything. What nothing on your machine proves is
+the script itself — a piped install runs a shell that arrived over TLS from the
+bucket, and neither `curl` nor `sh` verifies a signature. It is listed and
+digested in that release's signed manifest, but that listing is what an audit
+compares against afterwards, not something the pipe consults. If that matters
+to you, fetch it to a file and read it before running it, or take the manual
+install below, which needs no script at all.
+
+The pin is only good for getting one trustworthy `lait` onto the machine — what
+finally gets installed is whatever the channel proves — so a `<version>` copied
+out of an old document still installs the current release.
+
+The same install without the pipe, for a machine that would rather see the
+bytes first:
 
 ```sh
 version='<version>'
@@ -74,11 +101,11 @@ sudo ./lait-x86_64-unknown-linux-gnu/lait install
 
 A Raspberry Pi uses `lait-aarch64-unknown-linux-gnu.tar.gz`.
 
-The binary you untarred is only the bootstrapper. `lait install` resolves the
-`stable` channel through the same signed chain the daemon updates by — pointer,
-manifest, size, digest — and installs *that* release's binary, never itself, so
-a stale `version` in the line above is harmless and an unverifiable download is
-a refusal rather than an install. It writes:
+Either way, the binary that lands first is only the bootstrapper. `lait install`
+resolves the `stable` channel through the same signed chain the daemon updates
+by — pointer, manifest, size, digest — and installs *that* release's binary,
+never itself, so an unverifiable download is a refusal rather than an install.
+It writes:
 
 ```text
 /var/lib/lait/bin/lait              the proven binary, owned by the `lait` system user
@@ -97,8 +124,8 @@ After five failed starts in five minutes systemd leaves it down until
 is also how a wedged box is repaired, since it installs whatever `stable`
 proves by then.
 
-Flags: `--user` installs under `~/.local/share/lait` with a user unit and no
-root; `--channel test` follows the test channel, recorded beside the identity;
+Flags (after `sh -s --` when piped, or straight after `lait install`):
+`--user` installs under `~/.local/share/lait` with a user unit and no root; `--channel test` follows the test channel, recorded beside the identity;
 `--displays` leaves the display coordinator on (it binds port 7443);
 `--root <dir>` picks another root. An install line never crosses a root that
 was installed the other way.

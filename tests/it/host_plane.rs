@@ -703,3 +703,40 @@ fn founding_without_a_home_lands_the_store_under_the_spaces_root_by_id() {
     head.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The net plane is mounted where a headless daemon reaches it.
+///
+/// Every head in this suite runs with `LAIT_DISPLAY=off`, which is the posture
+/// of the machine the tunnel exists for: a box with no display, serving its
+/// owner's other devices. The mount sits *before* that gate in
+/// `Daemon::serve`, and moving it inside the display branch would compile,
+/// pass every unit test, and leave exactly that box with no tunnel — the
+/// "every component correct, the composition wrong" class this repository has
+/// been bitten by twice. So the evidence is taken from outside the daemon: a
+/// headless one has an answer about its interface.
+#[test]
+fn a_headless_daemon_still_mounts_the_net_plane() {
+    let root = temp_root("netplane");
+    let config = root.join("config");
+    let head = Head::start(&config, None);
+
+    let (status, view) = head.host(serde_json::json!({ "cmd": "reach_view" }));
+    assert_eq!(status, 200, "the reach view was refused: {view}");
+    let interface = &view["interface"];
+    assert!(
+        interface.is_object(),
+        "a headless daemon reported no interface at all — the mount is behind \
+         the display gate: {view}"
+    );
+    // *Which* absence depends on the machine: `unsupported` off Linux,
+    // `not_permitted` without CAP_NET_ADMIN, `off` under LAIT_NET. None of
+    // them is silence, and none of them is an error.
+    assert!(
+        matches!(
+            interface["interface"].as_str(),
+            Some("up" | "not_permitted" | "unsupported" | "off")
+        ),
+        "unrecognised interface state: {view}"
+    );
+    head.stop();
+}

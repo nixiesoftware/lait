@@ -38,15 +38,32 @@ fn load(identity: &Path) -> BTreeMap<String, Vec<SocketAddr>> {
     .unwrap_or_default()
 }
 
-/// Remember where `device` just answered from.
+/// Remember where `device` just answered from, and teach it to `transport`
+/// now.
 ///
-/// Empty routes are not written: a transport with no addresses to advertise
-/// (a relay policy, the in-memory one) says nothing about where anybody is,
-/// and recording that as "no route" would overwrite an address that still
-/// works with a fact nobody measured.
-pub(crate) fn remember(identity: &Path, device: &DeviceId, addrs: &[SocketAddr]) {
+/// One act, because they were two and every caller had to remember both. Four
+/// did; one taught only when it happened to be holding the endpoint. A route
+/// recorded but not taught is one nothing can dial until the next start —
+/// under `Isolated` a bare id resolves to nothing at all — so a device paired
+/// while the daemon was already up would sit unreachable until it restarted.
+/// `None` is a caller with no endpoint at hand: the record still stands, and
+/// [`teach`] hands it over at the next start.
+///
+/// Empty routes are neither written nor taught: a transport with no addresses
+/// to advertise (a relay policy, the in-memory one) says nothing about where
+/// anybody is, and recording that as "no route" would overwrite an address
+/// that still works with a fact nobody measured.
+pub(crate) fn remember(
+    identity: &Path,
+    transport: Option<&dyn Transport>,
+    device: &DeviceId,
+    addrs: &[SocketAddr],
+) {
     if addrs.is_empty() {
         return;
+    }
+    if let Some(transport) = transport {
+        transport.learn(device.clone(), addrs);
     }
     let mut held = load(identity);
     let mine: Vec<SocketAddr> = addrs.to_vec();

@@ -15,7 +15,7 @@ import {
 } from "./devices";
 
 function device(overrides: Partial<OwnDevice> & { device: string }): OwnDevice {
-  return { me: false, liveness: { kind: "notProbed" }, held: [], certifiedBy: [], ...overrides };
+  return { me: false, liveness: { kind: "notProbed" }, held: [], certifiedBy: [], reach: null, ...overrides };
 }
 
 function marker(base: string, standing: MarkerStanding): Marker {
@@ -29,6 +29,7 @@ function profile(overrides: Partial<ProfileFacts> = {}): ProfileFacts {
     origin: { kind: "founded" },
     devices: [device({ device: "dev_laptop", me: true })],
     deviceSetUnknown: false,
+    interface: null,
     pairing: null,
     offers: [],
     markers: [],

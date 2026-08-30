@@ -254,6 +254,12 @@ export interface ProfileFacts {
    * that went unanswered rather than a person with nothing.
    */
   deviceSetUnknown: boolean;
+  /**
+   * The tunnel interface on this machine; null when the daemon carries no net
+   * plane. The variants are the machine's own answers — none of them is a
+   * failure, and none says anything about how many devices there are.
+   */
+  interface: DeviceInterface | null;
   /** The code this device shows while it waits to be added; null when it holds none. */
   pairing: PairingCode | null;
   /** Devices waiting on their six words being compared here. */
@@ -307,7 +313,32 @@ export interface OwnDevice {
    * names them. Empty costs the device nothing.
    */
   certifiedBy: string[];
+  /** How the tunnel reaches this device; null when nothing carries. */
+  reach: DeviceReach | null;
 }
+
+/**
+ * The tunnel interface. `notPermitted` is the one a person can act on — a
+ * daemon started by hand holds no capability to open one — `unsupported` is a
+ * platform whose seam is not built, and `off` is the operator's own switch.
+ */
+export type DeviceInterface =
+  | { kind: "up"; name: string; address: string }
+  | { kind: "notPermitted" }
+  | { kind: "unsupported" }
+  | { kind: "off" };
+
+/**
+ * Three ways of not being reached, kept apart: nothing ever routed there, a
+ * dial that failed, and a device the set no longer names. Flattening them
+ * would draw a revoked device as a flaky one.
+ */
+export type DeviceReach =
+  | { kind: "connected"; via: string }
+  | { kind: "dialing" }
+  | { kind: "noRoute" }
+  | { kind: "unreachable"; since: number }
+  | { kind: "retired" };
 
 /**
  * Three facts, kept apart: a device that answered, one that could not be
@@ -1208,14 +1239,15 @@ export const fixtureClientView: ClientView = {
     me: "dev_this",
     origin: { kind: "founded" },
     devices: [
-      { device: "dev_this", me: true, liveness: { kind: "answered", version: "0.0.0-fixture", at: 1_755_552_000_000 }, held: ["orb_fixture"], certifiedBy: ["https://post.example"] },
-      { device: "dev_pi", me: false, liveness: { kind: "couldNotAsk", why: "no route" }, held: ["orb_fixture"], certifiedBy: [] },
+      { device: "dev_this", me: true, liveness: { kind: "answered", version: "0.0.0-fixture", at: 1_755_552_000_000 }, held: ["orb_fixture"], certifiedBy: ["https://post.example"], reach: null },
+      { device: "dev_pi", me: false, liveness: { kind: "couldNotAsk", why: "no route" }, held: ["orb_fixture"], certifiedBy: [], reach: { kind: "noRoute" } },
     ],
     deviceSetUnknown: false,
     markers: [
       { marker: "https://post.example", standing: { kind: "answering" } },
       { marker: "https://quiet.example", standing: { kind: "couldNotAsk" } },
     ],
+    interface: { kind: "notPermitted" },
     pairing: null,
     offers: [{
       pairing: "pai_fixture",

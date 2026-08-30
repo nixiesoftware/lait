@@ -314,11 +314,20 @@ pub struct Artifact {
 /// produces: an empty set trusts nothing while looking like configuration, and
 /// a duplicate hides that a key was replaced rather than added.
 pub fn pinned_pubkeys() -> Result<Vec<[u8; 32]>, Failure> {
-    if FEED_PUBKEYS_HEX.is_empty() {
-        return Err(Failure::Invalid("no feed key is pinned".into()));
-    }
-    let mut keys = Vec::with_capacity(FEED_PUBKEYS_HEX.len());
-    for hex in FEED_PUBKEYS_HEX {
+    decode_pubkeys(FEED_PUBKEYS_HEX.iter().copied())
+}
+
+/// The keys a signing envelope is checked against, refusing the two shapes a
+/// hurried edit produces: an empty set trusts nothing while looking like
+/// configuration, and a duplicate hides that a key was replaced rather than
+/// added.
+fn decode_pubkeys<'a>(hexes: impl Iterator<Item = &'a str>) -> Result<Vec<[u8; 32]>, Failure> {
+    let mut keys: Vec<[u8; 32]> = Vec::new();
+    for hex in hexes {
+        let hex = hex.trim();
+        if hex.is_empty() {
+            continue;
+        }
         let bytes = data_encoding::HEXLOWER
             .decode(hex.as_bytes())
             .map_err(|e| Failure::Invalid(format!("pinned key {hex} is not hex: {e}")))?;
@@ -330,7 +339,58 @@ pub fn pinned_pubkeys() -> Result<Vec<[u8; 32]>, Failure> {
         }
         keys.push(key);
     }
+    if keys.is_empty() {
+        return Err(Failure::Invalid("no feed key is pinned".into()));
+    }
     Ok(keys)
+}
+
+/// A value only a debug build is allowed to read from its environment.
+///
+/// The feed's base URL and key set are the trust root, and a trust root an
+/// environment variable can move is not one: a release binary that honoured
+/// these would let anything holding the daemon's environment choose which feed
+/// installs its next version. A debug build takes them so `ci/smoke-install.sh`
+/// can stand up a scratch feed in a container and watch a real daemon install
+/// from it and then update — the composition no unit test reaches. The gate is
+/// `config::cloud_default`'s, for the same reason.
+fn only_in_a_debug_build(debug_build: bool, value: Option<String>) -> Option<String> {
+    debug_build.then_some(value).flatten()
+}
+
+/// Where this build looks for the feed.
+fn feed_base_url() -> String {
+    base_url_from(
+        cfg!(debug_assertions),
+        std::env::var("LAIT_FEED_BASE_URL").ok(),
+    )
+}
+
+/// Split from [`feed_base_url`] so the decision itself is testable at the
+/// reader, not one helper short of it: what a release build does with a set
+/// `LAIT_FEED_BASE_URL` is the whole claim, and asserting only
+/// [`only_in_a_debug_build`] leaves the arm that applies it unasserted.
+fn base_url_from(debug_build: bool, from_env: Option<String>) -> String {
+    only_in_a_debug_build(debug_build, from_env)
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| FEED_BASE_URL.to_string())
+}
+
+/// The keys this build will believe: the pinned set, or a scratch set a debug
+/// build was handed as comma-separated lowercase hex.
+fn trusted_pubkeys() -> Result<Vec<[u8; 32]>, Failure> {
+    pubkeys_from(
+        cfg!(debug_assertions),
+        std::env::var("LAIT_FEED_PUBKEYS").ok(),
+    )
+}
+
+/// Split from [`trusted_pubkeys`] for the reason [`base_url_from`] is.
+fn pubkeys_from(debug_build: bool, from_env: Option<String>) -> Result<Vec<[u8; 32]>, Failure> {
+    match only_in_a_debug_build(debug_build, from_env).filter(|keys| !keys.trim().is_empty()) {
+        Some(keys) => decode_pubkeys(keys.split(',')),
+        None => pinned_pubkeys(),
+    }
 }
 
 /// Open a signed envelope: verify against any pinned key, then hand back the
@@ -426,8 +486,8 @@ pub fn resolve(channel: Channel) -> Result<Resolved, Failure> {
     let resolved = resolve_with(
         |url| http_fetch(url, MAX_FEED_OBJECT),
         channel,
-        FEED_BASE_URL,
-        &pinned_pubkeys()?,
+        &feed_base_url(),
+        &trusted_pubkeys()?,
         seen_published_at(channel),
     )?;
     if let Some(at) = resolved.published_at {
@@ -854,6 +914,105 @@ pub(crate) mod tests {
         assert!(resolved.floor.is_none());
         assert!(!resolved.floor_defect);
         assert!(resolved.manifest.artifacts["lait"].contains_key("x86_64-pc-windows-msvc"));
+    }
+
+    /// The trust root is compiled in, and the escape hatch that lets a
+    /// container smoke publish its own feed must not exist in the binary a
+    /// person installs. A release build that read these would let anything
+    /// holding the daemon's environment choose which feed installs its next
+    /// version — the one substitution the whole signed chain exists to refuse.
+    #[test]
+    fn the_feed_trust_root_moves_only_in_a_debug_build() {
+        let scratch = Some("http://feed:8080".to_string());
+        assert_eq!(only_in_a_debug_build(true, scratch.clone()), scratch);
+        assert_eq!(only_in_a_debug_build(false, scratch.clone()), None);
+        assert_eq!(only_in_a_debug_build(true, None), None);
+
+        // At the readers themselves, which is where the claim is spent. A
+        // release build handed the variable goes to the pinned bucket and the
+        // pinned keys, and an empty value is not a trust root either.
+        assert_eq!(base_url_from(true, scratch.clone()), "http://feed:8080");
+        assert_eq!(base_url_from(false, scratch.clone()), FEED_BASE_URL);
+        assert_eq!(base_url_from(true, Some("  ".into())), FEED_BASE_URL);
+        assert_eq!(base_url_from(true, None), FEED_BASE_URL);
+
+        let (_, scratch_key) = test_keypair();
+        let scratch_hex = Some(data_encoding::HEXLOWER.encode(&scratch_key));
+        assert_eq!(
+            pubkeys_from(true, scratch_hex.clone()).unwrap(),
+            [scratch_key]
+        );
+        let pinned = pinned_pubkeys().unwrap();
+        assert_eq!(pubkeys_from(false, scratch_hex).unwrap(), pinned);
+        assert_eq!(pubkeys_from(true, Some("  ".into())).unwrap(), pinned);
+        assert_eq!(pubkeys_from(true, None).unwrap(), pinned);
+    }
+
+    /// An empty or duplicated key set is refused wherever it comes from — the
+    /// pinned constant or a scratch feed's `LAIT_FEED_PUBKEYS`.
+    #[test]
+    fn a_key_set_with_nothing_in_it_or_the_same_key_twice_is_refused() {
+        let (_, pubkey) = test_keypair();
+        let hex = data_encoding::HEXLOWER.encode(&pubkey);
+        assert_eq!(
+            decode_pubkeys([hex.as_str()].into_iter()).unwrap(),
+            [pubkey]
+        );
+        let err = decode_pubkeys(["  ", ""].into_iter()).unwrap_err();
+        assert!(matches!(err, Failure::Invalid(_)), "{err}");
+        let err = decode_pubkeys([hex.as_str(), hex.as_str()].into_iter()).unwrap_err();
+        assert!(matches!(err, Failure::Invalid(_)), "{err}");
+    }
+
+    /// The property the release feed's forward compatibility rests on: a
+    /// manifest may carry bundles and fields this build never asks for, and
+    /// they must be invisible rather than fatal. `install.sh` is listed as
+    /// bundle `installer` from 0.9.9 onward, and every machine installed
+    /// before that reads the same manifest — a `deny_unknown_fields` here, or
+    /// an exhaustive walk over `artifacts`, would strand the whole fleet on
+    /// the release that introduced the key.
+    #[test]
+    fn a_manifest_may_carry_bundles_and_fields_this_build_never_asks_for() {
+        let (seed, pubkey) = test_keypair();
+        let mut objects = feed_with(&seed, "stable", "0.9.9", None);
+        let mut extended = manifest_json("0.9.9", None);
+        extended["bundles"]["installer"] = "0.9.9".into();
+        extended["artifacts"]["installer"] = serde_json::json!({"linux": {
+            "url": "https://feed.example/releases/0.9.9/install.sh",
+            "blake3": "11".repeat(32),
+            "size": 2894,
+        }});
+        extended["a_field_from_a_later_publisher"] = "ignored".into();
+        objects.insert(
+            "https://feed.example/releases/0.9.9/manifest.json".to_string(),
+            seal(&extended, &seed),
+        );
+        let resolved = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .expect("an unknown bundle must not fail a resolve");
+        assert_eq!(resolved.version.to_string(), "0.9.9");
+        // What the updater actually reaches for is untouched...
+        assert!(resolved.manifest.artifacts["lait"].contains_key("x86_64-pc-windows-msvc"));
+        // ...and what a newer build reaches for is there to be read.
+        assert_eq!(resolved.manifest.artifacts["installer"]["linux"].size, 2894);
+
+        // The manifest shape that predates the install line resolves the same
+        // way: adding the key is not what makes a release readable.
+        let older = feed_with(&seed, "stable", "0.9.9", None);
+        let resolved = resolve_with(
+            feed_of(&older),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .expect("a manifest with no installer bundle still resolves");
+        assert!(!resolved.manifest.bundles.contains_key("installer"));
     }
 
     #[test]
