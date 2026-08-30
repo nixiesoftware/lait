@@ -1317,6 +1317,35 @@ fn daemon_failure(error: &anyhow::Error) -> Response {
     (status, err_json(&format!("{error:#}"), ErrorKind::Error)).into_response()
 }
 
+/// An invite minted from a World's page is an invite into that World.
+///
+/// `Request::Invite` names the World whose role selector it expands, and
+/// leaves it optional because a machine with one Issues installed has nothing
+/// to choose between. A machine with two — the release and a local copy of it,
+/// which is a different World with the same three roles — has, and the daemon
+/// refuses to guess: every role on it came back "ambiguous across installed
+/// Worlds; name a World". The page cannot name one: it knows the mount it is
+/// served at and nothing about the id behind it. This head knows both, because
+/// it answers for exactly one World, so it states the fact here the way
+/// `lait mcp` states it for `invite_ticket`. A request that already names a
+/// World is left alone — a default does not override a choice.
+fn name_served_world(request: Request, served: Option<&replica::body::WorldId>) -> Request {
+    match request {
+        Request::Invite {
+            world: None,
+            role,
+            reusable,
+            ttl_hours,
+        } => Request::Invite {
+            world: served.map(|world| world.as_str().to_owned()),
+            role,
+            reusable,
+            ttl_hours,
+        },
+        other => other,
+    }
+}
+
 async fn rpc(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -1344,6 +1373,12 @@ async fn rpc(
                 .into_response();
         }
     };
+    let req = name_served_world(
+        req,
+        app.registry
+            .package_for_mount(&app.world)
+            .map(world_interface::WorldClientPackage::world),
+    );
     if matches!(req, Request::Subscribe { .. }) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1479,6 +1514,45 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("products/issues-app/assets/web"),
         )
+    }
+
+    /// The Issues page sends `invite` with no World, because it knows only
+    /// its mount. The head serves exactly one World and says which; a request
+    /// that named one already is not second-guessed, and nothing but an
+    /// invite is touched.
+    #[test]
+    fn an_unqualified_invite_is_stamped_with_the_served_world() {
+        let served = replica::body::WorldId::parse("local.issues").unwrap();
+        let invite = |world: Option<&str>| Request::Invite {
+            world: world.map(str::to_owned),
+            role: Some("administrator".into()),
+            reusable: false,
+            ttl_hours: Some(24),
+        };
+
+        let stamped = name_served_world(invite(None), Some(&served));
+        assert!(
+            matches!(&stamped, Request::Invite { world: Some(world), role: Some(role), reusable: false, ttl_hours: Some(24) }
+                if world == "local.issues" && role == "administrator"),
+            "{stamped:?}"
+        );
+
+        let explicit = name_served_world(invite(Some("com.lait.issues")), Some(&served));
+        assert!(
+            matches!(&explicit, Request::Invite { world: Some(world), .. } if world == "com.lait.issues"),
+            "{explicit:?}"
+        );
+
+        let unserved = name_served_world(invite(None), None);
+        assert!(
+            matches!(unserved, Request::Invite { world: None, .. }),
+            "a head with no package for its mount has nothing to say"
+        );
+
+        assert!(matches!(
+            name_served_world(Request::Id, Some(&served)),
+            Request::Id
+        ));
     }
 
     /// The real HTTP router, over an Orbit directory with no spaces.
