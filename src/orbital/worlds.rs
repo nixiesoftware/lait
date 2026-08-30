@@ -723,9 +723,20 @@ impl WorldRouter {
         match claimed.len() {
             0 => anyhow::bail!("unknown role '{role}': no installed World defines it"),
             1 => Ok(claimed.remove(0).1),
-            _ => anyhow::bail!(
-                "admission role '{role}' is ambiguous across installed Worlds; name a World"
-            ),
+            _ => {
+                // Name the claimants: the usual pair is a release and a local
+                // copy of it, and "ambiguous" alone reads as a broken role
+                // rather than a second Issues on the machine.
+                let claimants = claimed
+                    .iter()
+                    .map(|(world, _)| world.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "admission role '{role}' is ambiguous across installed Worlds \
+                     ({claimants}); name a World"
+                )
+            }
         }
     }
 
@@ -1273,5 +1284,73 @@ mod tests {
                 reason: runtime::exec::PackageInvalid::SpecRegistrationMismatch,
             }
         );
+    }
+
+    /// A lifecycle that claims exactly one role, in its own namespace — the
+    /// shape a release and a local copy of it present side by side.
+    struct ClaimsAdministrator(&'static str);
+
+    impl WorldLifecycle for ClaimsAdministrator {
+        fn admission_evidence(
+            &self,
+            role: &str,
+            parent_manifest_root: [u8; 32],
+        ) -> anyhow::Result<Option<mechanics::authorization::WorldAssignmentEvidence>> {
+            Ok((role == "administrator").then(|| {
+                mechanics::authorization::WorldAssignmentEvidence {
+                    world: self.0.to_owned(),
+                    opaque_definition_ref: Vec::new(),
+                    definition_digest: [0; 32],
+                    parent_manifest_root,
+                    assignments: Vec::new(),
+                }
+            }))
+        }
+    }
+
+    /// The release and a local copy of it are two Worlds with the same roles.
+    /// An unqualified selector is refused rather than guessed — install order
+    /// is not policy — and the refusal names both claimants, because
+    /// "ambiguous" alone reads as a broken role. Naming either World resolves
+    /// it to that World's evidence.
+    #[test]
+    fn a_role_two_installed_worlds_claim_is_resolved_by_naming_one() {
+        let release = package("com.example.issues", 1);
+        let local = package("local.issues", 2);
+        let (_, hosts) = WorldPackages::new()
+            .with_package(
+                WorldPackage::new(release.0, release.1)
+                    .with_lifecycle(Arc::new(ClaimsAdministrator("com.example.issues"))),
+            )
+            .with_package(
+                WorldPackage::new(local.0, local.1)
+                    .with_lifecycle(Arc::new(ClaimsAdministrator("local.issues"))),
+            )
+            .build()
+            .unwrap();
+
+        let err = hosts
+            .admission_evidence(None, "administrator", [0; 32])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("com.example.issues"), "{err}");
+        assert!(err.contains("local.issues"), "{err}");
+
+        let named = hosts
+            .admission_evidence(
+                Some(&WorldId::parse("local.issues").unwrap()),
+                "administrator",
+                [0; 32],
+            )
+            .unwrap();
+        assert_eq!(named.world, "local.issues");
+
+        // A role only one of them claims still needs no name.
+        let err = hosts
+            .admission_evidence(None, "viewer", [0; 32])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown role"), "{err}");
     }
 }
