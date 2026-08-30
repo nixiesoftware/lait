@@ -29,6 +29,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 data-encoding = "2.6"
 blake3 = "1"
+# The install line's own download is checked with `sha256sum`, the one digest
+# tool a stock Linux box already has. Everything past it is blake3 under the
+# manifest signature.
+sha2 = "0.10"
 semver = "1"
 # Packing a World's web head into the artifact a client extracts.
 flate2 = "1"

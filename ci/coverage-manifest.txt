@@ -6,25 +6,25 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2864
-pr-platform    2345
-nightly        2893
+pr             2913
+pr-platform    2386
+nightly        2942
 mutants        106
 
 [gates]
-orbital-boundaries           6
-orbital-clean-break          18
-orbital-authority            19
-orbital-formats              241
-core-fabric-foundations      56
-core-plane-shapes            89
-orbital-faults               38
-orbital-contact-real         6
-orbital-bootstrap-real       15
-orbital-ceremonies           12
-orbital-independent-world    6
-convergence-simulation       6
-orbital-product-parity       36
+orbital-boundaries 6
+orbital-clean-break 18
+orbital-authority 19
+orbital-formats 241
+core-fabric-foundations 56
+core-plane-shapes 89
+orbital-faults 38
+orbital-contact-real 6
+orbital-bootstrap-real 15
+orbital-ceremonies 12
+orbital-independent-world 6
+convergence-simulation 6
+orbital-product-parity 36
 
 [tests]
 addressbook announce::tests::a_substituted_device_set_is_caught_by_the_reader
@@ -922,6 +922,8 @@ lait update::facts::tests::the_process_protocols_are_named_independently
 lait update::feed::tests::a_channel_resolves_to_the_release_its_pointer_names
 lait update::feed::tests::a_channel_resolves_when_a_successor_key_signed_it
 lait update::feed::tests::a_floor_is_carried_and_an_unsatisfiable_floor_is_ignored_and_flagged
+lait update::feed::tests::a_key_set_with_nothing_in_it_or_the_same_key_twice_is_refused
+lait update::feed::tests::a_manifest_may_carry_bundles_and_fields_this_build_never_asks_for
 lait update::feed::tests::a_pointer_and_manifest_that_disagree_on_version_are_refused
 lait update::feed::tests::a_pointer_may_not_drop_its_stamp_once_one_has_been_seen
 lait update::feed::tests::a_relocation_is_followed_once_and_a_chain_is_refused
@@ -932,6 +934,7 @@ lait update::feed::tests::an_unreachable_pointer_stays_unreachable_never_up_to_d
 lait update::feed::tests::any_pinned_key_opens_an_envelope_which_is_what_makes_rotation_an_overlap
 lait update::feed::tests::channel_parse_accepts_exactly_the_two_channels
 lait update::feed::tests::garbage_is_invalid_not_a_verification_failure
+lait update::feed::tests::the_feed_trust_root_moves_only_in_a_debug_build
 lait update::feed::tests::the_pinned_keys_are_well_formed_and_distinct
 lait update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
 lait update::feed::tests::the_stable_channel_refuses_a_prerelease_even_when_the_pointer_names_one
@@ -1062,13 +1065,20 @@ lait-feed-notify tests::a_key_is_a_channel_path_and_nothing_else
 lait-feed-notify tests::a_relay_with_no_keys_is_refused_rather_than_open
 lait-feed-notify tests::the_board_persists_across_a_restart
 lait-feed-notify tests::the_board_takes_only_verified_newer_stamped_pointers
+lait-feed::bin/lait-feed tests::a_base_url_that_would_escape_the_script_is_refused_before_it_is_written
 lait-feed::bin/lait-feed tests::a_bundle_that_declares_another_world_or_version_is_refused
 lait-feed::bin/lait-feed tests::a_bundle_with_no_declaration_is_refused_at_publish_time
+lait-feed::bin/lait-feed tests::a_manifest_lists_the_install_line_and_refuses_a_release_without_one
+lait-feed::bin/lait-feed tests::a_manifest_refuses_an_install_line_generated_for_another_release
 lait-feed::bin/lait-feed tests::a_stable_channel_never_takes_a_prerelease
 lait-feed::bin/lait-feed tests::a_world_id_that_is_not_a_reverse_domain_is_refused
 lait-feed::bin/lait-feed tests::a_world_publish_seals_a_manifest_naming_one_artifact_for_the_release
+lait-feed::bin/lait-feed tests::an_install_line_is_refused_for_an_archive_it_cannot_hash
 lait-feed::bin/lait-feed tests::packing_the_same_bundle_twice_produces_the_same_bytes
 lait-feed::bin/lait-feed tests::promoting_without_the_sealed_manifest_is_refused_rather_than_guessed
+lait-feed::bin/lait-feed tests::the_install_line_bakes_each_linux_archive_and_generates_the_same_bytes_twice
+lait-feed::bin/lait-feed tests::the_install_line_is_posix_sh_and_refuses_a_machine_it_holds_no_digest_for
+lait-feed::bin/lait-feed tests::the_install_line_unpacks_only_what_hashes_to_the_digest_it_pins
 lait-issues contract::product_bound_tests::issue_and_entity_text_bounds_are_utf8_byte_bounds
 lait-issues contract::product_bound_tests::migration_window_cursor_rejects_body_and_subitem_tampering
 lait-issues contract::product_bound_tests::page_continuation_pins_the_complete_world_publication

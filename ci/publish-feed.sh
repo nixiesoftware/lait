@@ -34,6 +34,10 @@
 # Requires: gcloud (authenticated with write access to the bucket), curl, gh
 # (for --from-run), and a built `lait-feed` (cargo build -p lait-feed).
 #
+# Every publish also emits `releases/<version>/install.sh` — the one line a
+# person pastes onto a headless box. It is generated from the archives being
+# published, so its digests can never name another release's bytes.
+#
 # The seed never leaves the machine invoking this script. CI runs will replace
 # the gcloud user credential with Workload Identity Federation (SUB-13, open);
 # the sequencing here is identical either way.
@@ -256,6 +260,25 @@ elif [ -n "$ASTROLABE" ] && [ -n "$LAIT_ONLY" ]; then
   exit 1
 fi
 
+# 0. The install line, generated from the very archives about to be published.
+#    It is a release artifact like the rest — immutable under releases/<version>/,
+#    listed and digested in the signed manifest — and never a mutable object:
+#    the pointer stays the only one. Generation is deterministic, so a copy the
+#    release build already made is COMPARED rather than trusted; a divergence
+#    means the two were generated from different bytes, which is exactly the
+#    thing nobody would notice.
+# shellcheck disable=SC2086
+$FEED_TOOL installer --version "$VERSION" --base-url "$BASE_URL" \
+  --artifacts-dir "$ARTIFACTS" --out "$WORK/install.sh"
+if [ -f "$ARTIFACTS/install.sh" ]; then
+  cmp "$WORK/install.sh" "$ARTIFACTS/install.sh" || {
+    echo "publish-feed: $ARTIFACTS/install.sh is not the line these archives generate" >&2
+    exit 1
+  }
+else
+  cp "$WORK/install.sh" "$ARTIFACTS/install.sh"
+fi
+
 # 1. Seal the manifest from the artifacts as they exist on disk. Refuses a
 #    directory missing any lait target.
 MANIFEST_ARGS=(--version "$VERSION" --base-url "$BASE_URL" \
@@ -275,6 +298,7 @@ $FEED_TOOL pointer --channel "$CHANNEL" --version "$VERSION" \
 for artifact in "$ARTIFACTS"/lait-*.zip "$ARTIFACTS"/lait-*.tar.gz; do
   upload_immutable "$artifact" "$(basename "$artifact")"
 done
+upload_immutable "$ARTIFACTS/install.sh" "install.sh"
 if [ -n "$ASTROLABE" ]; then
   # Whichever platform installers exist; the manifest step already refused an
   # $ASTROLABE with neither, and noted any absent platform loudly.
@@ -299,7 +323,7 @@ upload_immutable "$WORK/manifest.json" "manifest.json"
 #    The list mirrors what step 3 uploaded, never the directory's contents: a
 #    local file that was deliberately not published — another version's
 #    installer in a reused directory included — must not fail the publish.
-VERIFY=("manifest.json")
+VERIFY=("manifest.json" "install.sh")
 for artifact in "$ARTIFACTS"/lait-*.zip "$ARTIFACTS"/lait-*.tar.gz; do
   [ -f "$artifact" ] && VERIFY+=("$(basename "$artifact")")
 done
