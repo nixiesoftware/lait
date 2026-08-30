@@ -3707,7 +3707,7 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "addressbook",
  "anyhow",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -3933,7 +3933,7 @@ dependencies = [
 
 [[package]]
 name = "lait-signage"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake3",
  "data-encoding",
