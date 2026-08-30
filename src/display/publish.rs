@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 use lait_directory::registry::{
     chronicle_entry, chronicle_over_http, publish_over_http, Chronicled, Label, RoutePublish,
 };
+use lait_directory::Receipt;
 
 pub fn publish_route(
     identity_home: &Path,
@@ -54,10 +55,10 @@ pub fn publish_route(
         .encode()
         .context("encode announcement")?;
     let publish = RoutePublish::sign(label, announcement, endpoint.to_string(), epoch, &first);
-    let receipt = publish_over_http(registry_base, &publish)?;
-    check_receipt(&publish, &receipt)?;
-    ratchet(identity_home, registry_base, &receipt)?;
-    Ok(receipt)
+    let chronicled = publish_over_http(registry_base, &publish)?;
+    check_receipt(&publish, &chronicled.receipt)?;
+    ratchet(identity_home, registry_base, &chronicled.receipt)?;
+    Ok(chronicled)
 }
 
 /// The forward-only half: pin the first head this identity accepts, and
@@ -70,7 +71,7 @@ pub fn publish_route(
 /// the receipt carried: a receipt head can be minted over a private side
 /// branch, so the canonical head is the authority, and the receipt is then
 /// checked to sit on that same chain (below).
-fn ratchet(identity_home: &Path, registry_base: &str, receipt: &Chronicled) -> Result<()> {
+fn ratchet(identity_home: &Path, registry_base: &str, receipt: &Receipt) -> Result<()> {
     use mechanics::chronicle::{advance, Advance, Refusal};
 
     let held = crate::display::pin::load(identity_home);
@@ -168,7 +169,7 @@ fn ratchet(identity_home: &Path, registry_base: &str, receipt: &Chronicled) -> R
 /// canonical head *behind* the receipt's claimed size is a rollback, also
 /// caught. Same-signer is required by `advance`, so a receipt signed by a
 /// different key than the public head fails too.
-fn reconcile_receipt(receipt: &Chronicled, registry_base: &str) -> Result<()> {
+fn reconcile_receipt(receipt: &Receipt, registry_base: &str) -> Result<()> {
     use mechanics::chronicle::{advance, Advance, PinnedHead};
 
     let Some(receipt_head) = &receipt.head else {
@@ -189,7 +190,7 @@ fn reconcile_receipt(receipt: &Chronicled, registry_base: &str) -> Result<()> {
 
 /// A receipt without a head is a registrar that keeps no chronicle — allowed
 /// while the fleet turns over. A receipt *with* one must prove itself whole.
-fn check_receipt(publish: &RoutePublish, receipt: &Chronicled) -> Result<()> {
+fn check_receipt(publish: &RoutePublish, receipt: &Receipt) -> Result<()> {
     let Some(head) = &receipt.head else {
         return Ok(());
     };
@@ -212,7 +213,8 @@ fn check_receipt(publish: &RoutePublish, receipt: &Chronicled) -> Result<()> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use lait_directory::registry::{Label, MemRegistry, Registrar, RegistryStore};
+    use lait_directory::registry::{ChronicleStore, Label, MemRegistry, Registrar, RegistryStore};
+    use lait_directory::Chronicler;
     use mechanics::kinship::ProfileId;
 
     fn home_with_identity() -> tempfile::TempDir {
@@ -232,20 +234,23 @@ mod tests {
             .to_string()
     }
 
-    async fn spawn_registry(store: MemRegistry, profile: &ProfileId) -> String {
-        spawn_registry_signed(store, profile, [51u8; 32]).await
+    async fn spawn_registry(chronicle: MemRegistry, profile: &ProfileId) -> String {
+        spawn_registry_signed(chronicle, profile, [51u8; 32]).await
     }
 
+    /// A registrar over a fresh route store, feeding a chronicle the caller
+    /// supplies — so a test can hand it a log with a history of its own.
     async fn spawn_registry_signed(
-        store: MemRegistry,
+        chronicle: MemRegistry,
         profile: &ProfileId,
         seed: [u8; 32],
     ) -> String {
-        let mut store = store;
+        let mut store = MemRegistry::default();
         store
             .bind(&Label::parse("acme").expect("label"), profile)
             .expect("bind");
-        let registrar = Registrar::open(store, seed).expect("open");
+        let chronicler = Chronicler::shared(chronicle, seed).expect("open the chronicle");
+        let registrar = Registrar::with_chronicler(store, chronicler);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -363,11 +368,7 @@ mod tests {
         // this passed as a normal extension and an attacker who minted a key
         // owned the ratchet. It must read as WrongSigner, not Diverged (no
         // accusation against the pinned holder) and never as fine.
-        let mut store = MemRegistry::default();
-        store
-            .bind(&Label::parse("acme").expect("label"), &profile)
-            .expect("bind");
-        let usurper = spawn_registry_signed(store, &profile, [99u8; 32]).await;
+        let usurper = spawn_registry_signed(MemRegistry::default(), &profile, [99u8; 32]).await;
         let error = publish(home.path().to_path_buf(), usurper)
             .await
             .expect_err("a different signer is refused");

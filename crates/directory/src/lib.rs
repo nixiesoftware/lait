@@ -35,10 +35,19 @@
 //!
 //! The directory learns who looks up whom, which is contact discovery, and that
 //! is a real cost rather than one to deny. It is minimised, not claimed away.
+//!
+//! One more cost is paid deliberately: an accepted publication is appended to
+//! the deployment's [`chronicle`], the log the label registry already keeps, so
+//! that a person with no label still gets a receipt somebody can check. A leaf
+//! is a hash, so what becomes public is that *some* publication happened — never
+//! whose, and never what it said. The alternative was a second log with a second
+//! signer for every reader to follow, which buys nothing the refusal shape above
+//! does not already protect.
 
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod chronicle;
 pub mod client;
 pub mod firestore;
 pub mod http;
@@ -49,6 +58,7 @@ pub mod wire;
 mod words;
 
 pub use address::Address;
+pub use chronicle::{ChronicleStore, Chronicler, Receipt};
 pub use client::Remote;
 pub use firestore::{Credentials, FirestoreStore};
 pub use service::{Service, Shared};
@@ -113,6 +123,19 @@ pub mod bounds {
     pub const RATE_WINDOW: u64 = 60;
 }
 
+/// What publishing answered: the address, and the chronicle's receipt for it.
+///
+/// The address alone is what a person needs; the receipt is what a *reader*
+/// needs to check that this publication was recorded, by a marker it follows,
+/// before it renders anything as certified. Carried together because they are
+/// answers to one act — a receipt fetched separately would be a receipt for
+/// some other publication.
+#[derive(Debug, Clone)]
+pub struct Issued {
+    pub address: Address,
+    pub receipt: Receipt,
+}
+
 /// What the service does, independent of how it is reached.
 ///
 /// A trait so the HTTP surface, the client's carrier-side adapter and the tests
@@ -131,8 +154,9 @@ pub trait Directory {
     /// Publish a profile's signed device events, verified on their own terms.
     ///
     /// Returns the address this profile answers to — minted on first publish and
-    /// stable afterwards. The service chooses it; the publisher does not.
-    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal>;
+    /// stable afterwards. The service chooses it; the publisher does not — and,
+    /// beside it, the receipt for the chronicle entry this publication became.
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Issued, Refusal>;
 
     /// Resolve one exact address to the announcement its profile published.
     ///
@@ -155,7 +179,7 @@ impl<S: Store> Directory for Service<S> {
         Service::challenge(self, device, now)
     }
 
-    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal> {
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Issued, Refusal> {
         Service::publish(self, request, now)
     }
 
@@ -175,7 +199,7 @@ pub fn publish_as(
     seed: &[u8; 32],
     announcement: &addressbook::Announcement,
     now: u64,
-) -> Result<Address, Refusal> {
+) -> Result<Issued, Refusal> {
     let device = mechanics::actor::device_from_seed(seed);
     let challenge = directory.challenge(&device, now)?;
     let encoded = announcement.encode().map_err(|_| Refusal::TooLarge)?;

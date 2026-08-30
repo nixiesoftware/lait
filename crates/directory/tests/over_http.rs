@@ -12,7 +12,7 @@ use lait_directory::{
     address::Address,
     http::{router, Shared},
     wire::sign,
-    Challenge, MemStore, Service, SignedPublish, SignedResolve,
+    Challenge, Chronicler, MemStore, Service, SignedPublish, SignedResolve,
 };
 use mechanics::{
     actor::device_from_seed,
@@ -21,7 +21,17 @@ use mechanics::{
 
 /// Serve the directory on an ephemeral port and answer its base URL.
 async fn serve() -> String {
-    let shared: Shared<MemStore> = Arc::new(Mutex::new(Service::new(MemStore::new())));
+    mounted(Service::new(MemStore::new())).await
+}
+
+/// The same surface over a directory that chronicles what it accepts.
+async fn serve_chronicled() -> String {
+    let chronicler = Chronicler::shared(MemStore::new(), [77u8; 32]).expect("open the chronicle");
+    mounted(Service::with_chronicler(MemStore::new(), chronicler)).await
+}
+
+async fn mounted(service: Service<MemStore>) -> String {
+    let shared: Shared<MemStore> = Arc::new(Mutex::new(service));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind an ephemeral port");
@@ -139,5 +149,84 @@ async fn a_malformed_device_is_refused_without_describing_the_service() {
         body.as_object().map(serde_json::Map::len),
         Some(1),
         "a refusal carried something beyond its name: {body}"
+    );
+}
+
+/// The receipt rides beside the address, flattened and all-defaulting, so a
+/// client built before the directory chronicled anything decodes `{address}`
+/// exactly as it always did. Growing the answer this way is what lets an old
+/// daemon keep publishing through a new Post — and a resolution still carries
+/// nothing but the bytes, because a receipt there would be a chronicle fact
+/// about somebody who did not ask for one to be published.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_rides_beside_the_address_and_an_old_client_still_decodes_it() {
+    /// The `Published` shape as it was before any of this. Deliberately a
+    /// second declaration: asserting the current type against itself would
+    /// prove the test compiles, not that the wire stayed compatible.
+    #[derive(serde::Deserialize)]
+    struct OldPublished {
+        address: String,
+    }
+
+    let base = serve_chronicled().await;
+    let (seed, announcement) = announced(21, 22, 2);
+    let request: SignedPublish = sign::publish(
+        &seed,
+        &challenge(&base, &seed),
+        announcement.encode().expect("encode"),
+    );
+    let body: serde_json::Value = ureq::post(&format!("{base}/directory/publish"))
+        .send_json(serde_json::to_value(&request).expect("serialize"))
+        .expect("publish")
+        .into_json()
+        .expect("json");
+
+    let old: OldPublished = serde_json::from_value(body.clone()).expect("an old client decodes");
+    let address = Address::parse(&old.address).expect("still just an address");
+    assert_eq!(
+        body["entry"].as_u64(),
+        Some(0),
+        "the receipt is flattened beside the address: {body}"
+    );
+    let marks = body["marks"].as_array().expect("marks rode along");
+    assert!(!marks.is_empty(), "a chronicled publication marked nobody");
+    assert!(
+        body["head"]["by"].is_string(),
+        "the head names its signer: {body}"
+    );
+
+    // The receipt is the publisher's. A resolution — which anyone holding the
+    // address may ask for — still answers the bytes and nothing else, so no
+    // chronicle fact about a publisher leaks to whoever looked them up.
+    let asker = [90u8; 32];
+    let resolve: SignedResolve = sign::resolve(&asker, &challenge(&base, &asker), &address);
+    let answered: serde_json::Value = ureq::post(&format!("{base}/directory/resolve"))
+        .send_json(serde_json::to_value(&resolve).expect("serialize"))
+        .expect("resolve")
+        .into_json()
+        .expect("json");
+    assert_eq!(
+        answered.as_object().map(serde_json::Map::len),
+        Some(1),
+        "a resolution carried something beyond the announcement: {answered}"
+    );
+
+    // And an address nobody holds still answers what a withheld one would,
+    // from a directory that chronicles. Absence and denial stay one answer.
+    let unheld = Address::mint(&[0x37; 16]);
+    let request = sign::resolve(&asker, &challenge(&base, &asker), &unheld);
+    let error = ureq::post(&format!("{base}/directory/resolve"))
+        .send_json(serde_json::to_value(&request).expect("serialize"))
+        .expect_err("nobody holds it");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("the directory was unreachable rather than answering");
+    };
+    assert_eq!(status, 404);
+    let refused: serde_json::Value = response.into_json().expect("json");
+    assert_eq!(refused["refusal"], "not_available");
+    assert_eq!(
+        refused.as_object().map(serde_json::Map::len),
+        Some(1),
+        "a refusal grew a field a prober could read: {refused}"
     );
 }

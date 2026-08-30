@@ -1163,7 +1163,7 @@ impl Daemon {
                             Ok(Ok(receipt)) => {
                                 tracing::info!(
                                     label = %receipt.resolved.label.as_str(),
-                                    chronicled = receipt.entry.is_some(),
+                                    chronicled = receipt.receipt.entry.is_some(),
                                     "route published"
                                 );
                             }

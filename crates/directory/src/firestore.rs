@@ -365,7 +365,9 @@ impl crate::registry::RegistryStore for FirestoreStore {
         )?;
         Ok(true)
     }
+}
 
+impl crate::chronicle::ChronicleStore for FirestoreStore {
     fn chronicle_leaves(&mut self) -> Result<Vec<[u8; 32]>> {
         let documents = self.list(REGISTRY_CHRONICLE)?;
         let mut leaves = Vec::with_capacity(documents.len());

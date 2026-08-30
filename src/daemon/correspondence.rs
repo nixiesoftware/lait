@@ -313,7 +313,11 @@ impl CorrespondenceService {
         if let Some(directory) = plane.directory.as_deref_mut() {
             let seed = plane.reach.seed();
             match lait_directory::publish_as(directory, &seed, &announcement, now) {
-                Ok(address) => plane.reach.issued(address.as_str().to_owned()),
+                // The receipt rides back with the address. Nothing here reads
+                // it yet: what a marker recorded is a tier a reader weighs, and
+                // it must never gate the share that made this identity
+                // reachable at all.
+                Ok(issued) => plane.reach.issued(issued.address.as_str().to_owned()),
                 Err(refusal) => {
                     tracing::warn!(%refusal, "the directory did not take this publication");
                 }
