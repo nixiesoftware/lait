@@ -1329,14 +1329,20 @@ pub enum Request {
     // that would otherwise be holding the store lock, the only one that can run
     // formation and rebuild without racing itself for it.
     //
-    // Paths are carried explicitly. The daemon's working directory is not the
-    // caller's, and a head serving several callers out of one process has no
-    // working directory worth consulting at all.
-    /// Found a new Space into an explicit store directory, and register the
-    /// resulting Orbit.
+    // Paths are carried explicitly or not at all. The daemon's working
+    // directory is not the caller's, and a head serving several callers out of
+    // one process has no working directory worth consulting — so a request
+    // either names the directory it means, or names none and lets the daemon
+    // allocate one under `config::spaces_root()`, keyed by the Space's id.
+    // Placement is a coordinate the registry records, never a decision a
+    // founding form has to extract from somebody.
+    /// Found a new Space into a store directory, and register the resulting
+    /// Orbit.
     HostSpaceFound {
-        /// The store directory to form into, created if absent.
-        home: String,
+        /// The store directory to form into, created if absent. `None` (or
+        /// blank) lets the daemon allocate `spaces_root()/<space id>`.
+        #[serde(default)]
+        home: Option<String>,
         /// The Space's display name.
         name: String,
         /// Optional `user.nick` written into the new store's config layer.
@@ -1351,8 +1357,11 @@ pub enum Request {
     HostSpaceEnter {
         /// A Coordinates v1 invite link (or its bare ticket).
         link: String,
-        /// The store directory to bootstrap into, created if absent.
-        home: String,
+        /// The store directory to bootstrap into, created if absent. `None`
+        /// (or blank) reuses the store this device already holds for the
+        /// invite's Space, else allocates `spaces_root()/<space id>`.
+        #[serde(default)]
+        home: Option<String>,
         #[serde(default)]
         nick: Option<String>,
     },
@@ -2301,13 +2310,13 @@ pub fn representative_requests() -> Vec<Request> {
             protocol_version: 0,
         },
         Request::HostSpaceFound {
-            home: s(),
+            home: Some(s()),
             name: s(),
             nick: None,
         },
         Request::HostSpaceEnter {
             link: s(),
-            home: s(),
+            home: None,
             nick: None,
         },
         Request::HostDeviceConsent { token: s() },

@@ -7,7 +7,7 @@
 
 [tiers]
 pr             2803
-pr-platform    2291
+pr-platform    2289
 nightly        2832
 mutants        106
 
@@ -729,7 +729,6 @@ lait orbital::hosting::tests::historical_upgrade_refuses_before_migrator_activat
 lait orbital::hosting::tests::narrowing_to_an_issue_admits_nothing_about_another_body
 lait orbital::hosting::tests::narrowing_to_an_issue_keeps_every_scope_over_its_body
 lait orbital::hosting::tests::station_activation_work_does_not_block_the_reactor
-lait orbital::worlds::tests::a_role_two_installed_worlds_claim_is_resolved_by_naming_one
 lait orbital::worlds::tests::a_world_exec_declaration_without_its_application_package_is_refused
 lait orbital::worlds::tests::call_handlers_are_owned_by_the_registered_package
 lait orbital::worlds::tests::executable_packages_are_validated_and_retained_by_the_world_host
@@ -866,7 +865,6 @@ lait serve::tests::a_fresh_url_token_beats_a_stale_cookie
 lait serve::tests::a_fresh_url_token_beats_a_stale_cookie_over_http
 lait serve::tests::a_launch_link_is_exchanged_for_a_session_and_then_is_worthless
 lait serve::tests::a_world_write_to_a_hosted_identitys_station_is_refused
-lait serve::tests::an_unqualified_invite_is_stamped_with_the_served_world
 lait serve::tests::bearer_outranks_everything_and_cookie_is_the_fallback
 lait serve::tests::cookie_name_is_per_port_so_two_runs_do_not_share_a_jar_entry
 lait serve::tests::declaring_presence_on_a_hosted_identitys_station_is_refused
@@ -1414,6 +1412,7 @@ lait::it frost_interop::a_trusted_dealer_group_signature_verifies_as_ed25519
 lait::it guided_join::diagnose_flags_expected_space_mismatch
 lait::it guided_join::diagnose_tracks_join_lifecycle_from_pending_to_all_pass
 lait::it guided_join::entering_refuses_a_directory_bound_to_another_space
+lait::it guided_join::entering_without_a_home_reuses_the_store_this_device_already_holds
 lait::it guided_join::stop_kills_the_daemon_even_with_a_live_subscriber
 lait::it guided_join::the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none
 lait::it guided_join::the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_store
@@ -1423,6 +1422,7 @@ lait::it host_plane::a_fresh_identity_with_no_store_forms_a_space_and_is_then_re
 lait::it host_plane::a_self_contained_home_is_the_same_orbit_on_the_next_request
 lait::it host_plane::deleting_an_issue_needs_confirmation_it_can_actually_ask_for
 lait::it host_plane::forgetting_an_orbit_leaves_its_store_on_disk
+lait::it host_plane::founding_without_a_home_lands_the_store_under_the_spaces_root_by_id
 lait::it host_plane::installing_the_mcp_server_writes_a_portable_entry_into_the_directory_it_was_given
 lait::it host_plane::rebuilding_does_not_lose_a_lock_race_with_a_live_daemon
 lait::it host_plane::restarting_the_daemon_leaves_the_head_able_to_stand_a_new_one_up

@@ -101,7 +101,10 @@ off PATH, optional `LAIT_AGENT` / `LAIT_WORLD`); it does not snapshot
 
 ```sh
 # found a Space (nothing is created implicitly)
-POST /api/host/rpc   {"cmd":"host_space_found","home":"…/.lait","name":"Smoke","nick":"smoke"}
+POST /api/host/rpc   {"cmd":"host_space_found","name":"Smoke","nick":"smoke"}
+                     # `home` names a store directory explicitly; omitted, the
+                     # daemon places it under its spaces root by the Space's id
+                     # and the reply's `home` says where
 GET  /api/spaces                                    # → the local Orbit id
 
 # the product

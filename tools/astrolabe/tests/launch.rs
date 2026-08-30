@@ -719,7 +719,7 @@ struct SeededSignage {
 async fn seed_signage_program(client: &Client, store: &Path) -> SeededSignage {
     client
         .space_found(
-            &store.to_string_lossy(),
+            Some(&store.to_string_lossy()),
             "Display recovery",
             Some("Astrolabe".into()),
         )
