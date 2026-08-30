@@ -216,16 +216,24 @@ pub fn allocated_home(space: &str) -> PathBuf {
     config::spaces_root().join(space)
 }
 
-/// The store this device already holds for `space`, if the registry knows one
-/// that is still present. A re-join must land where the Space already lives —
-/// forming a second store beside a repo-bound one is how a node ends up with
-/// two — so an entry that names no directory asks here before allocating.
-pub fn registered_home(space: &str) -> Option<PathBuf> {
+/// The store this identity already holds for `space`, if the registry knows
+/// one that is still present. A re-join must land where the Space already
+/// lives — forming a second store beside a repo-bound one is how a node ends
+/// up with two — so an entry that names no directory asks here before
+/// allocating.
+///
+/// Scoped to stores this daemon signs for with its own seed. The registry is
+/// machine-wide, and a daemon hosts other identities' stores too: an agent
+/// that entered this Space earlier holds a store for it that the custody gate
+/// would rightly refuse, and answering with that path would turn a re-join
+/// into a refusal that names nothing the caller asked about.
+pub fn registered_home(router: &Router, space: &str) -> Option<PathBuf> {
     orbits::list()
         .into_iter()
         .filter(|entry| entry.space == space)
         .map(|entry| PathBuf::from(entry.path))
-        .find(|path| crate::orbital::space_store_present(path))
+        .filter(|path| crate::orbital::space_store_present(path))
+        .find(|path| router.catalog().path_signs_with_own_seed(path))
 }
 
 /// A fresh directory under `spaces_root()/.forming/` for a founding that does
@@ -660,7 +668,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                         Ok(space) => space,
                         Err(refusal) => return Some(refusal),
                     };
-                    registered_home(&space)
+                    registered_home(router, &space)
                         .unwrap_or_else(|| allocated_home(&space))
                         .display()
                         .to_string()
