@@ -368,7 +368,21 @@ pub enum Tail {
     AlreadyPaired {
         devices: usize,
     },
-    NoCodeYet,
+    /// Carries which manager owns the unit, because the one line this prints
+    /// is a command to type, and `systemctl status lait` asks the system
+    /// manager about a unit a `--user` install enabled in the user one.
+    NoCodeYet {
+        user: bool,
+    },
+}
+
+/// The manager flag a printed command needs: `--user ` or nothing.
+fn manager_flag(user: bool) -> &'static str {
+    if user {
+        "--user "
+    } else {
+        ""
+    }
 }
 
 impl std::fmt::Display for Tail {
@@ -378,7 +392,11 @@ impl std::fmt::Display for Tail {
                 write!(f, "Pair it: enter {code} in Astrolabe → Devices")
             }
             Self::AlreadyPaired { devices } => write!(f, "Already paired ({devices} devices)"),
-            Self::NoCodeYet => write!(f, "Daemon up, no code yet — systemctl status lait"),
+            Self::NoCodeYet { user } => write!(
+                f,
+                "Daemon up, no code yet — systemctl {}status lait",
+                manager_flag(*user)
+            ),
         }
     }
 }
@@ -386,10 +404,10 @@ impl std::fmt::Display for Tail {
 /// What a `HostContext` answer says about pairing. Orientation carries no
 /// code and no device set yet, so a daemon that answers at all is
 /// [`Tail::NoCodeYet`]; anything else is not an answer.
-fn read_context(response: &crate::control::Response) -> Option<Tail> {
+fn read_context(response: &crate::control::Response, user: bool) -> Option<Tail> {
     use crate::control::{HostReply, Response};
     match response {
-        Response::Host(HostReply::Context { .. }) => Some(Tail::NoCodeYet),
+        Response::Host(HostReply::Context { .. }) => Some(Tail::NoCodeYet { user }),
         _ => None,
     }
 }
@@ -402,14 +420,14 @@ fn read_context(response: &crate::control::Response) -> Option<Tail> {
 /// installer started would be one `systemctl stop` cannot reach. A daemon
 /// that never answers is an error naming where to look, not one of the
 /// three answers — "could not be asked" is not "no code yet".
-pub async fn tail(root: &Path) -> Result<Tail> {
+pub async fn tail(root: &Path, user: bool) -> Result<Tail> {
     use crate::control::{ClientRequest, ControlRoute, Request};
     let home = root.join("daemon");
     let envelope = ClientRequest::routed(Request::HostContext, ControlRoute::Daemon, None);
     let ask = async {
         loop {
             if let Ok(response) = crate::control::send(&home, &envelope).await {
-                if let Some(tail) = read_context(&response) {
+                if let Some(tail) = read_context(&response, user) {
                     return tail;
                 }
             }
@@ -418,8 +436,9 @@ pub async fn tail(root: &Path) -> Result<Tail> {
     };
     tokio::time::timeout(TAIL_PATIENCE, ask).await.map_err(|_| {
         anyhow!(
-            "the daemon did not answer within {}s — journalctl -u lait",
-            TAIL_PATIENCE.as_secs()
+            "the daemon did not answer within {}s — journalctl {}-u lait",
+            TAIL_PATIENCE.as_secs(),
+            manager_flag(user)
         )
     })
 }
@@ -816,14 +835,23 @@ mod tests {
             orbits: vec![],
             asks: vec![],
         });
-        assert_eq!(read_context(&context), Some(Tail::NoCodeYet));
         assert_eq!(
-            read_context(&Response::Host(HostReply::Restarting { pid: None })),
+            read_context(&context, false),
+            Some(Tail::NoCodeYet { user: false })
+        );
+        assert_eq!(
+            read_context(&Response::Host(HostReply::Restarting { pid: None }), false),
             None
         );
         assert_eq!(
-            Tail::NoCodeYet.to_string(),
+            Tail::NoCodeYet { user: false }.to_string(),
             "Daemon up, no code yet — systemctl status lait"
+        );
+        // A `--user` install was enabled in the user manager; the command it
+        // prints must ask that one.
+        assert_eq!(
+            Tail::NoCodeYet { user: true }.to_string(),
+            "Daemon up, no code yet — systemctl --user status lait"
         );
     }
 }

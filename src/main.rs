@@ -366,7 +366,7 @@ impl Mode {
                     service::unit_label(plan.user),
                     plan.root.display()
                 );
-                let tail = service::tail(&plan.root).await?;
+                let tail = service::tail(&plan.root, plan.user).await?;
                 println!("{tail}");
                 Ok(())
             }
