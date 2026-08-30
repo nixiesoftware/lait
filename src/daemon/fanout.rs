@@ -17,6 +17,17 @@
 //! Standing is kept in memory and nowhere else. The ledger is the truth
 //! about who holds a Space; what this module remembers is only whether it
 //! has asked, so a restart asks again and the ledger answers "already".
+//!
+//! A device announces where it is on this lane, at start and whenever the
+//! set changes. It has to: a daemon that restarts comes back on a new
+//! ephemeral port, and under a policy with no relay or discovery the routes
+//! its siblings learned once during pairing are then addresses nobody
+//! answers on — every dial fails, honestly and forever. The announcement is
+//! what repairs that, from whichever side is still reachable. Under
+//! `Isolated` that means **at least one of the two must keep the address
+//! the other knows** across the restart; nothing here remembers an address
+//! across a boot, because a device that dialled remembered addresses would
+//! be a second discovery mechanism, and this lane is not one.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -36,6 +47,7 @@ use crate::control::{
     ControlRoute, DeviceStanding, FanoutStanding, Liveness, Request, Response, SpaceFanout,
 };
 use crate::daemon::correspondence::OwnDevices;
+use crate::daemon::own_routes;
 use crate::daemon::OrbitAddress;
 use crate::orbits::{self, bootstrap, Router, StationIdentity};
 
@@ -64,6 +76,17 @@ const ENTER_CONCURRENCY: usize = 2;
 /// The bounded wait for this identity's routes before an offer is sent.
 const ROUTES_DEADLINE: Duration = Duration::from_secs(3);
 
+/// The wait before asking a silent device again: the floor, doubled once
+/// per failure in a row, jittered like every other period in this daemon,
+/// and capped so a device that is simply gone costs one dial an evening.
+fn backoff(tries: u32) -> Duration {
+    let base = RETRY_FLOOR
+        .checked_mul(1u32 << tries.min(16))
+        .unwrap_or(RETRY_CEILING)
+        .min(RETRY_CEILING);
+    crate::update::watch::next_delay(base, RETRY_SPREAD)
+}
+
 /// What a holder says over the Own lane. Every frame carries the sender's
 /// routes, because under an isolated network the frame is the only way the
 /// other side ever learns them.
@@ -78,6 +101,20 @@ pub(crate) enum OwnFrame {
         coordinates: String,
         routes: Vec<SocketAddr>,
     },
+    /// "This is where I am." Sent at start and on every device set change,
+    /// so a device that came back on a new port is reachable again without
+    /// anybody re-running the pairing.
+    Hello { routes: Vec<SocketAddr> },
+}
+
+impl OwnFrame {
+    /// Every frame says where its sender is, because the frame is the only
+    /// thing that says so when there is no relay to ask.
+    fn routes(&self) -> &[SocketAddr] {
+        match self {
+            Self::Offer { routes, .. } | Self::Hello { routes } => routes,
+        }
+    }
 }
 
 /// What the offered device answers.
@@ -94,6 +131,11 @@ pub(crate) enum OwnAnswer {
     },
     Refused {
         why: String,
+    },
+    /// A [`OwnFrame::Hello`] taken, and this device's own routes back, so
+    /// one round trip repairs both directions.
+    Learned {
+        routes: Vec<SocketAddr>,
     },
 }
 
@@ -210,6 +252,28 @@ impl Facts {
         );
     }
 
+    /// The device just spoke to us, so whatever this daemon last recorded
+    /// about reaching it was taken before that and is not current: the
+    /// liveness row goes back to unmeasured, and every "could not be asked"
+    /// standing for it comes due now rather than at the end of a backoff
+    /// the device has already outlived.
+    fn reachable_again(&self, device: &DeviceId) {
+        self.liveness.lock_recovering().remove(device);
+        let mut standings = self.standings.lock_recovering();
+        for ((held, _), recorded) in standings.iter_mut() {
+            if held != device {
+                continue;
+            }
+            if let FanoutStanding::CouldNotAsk { why, .. } = &recorded.standing {
+                recorded.standing = FanoutStanding::CouldNotAsk {
+                    why: why.clone(),
+                    retry_at_ms: 0,
+                };
+                recorded.tries = 0;
+            }
+        }
+    }
+
     /// Record that `device` did not answer, with the next time to try.
     fn could_not_ask(&self, device: &DeviceId, space: &str, why: String, now_ms: u64) {
         let tries = self
@@ -217,13 +281,8 @@ impl Facts {
             .lock_recovering()
             .get(&(device.clone(), space.to_string()))
             .map_or(0, |r| r.tries);
-        let base = RETRY_FLOOR
-            .checked_mul(1u32 << tries.min(16))
-            .unwrap_or(RETRY_CEILING)
-            .min(RETRY_CEILING);
-        let delay = crate::update::watch::next_delay(base, RETRY_SPREAD);
         let retry_at_ms =
-            now_ms.saturating_add(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX));
+            now_ms.saturating_add(u64::try_from(backoff(tries).as_millis()).unwrap_or(u64::MAX));
         self.liveness
             .lock_recovering()
             .insert(device.clone(), Liveness::CouldNotAsk { why: why.clone() });
@@ -311,12 +370,26 @@ pub(crate) async fn serve(
     facts: Arc<Facts>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let answerer = tokio::spawn(answer_loop(router.clone(), transport.clone(), stop.clone()));
+    // What this daemon knew about its siblings before it restarted. Taught
+    // first, because the announcement below is a dial and a dial needs an
+    // address.
+    own_routes::teach(router.catalog().identity(), transport.as_ref());
+    let answerer = tokio::spawn(answer_loop(
+        router.clone(),
+        transport.clone(),
+        facts.clone(),
+        stop.clone(),
+    ));
     let mut doorbells = router.subscribe();
     let mut bells_open = true;
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut woken = false;
+    // Say where this device is before asking anything of anybody: this
+    // daemon may be the one that just came back on a new port.
+    let mut announce_all = true;
+    let mut announcements: BTreeMap<DeviceId, u64> = BTreeMap::new();
+    let mut failures: BTreeMap<DeviceId, u32> = BTreeMap::new();
     loop {
         tokio::select! {
             changed = stop.changed() => {
@@ -328,8 +401,11 @@ pub(crate) async fn serve(
                 if changed.is_err() {
                     break;
                 }
-                // A set that just changed is worth asking about now.
+                // A set that just changed is worth asking about now — and
+                // worth telling, because what moved in it may be a device
+                // that has never heard where this one is.
                 woken = true;
+                announce_all = true;
             }
             bell = doorbells.recv(), if bells_open => match bell {
                 Ok(bell) if bell.doorbell.authority_advanced => {
@@ -342,20 +418,107 @@ pub(crate) async fn serve(
                 let Some(set) = own.borrow().clone() else {
                     continue;
                 };
+                let now = crate::daemon::pair::now_ms();
+                if std::mem::take(&mut announce_all) {
+                    announcements = set
+                        .devices
+                        .iter()
+                        .filter(|device| **device != set.me)
+                        .map(|device| (device.clone(), now))
+                        .collect();
+                    failures.clear();
+                }
+                let greet = announcements
+                    .iter()
+                    .find(|(_, due)| **due <= now)
+                    .map(|(device, _)| device.clone());
                 let skip_backoff = std::mem::take(&mut woken);
-                // A step dials, and a dial can sit for the answer deadline.
-                // Selected against the stop so a shutdown lands inside the
-                // bound the daemon joins this task with, rather than after
-                // whatever the network was doing when it was asked to end.
+                // A dial can sit for the answer deadline, and an
+                // announcement is a dial. Selected against the stop so a
+                // shutdown lands inside the bound the daemon joins this task
+                // with, rather than after whatever the network was doing
+                // when it was asked to end. One dial per tick either way,
+                // and saying where this device is comes first, because every
+                // offer after it depends on being reachable.
                 tokio::select! {
-                    () = step(&router, transport.as_ref(), &set, &facts, skip_backoff) => {}
+                    () = async {
+                        match &greet {
+                            Some(device) => announce_one(
+                                transport.as_ref(),
+                                router.catalog().identity(),
+                                &facts,
+                                device,
+                                &mut announcements,
+                                &mut failures,
+                                now,
+                            ).await,
+                            None => {
+                                step(&router, transport.as_ref(), &set, &facts, skip_backoff).await;
+                            }
+                        }
+                    } => {}
                     _ = stop.changed() => break,
+                }
+                // An announcement took this tick, so the offer it would have
+                // made is still owed: do not spend the wake on it.
+                if greet.is_some() {
+                    woken = skip_backoff;
                 }
             }
         }
     }
     if let Err(error) = tokio::time::timeout(Duration::from_secs(5), answerer).await {
         tracing::debug!(%error, "the Own lane answerer did not finish in time");
+    }
+}
+
+/// Tell one own device where this one is.
+///
+/// Deliberately not discovery: the only address that travels is this
+/// device's own, only to a device already in the profile's set, at start and
+/// when that set changes. What it repairs is the restart — a daemon comes
+/// back on a new ephemeral port, and with no relay to resolve a bare id the
+/// route its siblings hold is an address nobody answers on. The side that is
+/// still reachable takes the announcement, and both directions work again. A
+/// device that does not answer is tried again on the ordinary backoff and no
+/// more often than that.
+async fn announce_one(
+    transport: &dyn Transport,
+    identity: &std::path::Path,
+    facts: &Facts,
+    device: &DeviceId,
+    announcements: &mut BTreeMap<DeviceId, u64>,
+    failures: &mut BTreeMap<DeviceId, u32>,
+    now: u64,
+) {
+    let routes = transport
+        .advertised_routes(ROUTES_DEADLINE)
+        .await
+        .unwrap_or_default();
+    let hello = OwnFrame::Hello { routes };
+    match tokio::time::timeout(ANSWER_DEADLINE, exchange(transport, device, &hello)).await {
+        Ok(Ok(answer)) => {
+            if let OwnAnswer::Learned { routes } = answer {
+                transport.learn(device.clone(), &routes);
+                own_routes::remember(identity, device, &routes);
+            }
+            // It answered, so this daemon can reach it: whatever it last
+            // recorded about not reaching it was taken before now.
+            facts.reachable_again(device);
+            announcements.remove(device);
+            failures.remove(device);
+        }
+        Ok(Err(_)) | Err(_) => {
+            let tries = failures.entry(device.clone()).or_insert(0);
+            let delay = u64::try_from(backoff(*tries).as_millis()).unwrap_or(u64::MAX);
+            *tries = tries.saturating_add(1);
+            announcements.insert(device.clone(), now.saturating_add(delay));
+            tracing::debug!(
+                target: "lait::fanout",
+                device = %device,
+                "could not say where this device is; trying again later"
+            );
+        }
     }
 }
 
@@ -627,6 +790,9 @@ async fn offer_one(
         OwnAnswer::Held => FanoutStanding::Held,
         OwnAnswer::Declined { why } => FanoutStanding::Declined { why },
         OwnAnswer::Refused { why } => FanoutStanding::Refused { why },
+        OwnAnswer::Learned { .. } => FanoutStanding::Deferred {
+            why: "the device answered an offer with its routes".into(),
+        },
     };
     tracing::info!(
         target: "lait::fanout",
@@ -719,6 +885,7 @@ impl Drop for Claim {
 async fn answer_loop(
     router: Arc<Router>,
     transport: Arc<dyn Transport>,
+    facts: Arc<Facts>,
     mut stop: watch::Receiver<bool>,
 ) {
     let entering = Entering::new();
@@ -734,6 +901,7 @@ async fn answer_loop(
                 tokio::spawn(answer_one(
                     router.clone(),
                     transport.clone(),
+                    facts.clone(),
                     entering.clone(),
                     incoming,
                 ));
@@ -761,6 +929,7 @@ async fn answer_loop(
 async fn answer_one(
     router: Arc<Router>,
     transport: Arc<dyn Transport>,
+    facts: Arc<Facts>,
     entering: Arc<Entering>,
     mut incoming: Incoming,
 ) {
@@ -777,16 +946,27 @@ async fn answer_one(
             // frame that did not arrive whole.
             _ => return,
         };
+    // Before anything else, and whatever the frame says: this is where the
+    // device that sent it can be reached, and the fact that it sent one at
+    // all is what makes any older record of not reaching it stale. Kept, so
+    // that a restart of this daemon does not forget the only address it has
+    // for a device it can no longer ask.
+    transport.learn(from.clone(), frame.routes());
+    crate::daemon::own_routes::remember(router.catalog().identity(), &from, frame.routes());
+    facts.reachable_again(&from);
     let answer = match frame {
         OwnFrame::Offer {
             space,
             actor,
             coordinates,
-            routes,
-        } => {
-            transport.learn(from.clone(), &routes);
-            answer_offer(router, &from, &space, &actor, coordinates, entering).await
-        }
+            ..
+        } => answer_offer(router, &from, &space, &actor, coordinates, entering).await,
+        OwnFrame::Hello { .. } => OwnAnswer::Learned {
+            routes: transport
+                .advertised_routes(ROUTES_DEADLINE)
+                .await
+                .unwrap_or_default(),
+        },
     };
     let Ok(bytes) = postcard::to_stdvec(&answer) else {
         return;
@@ -993,6 +1173,121 @@ mod tests {
             _protocols: comms::Protocols<'_>,
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(self.0.peer(device_from_seed(identity_seed))))
+        }
+    }
+
+    /// A transport whose route to one device is stale: the dial fails until
+    /// something teaches it an address for that device again. What a peer
+    /// that restarted on a new ephemeral port looks like from the other
+    /// side, under a policy with no relay to resolve a bare id — which
+    /// `MemNet` cannot show on its own, because it resolves by id and needs
+    /// no addresses at all.
+    struct StaleRoute {
+        inner: Arc<dyn Transport>,
+        stale: Mutex<std::collections::BTreeSet<DeviceId>>,
+    }
+
+    impl StaleRoute {
+        fn new(inner: Arc<dyn Transport>, gone: DeviceId) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                stale: Mutex::new(std::iter::once(gone).collect()),
+            })
+        }
+
+        fn is_stale(&self, device: &DeviceId) -> bool {
+            self.stale.lock_recovering().contains(device)
+        }
+    }
+
+    #[async_trait]
+    impl Transport for StaleRoute {
+        fn my_id(&self) -> comms::PeerId {
+            self.inner.my_id()
+        }
+
+        fn learn(&self, peer: comms::PeerId, addrs: &[SocketAddr]) {
+            if !addrs.is_empty() {
+                self.stale.lock_recovering().remove(&peer);
+            }
+            self.inner.learn(peer, addrs);
+        }
+
+        async fn connect(
+            &self,
+            peer: comms::PeerId,
+            alpn: comms::Alpn,
+        ) -> Result<Box<dyn comms::Stream>> {
+            if self.is_stale(&peer) {
+                bail!("no route to {peer}");
+            }
+            self.inner.connect(peer, alpn).await
+        }
+
+        async fn accept(&self) -> Option<Incoming> {
+            self.inner.accept().await
+        }
+
+        fn advertised_addrs(&self) -> Vec<SocketAddr> {
+            self.inner.advertised_addrs()
+        }
+
+        async fn subscribe(
+            &self,
+            topic: comms::Topic,
+            bootstrap: &[comms::PeerId],
+        ) -> Result<(Box<dyn comms::GossipSender>, Box<dyn comms::GossipReceiver>)> {
+            self.inner.subscribe(topic, bootstrap).await
+        }
+
+        async fn shutdown(&self) {
+            self.inner.shutdown().await;
+        }
+    }
+
+    /// A transport with an address to advertise. `MemNet` has none, and a
+    /// Hello carrying no routes would prove nothing about the repair.
+    struct Announcing {
+        inner: Arc<dyn Transport>,
+        addrs: Vec<SocketAddr>,
+    }
+
+    #[async_trait]
+    impl Transport for Announcing {
+        fn my_id(&self) -> comms::PeerId {
+            self.inner.my_id()
+        }
+
+        fn learn(&self, peer: comms::PeerId, addrs: &[SocketAddr]) {
+            self.inner.learn(peer, addrs);
+        }
+
+        async fn connect(
+            &self,
+            peer: comms::PeerId,
+            alpn: comms::Alpn,
+        ) -> Result<Box<dyn comms::Stream>> {
+            self.inner.connect(peer, alpn).await
+        }
+
+        async fn accept(&self) -> Option<Incoming> {
+            self.inner.accept().await
+        }
+
+        fn advertised_addrs(&self) -> Vec<SocketAddr> {
+            self.addrs.clone()
+        }
+
+        async fn subscribe(
+            &self,
+            topic: comms::Topic,
+            bootstrap: &[comms::PeerId],
+        ) -> Result<(Box<dyn comms::GossipSender>, Box<dyn comms::GossipReceiver>)> {
+            self.inner.subscribe(topic, bootstrap).await
+        }
+
+        async fn shutdown(&self) {
+            self.inner.shutdown().await;
         }
     }
 
@@ -1356,13 +1651,20 @@ mod tests {
                         .await
                         .unwrap()
                         .unwrap();
-                    let OwnFrame::Offer { space: offered, .. } =
-                        postcard::from_bytes::<OwnFrame>(&frame).unwrap();
-                    assert_eq!(offered, space);
-                    offers.fetch_add(1, Ordering::SeqCst);
-                    let answer = postcard::to_stdvec(&OwnAnswer::Declined {
-                        why: "not on this box".into(),
-                    })
+                    let answer = match postcard::from_bytes::<OwnFrame>(&frame).unwrap() {
+                        OwnFrame::Offer { space: offered, .. } => {
+                            assert_eq!(offered, space);
+                            offers.fetch_add(1, Ordering::SeqCst);
+                            postcard::to_stdvec(&OwnAnswer::Declined {
+                                why: "not on this box".into(),
+                            })
+                        }
+                        // Where this device is, which is a different
+                        // question from whether it wants the Space.
+                        OwnFrame::Hello { .. } => {
+                            postcard::to_stdvec(&OwnAnswer::Learned { routes: Vec::new() })
+                        }
+                    }
                     .unwrap();
                     incoming.stream.send(&answer).await.unwrap();
                     incoming.stream.finish().await.unwrap();
@@ -1517,6 +1819,73 @@ mod tests {
         }
 
         d.stop().await;
+        a.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_restarted_device_announces_itself_and_the_fan_out_recovers() {
+        // The M1 failure, in miniature. B's daemon restarts after pairing
+        // and comes back on a new port; under a policy with no relay the
+        // route A learned during the ceremony is an address nobody answers
+        // on, so every offer fails honestly and forever. B's announcement
+        // is what ends that — A takes the routes off the frame and the
+        // Space it could not hand over goes across.
+        let root = ScopedRoot::new("restart");
+        let net = MemNet::new();
+        let mut a = Side::stand("a", &net, &root, Vec::new()).await;
+        let mut b = Side::stand("b", &net, &root, vec![crate::config::spaces_root()]).await;
+        link(&[&a, &b]);
+        let stale = StaleRoute::new(a.transport.clone(), b.me());
+        a.transport = stale.clone();
+        b.transport = Arc::new(Announcing {
+            inner: b.transport.clone(),
+            addrs: vec!["127.0.0.1:7787".parse().expect("an address")],
+        });
+        let (space, _) = a.found("Restarted");
+        a.start();
+
+        let standing = poll_until(Duration::from_secs(45), || async {
+            match a.facts.standing(&b.me(), &space) {
+                Some(standing @ FanoutStanding::CouldNotAsk { .. }) => Some(standing),
+                Some(other) => panic!("a device with no route was recorded as {other:?}"),
+                None => None,
+            }
+        })
+        .await
+        .expect("A cannot reach B on the route it holds");
+        let FanoutStanding::CouldNotAsk { retry_at_ms, .. } = standing else {
+            unreachable!()
+        };
+        assert!(
+            retry_at_ms > crate::daemon::pair::now_ms(),
+            "the retry is scheduled, so nothing but an announcement can shorten it"
+        );
+
+        // B comes up and says where it is, to the sibling whose address it
+        // still knows.
+        b.start();
+        poll_until(Duration::from_secs(60), || async {
+            eprintln!(
+                "PROBE stale={} a_standing={:?} b_standing={:?}",
+                stale.is_stale(&b.me()),
+                a.facts.standing(&b.me(), &space),
+                b.facts.standing(&a.me(), &space),
+            );
+            (a.facts.standing(&b.me(), &space) == Some(FanoutStanding::Held)).then_some(())
+        })
+        .await
+        .expect("the announcement repaired A's route and the Space fanned out");
+        assert!(
+            !stale.is_stale(&b.me()),
+            "A held the Space without ever learning where B is"
+        );
+        assert_eq!(
+            a.facts.liveness_of(&b.me()),
+            Liveness::NotProbed,
+            "a device that announced itself still reads as one that could not be asked"
+        );
+
+        b.stop().await;
         a.stop().await;
     }
 

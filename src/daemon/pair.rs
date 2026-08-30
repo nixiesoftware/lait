@@ -647,6 +647,10 @@ impl PairService {
             return PairReply::Refused;
         }
         identity.learn(from.clone(), &confirm.routes);
+        // Kept past this process: adoption asks for a fresh generation, and
+        // the sponsor's address is the only one this device will have when
+        // it comes back.
+        crate::daemon::own_routes::remember(&self.identity, &from, &confirm.routes);
 
         // Already a device of this profile — the sponsor adopted and the
         // `Complete` was lost, or this is a replay of a finished ceremony.
@@ -755,6 +759,7 @@ impl PairService {
         if let Some(outstanding) = joiner.outstanding.as_ref() {
             outstanding.identity.learn(from.clone(), routes);
         }
+        crate::daemon::own_routes::remember(&self.identity, &from, routes);
         match self
             .correspondence
             .become_device_of(pending.card, from, link, now_ms / 1000)
@@ -926,6 +931,7 @@ impl PairService {
                     bail!("that code is this device's own");
                 }
                 identity.learn(joiner.clone(), &routes);
+                crate::daemon::own_routes::remember(&self.identity, &joiner, &routes);
                 let phrase = confirmation_phrase(
                     &own.card.profile,
                     session.key(),

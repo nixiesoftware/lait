@@ -19,7 +19,7 @@ use crate::Error;
 /// The new bytes are synced under `.tmp` *before* the swap begins, so the
 /// window between removing the old file and renaming the new one always has a
 /// complete survivor on disk. [`open_or_recover`] is what finds it.
-pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+pub fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -46,7 +46,7 @@ pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// candidates exist and none of them read, this fails closed with the first
 /// error rather than answering absence, because absence is what a caller acts
 /// on by starting over.
-pub(crate) fn open_or_recover<T>(
+pub fn open_or_recover<T>(
     path: &Path,
     read: impl Fn(&Path) -> Result<T, Error>,
 ) -> Result<Option<T>, Error> {

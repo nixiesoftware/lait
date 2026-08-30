@@ -27,7 +27,10 @@ mod attest;
 mod bounds;
 mod bundle;
 mod codec;
-mod durable;
+/// Writing a file that survives a crash, and finding the survivor. Public
+/// because every durable file this daemon keeps beside an identity goes
+/// through these two rather than inventing its own tmp-and-rename.
+pub mod durable;
 mod engine;
 mod error;
 mod ids;
