@@ -1027,6 +1027,11 @@ impl Daemon {
         // standing unchanged.
         let staging = self.spawn_staging();
         let world_upgrades = self.spawn_world_upgrades();
+        // Ungated, and mounted here rather than behind the display gate for
+        // the same reason the fan-out is: the headless box that publishes
+        // nothing is exactly the device whose markers would otherwise never
+        // be looked at again.
+        let markers = self.spawn_markers();
         // A device that holds no profile but its own shows a code until it
         // is paired — whatever else this daemon serves, and whether or not
         // it hosts displays: the headless box is exactly the one this is for.
@@ -1078,6 +1083,7 @@ impl Daemon {
             Self::join_staging(staging).await;
             Self::join_world_upgrades(world_upgrades).await;
             Self::join_fanout(fanout).await;
+            Self::join_markers(markers).await;
             return served;
         }
         // Take the port before committing to it, so "another daemon already holds
@@ -1108,6 +1114,7 @@ impl Daemon {
                 Self::join_staging(staging).await;
                 Self::join_world_upgrades(world_upgrades).await;
                 Self::join_fanout(fanout).await;
+                Self::join_markers(markers).await;
                 return served;
             }
             Err(error) => {
@@ -1115,6 +1122,7 @@ impl Daemon {
                 Self::join_staging(staging).await;
                 Self::join_world_upgrades(world_upgrades).await;
                 Self::join_fanout(fanout).await;
+                Self::join_markers(markers).await;
                 return Err(error).context("serve daemon display HTTPS");
             }
         };
@@ -1231,7 +1239,28 @@ impl Daemon {
         Self::join_staging(staging).await;
         Self::join_world_upgrades(world_upgrades).await;
         Self::join_fanout(fanout).await;
+        Self::join_markers(markers).await;
         outcome
+    }
+
+    /// Follow the markers this identity's book weighs, on the update
+    /// watcher's period. Nothing depends on the answer — a mark confers
+    /// nothing — so this never fails the daemon and never delays it: it is
+    /// spawned, and joined only so its turn cannot outlive the daemon.
+    fn spawn_markers(&self) -> tokio::task::JoinHandle<()> {
+        let identity = self.router.catalog().identity().to_path_buf();
+        let stop = self.endpoint.subscribe_stop();
+        tokio::spawn(crate::daemon::markers::serve_markers(identity, stop))
+    }
+
+    async fn join_markers(markers: tokio::task::JoinHandle<()>) {
+        match tokio::time::timeout(Duration::from_secs(5), markers).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the marker follower ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the marker follower did not finish in time; leaving it to the process exit"
+            ),
+        }
     }
 
     /// Start the fan-out over the identity's Own lane. Its facts are hooked

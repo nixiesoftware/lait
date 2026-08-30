@@ -571,6 +571,10 @@ impl CorrespondenceService {
         // view and the hub's admission must never disagree about who is own.
         let own = self.own.borrow().clone();
         let facts = self.fanout.get();
+        // Read from the marker files, not asked over the network: drawing a
+        // window must not be a network act, and a marker answering fine ten
+        // seconds ago must not read as unreachable because a view was slow.
+        let weighed = crate::daemon::markers::weighed(&self.identity);
         let devices = own.as_ref().map_or_else(Vec::new, |own| {
             own.devices
                 .iter()
@@ -580,6 +584,7 @@ impl CorrespondenceService {
                     liveness: facts
                         .map_or_else(Default::default, |facts| facts.liveness_of(device)),
                     held: facts.map_or_else(Vec::new, |facts| facts.held_by(device)),
+                    certified_by: weighed.certifying(device),
                 })
                 .collect()
         });
@@ -611,6 +616,7 @@ impl CorrespondenceService {
             devices,
             device_set_unknown: own.is_none(),
             spaces,
+            markers: weighed.markers,
         }))
     }
 

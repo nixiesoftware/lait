@@ -258,7 +258,39 @@ export interface ProfileFacts {
   pairing: PairingCode | null;
   /** Devices waiting on their six words being compared here. */
   offers: PairOffer[];
+  /**
+   * The markers this device weighs, in its own order. A tier and never a
+   * gate: nothing on the Devices surface is withheld, disabled or refused
+   * because a marker is silent about a device.
+   */
+  markers: Marker[];
 }
+
+/**
+ * One marker: something that keeps a record of what it was told and signs
+ * what it recorded. Evidence, never authority — no control anywhere is
+ * enabled or disabled by what one says.
+ */
+export interface Marker {
+  /** Where it answers — the only part of a marker a person is shown. */
+  marker: string;
+  standing: MarkerStanding;
+}
+
+/**
+ * Eight facts, kept apart. Only `answering` is an answer, so only under it
+ * can a device be "not listed"; saying that for a marker nothing asked, or
+ * one that could not be reached, would report a network as a judgement.
+ */
+export type MarkerStanding =
+  | { kind: "answering" }
+  | { kind: "neverAsked" }
+  | { kind: "couldNotAsk" }
+  | { kind: "answeredAsAnother" }
+  | { kind: "answeredOlder" }
+  | { kind: "unproven" }
+  | { kind: "contradicted" }
+  | { kind: "unreadable" };
 
 export type DeviceOrigin =
   | { kind: "founded" }
@@ -270,6 +302,11 @@ export interface OwnDevice {
   liveness: DeviceLiveness;
   /** The Spaces this device is listed in. Empty is an answer, not an absence. */
   held: string[];
+  /**
+   * The markers that have recorded this device, named as `Marker.marker`
+   * names them. Empty costs the device nothing.
+   */
+  certifiedBy: string[];
 }
 
 /**
@@ -1171,10 +1208,14 @@ export const fixtureClientView: ClientView = {
     me: "dev_this",
     origin: { kind: "founded" },
     devices: [
-      { device: "dev_this", me: true, liveness: { kind: "answered", version: "0.0.0-fixture", at: 1_755_552_000_000 }, held: ["orb_fixture"] },
-      { device: "dev_pi", me: false, liveness: { kind: "couldNotAsk", why: "no route" }, held: ["orb_fixture"] },
+      { device: "dev_this", me: true, liveness: { kind: "answered", version: "0.0.0-fixture", at: 1_755_552_000_000 }, held: ["orb_fixture"], certifiedBy: ["https://post.example"] },
+      { device: "dev_pi", me: false, liveness: { kind: "couldNotAsk", why: "no route" }, held: ["orb_fixture"], certifiedBy: [] },
     ],
     deviceSetUnknown: false,
+    markers: [
+      { marker: "https://post.example", standing: { kind: "answering" } },
+      { marker: "https://quiet.example", standing: { kind: "couldNotAsk" } },
+    ],
     pairing: null,
     offers: [{
       pairing: "pai_fixture",

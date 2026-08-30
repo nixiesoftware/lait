@@ -621,6 +621,168 @@ fn adopt_legacy(identity: &Path, base: &str, by: &DeviceId) -> Option<MarkerReco
     Some(record)
 }
 
+/// The book as a surface reads it: one row per marker this identity weighs,
+/// in the order it weighs them, and which markers have recorded each device.
+///
+/// Read from the files alone — nothing here asks a marker anything. A view
+/// that fetched would make drawing a window a network act, and would answer
+/// "could not be asked" for a marker that was answering fine ten seconds ago.
+#[derive(Debug, Default)]
+pub struct Weighed {
+    /// One row per book entry, in the book's order. Position is the weight,
+    /// and the ordering is this reader's.
+    pub markers: Vec<crate::control::MarkerView>,
+    /// Which markers have proven a record naming each device, by marker
+    /// device id.
+    certified: BTreeMap<DeviceId, Vec<String>>,
+}
+
+impl Weighed {
+    /// The markers that certify one device. Empty is the ordinary answer and
+    /// is not a finding: it means no marker this identity weighs has recorded
+    /// a publication naming this device, which is a fact about markers.
+    #[must_use]
+    pub fn certifying(&self, device: &DeviceId) -> Vec<String> {
+        self.certified.get(device).cloned().unwrap_or_default()
+    }
+}
+
+/// Read every marker in the book, with what each has proven.
+///
+/// A marker that has been caught equivocating, or that answered under a
+/// device this identity does not follow, certifies nobody — it is dropped
+/// from the tier rather than weighed down, because there is no rank below
+/// zero and a reader that kept counting a caught liar would be pretending
+/// there is. Its row stays, carrying the reason.
+#[must_use]
+pub fn weighed(identity: &Path) -> Weighed {
+    let book = crate::config::Settings::load(Some(identity))
+        .marks_book()
+        .unwrap_or_default();
+    weighing(identity, book)
+}
+
+/// The reading itself, with the book supplied — so what a surface draws can
+/// be asserted without a config root. The same split, for the same reason, as
+/// `serve_checking` in [`crate::update::watch`].
+#[must_use]
+fn weighing(identity: &Path, book: Vec<MarkerEntry>) -> Weighed {
+    let mut weighed = Weighed::default();
+    for entry in book {
+        let held = following(identity, &entry);
+        let (by, record) = match held {
+            Some((by, record)) => (Some(by), Some(record)),
+            None => (entry.by.clone(), None),
+        };
+        if let (Some(by), Some(record)) = (by.as_ref(), record.as_ref()) {
+            if weighs(&record.standing) {
+                for (device, mark) in &record.marks {
+                    if mark.proven {
+                        weighed
+                            .certified
+                            .entry(device.clone())
+                            .or_default()
+                            .push(by.as_str().to_owned());
+                    }
+                }
+            }
+        }
+        weighed.markers.push(crate::control::MarkerView {
+            base: entry.base,
+            by: by.map(|by| by.as_str().to_owned()),
+            standing: record.as_ref().map(|record| seen(&record.standing)),
+            checked_at: record.map(|record| record.checked_at),
+        });
+    }
+    weighed
+}
+
+/// Whether a marker in this standing may still certify anybody.
+///
+/// The two that may not are the two where the marker itself is the problem.
+/// The rest — unreachable, rolled back, unproven, unreadable — keep the pin
+/// and leave what was proven earlier standing, which is the whole difference
+/// between a witness caught lying and one who was not at home.
+fn weighs(standing: &MarkerStanding) -> bool {
+    !matches!(
+        standing,
+        MarkerStanding::Diverged { .. } | MarkerStanding::WrongSigner { .. }
+    )
+}
+
+/// The durable standing as the control plane spells it. Exhaustive on
+/// purpose: a standing added to the record must be decided for the surface
+/// here rather than quietly rendering as something else.
+fn seen(standing: &MarkerStanding) -> crate::control::MarkerStandingView {
+    use crate::control::MarkerStandingView as Seen;
+    match standing {
+        MarkerStanding::Pinned { .. } => Seen::Pinned,
+        MarkerStanding::Unchanged { .. } => Seen::Unchanged,
+        MarkerStanding::Extended { .. } => Seen::Extended,
+        MarkerStanding::CouldNotAsk { why } => Seen::CouldNotAsk { why: why.clone() },
+        MarkerStanding::WrongSigner { .. } => Seen::WrongSigner,
+        MarkerStanding::Rollback { .. } => Seen::Rollback,
+        MarkerStanding::Unproven { .. } => Seen::Unproven,
+        MarkerStanding::Diverged { .. } => Seen::Diverged,
+        MarkerStanding::Refused { why } => Seen::Refused { why: why.clone() },
+    }
+}
+
+/// Follow the book until the daemon stops: one marker per turn, on the
+/// update watcher's period and its jitter.
+///
+/// One per turn rather than the whole book at once for the reason the World
+/// upgrade worker advances one job at a time — a book of markers is a list of
+/// blocking HTTP calls, and a daemon that made all of them back to back would
+/// spend a stall on every one of them at once. The period is the staging
+/// watcher's because the question is the same shape: has the thing I follow
+/// changed since I last looked, and there is nothing to be gained by asking
+/// faster than a person could act on the answer.
+///
+/// A receipt still ratchets immediately ([`ratchet`] is called on every
+/// publication), so this loop is the floor for a daemon that publishes
+/// nothing, never the latency.
+pub async fn serve_markers(identity: PathBuf, mut stop: tokio::sync::watch::Receiver<bool>) {
+    let book = crate::config::Settings::load(Some(&identity))
+        .marks_book()
+        .unwrap_or_default();
+    if book.is_empty() {
+        tracing::info!("this identity weighs no markers; nothing to follow");
+        return;
+    }
+    // The whole book inside one period, so a second marker does not halve the
+    // rate at which the first is looked at.
+    let period = crate::update::watch::CHECK_PERIOD
+        .checked_div(u32::try_from(book.len()).unwrap_or(u32::MAX))
+        .unwrap_or(crate::update::watch::CHECK_PERIOD);
+    // The first turn is spread too, so a fleet restarted together by a reboot
+    // does not arrive at one marker together either.
+    let mut delay = crate::update::watch::MAX_SPREAD.mul_f64(crate::update::watch::draw());
+    let mut turns = book.iter().cycle();
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            _ = stop.changed() => return,
+        }
+        if *stop.borrow() {
+            return;
+        }
+        let Some(entry) = turns.next().cloned() else {
+            return;
+        };
+        let identity = identity.clone();
+        match tokio::task::spawn_blocking(move || ratchet(&identity, &entry, None)).await {
+            Ok(standing) => {
+                if let Some(why) = standing.refused() {
+                    tracing::info!(%why, "a marker this identity follows did not check out");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "following a marker panicked"),
+        }
+        delay = crate::update::watch::next_delay(period, crate::update::watch::MAX_SPREAD);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,6 +960,117 @@ mod tests {
             !evidence_path(dir.path(), &device(9)).exists(),
             "evidence is filed against the signer that equivocated, nobody else"
         );
+    }
+
+    /// One proven mark, filed under `subject`, as a record would hold it.
+    fn marked(subject: &DeviceId, proven: bool) -> BTreeMap<DeviceId, Mark> {
+        use mechanics::kinship::{Audience, Claim};
+        let mut log = Chronicle::new();
+        log.append(b"a publication").expect("append");
+        let avowal = Avowal::seal(
+            &[4u8; 32],
+            Party::Device(subject.clone()),
+            Claim::Chronicled {
+                size: log.size(),
+                root: log.root(),
+                entry: 0,
+                leaf: Chronicle::leaf_of(b"a publication"),
+            },
+            Audience::Public,
+            log.size(),
+            [0u8; 16],
+        )
+        .expect("seal");
+        BTreeMap::from([(
+            subject.clone(),
+            Mark {
+                avowal,
+                inclusion: log.inclusion(0).expect("inclusion"),
+                proven,
+            },
+        )])
+    }
+
+    /// What the Devices surface reads. Three things have to survive the trip,
+    /// and each of them is a defect if it does not: a marker nothing has asked
+    /// is not one that answered "no"; a device no marker names is not a device
+    /// with a problem; and a marker caught contradicting itself certifies
+    /// nobody while still appearing, because the standing is the fact worth
+    /// seeing.
+    #[test]
+    fn the_book_reads_as_a_tier_and_never_as_a_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let subject = device(11);
+        let asked = device(4);
+        let liar = device(5);
+
+        let mut answered = record(MarkerStanding::Extended { from: 1, to: 2 }, None);
+        answered.base = "https://asked.example".into();
+        answered.marks = marked(&subject, true);
+        save(dir.path(), &asked, &answered);
+
+        let mut diverged = record(MarkerStanding::Diverged { size: 1 }, None);
+        diverged.base = "https://liar.example".into();
+        diverged.marks = marked(&subject, true);
+        save(dir.path(), &liar, &diverged);
+
+        let book = [
+            "https://asked.example",
+            "https://liar.example",
+            "https://silent.example",
+        ]
+        .iter()
+        .map(|base| MarkerEntry {
+            base: (*base).into(),
+            by: None,
+        })
+        .collect();
+        let weighed = weighing(dir.path(), book);
+
+        assert_eq!(
+            weighed
+                .markers
+                .iter()
+                .map(|marker| (marker.base.as_str(), marker.standing.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "https://asked.example",
+                    Some(crate::control::MarkerStandingView::Extended)
+                ),
+                (
+                    "https://liar.example",
+                    Some(crate::control::MarkerStandingView::Diverged)
+                ),
+                // Never asked is the absence of a standing, not a standing
+                // that means no — the row exists so a surface can say which.
+                ("https://silent.example", None),
+            ],
+        );
+        assert_eq!(
+            weighed.certifying(&subject),
+            [asked.as_str()],
+            "a marker caught equivocating certifies nobody, and one nobody asked certifies nobody",
+        );
+        assert!(
+            weighed.certifying(&device(12)).is_empty(),
+            "a device no marker has recorded is an ordinary device, not a finding",
+        );
+
+        // A mark this reader did not itself prove is quoting, not evidence.
+        let mut unproven = record(MarkerStanding::Unchanged { size: 2 }, None);
+        unproven.base = "https://asked.example".into();
+        unproven.marks = marked(&subject, false);
+        save(dir.path(), &asked, &unproven);
+        assert!(weighing(
+            dir.path(),
+            vec![MarkerEntry {
+                base: "https://asked.example".into(),
+                by: None,
+            }],
+        )
+        .certifying(&subject)
+        .is_empty());
     }
 
     /// A mark is checked against the log this reader follows, and a mark from

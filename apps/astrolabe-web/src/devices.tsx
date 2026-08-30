@@ -26,13 +26,16 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ArrowLeft20Regular, Dismiss20Regular, Laptop20Regular } from "@fluentui/react-icons";
+import {
+  ArrowLeft20Regular, CheckmarkCircle20Regular, Dismiss20Regular, Laptop20Regular,
+} from "@fluentui/react-icons";
 import { useEffect, useState } from "react";
 
 import {
   actionKey,
   type ClientAction,
   type ClientView,
+  type Marker,
   type OwnDevice,
   type PairOffer,
   type ProfileFacts,
@@ -72,6 +75,101 @@ export function deviceStanding(device: OwnDevice): { label: string; tone: Device
   }
   if (device.liveness.kind === "couldNotAsk") return { label: "Could not be reached", tone: "warn" };
   return { label: device.me ? "This device" : "Not checked yet", tone: "neutral" };
+}
+
+/**
+ * A marker, as a person reads it: where it answers, without the scheme.
+ *
+ * Not a friendly name invented here. Whatever a marker is called is its own
+ * to say, and a client that renamed one would be putting a word a person
+ * trusts in front of a service that never claimed it.
+ */
+export function markerName(marker: string): string {
+  return marker.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
+/**
+ * What one marker's last check found, on the list of markers.
+ *
+ * "Nothing has asked yet" and "it could not be reached" are two different
+ * lines and neither is a warning: a marker being down is not a finding about
+ * a person's devices, and drawing it as one would make an outage look like a
+ * verdict. The four below it are findings — about the marker.
+ */
+export function markerStanding(marker: Marker): { label: string; tone: DeviceTone; said: string } {
+  switch (marker.standing.kind) {
+    case "answering":
+      return { label: "Answering", tone: "good", said: "It answered, and what it said checks out." };
+    case "neverAsked":
+      return { label: "Not checked yet", tone: "neutral", said: "This device has not looked at it yet." };
+    case "couldNotAsk":
+      return {
+        label: "Could not be reached",
+        tone: "neutral",
+        said: "It may be down or on another network. Anything it listed before still stands.",
+      };
+    case "answeredAsAnother":
+      return {
+        label: "Answered as something else",
+        tone: "warn",
+        said: "Something other than the marker this device follows is answering here. Nothing it says is counted.",
+      };
+    case "answeredOlder":
+      return {
+        label: "Answered with less than before",
+        tone: "warn",
+        said: "It answered with less than it had already recorded. What it proved earlier still stands; this answer does not.",
+      };
+    case "unproven":
+      return {
+        label: "Could not show its record",
+        tone: "warn",
+        said: "It could not show this answer carries forward what this device already had. What it proved earlier still stands.",
+      };
+    case "contradicted":
+      return {
+        label: "Contradicted itself",
+        tone: "warn",
+        said: "It gave two records that cannot both be true. Nothing it says is counted.",
+      };
+    case "unreadable":
+      return {
+        label: "Answer could not be read",
+        tone: "warn",
+        said: "Its answer was not something this device could read. What it proved earlier still stands.",
+      };
+  }
+}
+
+/**
+ * What each marker says about one device — a tier, never a gate.
+ *
+ * Four lines, and the difference between them is the whole point. Being
+ * listed is the only one that adds anything; the other three take nothing
+ * away, and the two that are not answers ("not checked yet", "could not be
+ * reached") must never be drawn as the one that is ("not listed"), because a
+ * marker that is down has said nothing at all about anybody.
+ *
+ * Nothing on this surface reads the result: no control is disabled, no row is
+ * hidden, and no act is refused because a marker is silent.
+ */
+export function certification(
+  device: OwnDevice,
+  markers: Marker[],
+): { marker: string; label: string; tone: DeviceTone }[] {
+  return markers.map((marker) => {
+    const name = markerName(marker.marker);
+    if (device.certifiedBy.includes(marker.marker)) {
+      return { marker: marker.marker, label: `Listed by ${name}`, tone: "good" as const };
+    }
+    if (marker.standing.kind === "answering") {
+      return { marker: marker.marker, label: `Not listed by ${name}`, tone: "neutral" as const };
+    }
+    if (marker.standing.kind === "neverAsked") {
+      return { marker: marker.marker, label: `${name} not checked yet`, tone: "neutral" as const };
+    }
+    return { marker: marker.marker, label: `${name} could not be checked`, tone: "neutral" as const };
+  });
 }
 
 /** The Spaces a device is listed in, counted rather than named. */
@@ -224,9 +322,19 @@ export function DevicesSurface({ view, dispatch, onBack, ownedWindow = false }: 
           {absence !== null
             ? <Empty said={absence} />
             : <div className={styles.cards}>
-              {profile?.devices.map((device) => <DeviceRow key={device.device} device={device} />)}
+              {profile?.devices.map((device) =>
+                <DeviceRow key={device.device} device={device} markers={profile.markers} />)}
             </div>}
         </section>
+        {/* Only when this person weighs any. A device with no markers in its
+            book has nothing to draw here, and an empty section would invite
+            the reading that something is missing. */}
+        {(profile?.markers ?? []).length > 0 && <section>
+          <SectionTitle label="WHO LISTS THEM" count={profile?.markers.length} />
+          <div className={styles.cards}>
+            {profile?.markers.map((marker) => <MarkerRow key={marker.marker} marker={marker} />)}
+          </div>
+        </section>}
         {/* Offered even by a device that is itself waiting: two fresh
             machines both show a code, and whichever one a person is sitting
             at is the one that has to be able to type the other's. */}
@@ -253,9 +361,13 @@ function WaitingToBeAdded({ code, expiresAtMs }: { code: string; expiresAtMs: nu
   </Card>;
 }
 
-function DeviceRow({ device }: { device: OwnDevice }) {
+function DeviceRow({ device, markers }: { device: OwnDevice; markers: Marker[] }) {
   const styles = useStyles();
   const standing = deviceStanding(device);
+  // Drawn beside the device, never in front of it: this row is complete
+  // whether or not anybody has ever listed the device, and the chips add to
+  // it rather than qualify it.
+  const listings = certification(device, markers);
   return <Card>
     <div className={styles.row}>
       <div className={styles.rowIcon}><Laptop20Regular /></div>
@@ -267,6 +379,34 @@ function DeviceRow({ device }: { device: OwnDevice }) {
         <Caption1 className={styles.muted}>{spacesHeld(device)}</Caption1>
         {device.liveness.kind === "couldNotAsk"
           && <Caption1 className={styles.muted}>It may be off or on another network — nothing it holds has been lost.</Caption1>}
+        {listings.length > 0 && <div className={styles.rowTitle}>
+          {listings.map((listing) => <Chip key={listing.marker} label={listing.label} tone={listing.tone} />)}
+        </div>}
+      </div>
+    </div>
+  </Card>;
+}
+
+/**
+ * One marker and how the last look at it went.
+ *
+ * Its own section rather than a footnote on every device, because every
+ * sentence here is about the marker — a marker that could not be reached is
+ * a fact about that service, and repeating it under each device would read
+ * as a finding about the devices.
+ */
+function MarkerRow({ marker }: { marker: Marker }) {
+  const styles = useStyles();
+  const standing = markerStanding(marker);
+  return <Card>
+    <div className={styles.row}>
+      <div className={styles.rowIcon}><CheckmarkCircle20Regular /></div>
+      <div className={styles.rowCopy}>
+        <div className={styles.rowTitle}>
+          <Text weight="semibold">{markerName(marker.marker)}</Text>
+          <Chip label={standing.label} tone={standing.tone} />
+        </div>
+        <Caption1 className={styles.muted}>{standing.said}</Caption1>
       </div>
     </div>
   </Card>;

@@ -11,7 +11,9 @@
 //! client follows, and the case a second copy would have broken is exactly the
 //! one that matters: a letter landing while nobody was looking.
 
-use lait::control::{ControlRoute, OriginView, OwnDeviceView, ReachView, Request, Response};
+use lait::control::{
+    ControlRoute, MarkerView, OriginView, OwnDeviceView, ReachView, Request, Response,
+};
 
 use crate::client::{Client, ClientError, ClientResult};
 use crate::model::{ChatMessage, Contact, Conversation, Correspondence};
@@ -37,6 +39,11 @@ pub struct ProfileSnapshot {
     pub devices: Vec<OwnDeviceView>,
     /// The set was not held. Never folded into `devices` being empty.
     pub device_set_unknown: bool,
+    /// The markers this identity weighs, in its own order. Carried beside
+    /// the devices because a device's certification is only readable against
+    /// the list — "no marker says so" and "the marker could not be asked"
+    /// are different answers and the second one lives here.
+    pub markers: Vec<MarkerView>,
 }
 
 impl Client {
@@ -49,6 +56,7 @@ impl Client {
             origin: view.origin,
             devices: view.devices,
             device_set_unknown: view.device_set_unknown,
+            markers: view.markers,
         })
     }
 
