@@ -21,9 +21,16 @@
 # real bucket. Nothing here touches gs://the-foundation-dist.
 #
 # Requires a Docker daemon that can run privileged Linux containers with
-# cgroups (an ubuntu CI runner, a Linux workstation, or Docker Desktop with the
-# daemon up). It is not runnable on a Mac with Docker Desktop stopped, which is
-# where it was written; CI's ubuntu job is where it runs unattended.
+# cgroups (a Linux workstation, or Docker Desktop with the daemon up). It is
+# not runnable on a Mac with Docker Desktop stopped, which is where it was
+# written — and it has not been run anywhere yet.
+#
+# **This is operator-run, and wired to no CI job.** Run it on a Linux box
+# before a release that touches the install path. Two things it would not cover
+# even then: a download whose digest does not match the pinned one — that is
+# `the_install_line_unpacks_only_what_hashes_to_the_digest_it_pins` in
+# `tools/feed`, which runs the script against stubs — and `--user`, which
+# installs a user unit and no /var/lib and is covered nowhere.
 #
 #   bash ci/smoke-install.sh                 # build the Linux binary in a container
 #   bash ci/smoke-install.sh --tarball path  # take a prebuilt lait-<triple>.tar.gz

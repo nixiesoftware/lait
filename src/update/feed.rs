@@ -360,23 +360,34 @@ fn only_in_a_debug_build(debug_build: bool, value: Option<String>) -> Option<Str
 
 /// Where this build looks for the feed.
 fn feed_base_url() -> String {
-    only_in_a_debug_build(
+    base_url_from(
         cfg!(debug_assertions),
         std::env::var("LAIT_FEED_BASE_URL").ok(),
     )
-    .filter(|url| !url.trim().is_empty())
-    .unwrap_or_else(|| FEED_BASE_URL.to_string())
+}
+
+/// Split from [`feed_base_url`] so the decision itself is testable at the
+/// reader, not one helper short of it: what a release build does with a set
+/// `LAIT_FEED_BASE_URL` is the whole claim, and asserting only
+/// [`only_in_a_debug_build`] leaves the arm that applies it unasserted.
+fn base_url_from(debug_build: bool, from_env: Option<String>) -> String {
+    only_in_a_debug_build(debug_build, from_env)
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| FEED_BASE_URL.to_string())
 }
 
 /// The keys this build will believe: the pinned set, or a scratch set a debug
 /// build was handed as comma-separated lowercase hex.
 fn trusted_pubkeys() -> Result<Vec<[u8; 32]>, Failure> {
-    match only_in_a_debug_build(
+    pubkeys_from(
         cfg!(debug_assertions),
         std::env::var("LAIT_FEED_PUBKEYS").ok(),
     )
-    .filter(|keys| !keys.trim().is_empty())
-    {
+}
+
+/// Split from [`trusted_pubkeys`] for the reason [`base_url_from`] is.
+fn pubkeys_from(debug_build: bool, from_env: Option<String>) -> Result<Vec<[u8; 32]>, Failure> {
+    match only_in_a_debug_build(debug_build, from_env).filter(|keys| !keys.trim().is_empty()) {
         Some(keys) => decode_pubkeys(keys.split(',')),
         None => pinned_pubkeys(),
     }
@@ -914,8 +925,27 @@ pub(crate) mod tests {
     fn the_feed_trust_root_moves_only_in_a_debug_build() {
         let scratch = Some("http://feed:8080".to_string());
         assert_eq!(only_in_a_debug_build(true, scratch.clone()), scratch);
-        assert_eq!(only_in_a_debug_build(false, scratch), None);
+        assert_eq!(only_in_a_debug_build(false, scratch.clone()), None);
         assert_eq!(only_in_a_debug_build(true, None), None);
+
+        // At the readers themselves, which is where the claim is spent. A
+        // release build handed the variable goes to the pinned bucket and the
+        // pinned keys, and an empty value is not a trust root either.
+        assert_eq!(base_url_from(true, scratch.clone()), "http://feed:8080");
+        assert_eq!(base_url_from(false, scratch.clone()), FEED_BASE_URL);
+        assert_eq!(base_url_from(true, Some("  ".into())), FEED_BASE_URL);
+        assert_eq!(base_url_from(true, None), FEED_BASE_URL);
+
+        let (_, scratch_key) = test_keypair();
+        let scratch_hex = Some(data_encoding::HEXLOWER.encode(&scratch_key));
+        assert_eq!(
+            pubkeys_from(true, scratch_hex.clone()).unwrap(),
+            [scratch_key]
+        );
+        let pinned = pinned_pubkeys().unwrap();
+        assert_eq!(pubkeys_from(false, scratch_hex).unwrap(), pinned);
+        assert_eq!(pubkeys_from(true, Some("  ".into())).unwrap(), pinned);
+        assert_eq!(pubkeys_from(true, None).unwrap(), pinned);
     }
 
     /// An empty or duplicated key set is refused wherever it comes from — the

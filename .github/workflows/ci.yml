@@ -939,22 +939,50 @@ jobs:
       # a one-line install that refuses every download on exactly the machines
       # it exists for — and it would drift silently, because nothing else reads
       # the script.
-      - name: Assert the install line pins the archives this release publishes
+      #
+      # This is also the only place the script is checked against the manifest
+      # that lists it. A machine running the install line has verified nothing:
+      # it took the shell over TLS from the bucket and ran it. So the comparison
+      # a person cannot make is made here, on every push, against the signed
+      # bytes — size and blake3, from the same `hash_file` the manifest is
+      # sealed with.
+      - name: Assert the install line is the one the signed manifest names
         shell: bash
         run: |
           set -euo pipefail
+          version="$(jq -er .version manifest-payload.json)"
           url="$(jq -r '.artifacts.installer.linux.url // empty' manifest-payload.json)"
           if [ -z "$url" ]; then
-            echo "::notice::the stable release predates the install line; nothing to check"
-            exit 0
+            # The bundle arrived in 0.9.9. Below that there is nothing to check;
+            # at or above it, a manifest that lists no installer is a release
+            # whose documented one-line install 404s — and a skip-with-notice
+            # that never expires would report exactly that as "all clear".
+            lowest="$(printf '%s\n0.9.9\n' "$version" | sort -V | head -n1)"
+            if [ "$version" != "0.9.9" ] && [ "$lowest" = "$version" ]; then
+              echo "::notice::stable is $version, which predates the install line; nothing to check"
+              exit 0
+            fi
+            echo "::error::stable is $version and its manifest lists no installer bundle"
+            exit 1
           fi
           curl -fsSL "$url" -o install.sh
           sh -n install.sh
-          for machine in x86_64 aarch64; do
-            archive="release-archives/lait-$machine-unknown-linux-gnu.tar.gz"
+
+          want="$(jq -er '.artifacts.installer.linux | "\(.blake3) \(.size)"' manifest-payload.json)"
+          got="$(cargo run --quiet -p lait-feed -- digest --file install.sh)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::install.sh hashes to [$got], and the signed manifest seals [$want]"
+            exit 1
+          fi
+
+          # The pair, not the digest alone: two arms holding each other's digest
+          # contain both strings and pass a bare `grep -F` — while refusing every
+          # download, on both architectures at once.
+          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            archive="release-archives/lait-$triple.tar.gz"
             digest="$(sha256sum "$archive" | cut -d' ' -f1)"
-            grep -qF "$digest" install.sh || {
-              echo "::error::install.sh does not pin $archive"
+            grep -A1 -F "target='$triple'" install.sh | grep -qF "digest='$digest'" || {
+              echo "::error::install.sh does not pin $archive to $triple"
               exit 1
             }
           done

@@ -75,10 +75,17 @@ its own:
 curl -fsSL .../install.sh | sudo sh -s -- --channel test
 ```
 
-The script is published with the release it names and never moves: it is listed
-and digested in that release's signed manifest, and it bakes the sha256 of that
-version's two Linux archives, which it checks before running anything. Its own
-pin is only good for getting one trustworthy `lait` onto the machine — what
+The script is published with the release it names and never moves. What it
+proves is the archive: it bakes the sha256 of that version's two Linux archives
+and compares before it unpacks anything. What nothing on your machine proves is
+the script itself — a piped install runs a shell that arrived over TLS from the
+bucket, and neither `curl` nor `sh` verifies a signature. It is listed and
+digested in that release's signed manifest, but that listing is what an audit
+compares against afterwards, not something the pipe consults. If that matters
+to you, fetch it to a file and read it before running it, or take the manual
+install below, which needs no script at all.
+
+The pin is only good for getting one trustworthy `lait` onto the machine — what
 finally gets installed is whatever the channel proves — so a `<version>` copied
 out of an old document still installs the current release.
 

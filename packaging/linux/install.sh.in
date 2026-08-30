@@ -52,14 +52,39 @@ case "$machine" in
     ;;
 esac
 
+# `--user` is the mode that wants no root. Every other mode writes a system
+# unit and /var/lib, so a person who forgot `sudo` is told here rather than
+# after a download and a refusal from a binary they have not seen yet.
+user_mode=no
+for argument in ${1+"$@"}; do
+  if [ "$argument" = --user ]; then
+    user_mode=yes
+  fi
+done
+if [ "$user_mode" = no ] && [ "$(id -u)" != 0 ]; then
+  fail "installing the system service needs root: re-run under sudo, or pass --user"
+fi
+
 archive="lait-$target.tar.gz"
-work="$(mktemp -d)"
+# Named rather than left to TMPDIR: a preserved TMPDIR can be a directory
+# somebody else can write, and the archive lands here before it is proven.
+work="$(mktemp -d /tmp/lait-install.XXXXXXXX)"
 trap 'rm -rf "$work"' EXIT
 trap 'rm -rf "$work"; exit 130' INT
 trap 'rm -rf "$work"; exit 143' TERM
 
+# https pins the protocol and the floor, so a redirect cannot walk the download
+# down to plain HTTP. The plain arm is for a scratch feed served over HTTP in
+# `ci/smoke-install.sh`; a published base is always https and takes the first.
+fetch() {
+  case "$1" in
+    https://*) curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2" ;;
+    *) curl -fsSL "$1" -o "$2" ;;
+  esac
+}
+
 echo "lait: fetching $archive for $version" >&2
-curl -fsSL "$base/releases/$version/$archive" -o "$work/$archive" ||
+fetch "$base/releases/$version/$archive" "$work/$archive" ||
   fail "could not fetch $base/releases/$version/$archive"
 
 # The digest is compared in the shell rather than handed to `sha256sum -c` on
