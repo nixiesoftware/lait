@@ -499,8 +499,7 @@ async fn announce_one(
     match tokio::time::timeout(ANSWER_DEADLINE, exchange(transport, device, &hello)).await {
         Ok(Ok(answer)) => {
             if let OwnAnswer::Learned { routes } = answer {
-                transport.learn(device.clone(), &routes);
-                own_routes::remember(identity, device, &routes);
+                own_routes::remember(identity, Some(transport), device, &routes);
             }
             // It answered, so this daemon can reach it: whatever it last
             // recorded about not reaching it was taken before now.
@@ -951,8 +950,12 @@ async fn answer_one(
     // all is what makes any older record of not reaching it stale. Kept, so
     // that a restart of this daemon does not forget the only address it has
     // for a device it can no longer ask.
-    transport.learn(from.clone(), frame.routes());
-    crate::daemon::own_routes::remember(router.catalog().identity(), &from, frame.routes());
+    crate::daemon::own_routes::remember(
+        router.catalog().identity(),
+        Some(transport.as_ref()),
+        &from,
+        frame.routes(),
+    );
     facts.reachable_again(&from);
     let answer = match frame {
         OwnFrame::Offer {

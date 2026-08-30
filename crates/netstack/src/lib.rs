@@ -7,10 +7,10 @@
 //! `comms` and never iroh — exactly as `lait-relay` fronts `comms::relay` —
 //! and it keeps every IPv6/L3 notion out of the transport seam and the kernel.
 //!
-//! It is a prototype boundary: a standalone tunnel today, folding into a
-//! `lait/exec/1` net plane inside the daemon at slice 3, at which point the
-//! [`carry`] logic moves to `runtime` and this crate keeps only the addressing
-//! and the TUN seam that the plane composes.
+//! The carry is a component, not a program: it borrows a transport, follows
+//! a watch of the profile's own devices, and is composed by the daemon as its
+//! net plane. It moves nowhere — `runtime` has no identity to carry for, and
+//! the daemon is where the identity, its endpoint and its device set live.
 
 use std::net::Ipv6Addr;
 

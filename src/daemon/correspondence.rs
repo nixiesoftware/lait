@@ -154,6 +154,11 @@ pub struct CorrespondenceService {
     /// like the book. Absent, every device renders unprobed and holding
     /// nothing known — a daemon that runs no fan-out has not asked.
     fanout: std::sync::OnceLock<std::sync::Arc<crate::daemon::fanout::Facts>>,
+    /// What the net plane knows about reaching the own devices, hooked once
+    /// like the rest. Absent — no plane mounted — every device renders with
+    /// no reach and the interface is `None`, which is "nothing carried" and
+    /// never "unreachable".
+    netplane: std::sync::OnceLock<std::sync::Arc<crate::daemon::netplane::Facts>>,
 }
 
 /// What a restored plane holds: the identity's reach, and something to carry
@@ -183,6 +188,7 @@ impl CorrespondenceService {
             plane: Mutex::new(None),
             book: std::sync::OnceLock::new(),
             fanout: std::sync::OnceLock::new(),
+            netplane: std::sync::OnceLock::new(),
         }
     }
 
@@ -201,6 +207,11 @@ impl CorrespondenceService {
     /// Hook the fan-out's facts, once, when the daemon mounts the loop.
     pub(crate) fn hook_fanout(&self, facts: std::sync::Arc<crate::daemon::fanout::Facts>) {
         let _ = self.fanout.set(facts);
+    }
+
+    /// Hook the net plane's facts, once, when the daemon mounts the tunnel.
+    pub(crate) fn hook_netplane(&self, facts: std::sync::Arc<crate::daemon::netplane::Facts>) {
+        let _ = self.netplane.set(facts);
     }
 
     /// Publish a device set as if the plane held it. For tests that stand
@@ -542,6 +553,7 @@ impl CorrespondenceService {
         // view and the hub's admission must never disagree about who is own.
         let own = self.own.borrow().clone();
         let facts = self.fanout.get();
+        let net = self.netplane.get();
         let devices = own.as_ref().map_or_else(Vec::new, |own| {
             own.devices
                 .iter()
@@ -551,6 +563,7 @@ impl CorrespondenceService {
                     liveness: facts
                         .map_or_else(Default::default, |facts| facts.liveness_of(device)),
                     held: facts.map_or_else(Vec::new, |facts| facts.held_by(device)),
+                    reach: net.and_then(|net| net.reach_of(device)),
                 })
                 .collect()
         });
@@ -582,6 +595,7 @@ impl CorrespondenceService {
             devices,
             device_set_unknown: own.is_none(),
             spaces,
+            interface: net.map(|net| net.interface()),
         }))
     }
 

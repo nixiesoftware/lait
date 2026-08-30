@@ -173,9 +173,16 @@ pub fn render_unit(root: &Path, user: bool, displays: bool) -> String {
             continue;
         }
         if user {
-            if ["User=", "Group=", "ProtectSystem=", "ReadWritePaths="]
-                .iter()
-                .any(|key| line.starts_with(key))
+            if [
+                "User=",
+                "Group=",
+                "ProtectSystem=",
+                "ReadWritePaths=",
+                "AmbientCapabilities=",
+                "CapabilityBoundingSet=",
+            ]
+            .iter()
+            .any(|key| line.starts_with(key))
             {
                 continue;
             }
@@ -624,10 +631,17 @@ mod tests {
             assert!(unit.lines().any(|l| l == line), "missing {line:?} in:\n{unit}");
         }
         assert!(!unit.contains("KillMode"), "KillMode must stay the default");
-        assert!(
-            !unit.contains("AmbientCapabilities"),
-            "capabilities land with the net plane, not before something uses them"
-        );
+        // The net plane needs exactly one capability, and holding it ambiently
+        // is what lets the daemon open a TUN without being root. Ambient is
+        // also what a child inherits, which is why every spawn path clears it
+        // (`disinherit_capabilities`); the bounding set caps what may ever be
+        // gained here rather than dropping anything.
+        assert!(unit
+            .lines()
+            .any(|l| l == "AmbientCapabilities=CAP_NET_ADMIN"));
+        assert!(unit
+            .lines()
+            .any(|l| l == "CapabilityBoundingSet=CAP_NET_ADMIN"));
         assert!(
             !unit.contains('@'),
             "an unfilled placeholder survived:\n{unit}"
@@ -645,7 +659,16 @@ mod tests {
         assert!(displays.contains("LAIT_SUPERVISED=1"));
 
         let user = render_unit(Path::new("/home/p/.local/share/lait"), true, false);
-        for dropped in ["User=", "Group=", "ProtectSystem=", "ReadWritePaths="] {
+        for dropped in [
+            "User=",
+            "Group=",
+            "ProtectSystem=",
+            "ReadWritePaths=",
+            // A user manager grants no capabilities; the plane says
+            // `not permitted` there, which is the truth about that install.
+            "AmbientCapabilities=",
+            "CapabilityBoundingSet=",
+        ] {
             assert!(
                 !user.contains(dropped),
                 "a user manager cannot honour {dropped}:\n{user}"

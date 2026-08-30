@@ -11,7 +11,7 @@ import {
 } from "./devices";
 
 function device(overrides: Partial<OwnDevice> & { device: string }): OwnDevice {
-  return { me: false, liveness: { kind: "notProbed" }, held: [], ...overrides };
+  return { me: false, liveness: { kind: "notProbed" }, held: [], reach: null, ...overrides };
 }
 
 function profile(overrides: Partial<ProfileFacts> = {}): ProfileFacts {
@@ -21,6 +21,7 @@ function profile(overrides: Partial<ProfileFacts> = {}): ProfileFacts {
     origin: { kind: "founded" },
     devices: [device({ device: "dev_laptop", me: true })],
     deviceSetUnknown: false,
+    interface: null,
     pairing: null,
     offers: [],
     ...overrides,
