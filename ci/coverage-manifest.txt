@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2803
-pr-platform    2289
-nightly        2832
+pr             2805
+pr-platform    2291
+nightly        2834
 mutants        106
 
 [gates]
@@ -729,6 +729,7 @@ lait orbital::hosting::tests::historical_upgrade_refuses_before_migrator_activat
 lait orbital::hosting::tests::narrowing_to_an_issue_admits_nothing_about_another_body
 lait orbital::hosting::tests::narrowing_to_an_issue_keeps_every_scope_over_its_body
 lait orbital::hosting::tests::station_activation_work_does_not_block_the_reactor
+lait orbital::worlds::tests::a_role_two_installed_worlds_claim_is_resolved_by_naming_one
 lait orbital::worlds::tests::a_world_exec_declaration_without_its_application_package_is_refused
 lait orbital::worlds::tests::call_handlers_are_owned_by_the_registered_package
 lait orbital::worlds::tests::executable_packages_are_validated_and_retained_by_the_world_host
@@ -865,6 +866,7 @@ lait serve::tests::a_fresh_url_token_beats_a_stale_cookie
 lait serve::tests::a_fresh_url_token_beats_a_stale_cookie_over_http
 lait serve::tests::a_launch_link_is_exchanged_for_a_session_and_then_is_worthless
 lait serve::tests::a_world_write_to_a_hosted_identitys_station_is_refused
+lait serve::tests::an_unqualified_invite_is_stamped_with_the_served_world
 lait serve::tests::bearer_outranks_everything_and_cookie_is_the_fallback
 lait serve::tests::cookie_name_is_per_port_so_two_runs_do_not_share_a_jar_entry
 lait serve::tests::declaring_presence_on_a_hosted_identitys_station_is_refused
