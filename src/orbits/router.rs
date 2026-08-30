@@ -644,15 +644,22 @@ impl Router {
         if let Ok(book) = &book {
             correspondence.hook_book(book.clone());
         }
-        // Carried over a hosted Post when one is named. Absent, the plane stands
-        // but carries nothing, and every operation says so — which is a
-        // different fact from an empty mailbox and the only one worth acting on.
-        if let Some(base) = crate::daemon::correspondence::configured_carrier(&identity) {
-            if let Err(error) =
-                correspondence.carry_over(base, crate::daemon::correspondence::now_secs())
-            {
-                tracing::warn!(%error, "correspondence could not be carried");
+        // The plane stands whether or not anything carries: the device set it
+        // publishes is what the hub admits on, and a daemon with no Post still
+        // has devices. Restored first, unconditionally; then carried over a
+        // hosted Post when one is named. Absent a carrier, every send says so —
+        // a different fact from an empty mailbox and the only one worth acting
+        // on.
+        let now = crate::daemon::correspondence::now_secs();
+        match correspondence.restore(now) {
+            Ok(()) => {
+                if let Some(base) = crate::daemon::correspondence::configured_carrier(&identity) {
+                    if let Err(error) = correspondence.carry_over(base, now) {
+                        tracing::warn!(%error, "correspondence could not be carried");
+                    }
+                }
             }
+            Err(error) => tracing::warn!(%error, "the reach plane could not be restored"),
         }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
         // The hub admits own devices on the set correspondence publishes, so

@@ -490,6 +490,37 @@ impl ReachPlane {
         ))
     }
 
+    /// This identity's card for one of its **own** devices — what a pairing
+    /// hands the joiner so it can stand as this profile.
+    ///
+    /// Projects under `Standing { own: true }`, so the structural bodies ride:
+    /// the genesis link and the witness retirement are `Audience::Own` facts,
+    /// and a joiner given a card without them holds a head it cannot walk from
+    /// the genesis. Unlike [`Self::card`] this answers at epoch 1 — a profile
+    /// that has never avowed anything still has devices, and the joiner is
+    /// adopting the profile, not reaching it.
+    pub fn own_card(&self, for_device: &DeviceId) -> Result<Announcement, Failure> {
+        let reader = Standing {
+            own: true,
+            device: Some(for_device.clone()),
+            ..Standing::default()
+        };
+        let projection =
+            self.registry
+                .project(&self.profile, &self.canonical_seed(), self.epoch, &reader)?;
+        Ok(Announcement::new(
+            self.profile.clone(),
+            self.genesis.clone(),
+            projection,
+        ))
+    }
+
+    /// How this device came to hold its profile.
+    #[must_use]
+    pub fn origin(&self) -> &addressbook::reach_store::Origin {
+        &self.origin
+    }
+
     /// Learn a correspondent's profile from their announcement, anchored to its
     /// genesis. `reader` is this identity's own standing toward them.
     pub fn learn(
@@ -880,9 +911,6 @@ impl ReachPlane {
     }
 }
 
-/// The default hosted Post — The Foundation's, unless `LAIT_POST_URL` overrides.
-pub const DEFAULT_POST_URL: &str = "https://post.foundation.pub";
-
 /// The client's live correspondence over a hosted Post.
 ///
 /// Wraps a [`ReachPlane`] and a hosted carrier's base URL, and runs the real
@@ -1246,6 +1274,59 @@ mod tests {
         assert!(matches!(
             ReachPlane::found_here(ALICE_A, None, Some(held), NOW),
             Err(Failure::NoGenesis)
+        ));
+    }
+
+    /// A joiner is handed the profile as its own device sees it. The card is
+    /// evidence to a reader standing as `own`, and it carries the structural
+    /// bodies — the genesis link and the witness retirement — because a head
+    /// nobody can walk from the genesis is a hint, not a profile. `card`
+    /// refuses at epoch 1; this must not, or a fresh profile could never be
+    /// paired from.
+    #[test]
+    fn an_own_card_carries_the_structural_bodies_for_an_own_device() {
+        let plane = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("found");
+        let me = device_from_seed(&ALICE_A);
+        assert!(
+            plane.card(&plane.standing()).is_none(),
+            "nothing avowed yet"
+        );
+
+        let card = plane.own_card(&me).expect("an own card at epoch 1");
+        assert_eq!(&card.profile, plane.profile());
+        let reader = Standing {
+            own: true,
+            device: Some(me.clone()),
+            ..Standing::default()
+        };
+        card.projection
+            .verify(&reader)
+            .expect("evidence to an own reader");
+
+        let genesis = plane.state().genesis.expect("carried");
+        let witness = genesis
+            .devices
+            .iter()
+            .find(|device| **device != me)
+            .cloned()
+            .expect("the witness");
+        assert!(
+            card.projection
+                .bodies
+                .iter()
+                .any(|entry| matches!(entry, Entry::Link(link) if link == &genesis)),
+            "the genesis link rides"
+        );
+        assert!(
+            card.projection.bodies.iter().any(
+                |entry| matches!(entry, Entry::Retire(retirement) if retirement.device == witness)
+            ),
+            "and so does the witness retirement: {:?}",
+            card.projection.bodies
+        );
+        assert!(matches!(
+            plane.origin(),
+            addressbook::reach_store::Origin::Founded
         ));
     }
 

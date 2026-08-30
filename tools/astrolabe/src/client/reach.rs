@@ -16,7 +16,7 @@ use lait::control::{ControlRoute, ReachView, Request, Response};
 use crate::client::{Client, ClientError, ClientResult};
 use crate::model::{ChatMessage, Contact, Conversation, Correspondence};
 
-pub use correspondence::plane::{Collected, Failure, Opened, ReachPlane, DEFAULT_POST_URL};
+pub use correspondence::plane::{Collected, Failure, Opened, ReachPlane};
 
 impl Client {
     /// What this identity's correspondence looks like now.

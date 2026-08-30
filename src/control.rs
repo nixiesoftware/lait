@@ -2411,6 +2411,65 @@ pub struct ReachView {
     pub correspondents: Vec<String>,
     /// One transcript per correspondent, in send order.
     pub conversations: Vec<ConversationView>,
+    /// This machine's device in the profile — the join key every other slice
+    /// keys on.
+    #[serde(default)]
+    pub me: Option<String>,
+    /// How this device came to hold the profile.
+    #[serde(default)]
+    pub origin: Option<OriginView>,
+    /// The profile's device set, `me` included. Empty when the set is not
+    /// held — and then `device_set_unknown` says so, because an empty set and
+    /// an unmeasured one are different facts and only one is worth acting on.
+    #[serde(default)]
+    pub devices: Vec<OwnDeviceView>,
+    /// The device set has not been restored on this daemon. Never folded
+    /// into `devices` being empty: no profile has no devices.
+    #[serde(default)]
+    pub device_set_unknown: bool,
+}
+
+/// How a device came to hold its profile: founded on this machine, or
+/// adopted from a device that already held it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "snake_case")]
+pub enum OriginView {
+    Founded,
+    Adopted { from: String, at: u64 },
+}
+
+/// One device of the profile, as this daemon holds it. A device in the set
+/// with no other fact known renders with the defaults below — never dropped,
+/// because a device that vanishes from the list when it could not be asked is
+/// the false-disconnection defect one layer down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnDeviceView {
+    /// The device id — the join key.
+    pub device: String,
+    /// Whether this is the device answering.
+    pub me: bool,
+    /// The last thing a probe learned, if one ran.
+    #[serde(default)]
+    pub liveness: Liveness,
+    /// Space ids the ledger lists this device in, under my actor.
+    #[serde(default)]
+    pub held: Vec<String>,
+}
+
+/// What a probe of an own device last learned. `NotProbed` is the default
+/// and is neither "down" nor "could not be asked": nothing has asked yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "liveness", rename_all = "snake_case")]
+pub enum Liveness {
+    Reported {
+        version: String,
+        at: u64,
+    },
+    CouldNotAsk {
+        why: String,
+    },
+    #[default]
+    NotProbed,
 }
 
 /// Everything said with one correspondent.
