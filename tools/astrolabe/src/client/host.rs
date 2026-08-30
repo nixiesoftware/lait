@@ -70,25 +70,41 @@ pub struct Retired {
     pub device: String,
     pub revoked_in: Vec<String>,
     pub unfenced: Vec<String>,
+    /// The Spaces the removal could not be made in. Named rather than
+    /// counted into the first list: those Spaces still list the retired
+    /// device, which is the one outcome here worth doing something about.
+    pub could_not: Vec<String>,
 }
 
 impl Retired {
     /// What happened, in one sentence a person can act on.
+    ///
+    /// It says "Spaces you share an actor in" because that is what was
+    /// touched: a device is removed from the lists its own actor keeps, and a
+    /// Space it entered as somebody else is none of this act's business.
+    /// Claiming "everywhere" would be claiming more than was done.
     #[must_use]
     pub fn said(&self) -> String {
         let spaces = match self.revoked_in.len() {
-            0 => "no Space listed it".to_string(),
-            1 => "removed from 1 Space".to_string(),
-            n => format!("removed from {n} Spaces"),
+            0 => "no Space of yours listed it".to_string(),
+            1 => "removed from 1 Space you share an actor in".to_string(),
+            n => format!("removed from {n} Spaces you share an actor in"),
         };
-        if self.unfenced.is_empty() {
-            return format!("retired — {spaces}");
+        let mut said = format!("retired — {spaces}");
+        if !self.unfenced.is_empty() {
+            said.push_str(&format!(
+                "; it can still read what it already held in {} (an admin has to rotate the \
+                 key there)",
+                self.unfenced.join(", ")
+            ));
         }
-        format!(
-            "retired — {spaces}; it can still read what it already held in {} \
-             (an admin has to rotate the key there)",
-            self.unfenced.join(", ")
-        )
+        if !self.could_not.is_empty() {
+            said.push_str(&format!(
+                "; {} would not take the removal and still list it — this device keeps trying",
+                self.could_not.join(", ")
+            ));
+        }
+        said
     }
 }
 
@@ -262,10 +278,12 @@ impl Client {
                 device,
                 revoked_in,
                 unfenced,
+                could_not,
             }) => Ok(Retired {
                 device,
                 revoked_in,
                 unfenced,
+                could_not,
             }),
             other => Err(ClientError::internal(format!(
                 "unexpected answer to a retirement: {other:?}"

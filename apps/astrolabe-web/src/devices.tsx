@@ -253,9 +253,12 @@ export function excluding(view: ClientView, space: string, device: string): bool
  */
 export function retireWarning(device: OwnDevice): string {
   const spaces = device.held.length === 1 ? "1 Space" : `${device.held.length} Spaces`;
+  // Which Spaces, exactly: the ones it is on your actor's list in. A Space it
+  // entered as somebody else is not this act's to touch, and saying
+  // "everywhere" would promise more than happens.
   const listed = device.held.length === 0
-    ? "It is not listed in any Space."
-    : `It stops being listed in ${spaces}.`;
+    ? "It is not listed in any Space of yours."
+    : `It stops being listed in ${spaces} you share an actor in.`;
   return `${listed} Nothing on it is deleted, and it is not asked first — it may be off. `
     + "Anything already shared with it stays readable there until a Space key is rotated.";
 }

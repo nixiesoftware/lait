@@ -994,7 +994,12 @@ pub enum Request {
     },
     /// Retire one of this profile's devices, from another one: the signed
     /// kinship retirement, and then a signed actor op per Space that de-lists
-    /// it there. Two acts on purpose — kinship says who is a device of this
+    /// it there.
+    ///
+    /// "Everywhere" is the Spaces this daemon holds where that device is
+    /// bound to *your* actor — the only lists a device of yours may sign
+    /// against. A Space it entered as somebody else is untouched, and no
+    /// answer here claims otherwise. Two acts on purpose — kinship says who is a device of this
     /// person and authorizes nothing, so a Space stops naming a device only
     /// because a device of its actor signed that it should.
     ///
@@ -3184,6 +3189,11 @@ pub enum HostReply {
         device: String,
         revoked_in: Vec<String>,
         unfenced: Vec<String>,
+        /// The Spaces the removal could not be made in at all. A third list
+        /// because a Space that could not be asked is not one that never
+        /// named the device: only the first reading leaves a retired machine
+        /// on a list, and only it is worth acting on.
+        could_not: Vec<String>,
     },
     /// Orientation for the identity this daemon runs as.
     Context {
