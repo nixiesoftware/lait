@@ -376,19 +376,23 @@ pub fn ratchet(identity: &Path, entry: &MarkerEntry, receipt: Option<&Receipt>) 
     }
 
     // A pre-marker identity holds one pin, for one registrar, in a file that
-    // records no base at all. Adopt it when the device answering now is the
-    // one that signed it — dropping it would re-pin the whole fleet in a
-    // single unprotected step, against the service it has followed longest.
-    let (held, pin, known) = match pin {
-        Some(pin) => (held, Some(pin), known),
-        None => match adopt_legacy(identity, &entry.base, &current.by) {
-            Some(record) => {
+    // records no base at all. It is adopted under the device that *signed* it,
+    // whoever is answering now — so a base that has since been taken over
+    // reaches the ratchet with the old pin in hand and reads `WrongSigner`,
+    // which is what it read before this store existed. Dropping it, or filing
+    // it under whoever replies, would re-pin the whole fleet in a single
+    // unprotected step against the service it has followed longest.
+    //
+    // Skipped entirely when the book names a signer for this base: that is a
+    // later and explicit decision about who to follow here, and a pin from
+    // before it was made must not override it.
+    let (held, pin, known) = match (pin, entry.by.is_some()) {
+        (Some(pin), _) => (held, Some(pin), known),
+        (None, true) => (held, None, known),
+        (None, false) => match adopt_legacy(identity, &entry.base) {
+            Some((by, record)) => {
                 let pin = record.pin.as_ref().map(PinnedHead::from);
-                (
-                    Some((current.by.clone(), record)),
-                    pin,
-                    Some(current.by.clone()),
-                )
+                (Some((by.clone(), record)), pin, Some(by))
             }
             None => (held, None, known),
         },
@@ -419,6 +423,38 @@ pub fn ratchet(identity: &Path, entry: &MarkerEntry, receipt: Option<&Receipt>) 
     match advance(pin.as_ref(), &current, &consistency) {
         Ok(outcome) => {
             let accepted = accept(&current, pin.as_ref(), receipt);
+            // Place the receipt's own head on the chronicle just accepted,
+            // before anything it carried is stored. `verify_mark` is pure and
+            // cannot catch this: a head minted over a private side branch can
+            // include an entry the public log does not contain, and every mark
+            // under it verifies. A receipt that cannot be shown to sit on this
+            // log is unproven, and unproven is a standing rather than a flag on
+            // a mark nothing reads.
+            let bridge = match placed(&entry.base, &accepted, receipt) {
+                Placed::NoReceipt => None,
+                Placed::On(bridge) => Some(bridge),
+                Placed::Elsewhere { size } => {
+                    return keep(
+                        identity,
+                        known.as_ref(),
+                        entry,
+                        held,
+                        MarkerStanding::Unproven {
+                            pinned: accepted.size,
+                            offered: size,
+                        },
+                    )
+                }
+                Placed::Unreachable { why } => {
+                    return keep(
+                        identity,
+                        known.as_ref(),
+                        entry,
+                        held,
+                        MarkerStanding::CouldNotAsk { why },
+                    )
+                }
+            };
             let standing = match outcome {
                 Advance::Pinned => MarkerStanding::Pinned {
                     size: accepted.size,
@@ -433,8 +469,9 @@ pub fn ratchet(identity: &Path, entry: &MarkerEntry, receipt: Option<&Receipt>) 
             };
             let by = accepted.by.clone();
             let mut record = record_of(entry, held, standing.clone());
-            if let Some(marks) = marks_of(&entry.base, &accepted, receipt) {
-                record.marks = marks;
+            if let Some(bridge) = bridge {
+                record.marks =
+                    marks_of(&accepted, receipt, &bridge, my_devices(identity).as_deref());
             }
             record.pin = Some(accepted);
             save(identity, &by, &record);
@@ -498,37 +535,87 @@ fn refusal_standing(refusal: &Refusal, pin: Option<&PinnedHead>, offered: &Head)
     }
 }
 
-/// The marks a chronicled receipt carried, each checked twice: on its own
-/// terms ([`mechanics::chronicle::verify_mark`]) and against the head this
-/// reader just accepted ([`mechanics::chronicle::consistent_with`]).
+/// Where a receipt's own head sits relative to the head just accepted.
+enum Placed {
+    /// Nothing to place: no receipt, or a marker that keeps no chronicle.
+    NoReceipt,
+    /// One log. The path between the two sizes, for the marks to be checked
+    /// against the accepted head with.
+    On(Vec<[u8; 32]>),
+    /// Not one log — a side branch, a rollback, or another signer entirely.
+    Elsewhere { size: u64 },
+    /// The path could not be fetched. An outage, and never folded into the
+    /// refusal above: "could not be asked" and "proved a recording its public
+    /// log does not contain" are the two facts this whole module keeps apart.
+    Unreachable { why: String },
+}
+
+/// Bind the receipt's head to the chronicle this reader just accepted.
 ///
-/// `None` when there is nothing to say — no receipt, or a marker that keeps no
-/// chronicle — which leaves whatever was proven before standing. `Some` always
-/// replaces, empty map included: that is the withdrawal.
-fn marks_of(
-    base: &str,
-    accepted: &Head,
-    receipt: Option<&Receipt>,
-) -> Option<BTreeMap<DeviceId, Mark>> {
-    let receipt = receipt?;
-    let signed_at = receipt.head.as_ref()?;
-    let pin = PinnedHead::from(accepted);
-    // The marks commit to the receipt's head. Where the accepted head has
-    // moved past it, the bridge between the two is what makes them one log.
+/// The receipt head is treated as a mini-pin and the accepted head must prove
+/// it extends it: a genuine receipt head is a prefix of the canonical log, while
+/// a side-branch head that includes the entry cannot be a prefix of a log that
+/// omits it, so the proof fails and the false receipt is caught. A canonical
+/// head *behind* the receipt's claimed size is a rollback, also caught, and
+/// `advance` requires the same signer, so a receipt signed under another key
+/// fails too.
+fn placed(base: &str, accepted: &Head, receipt: Option<&Receipt>) -> Placed {
+    let Some(receipt) = receipt else {
+        return Placed::NoReceipt;
+    };
+    let Some(signed_at) = receipt.head.as_ref() else {
+        return Placed::NoReceipt;
+    };
     let bridge = if signed_at.size < accepted.size {
-        chronicle_over_http(base, Some(signed_at.size))
-            .map(|answer| answer.consistency)
-            .unwrap_or_default()
+        match chronicle_over_http(base, Some(signed_at.size)) {
+            Ok(answer) => answer.consistency,
+            Err(error) => {
+                return Placed::Unreachable {
+                    why: error.to_string(),
+                }
+            }
+        }
     } else {
         Vec::new()
     };
+    match advance(Some(&PinnedHead::from(signed_at)), accepted, &bridge) {
+        Ok(_) => Placed::On(bridge),
+        Err(_) => Placed::Elsewhere {
+            size: signed_at.size,
+        },
+    }
+}
+
+/// The marks a placed receipt carried, each checked twice: on its own terms
+/// ([`mechanics::chronicle::verify_mark`]) and against the head this reader
+/// just accepted ([`mechanics::chronicle::consistent_with`]).
+///
+/// The set replaces whatever was held, empty map included — that is the
+/// withdrawal. `mine` filters to this profile's own devices where it is known:
+/// a marker signs marks about whoever a publication avowed, and a row about a
+/// stranger has no business under this identity's record. `None` means the
+/// device set could not be read, which is not the same as an empty one and must
+/// not be acted on as though a marker had named nobody.
+fn marks_of(
+    accepted: &Head,
+    receipt: Option<&Receipt>,
+    bridge: &[[u8; 32]],
+    mine: Option<&[DeviceId]>,
+) -> BTreeMap<DeviceId, Mark> {
     let mut marks = BTreeMap::new();
+    let Some(receipt) = receipt else {
+        return marks;
+    };
+    let pin = PinnedHead::from(accepted);
     for avowal in &receipt.marks {
         let Party::Device(subject) = &avowal.subject else {
             continue;
         };
+        if mine.is_some_and(|mine| !mine.contains(subject)) {
+            continue;
+        }
         let proven = mechanics::chronicle::verify_mark(avowal, &receipt.inclusion).is_ok()
-            && mechanics::chronicle::consistent_with(&pin, avowal, &bridge).is_ok();
+            && mechanics::chronicle::consistent_with(&pin, avowal, bridge).is_ok();
         marks.insert(
             subject.clone(),
             Mark {
@@ -538,7 +625,18 @@ fn marks_of(
             },
         );
     }
-    Some(marks)
+    marks
+}
+
+/// The devices this identity's profile names, or `None` when the kinship store
+/// cannot be read. Read here rather than passed in so every caller of
+/// [`ratchet`] gets the same filter without carrying the device set to it.
+fn my_devices(identity: &Path) -> Option<Vec<DeviceId>> {
+    let seed = crate::config::load_identity(identity).ok()?;
+    let state = addressbook::ReachStore::at(identity).load().ok()??;
+    correspondence::plane::ReachPlane::restore(seed, state, mechanics::wallclock::now_millis())
+        .ok()
+        .map(|plane| plane.my_devices())
 }
 
 fn record_of(
@@ -581,20 +679,18 @@ fn keep(
     standing
 }
 
-/// Adopt the single-registrar pin this store replaces, once, when the device
-/// answering now is the one that signed it.
+/// Adopt the single-registrar pin this store replaces, once.
 ///
-/// Every installed machine holds one, and dropping it would silently re-pin
-/// the fleet — one step with no divergence protection, on the exact service
-/// this identity has been following the longest. The *signer* is the test
-/// rather than the host: the old file recorded no base, and this store is
-/// keyed by signer precisely because a service moves.
-fn adopt_legacy(identity: &Path, base: &str, by: &DeviceId) -> Option<MarkerRecord> {
+/// Every installed machine holds one, and dropping it would silently re-pin the
+/// fleet — one step with no divergence protection, on the exact service it has
+/// been following the longest. Filed under the device that *signed* it, not
+/// under whoever is answering now: the file records no base, this store is keyed
+/// by signer, and handing the base to a new key would be exactly the silent
+/// takeover the ratchet exists to refuse.
+fn adopt_legacy(identity: &Path, base: &str) -> Option<(DeviceId, MarkerRecord)> {
     let legacy = identity.join(LEGACY_PIN);
     let head: Head = serde_json::from_slice(&std::fs::read(&legacy).ok()?).ok()?;
-    if head.by != *by {
-        return None;
-    }
+    let by = head.by.clone();
     let record = MarkerRecord {
         standing: MarkerStanding::Pinned { size: head.size },
         pin: Some(head),
@@ -602,23 +698,23 @@ fn adopt_legacy(identity: &Path, base: &str, by: &DeviceId) -> Option<MarkerReco
         checked_at: 0,
         marks: BTreeMap::new(),
     };
-    save(identity, by, &record);
+    save(identity, &by, &record);
     // The evidence half moves with the pin it accuses: a divergence already
     // caught must not be forgotten by a rename.
     let evidence = identity.join(LEGACY_EVIDENCE);
     if let Ok(kept) = std::fs::read(&evidence) {
-        if !evidence_path(identity, by).exists() {
+        if !evidence_path(identity, &by).exists() {
             if let Err(error) =
-                addressbook::durable::atomic_replace(&evidence_path(identity, by), &kept)
+                addressbook::durable::atomic_replace(&evidence_path(identity, &by), &kept)
             {
                 tracing::error!(%error, "could not carry the divergence evidence forward");
-                return Some(record);
+                return Some((by, record));
             }
         }
         std::fs::remove_file(&evidence).ok();
     }
     std::fs::remove_file(&legacy).ok();
-    Some(record)
+    Some((by, record))
 }
 
 /// The book as a surface reads it: one row per marker this identity weighs,
@@ -909,6 +1005,9 @@ mod tests {
                 offered: 3,
             },
             MarkerStanding::Diverged { size: 1 },
+            MarkerStanding::Refused {
+                why: "the signature does not verify".into(),
+            },
         ]
         .iter()
         .map(|standing| standing.refused().expect("a refusal says why"))
@@ -926,6 +1025,69 @@ mod tests {
         assert!(MarkerStanding::Extended { from: 1, to: 2 }
             .refused()
             .is_none());
+    }
+
+    /// The check `reconcile_receipt` used to make, restored as a standing.
+    ///
+    /// A head minted over a private side branch can include an entry the public
+    /// log does not contain, and every mark under it verifies — `verify_mark` is
+    /// pure and cannot see this. Only the receipt head's relation to the head
+    /// this reader accepted catches it, and it has to be a standing rather than
+    /// a flag on a mark, because a flag nothing reads is not a refusal.
+    #[test]
+    fn a_receipt_head_off_the_accepted_chronicle_is_unproven() {
+        let accepted = head(4, &[b"one"]);
+        let receipt = |head: Option<Head>| Receipt {
+            head,
+            entry: Some(0),
+            ..Default::default()
+        };
+        // No network is reachable from any of these: the fetch only happens for
+        // a receipt head *behind* the accepted one.
+        let nowhere = "http://127.0.0.1:1";
+
+        assert!(matches!(
+            placed(nowhere, &accepted, None),
+            Placed::NoReceipt
+        ));
+        assert!(
+            matches!(
+                placed(nowhere, &accepted, Some(&receipt(None))),
+                Placed::NoReceipt
+            ),
+            "a marker that keeps no chronicle has nothing to place, and is not a refusal"
+        );
+        assert!(matches!(
+            placed(nowhere, &accepted, Some(&receipt(Some(accepted.clone())))),
+            Placed::On(_)
+        ));
+
+        // Same signer, same size, different root — the private branch.
+        assert!(
+            matches!(
+                placed(
+                    nowhere,
+                    &accepted,
+                    Some(&receipt(Some(head(4, &[b"other"]))))
+                ),
+                Placed::Elsewhere { size: 1 }
+            ),
+            "a receipt minted over a branch the public log omits is not on this log"
+        );
+        // A receipt claiming a longer log than the marker serves.
+        assert!(matches!(
+            placed(
+                nowhere,
+                &accepted,
+                Some(&receipt(Some(head(4, &[b"one", b"two"]))))
+            ),
+            Placed::Elsewhere { size: 2 }
+        ));
+        // And one signed by somebody else entirely.
+        assert!(matches!(
+            placed(nowhere, &accepted, Some(&receipt(Some(head(9, &[b"one"]))))),
+            Placed::Elsewhere { size: 1 }
+        ));
     }
 
     /// Non-repudiability is a file: the two signed heads are what a third
@@ -1138,16 +1300,13 @@ mod tests {
         .expect("write");
         std::fs::write(dir.path().join(LEGACY_EVIDENCE), b"{}").expect("write");
 
-        assert!(
-            adopt_legacy(dir.path(), "https://marker.example/", &device(9)).is_none(),
-            "the old pin belongs to the device that signed it, not to whoever answers next"
+        let (by, _) = adopt_legacy(dir.path(), "https://marker.example/").expect("adopted");
+        assert_eq!(
+            by,
+            device(4),
+            "the old pin is filed under the device that signed it, never under whoever answers \
+             next — a base that changed hands must reach the ratchet as WrongSigner"
         );
-        assert!(
-            dir.path().join(LEGACY_PIN).exists(),
-            "and it is left where it is until that device does answer"
-        );
-
-        adopt_legacy(dir.path(), "https://marker.example/", &device(4)).expect("adopted");
         let adopted = load(dir.path(), &device(4)).expect("the pin was adopted");
         assert_eq!(adopted.pin.as_ref(), Some(&held));
         assert_eq!(adopted.base, "https://marker.example");
@@ -1167,7 +1326,10 @@ mod tests {
                 Some(head(4, &[b"one", b"two"])),
             ),
         );
-        assert!(adopt_legacy(dir.path(), "https://marker.example", &device(4)).is_none());
+        assert!(
+            adopt_legacy(dir.path(), "https://marker.example").is_none(),
+            "the legacy file is gone, so there is nothing left to adopt"
+        );
         assert_eq!(
             load(dir.path(), &device(4)).expect("still held").standing,
             MarkerStanding::Extended { from: 1, to: 2 },

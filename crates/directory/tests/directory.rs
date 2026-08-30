@@ -108,6 +108,7 @@ impl Home {
     ) -> Result<Issued, Refusal> {
         let announcement = self.announce(epoch);
         lait_directory::publish_as(service, &self.seeds[0], &announcement, NOW)
+            .map(|published| published.issued)
     }
 }
 
@@ -445,6 +446,7 @@ fn an_older_publication_does_not_replace_a_newer_one() {
 
     let address = lait_directory::publish_as(&mut service, &home.seeds[0], &new, NOW)
         .expect("publish the newer")
+        .issued
         .address;
     let _ = lait_directory::publish_as(&mut service, &home.seeds[0], &old, NOW)
         .expect("an older publication is accepted rather than errored");

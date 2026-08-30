@@ -61,7 +61,7 @@ pub use address::Address;
 pub use chronicle::{ChronicleStore, Chronicler, Receipt};
 pub use client::Remote;
 pub use firestore::{Credentials, FirestoreStore};
-pub use service::{Service, Shared};
+pub use service::{chronicle_entry_for, Service, Shared};
 pub use store::{MemStore, Published, Store};
 pub use wire::{sign, Challenge, SignedPublish, SignedResolve};
 
@@ -188,23 +188,45 @@ impl<S: Store> Directory for Service<S> {
     }
 }
 
+/// One completed publication: what the service answered, and the chronicle
+/// leaf these exact bytes must appear as if the receipt is about them.
+///
+/// The leaf is recomputed here from the request this process signed, never read
+/// out of the answer — that recomputation is the *only* thing that binds a
+/// receipt to a publication. Without it a receipt proves that the service
+/// recorded something, somewhere, and a service that answers an **older**
+/// receipt hands back marks that verify perfectly against a head the reader
+/// follows. A reader that replaces its mark set with those has re-certified a
+/// device the newest publication withdrew, which is the whole of the
+/// per-receipt revocation gone.
+#[derive(Debug, Clone)]
+pub struct Publication {
+    pub issued: Issued,
+    /// `Chronicle::leaf_of(chronicle_entry_for(&request))` for the request
+    /// this call signed.
+    pub leaf: [u8; 32],
+}
+
 /// Publish `announcement` and learn the address it answers to.
 ///
 /// The round trip in one call, because challenge-then-sign-then-send is the
 /// *protocol* and a caller reimplementing it is a caller that can get the order
 /// wrong. Takes a seed and runs in the caller's process; nothing here is the
-/// service's.
+/// service's — including the leaf, which is why it comes back beside the
+/// answer rather than inside it.
 pub fn publish_as(
     directory: &mut dyn Directory,
     seed: &[u8; 32],
     announcement: &addressbook::Announcement,
     now: u64,
-) -> Result<Issued, Refusal> {
+) -> Result<Publication, Refusal> {
     let device = mechanics::actor::device_from_seed(seed);
     let challenge = directory.challenge(&device, now)?;
     let encoded = announcement.encode().map_err(|_| Refusal::TooLarge)?;
     let request = wire::sign::publish(seed, &challenge, encoded);
-    directory.publish(&request, now)
+    let issued = directory.publish(&request, now)?;
+    let leaf = mechanics::chronicle::Chronicle::leaf_of(&service::chronicle_entry_for(&request));
+    Ok(Publication { issued, leaf })
 }
 
 /// Ask for one exact address, and get back what its holder published.

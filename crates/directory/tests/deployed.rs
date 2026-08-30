@@ -63,9 +63,10 @@ fn a_deployed_directory_issues_an_address_and_answers_it() {
     };
 
     let (seed, announcement) = fresh_profile();
-    let issued = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
+    let published = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
         .expect("the deployed directory took the publication");
-    let address = issued.address;
+    let issued = &published.issued;
+    let address = issued.address.clone();
     assert!(
         address.is_mintable(),
         "{address} came back off the word list"
@@ -79,10 +80,24 @@ fn a_deployed_directory_issues_an_address_and_answers_it() {
         mechanics::chronicle::verify_mark(mark, &issued.receipt.inclusion)
             .expect("the deployed marker proved what it recorded");
     }
+    // And the receipt is about *this* publication: the leaf is recomputed from
+    // the bytes this process signed, so an older receipt whose marks verify
+    // perfectly is still caught here and nowhere else.
+    if let (Some(head), Some(entry)) = (issued.receipt.head.as_ref(), issued.receipt.entry) {
+        mechanics::chronicle::verify_inclusion(
+            &published.leaf,
+            entry,
+            head.size,
+            &head.root,
+            &issued.receipt.inclusion,
+        )
+        .expect("the receipt proves the publication that was just made, not another");
+    }
 
     // Stable afterwards — the property a person's card depends on.
     let again = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
         .expect("republish")
+        .issued
         .address;
     assert_eq!(address, again, "the address moved under its holder");
 
@@ -142,6 +157,7 @@ fn a_deployed_directory_spends_a_challenge_exactly_once() {
     let (seed, announcement) = fresh_profile();
     let address = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
         .expect("publish")
+        .issued
         .address;
 
     let asker = mechanics::actor::random_seed().expect("randomness");

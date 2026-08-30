@@ -229,6 +229,47 @@ mod tests {
         assert_eq!(moved.size, 2, "the pin advanced along a proven extension");
     }
 
+    /// The book names the signer, so the *first* answer is checked like every
+    /// later one. Without this line a fresh install pins whatever key replies
+    /// at a host name — and the recovery from a bad first pin is deleting a
+    /// file on every device in the fleet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pinned_signer_in_the_book_refuses_a_different_signer_at_first_contact() {
+        let home = home_with_identity();
+        let profile = profile_of(home.path());
+        let held: Held = Arc::new(Mutex::new(registrar(
+            MemRegistry::default(),
+            &profile,
+            [51u8; 32],
+        )));
+        let base = spawn(held).await;
+
+        let named = mechanics::actor::device_from_seed(&[7u8; 32]);
+        std::fs::write(
+            home.path().join("config.json"),
+            serde_json::json!({ "marks.book": format!("{base}@{}", named.as_str()) }).to_string(),
+        )
+        .expect("write the book");
+
+        let error = publish(home.path().to_path_buf(), base.clone())
+            .await
+            .expect_err("a signer the book does not name is refused before anything is pinned");
+        assert!(
+            error.to_string().contains("different device"),
+            "the refusal names the wrong signer: {error}"
+        );
+        let answered = mechanics::actor::device_from_seed(&[51u8; 32]);
+        assert!(
+            crate::daemon::markers::load(home.path(), &answered).is_none(),
+            "nothing is filed under the device that answered — that is the whole of the trust on \
+             first use this removes"
+        );
+        assert!(
+            pinned(home.path(), &base).is_none(),
+            "and no head was pinned at all"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_registrar_with_a_different_memory_at_the_pinned_size_is_caught() {
         let home = home_with_identity();
