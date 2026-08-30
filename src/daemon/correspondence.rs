@@ -342,7 +342,7 @@ impl CorrespondenceService {
     }
 
     /// The sponsor's adoption: append the assembled link, keep, republish the
-    /// device set, and — when a directory is configured — announce so
+    /// device set, then — when a directory is configured — announce so
     /// correspondents learn the grown set. Kept before the watch moves: a hub
     /// admitting a device the store does not yet name would be admitting on
     /// a fact a crash could take back.
@@ -362,13 +362,24 @@ impl CorrespondenceService {
             .reach
             .adopt_device(link)
             .map_err(|error| format!("{error}"))?;
-        if plane.directory.is_some() {
-            if let Err(error) = self.present(plane, now) {
-                tracing::warn!(%error, "the grown device set could not be announced");
-            }
-        }
         self.keep(plane)?;
         self.own.send_replace(Some(own_of(&plane.reach)));
+        // Announcing comes after the link is durable: a publication that
+        // avowed a device the store did not yet name would be evidence of a
+        // fact a crash could take back. Best-effort, and kept again on
+        // success because it moves the epoch.
+        if plane.directory.is_some() {
+            match self.present(plane, now) {
+                Ok(()) => {
+                    if let Err(error) = self.keep(plane) {
+                        tracing::warn!(%error, "the announcement's epoch could not be kept");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the grown device set could not be announced");
+                }
+            }
+        }
         Ok(())
     }
 

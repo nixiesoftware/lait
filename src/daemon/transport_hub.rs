@@ -1321,6 +1321,17 @@ impl IdentityTransport {
     }
 }
 
+/// The Own lane goes back to the hub with the view that took it: the hub
+/// outlives every view, and a lane that died with its first reader would
+/// leave every later `identity_transport()` accepting nothing.
+impl Drop for IdentityTransport {
+    fn drop(&mut self) {
+        if let Some(lane) = self.own_lane.get_mut().take() {
+            *self.hub.own_lane.lock_recovering() = Some(lane);
+        }
+    }
+}
+
 #[async_trait]
 impl Transport for IdentityTransport {
     fn my_id(&self) -> PeerId {
@@ -1704,6 +1715,65 @@ mod tests {
             .expect("a second network policy is refused");
         assert!(other_policy.to_string().contains("two network policies"));
         factory.shutdown().await;
+    }
+
+    /// The lane is one reader's at a time, and outlives that reader: a view
+    /// that accepted and was dropped hands the lane back, so the next view
+    /// raised for the same key accepts what arrives after it.
+    #[tokio::test]
+    async fn the_own_lane_outlives_the_view_that_took_it() {
+        let net = MemNet::new().with_planes();
+        let inner = Arc::new(MemFactory {
+            net: net.clone(),
+            builds: AtomicUsize::new(0),
+        });
+        let me_seed = [95u8; 32];
+        let peer_seed = [96u8; 32];
+        let me = mechanics::actor::device_from_seed(&me_seed);
+        let peer = mechanics::actor::device_from_seed(&peer_seed);
+        let (_own_tx, own_rx) = watch::channel(Some(own_set(&me_seed, &peer_seed)));
+        let factory = TransportHubFactory::new(inner, own_rx);
+        let own_device: Arc<dyn Transport> = Arc::new(net.peer(peer.clone()));
+
+        let first = factory
+            .identity_transport(&me_seed, &Network::Isolated)
+            .await
+            .expect("raise");
+        let mut stream = own_device
+            .connect(me.clone(), runtime::correspondence::OWN_ALPN)
+            .await
+            .expect("dial");
+        stream.send(b"one").await.expect("send");
+        let incoming = tokio::time::timeout(Duration::from_secs(5), first.accept())
+            .await
+            .expect("routed")
+            .expect("open");
+        assert_eq!(incoming.from, peer);
+        let second = factory
+            .identity_transport(&me_seed, &Network::Isolated)
+            .await
+            .expect("a second view");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), second.accept())
+                .await
+                .map_or(true, |taken| taken.is_none()),
+            "while the first view holds the lane, the second gets nothing"
+        );
+        drop(first);
+
+        let mut stream = own_device
+            .connect(me.clone(), runtime::correspondence::OWN_ALPN)
+            .await
+            .expect("dial again");
+        stream.send(b"two").await.expect("send");
+        let mut incoming = tokio::time::timeout(Duration::from_secs(5), second.accept())
+            .await
+            .expect("the lane came back with the first view's drop")
+            .expect("open");
+        assert_eq!(
+            incoming.stream.recv().await.expect("read"),
+            Some(b"two".to_vec())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

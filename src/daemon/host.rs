@@ -1275,8 +1275,9 @@ impl Daemon {
             requested: self.relaunch_requested.clone(),
             endpoint: self.endpoint.clone(),
         };
+        let on_adopted: OnAdopted = Arc::new(move || relaunch.request());
         let network = crate::config::Settings::load(Some(home)).network();
-        tokio::spawn(serve_pairing(pair, network, stop, relaunch))
+        tokio::spawn(serve_pairing(pair, network, stop, on_adopted))
     }
 
     /// Subscribe to the notify relay, when one is configured, so a publish
@@ -1353,11 +1354,16 @@ impl Daemon {
 /// spent, burnt or expired, and mint again. A mint that fails — no route
 /// yet, no identity endpoint — is retried on a jittered delay rather than
 /// tightly, because the ordinary cause is a network that is not up yet.
+/// What the daemon does the moment this device is adopted: ask for a fresh
+/// generation. A closure rather than the relaunch handle itself, so the loop
+/// can be driven without a listener.
+type OnAdopted = Arc<dyn Fn() + Send + Sync>;
+
 async fn serve_pairing(
     pair: Arc<crate::daemon::pair::PairService>,
     network: Result<comms::policy::Network>,
     mut stop: tokio::sync::watch::Receiver<bool>,
-    relaunch: GenerationRelaunch,
+    on_adopted: OnAdopted,
 ) {
     use crate::daemon::pair::Accepted;
     let network = match network {
@@ -1395,7 +1401,7 @@ async fn serve_pairing(
                     target: "lait::pair",
                     "this device is now one of the profile's; restarting to serve as it"
                 );
-                relaunch.request();
+                on_adopted();
                 break;
             }
             Ok(_) => {}
@@ -2499,5 +2505,78 @@ mod tests {
             .unwrap();
         completion.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The joiner's loop, end to end on the in-memory network: it mints on
+    /// its own, replaces a burnt code without being asked, and on adoption
+    /// asks for a fresh generation and closes the endpoint.
+    #[tokio::test]
+    async fn serve_pairing_re_mints_on_burn_and_relaunches_on_adoption() {
+        use crate::daemon::pair::tests::{sorted, wrong_secret, Side};
+        use crate::daemon::pair::{now_ms, SponsorOutcome};
+        use std::sync::atomic::AtomicBool;
+
+        async fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+            for _ in 0..250 {
+                if let Some(value) = check() {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("never: {what}");
+        }
+
+        let net = comms::mem::MemNet::new();
+        let sponsor = Side::stand("host-sponsor", &net);
+        let joiner = Side::stand("host-joiner", &net);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let relaunched = Arc::new(AtomicBool::new(false));
+        let on_adopted: OnAdopted = {
+            let relaunched = relaunched.clone();
+            Arc::new(move || relaunched.store(true, Ordering::SeqCst))
+        };
+        let network = joiner.pair.network().expect("network");
+        let loop_task = tokio::spawn(serve_pairing(
+            joiner.pair.clone(),
+            Ok(network),
+            stop_rx,
+            on_adopted,
+        ));
+
+        let first = wait_for("a code is minted on its own", || {
+            joiner.pair.status(now_ms()).map(|code| code.code)
+        })
+        .await;
+        let wrong = wrong_secret(&first);
+        for _ in 0..3 {
+            assert!(sponsor.pair.enter(&wrong, now_ms()).await.is_err());
+        }
+        let second = wait_for("a fresh code replaces the burnt one", || {
+            joiner
+                .pair
+                .status(now_ms())
+                .map(|code| code.code)
+                .filter(|code| code != &first)
+        })
+        .await;
+
+        let offer = match sponsor.pair.enter(&second, now_ms()).await.expect("enter") {
+            SponsorOutcome::Offer(offer) => offer,
+            other => panic!("expected an offer, got {other:?}"),
+        };
+        sponsor
+            .pair
+            .confirm(&offer.pairing, true, now_ms())
+            .await
+            .expect("confirm");
+        wait_for("adoption asks for a relaunch", || {
+            relaunched.load(Ordering::SeqCst).then_some(())
+        })
+        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), loop_task).await;
+        assert!(!joiner.pair.endpoint_open(), "the endpoint is closed");
+        assert!(!joiner.pair.unpaired());
+        assert_eq!(joiner.devices(), sorted(vec![sponsor.me(), joiner.me()]));
+        stop_tx.send_replace(true);
     }
 }

@@ -659,8 +659,9 @@ impl ReachPlane {
     /// The throwaway profile this plane was founded under is dropped, not
     /// merged: nothing was ever said under it, or this refuses with
     /// [`Failure::AlreadyCorresponded`] — a profile that has learned somebody,
-    /// sent a letter or been issued an address has correspondents who would
-    /// otherwise be sealing to an id nobody answers for any more.
+    /// sent or collected a letter, been issued an address, or announced
+    /// itself at all (the epoch moved) has correspondents who would otherwise
+    /// be sealing to an id nobody answers for any more.
     ///
     /// The card is taken as **authored**, not absorbed: the sponsor projected
     /// it under `Standing { own: true }` so the structural bodies ride, and
@@ -675,7 +676,12 @@ impl ReachPlane {
         link: DeviceLink,
         now: u64,
     ) -> Result<(), Failure> {
-        if self.registry.profiles().count() > 1 || !self.sent.is_empty() || self.address.is_some() {
+        let corresponded = self.registry.profiles().count() > 1
+            || !self.sent.is_empty()
+            || self.address.is_some()
+            || !self.mailbox.is_empty()
+            || self.epoch > GENESIS_EPOCH;
+        if corresponded {
             return Err(Failure::AlreadyCorresponded);
         }
         let log = mechanics::kinship::KinshipLog::found(card.genesis.clone())
@@ -1656,7 +1662,22 @@ mod tests {
         let mut addressed = ReachPlane::found_here(ALICE_B, None, None, NOW).expect("found");
         addressed.issued("tin-harbor-quiet-4417".into());
         assert!(matches!(
-            addressed.become_device_of(card, sponsor_device, link, NOW),
+            addressed.become_device_of(card.clone(), sponsor_device.clone(), link.clone(), NOW),
+            Err(Failure::AlreadyCorresponded)
+        ));
+
+        // Announcing with no directory issues no address and learns nobody,
+        // and is still speaking as this profile: somebody may hold the card.
+        let mut announced = ReachPlane::found_here(ALICE_B, None, None, NOW).expect("found");
+        let reader = Standing {
+            device: Some(device_from_seed(&BOB_A)),
+            ..Standing::default()
+        };
+        announced
+            .announce(Audience::Public, &reader)
+            .expect("announce");
+        assert!(matches!(
+            announced.become_device_of(card, sponsor_device, link, NOW),
             Err(Failure::AlreadyCorresponded)
         ));
     }
