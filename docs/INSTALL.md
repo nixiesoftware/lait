@@ -61,25 +61,53 @@ AppIndicator runtime libraries.
 
 ## Headless host
 
-The desktop installer is preferred. An always-on seed operator can download the
-matching host archive from our release directory without involving Cargo or a
-package registry. Select the archive named for the machine's Rust target triple;
-for example, on x86_64 Linux:
+A Pi, a NAS, a VPS: an always-on device that holds your Spaces and never draws
+a window. Download the host archive named for the machine's Rust target triple
+and run its `install` mode as root; for example, on x86_64 Linux:
 
 ```sh
 version='<version>'
 curl -fLO "https://storage.googleapis.com/the-foundation-dist/releases/$version/lait-x86_64-unknown-linux-gnu.tar.gz"
 tar xzf "lait-x86_64-unknown-linux-gnu.tar.gz"
-./lait-x86_64-unknown-linux-gnu/lait --version
+sudo ./lait-x86_64-unknown-linux-gnu/lait install
 ```
 
-Windows uses `lait-x86_64-pc-windows-msvc.zip`; macOS has both
-`lait-aarch64-apple-darwin.tar.gz` and `lait-x86_64-apple-darwin.tar.gz`.
-Cargo remains a source-build tool for contributors, not an installation or
-release channel.
+A Raspberry Pi uses `lait-aarch64-unknown-linux-gnu.tar.gz`.
 
-For a seed node, build and run the repository's `docker-compose.yml`. Data lives
-under the configured Lait home and must be preserved across container updates.
+The binary you untarred is only the bootstrapper. `lait install` resolves the
+`stable` channel through the same signed chain the daemon updates by — pointer,
+manifest, size, digest — and installs *that* release's binary, never itself, so
+a stale `version` in the line above is harmless and an unverifiable download is
+a refusal rather than an install. It writes:
+
+```text
+/var/lib/lait/bin/lait              the proven binary, owned by the `lait` system user
+/var/lib/lait/bin/installed.json    version, target, channel, unit
+/var/lib/lait/…                     the identity, minted by the daemon at its first boot
+/etc/systemd/system/lait.service    Restart=always, LAIT_SUPERVISED=1, LAIT_DISPLAY=off
+```
+
+then enables and starts the unit and prints what the daemon has to say — a
+pairing code to enter in Astrolabe once that surface ships, or where to look.
+From then on the daemon follows the channel itself: a published release is
+proven, swapped over `bin/lait`, and the daemon exits for systemd to start the
+new one. `journalctl -u lait -f` is its log; `systemctl status lait` its state.
+After five failed starts in five minutes systemd leaves it down until
+`systemctl reset-failed lait` or the install line is run again — re-running it
+is also how a wedged box is repaired, since it installs whatever `stable`
+proves by then.
+
+Flags: `--user` installs under `~/.local/share/lait` with a user unit and no
+root; `--channel test` follows the test channel, recorded beside the identity;
+`--displays` leaves the display coordinator on (it binds port 7443);
+`--root <dir>` picks another root. An install line never crosses a root that
+was installed the other way.
+
+Windows uses `lait-x86_64-pc-windows-msvc.zip`; macOS has both
+`lait-aarch64-apple-darwin.tar.gz` and `lait-x86_64-apple-darwin.tar.gz`, and
+neither has an install mode — the desktop client is the canonical install
+there. Cargo remains a source-build tool for contributors, not an installation
+or release channel.
 
 ## First launch
 

@@ -1265,45 +1265,47 @@ impl Daemon {
     }
 
     /// Start the continuous staging watcher, when this daemon runs inside an
-    /// installation of either shape — a stub-managed tree, or a macOS bundle
-    /// staging beside the identity.
+    /// installation of any shape — a stub-managed tree, a macOS bundle
+    /// staging beside the identity, or a headless service.
     ///
-    /// `None` everywhere else — a developer's build tree and a standalone
-    /// `lait` have nowhere to stage to, and inventing a root would drop a
-    /// client tree beside somebody's `target/`. The watcher stops with the
+    /// `None` everywhere else — a developer's build tree and a bare `lait`
+    /// have nowhere for a release to go, and inventing a root would drop
+    /// bytes beside somebody's `target/`. The watcher stops with the
     /// endpoint, on the same signal every other service here uses.
     fn spawn_staging(&self) -> Option<tokio::task::JoinHandle<()>> {
         let identity = self.router.catalog().identity().to_path_buf();
-        let root = crate::update::watch::staging_root(&identity)?;
-        if let Err(error) = std::fs::create_dir_all(&root) {
+        let current_exe = std::env::current_exe().ok()?;
+        let installation = crate::update::watch::Installation::of(&current_exe, &identity)?;
+        if let Err(error) = std::fs::create_dir_all(installation.root()) {
             // Said, not skipped: an unwritable staging path is a fact about
             // this machine, and silence here is a client that never updates
             // and never explains why.
             tracing::warn!(
                 %error,
-                root = %root.display(),
+                root = %installation.root().display(),
                 "the staging root could not be created; this installation will not update"
             );
             return None;
         }
         let stop = self.endpoint.subscribe_stop();
-        // A selected World release is served only by a fresh generation, the
-        // same crossing the consented upgrade makes; the watcher asks for it
-        // the moment a check stages one.
+        // What a check takes is served only by a fresh generation — a
+        // selected World release, or a service's swapped binary — the same
+        // crossing the consented upgrade makes; the watcher asks for it the
+        // moment a check needs one.
         let relaunch = GenerationRelaunch {
             requested: self.relaunch_requested.clone(),
             endpoint: self.endpoint.clone(),
         };
-        let on_worlds_staged: crate::update::watch::OnWorldsStaged =
+        let on_relaunch_needed: crate::update::watch::OnWorldsStaged =
             Arc::new(move || relaunch.request());
         let wake = Arc::new(tokio::sync::Notify::new());
         self.spawn_notify(&identity, stop.clone(), wake.clone());
         Some(tokio::spawn(crate::update::watch::serve(
             identity,
-            root,
+            installation,
             stop,
             wake,
-            on_worlds_staged,
+            on_relaunch_needed,
         )))
     }
 
@@ -1933,17 +1935,55 @@ pub async fn run_lait_daemon(
     // teardown, a blocking task that has not noticed — stays interruptible the
     // ordinary way.
     crate::process::restore_default_termination_signals();
-    if result.is_ok() && relaunch_requested.load(Ordering::Acquire) {
-        let executable =
-            std::env::current_exe().context("locate daemon executable for relaunch")?;
-        let home = selection.daemon_home()?;
-        let log = std::fs::File::create(crate::host_client::daemon_log_path(&home)).ok();
-        let identity = selection.self_contained_home();
-        crate::daemon_spawn::spawn(&executable, log, identity.as_deref())
-            .context("spawn the next World daemon generation")?
-            .reap();
+    match successor(
+        result.is_ok(),
+        relaunch_requested.load(Ordering::Acquire),
+        crate::process::supervised(),
+    ) {
+        Successor::Respawn => {
+            let executable =
+                std::env::current_exe().context("locate daemon executable for relaunch")?;
+            let home = selection.daemon_home()?;
+            let log = std::fs::File::create(crate::host_client::daemon_log_path(&home)).ok();
+            let identity = selection.self_contained_home();
+            crate::daemon_spawn::spawn(&executable, log, identity.as_deref())
+                .context("spawn the next World daemon generation")?
+                .reap();
+        }
+        Successor::LeaveToSupervisor => {
+            tracing::info!("leaving the restart to the supervisor");
+        }
+        Successor::None => {}
     }
     result
+}
+
+/// Who starts the next daemon generation once this one has stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Successor {
+    /// This process spawns it, detached, before it exits.
+    Respawn,
+    /// This process exits cleanly and the supervisor's `Restart=` execs it.
+    LeaveToSupervisor,
+    /// Nobody: the stop was not a relaunch, or the run failed and a respawn
+    /// would loop on the failure.
+    None,
+}
+
+/// The exit-time relaunch decision, as a table.
+///
+/// A relaunch is only ever a *requested* one after a run that ended well; a
+/// daemon that respawned after failing would loop on whatever failed it. And
+/// under a supervisor the respawn is not merely redundant: a detached child
+/// lands outside the unit's cgroup, `systemctl stop` cannot reach it, and
+/// the supervisor — seeing its child gone — starts a second daemon beside
+/// it. A supervised relaunch is therefore an exit, and nothing else.
+pub(crate) fn successor(ok: bool, relaunch_requested: bool, supervised: bool) -> Successor {
+    match (ok, relaunch_requested, supervised) {
+        (false, _, _) | (true, false, _) => Successor::None,
+        (true, true, true) => Successor::LeaveToSupervisor,
+        (true, true, false) => Successor::Respawn,
+    }
 }
 
 /// How far shutdown got, published for the one observer that can still read it.
@@ -2316,6 +2356,27 @@ mod tests {
     use comms::Transport;
 
     static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// The exit-time table, all four rows. The row that matters is the
+    /// supervised one: a daemon that respawned under systemd would put its
+    /// next generation outside the unit and leave the supervisor to start a
+    /// second beside it. The failed-run row matters almost as much — a
+    /// respawn after a failure is a loop on the failure.
+    #[test]
+    fn a_supervised_relaunch_is_an_exit_and_an_unsupervised_one_is_a_spawn() {
+        assert_eq!(successor(true, true, true), Successor::LeaveToSupervisor);
+        assert_eq!(successor(true, true, false), Successor::Respawn);
+        assert_eq!(
+            successor(true, false, false),
+            Successor::None,
+            "a stop that nobody asked to relaunch spawned a daemon"
+        );
+        assert_eq!(
+            successor(false, true, false),
+            Successor::None,
+            "a failed run respawned itself, which is a loop on the failure"
+        );
+    }
 
     #[test]
     fn restart_drift_skips_an_unbound_space_and_keeps_operation_progress() {
