@@ -933,6 +933,32 @@ jobs:
             curl -fsSL "$url" -o "release-archives/${url##*/}"
           done
           ls -l release-archives
+      # The install line is the same contract from the other end: it is listed
+      # in the signed manifest as bundle `installer`, and the sha256 it bakes
+      # must be the sha256 of the archives that manifest names. A drift here is
+      # a one-line install that refuses every download on exactly the machines
+      # it exists for — and it would drift silently, because nothing else reads
+      # the script.
+      - name: Assert the install line pins the archives this release publishes
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="$(jq -r '.artifacts.installer.linux.url // empty' manifest-payload.json)"
+          if [ -z "$url" ]; then
+            echo "::notice::the stable release predates the install line; nothing to check"
+            exit 0
+          fi
+          curl -fsSL "$url" -o install.sh
+          sh -n install.sh
+          for machine in x86_64 aarch64; do
+            archive="release-archives/lait-$machine-unknown-linux-gnu.tar.gz"
+            digest="$(sha256sum "$archive" | cut -d' ' -f1)"
+            grep -qF "$digest" install.sh || {
+              echo "::error::install.sh does not pin $archive"
+              exit 1
+            }
+          done
+
       - name: Assert the updater's path resolves inside them
         shell: bash
         env:

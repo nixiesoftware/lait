@@ -1,0 +1,75 @@
+#!/bin/sh
+# The lait install line, before its release's coordinates are filled in.
+#
+# `lait-feed installer` substitutes the version, the feed base URL and one
+# sha256 per Linux archive, and the result is published as
+# `releases/<version>/install.sh` — listed and digested in that release's
+# signed manifest as bundle `installer`.
+#
+# POSIX sh, deliberately: this runs before anything of ours is on the box, on
+# whatever /bin/sh a Pi image shipped. No bashisms, no jq, no b3sum — sha256sum
+# is on every box and b3sum is on none, which is why the digest baked here is
+# sha256 while the manifest stays blake3.
+#
+# What this pins is only the bootstrapper. The binary it untars resolves the
+# channel through the signed chain — pointer, manifest, size, digest — and
+# installs *that* release, so a stale install line in an old document installs
+# the current release anyway, and "could not verify" stays a refusal.
+set -eu
+
+version='@VERSION@'
+base='@BASE_URL@'
+
+fail() {
+  echo "lait: $1" >&2
+  exit 1
+}
+
+for tool in curl sha256sum tar; do
+  command -v "$tool" >/dev/null 2>&1 ||
+    fail "$tool is needed to install lait and is not on this machine"
+done
+
+system="$(uname -s)"
+[ "$system" = Linux ] ||
+  fail "the always-on service is a systemd unit, and this machine runs $system"
+
+# `uname -m` answers with the kernel's name for the machine, not a Rust triple.
+# An architecture with no digest here is a refusal: this release ships no
+# archive for it, and guessing one would be installing bytes nothing proves.
+machine="$(uname -m)"
+case "$machine" in
+  x86_64 | amd64)
+    target='x86_64-unknown-linux-gnu'
+    digest='@X86_64_SHA256@'
+    ;;
+  aarch64 | arm64)
+    target='aarch64-unknown-linux-gnu'
+    digest='@AARCH64_SHA256@'
+    ;;
+  *)
+    fail "lait $version ships no host archive for $machine; it builds x86_64 and aarch64"
+    ;;
+esac
+
+archive="lait-$target.tar.gz"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; exit 130' INT
+trap 'rm -rf "$work"; exit 143' TERM
+
+echo "lait: fetching $archive for $version" >&2
+curl -fsSL "$base/releases/$version/$archive" -o "$work/$archive" ||
+  fail "could not fetch $base/releases/$version/$archive"
+
+# The digest is compared in the shell rather than handed to `sha256sum -c` on
+# stdin, because this script's own stdin is the pipe it was delivered on.
+actual="$(sha256sum <"$work/$archive" | cut -d' ' -f1)"
+[ "$actual" = "$digest" ] ||
+  fail "$archive is not the byte set this install line was generated for; refusing to run it"
+
+tar xzf "$work/$archive" -C "$work"
+
+# `${1+"$@"}` rather than `"$@"`: with no arguments and `set -u`, older shells
+# treat the bare form as an unset variable and abort here instead of installing.
+"$work/lait-$target/lait" install ${1+"$@"}
