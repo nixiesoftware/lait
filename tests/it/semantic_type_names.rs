@@ -693,6 +693,11 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 // one is Space-less by construction.
                 "kinship",
                 "membership",
+                // The balanced PAKE the device-pairing ceremony spends.
+                // Public because a password-authenticated exchange is a
+                // mechanic, not a daemon detail — and naming it here is
+                // what keeps a second one from growing somewhere else.
+                "pake",
                 "policy",
                 "recovery",
                 // Owner-only, crash-safe storage for device-local secret

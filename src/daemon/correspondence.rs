@@ -680,8 +680,15 @@ impl CorrespondenceService {
                 })
                 .collect()
         });
+        // The exclusions are read from the file for the view, not from what
+        // the fan-out happens to remember: a decision a person made outlives
+        // this process, and a restart that drew it as "nothing has offered
+        // this yet" would be the fold the file exists to prevent.
         let spaces = match (facts, own.as_ref()) {
-            (Some(facts), Some(own)) => facts.view(own),
+            (Some(facts), Some(own)) => facts.view(
+                own,
+                &crate::daemon::replica::ReplicaPolicy::load(&self.identity),
+            ),
             _ => Vec::new(),
         };
         let origin = match plane.reach.origin() {

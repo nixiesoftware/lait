@@ -854,6 +854,15 @@ pub struct SpaceAuthority {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// What a Space answers when the device asked about is not one of this
+/// actor's — already revoked, or never added.
+///
+/// Shared rather than spelled twice: the fan-out reads this answer as "the
+/// race was already settled" and records nothing, and a caller matching a
+/// sentence this crate could reword at any time is a caller that silently
+/// starts recording a converged race as a refusal.
+pub const DEVICE_NOT_BOUND: &str = "that device is not bound to this actor";
+
 impl SpaceAuthority {
     pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock_recovering()
@@ -1689,7 +1698,7 @@ impl SpaceAuthority {
         let device = DeviceId::parse(device_str).ok_or_else(|| anyhow!("invalid device id"))?;
         let devices = inner.actor_plane().devices_of(&me);
         if !devices.contains(&device) {
-            return Err(anyhow!("that device is not bound to this actor"));
+            return Err(anyhow!("{DEVICE_NOT_BOUND}"));
         }
         if devices.len() <= 1 {
             return Err(anyhow!("refusing to revoke your only device"));
