@@ -78,9 +78,6 @@ Windows uses `lait-x86_64-pc-windows-msvc.zip`; macOS has both
 Cargo remains a source-build tool for contributors, not an installation or
 release channel.
 
-For a seed node, build and run the repository's `docker-compose.yml`. Data lives
-under the configured Lait home and must be preserved across container updates.
-
 ## First launch
 
 Astrolabe starts its matching local sidecar and opens its own native window.

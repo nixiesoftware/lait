@@ -124,9 +124,6 @@ impl Mode {
                 let mut home = None;
                 while let Some(flag) = args.next() {
                     match flag {
-                        // A deprecated no-op: the daemon is always-on, and the
-                        // flag is still in `Dockerfile`'s CMD.
-                        "--seed" => {}
                         "--home" => home = Some(next(&mut args, "--home")?),
                         other => return Err(unknown(other)),
                     }
@@ -356,5 +353,28 @@ mod tests {
             "the MCP head accepted a flag it has no use for"
         );
         assert!(parse(&["--nonsense"]).is_err());
+    }
+
+    /// `--seed` was a no-op kept because a container CMD spelled it. The
+    /// container is gone, and a flag that parses to nothing is a flag a unit
+    /// file can carry for years without anybody noticing it does nothing.
+    #[test]
+    fn the_daemon_no_longer_accepts_the_seed_flag_that_did_nothing() {
+        assert!(
+            parse(&["daemon", "--seed"]).is_err(),
+            "the daemon still swallows --seed"
+        );
+    }
+
+    /// The install line prints for a person at a terminal — a pairing code,
+    /// or where to look — and never a readiness line for a parser. Pinned
+    /// before the mode exists so that landing it cannot inherit `--json`
+    /// from the app arm by accident.
+    #[test]
+    fn the_install_line_refuses_json() {
+        assert!(
+            parse(&["install", "--json"]).is_err(),
+            "install accepted --json, which belongs to the app"
+        );
     }
 }

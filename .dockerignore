@@ -18,6 +18,4 @@ packaging/
 # The license obligation an image carries: kept in context so both this and
 # the Post seam image can COPY it.
 !THIRD-PARTY-NOTICES.md
-Dockerfile
-docker-compose.yml
 .dockerignore

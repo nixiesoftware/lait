@@ -8,6 +8,12 @@
 //! is the stub's act at a launch, and this half only ever leaves bytes on
 //! disk that a later launch may or may not accept.
 //!
+//! A headless service has no stub and no launch. There the daemon is the
+//! only thing positioned to apply — the same argument that lets macOS
+//! exchange its bundle here — so a service check swaps the proven binary
+//! over `<root>/bin/lait` and asks for a relaunch, and the relaunch is an
+//! exit: `Restart=` is what execs the new bytes, never this process.
+//!
 //! ## The standing is a fact on disk, not a message
 //!
 //! Every check writes what it learned to `update-standing.json` under the
@@ -202,30 +208,78 @@ pub fn live_bundle() -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 const BUNDLE_STAGING_DIR: &str = "client-update";
 
-/// Where this installation stages client releases, whichever shape it has.
-///
-/// A stub-managed installation stages inside its own root. A macOS bundle has
-/// no root — the person put the application where they wanted it — so it
-/// stages beside the identity and the two bundles are exchanged.
-///
-/// `None` is neither shape: a developer's build tree or a standalone `lait`,
-/// where staging has nowhere to go and inventing one would drop a client tree
-/// beside somebody's `target/`.
-pub fn staging_root_of(executable: &Path, identity: &Path) -> Option<PathBuf> {
-    if let Some(root) = install_root_of(executable) {
-        return Some(root);
-    }
-    #[cfg(target_os = "macos")]
-    if live_bundle_of(executable).is_some() {
-        return Some(identity.join(BUNDLE_STAGING_DIR));
-    }
-    let _ = identity;
-    None
+/// The directory the service layout keeps its binary in, under the root.
+const SERVICE_BIN_DIR: &str = "bin";
+
+/// The record the install line writes beside the service binary. Its presence
+/// is what makes `<root>/bin/lait` an installation rather than a binary
+/// somebody untarred into a directory that happened to be called `bin`.
+pub const SERVICE_INSTALLED_FILE: &str = "installed.json";
+
+/// The shape this daemon is installed in, which decides how a release is
+/// applied. Every shape is recognised whole, never by one landmark: "my
+/// parent is called `bin`" is true of half the binaries on a machine, and a
+/// developer's `target/debug/lait` must never be read as something to swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Installation {
+    /// A stub-managed client tree: `<root>/current/lait` with the stub at
+    /// `<root>/astrolabe`. Releases are staged into the root and the stub
+    /// applies them at the next launch.
+    StubTree { root: PathBuf },
+    /// A macOS application bundle. It has no root of its own — the person put
+    /// the `.app` where they wanted it — so releases stage beside the
+    /// identity and the daemon exchanges the bundles.
+    Bundle { staging: PathBuf },
+    /// A headless service: `<root>/bin/lait` (this executable) beside
+    /// `<root>/bin/installed.json`, and no client anywhere near it. Releases
+    /// are swapped over the binary and a relaunch is asked for.
+    Service { root: PathBuf },
 }
 
-/// [`staging_root_of`] for the running binary.
-pub fn staging_root(identity: &Path) -> Option<PathBuf> {
-    staging_root_of(&std::env::current_exe().ok()?, identity)
+impl Installation {
+    /// Which shape `executable` sits in, or `None` for a bare binary — a
+    /// developer's build tree, a tarball somebody untarred and ran — where a
+    /// release has nowhere to go and inventing somewhere would drop bytes
+    /// beside a `target/`.
+    ///
+    /// The service shape is refused when a client sits beside the binary,
+    /// because `custody_of` reads that as the client's installation and a
+    /// sidecar must never replace itself out from under its client.
+    pub fn of(executable: &Path, identity: &Path) -> Option<Self> {
+        if let Some(root) = install_root_of(executable) {
+            return Some(Self::StubTree { root });
+        }
+        #[cfg(target_os = "macos")]
+        if live_bundle_of(executable).is_some() {
+            return Some(Self::Bundle {
+                staging: identity.join(BUNDLE_STAGING_DIR),
+            });
+        }
+        let _ = identity;
+        let bin = executable.parent()?;
+        if bin.file_name()? != SERVICE_BIN_DIR
+            || !bin.join(SERVICE_INSTALLED_FILE).is_file()
+            || super::custody_of(executable) != super::Custody::SelfManaged
+        {
+            return None;
+        }
+        Some(Self::Service {
+            root: bin.parent()?.to_path_buf(),
+        })
+    }
+
+    /// The directory this shape writes releases under.
+    pub fn root(&self) -> &Path {
+        match self {
+            Self::StubTree { root } | Self::Service { root } => root,
+            Self::Bundle { staging } => staging,
+        }
+    }
+
+    /// The binary a service swaps.
+    fn service_binary(root: &Path) -> PathBuf {
+        root.join(SERVICE_BIN_DIR).join("lait")
+    }
 }
 
 /// Now, in unix seconds.
@@ -258,8 +312,9 @@ fn record(identity: &Path, standing: &Standing) {
     }
 }
 
-/// One check: resolve the channel, and stage the tree when it holds
-/// something newer than what is installed here.
+/// One check: resolve the channel, and take the release when it holds
+/// something newer than what is installed here — staged as a tree for a
+/// client shape, swapped over the binary for a service.
 ///
 /// Blocking (HTTP, archive extract, file writes), so callers on a reactor
 /// must hand it to `spawn_blocking`. Injected fetch and channel for the same
@@ -269,7 +324,7 @@ pub fn check_with<R, F>(
     fetch: F,
     current: &semver::Version,
     target: &str,
-    root: &Path,
+    installation: &Installation,
     previous: Option<Standing>,
 ) -> Standing
 where
@@ -307,41 +362,95 @@ where
         };
     }
 
-    // A tree already staged at this version is the answer; re-downloading it
-    // every period would be bytes spent to learn nothing.
-    if let Some(staged) = tree::staged_version(root) {
-        if staged == resolved.version.to_string() {
-            // The clock is *not* reset. A period that re-observes the same
-            // staged release must leave its age alone, or a release waiting a
-            // week would look four hours old at every check and the
-            // escalation would never escalate.
-            let at = previous
-                .and_then(|standing| match standing {
-                    Standing::Staged { version, at, .. } if version == staged => Some(at),
-                    _ => None,
-                })
-                .unwrap_or_else(now);
-            return Standing::Staged {
+    let version = resolved.version.to_string();
+    // The clock is *not* reset when a period re-observes a release it already
+    // took. A release waiting a week would otherwise look four hours old at
+    // every check, and the escalation would never escalate.
+    let taken_at = |version: &str| {
+        previous.and_then(|standing| match standing {
+            Standing::Staged {
                 version: staged,
                 at,
-            };
-        }
-    }
+            } if staged == version => Some(at),
+            _ => None,
+        })
+    };
 
-    match tree::stage_tree_with(fetch, &resolved, target, root) {
-        Ok(staged) => Standing::Staged {
-            version: staged.version,
-            at: now(),
-        },
-        Err(error) => {
-            // The release exists and this machine could not take it. That is
-            // "available", not "current" and not "could not ask" — the
-            // channel answered, and a later period may well succeed.
-            tracing::warn!(%error, "a release could not be staged");
-            Standing::Available {
-                version: resolved.version.to_string(),
+    match installation {
+        Installation::StubTree { root } | Installation::Bundle { staging: root } => {
+            // A tree already staged at this version is the answer;
+            // re-downloading it every period would be bytes spent to learn
+            // nothing.
+            if let Some(staged) = tree::staged_version(root) {
+                if staged == version {
+                    let at = taken_at(&staged).unwrap_or_else(now);
+                    return Standing::Staged {
+                        version: staged,
+                        at,
+                    };
+                }
+            }
+            match tree::stage_tree_with(fetch, &resolved, target, root) {
+                Ok(staged) => Standing::Staged {
+                    version: staged.version,
+                    at: now(),
+                },
+                Err(error) => {
+                    // The release exists and this machine could not take it.
+                    // That is "available", not "current" and not "could not
+                    // ask" — the channel answered, and a later period may
+                    // well succeed.
+                    tracing::warn!(%error, "a release could not be staged");
+                    Standing::Available { version }
+                }
             }
         }
+        Installation::Service { root } => {
+            // The binary was already swapped for this release and the
+            // relaunch is what has not happened. Asking again every period
+            // would download the same bytes to learn nothing.
+            if let Some(at) = taken_at(&version) {
+                return Standing::Staged { version, at };
+            }
+            match super::stage_with(fetch, &resolved, current, target) {
+                Ok(Some(binary)) => {
+                    match super::swap_at(&Installation::service_binary(root), &binary) {
+                        Ok(()) => Standing::Staged { version, at: now() },
+                        Err(error) => {
+                            tracing::warn!(%error, "a proven release could not be swapped in");
+                            Standing::Available { version }
+                        }
+                    }
+                }
+                // Unreachable — newness was decided above — but the answer
+                // that is true if it ever is.
+                Ok(None) => Standing::Current {
+                    channel_version: version,
+                },
+                Err(super::StageFailure::CouldNotTake(why)) => {
+                    tracing::warn!(%why, "a release could not be taken");
+                    Standing::Available { version }
+                }
+                // Bytes that did not prove are a fact about the host, not the
+                // network, and the binary on disk was never touched.
+                Err(super::StageFailure::Refused(why)) => Standing::Refused { why },
+            }
+        }
+    }
+}
+
+/// Whether this check is the one that swapped a service's binary: the
+/// standing became `Staged` at a version the previous one was not. A
+/// relaunch is asked for on that check and no other — a period that
+/// re-observes its own swap must not ask again, or a relaunch that failed
+/// would be asked for forever.
+fn swapped_this_check(previous: Option<&Standing>, standing: &Standing) -> bool {
+    match (previous, standing) {
+        (Some(Standing::Staged { version: was, .. }), Standing::Staged { version, .. }) => {
+            was != version
+        }
+        (_, Standing::Staged { .. }) => true,
+        _ => false,
     }
 }
 
@@ -400,34 +509,39 @@ fn check_worlds(identity: &Path) -> bool {
     staged
 }
 
-/// What one check came to: the client's standing, and whether a World moved.
+/// What one check came to: the client's standing, and whether a fresh
+/// daemon generation is needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
     pub standing: Standing,
-    /// A World release was staged and selected, and only a fresh daemon
-    /// generation can serve it.
-    pub worlds_staged: bool,
+    /// Only a fresh daemon generation can serve what this check took: a
+    /// World release was staged and selected, or a service's binary was
+    /// swapped and the running image is the old one.
+    pub relaunch: bool,
 }
 
 /// The ordinary check, against the real feed and the real host.
-fn check(identity: &Path, root: &Path) -> Checked {
+fn check(identity: &Path, installation: &Installation) -> Checked {
     let channel = feed::Channel::current();
     let current = semver::Version::parse(env!("LAIT_VERSION_SEMVER"))
         .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+    let previous = standing(identity);
     let standing = check_with(
         || feed::resolve(channel),
         feed::http_fetch,
         &current,
         env!("LAIT_TARGET"),
-        root,
-        standing(identity),
+        installation,
+        previous.clone(),
     );
     record(identity, &standing);
-    apply_if_this_platform_has_no_stub(root);
+    apply_if_this_platform_has_no_stub(installation.root());
+    let swapped = matches!(installation, Installation::Service { .. })
+        && swapped_this_check(previous.as_ref(), &standing);
     let worlds_staged = check_worlds(identity);
     Checked {
         standing,
-        worlds_staged,
+        relaunch: worlds_staged || swapped,
     }
 }
 
@@ -495,31 +609,32 @@ pub(super) fn draw() -> f64 {
     f64::from(u32::from_le_bytes(bytes)) / f64::from(u32::MAX)
 }
 
-/// What the loop does when a check staged a World release: the daemon's
-/// generation relaunch, supplied by the host because only it owns the
-/// endpoint. A `fn` would do but the host's relaunch captures state.
+/// What the loop does when a check found that a fresh generation is needed —
+/// a World release staged and selected, or a service binary swapped: the
+/// daemon's generation relaunch, supplied by the host because only it owns
+/// the endpoint. A `fn` would do but the host's relaunch captures state.
 pub type OnWorldsStaged = Arc<dyn Fn() + Send + Sync>;
 
 /// Run periodic staging until the daemon stops, checking early whenever
 /// `wake` is notified.
 ///
 /// Silent by construction: the only observable effects are the standing file
-/// and a staged tree. A daemon on a machine that is not a stub-managed
-/// installation never starts this at all — there is nowhere to stage to, and
-/// inventing one would put a client tree beside a developer's `target/`.
+/// and the taken release. A daemon on a machine that is not an installation
+/// never starts this at all — there is nowhere for a release to go, and
+/// inventing somewhere would put bytes beside a developer's `target/`.
 pub async fn serve(
     identity: PathBuf,
-    root: PathBuf,
+    installation: Installation,
     stop: tokio::sync::watch::Receiver<bool>,
     wake: Arc<Notify>,
-    on_worlds_staged: OnWorldsStaged,
+    on_relaunch_needed: OnWorldsStaged,
 ) {
     serve_checking(
         identity,
-        root,
+        installation,
         stop,
         wake,
-        on_worlds_staged,
+        on_relaunch_needed,
         CHECK_PERIOD,
         MAX_SPREAD,
         MIN_GAP,
@@ -539,16 +654,16 @@ pub async fn serve(
 #[allow(clippy::too_many_arguments)]
 async fn serve_checking(
     identity: PathBuf,
-    root: PathBuf,
+    installation: Installation,
     mut stop: tokio::sync::watch::Receiver<bool>,
     wake: Arc<Notify>,
-    on_worlds_staged: OnWorldsStaged,
+    on_relaunch_needed: OnWorldsStaged,
     period: Duration,
     spread: Duration,
     gap: Duration,
-    check: fn(&Path, &Path) -> Checked,
+    check: fn(&Path, &Installation) -> Checked,
 ) {
-    tracing::info!(root = %root.display(), "staging updates for this installation");
+    tracing::info!(?installation, "staging updates for this installation");
     // The first check is spread too, so a fleet restarted together by a
     // reboot or a deploy does not arrive at the host together either.
     let mut delay = spread.mul_f64(draw()).min(period);
@@ -575,13 +690,13 @@ async fn serve_checking(
             }
             tracing::info!("a newer pointer was announced; checking now rather than on the period");
         }
-        let (identity, root) = (identity.clone(), root.clone());
-        match tokio::task::spawn_blocking(move || check(&identity, &root)).await {
+        let (identity, installation) = (identity.clone(), installation.clone());
+        match tokio::task::spawn_blocking(move || check(&identity, &installation)).await {
             Ok(checked) => {
                 tracing::debug!(standing = ?checked.standing, "channel checked");
-                if checked.worlds_staged {
-                    tracing::info!("a World release is selected; relaunching the daemon generation to serve it");
-                    on_worlds_staged();
+                if checked.relaunch {
+                    tracing::info!("a fresh generation is needed to serve what was taken; relaunching the daemon");
+                    on_relaunch_needed();
                 }
             }
             Err(error) => tracing::warn!(%error, "the staging check panicked"),
@@ -594,6 +709,13 @@ async fn serve_checking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The client shape most checks are written against.
+    fn stub_tree(root: &Path) -> Installation {
+        Installation::StubTree {
+            root: root.to_path_buf(),
+        }
+    }
 
     fn resolved(version: &str) -> feed::Resolved {
         feed::Resolved {
@@ -618,7 +740,7 @@ mod tests {
             |_, _| panic!("nothing may be fetched when there is nothing newer"),
             &semver::Version::parse("0.8.0").unwrap(),
             "x86_64-unknown-linux-gnu",
-            root.path(),
+            &stub_tree(root.path()),
             None,
         );
         assert_eq!(
@@ -667,7 +789,7 @@ mod tests {
                 |_, _| panic!("nothing may be fetched when the channel did not resolve"),
                 &semver::Version::parse("0.8.0").unwrap(),
                 "x86_64-unknown-linux-gnu",
-                root.path(),
+                &stub_tree(root.path()),
                 None,
             );
             assert_eq!(standing, expected);
@@ -684,7 +806,7 @@ mod tests {
             |_, _| panic!("an absent artifact is never fetched"),
             &semver::Version::parse("0.8.0").unwrap(),
             "x86_64-unknown-linux-gnu",
-            root.path(),
+            &stub_tree(root.path()),
             None,
         );
         assert_eq!(
@@ -773,7 +895,7 @@ mod tests {
             |_, _| panic!("an already-staged release must not be downloaded again"),
             &semver::Version::parse("0.8.0").unwrap(),
             "x86_64-unknown-linux-gnu",
-            root.path(),
+            &stub_tree(root.path()),
             Some(Standing::Staged {
                 version: "0.9.0".into(),
                 at: long_ago,
@@ -794,36 +916,65 @@ mod tests {
         );
     }
 
-    /// The application is found by asking where this daemon runs from, not by
-    /// Both installation shapes reach a staging root, and nothing else does.
+    /// Every shape is recognised whole, and nothing else is a shape at all.
     ///
-    /// The stub layout was once the only shape recognized, so a macOS bundle
+    /// The stub layout was once the only one recognised, so a macOS bundle
     /// answered `None` and its daemon never started the watcher — every
-    /// component of the apply path correct, and unreachable. This asserts the
-    /// composition rather than the parts.
+    /// component of the apply path correct, and unreachable. The service
+    /// shape has the opposite failure available to it: a binary whose parent
+    /// happens to be called `bin` must not be swapped over, so the record
+    /// beside it is required, and a client beside it is a refusal.
     #[test]
-    fn every_installed_shape_has_somewhere_to_stage_and_a_build_tree_does_not() {
+    fn every_installed_shape_is_one_shape_and_a_bare_binary_is_none() {
         let root = tempfile::tempdir().expect("a scratch dir");
         let identity = root.path().join("identity");
+        let stub_name = if cfg!(windows) {
+            "astrolabe.exe"
+        } else {
+            "astrolabe"
+        };
+
+        // A service: `bin/lait` beside `bin/installed.json`.
+        let service = root.path().join("var").join("lib").join("lait");
+        let bin = service.join(SERVICE_BIN_DIR);
+        std::fs::create_dir_all(&bin).expect("the service bin");
+        let lait = bin.join("lait");
+        std::fs::write(&lait, b"the service binary").expect("stage lait");
+        assert_eq!(
+            Installation::of(&lait, &identity),
+            None,
+            "a binary in a directory called bin was read as a service"
+        );
+        std::fs::write(bin.join(SERVICE_INSTALLED_FILE), b"{}").expect("the record");
+        assert_eq!(
+            Installation::of(&lait, &identity),
+            Some(Installation::Service { root: service }),
+            "the whole service shape was not recognised"
+        );
+        // A client beside the binary makes it that client's sidecar, and a
+        // sidecar never replaces itself out from under its client.
+        std::fs::write(bin.join(stub_name), b"a stray client").expect("stage the stray");
+        assert_eq!(
+            Installation::of(&lait, &identity),
+            None,
+            "a service root with a client beside the binary was still a service"
+        );
 
         // A stub-managed installation stages inside its own root.
         let install = root.path().join("Programs").join("Astrolabe");
         std::fs::create_dir_all(install.join(tree::LIVE_DIR)).expect("the live tree");
-        let stub = install.join(if cfg!(windows) {
-            "astrolabe.exe"
-        } else {
-            "astrolabe"
-        });
-        std::fs::write(&stub, b"the stub").expect("stage the stub");
+        std::fs::write(install.join(stub_name), b"the stub").expect("stage the stub");
         assert_eq!(
-            staging_root_of(&install.join(tree::LIVE_DIR).join("lait"), &identity),
-            Some(install),
+            Installation::of(&install.join(tree::LIVE_DIR).join("lait"), &identity),
+            Some(Installation::StubTree {
+                root: install.clone()
+            }),
             "a stub-managed installation did not find its own root"
         );
 
-        // A developer's build is neither shape and must stage nowhere.
+        // A developer's build is no shape and must stage nowhere.
         assert_eq!(
-            staging_root_of(
+            Installation::of(
                 &root.path().join("target").join("debug").join("lait"),
                 &identity
             ),
@@ -834,7 +985,7 @@ mod tests {
         // A macOS bundle has no root of its own and stages beside the identity.
         #[cfg(target_os = "macos")]
         assert_eq!(
-            staging_root_of(
+            Installation::of(
                 &root
                     .path()
                     .join("Astrolabe.app")
@@ -843,11 +994,139 @@ mod tests {
                     .join("lait"),
                 &identity,
             ),
-            Some(identity.join(BUNDLE_STAGING_DIR)),
+            Some(Installation::Bundle {
+                staging: identity.join(BUNDLE_STAGING_DIR)
+            }),
             "a bundle installation had nowhere to stage, so it would never update"
         );
     }
 
+    /// The service check, end to end through the same sealed feed the
+    /// single-binary chain is proven against: the signed pointer names the
+    /// manifest, the manifest the artifact, and the bytes that come out of
+    /// the archive are the bytes that land at `bin/lait`. Then the two rules
+    /// a service adds — the relaunch is asked for on the check that swapped
+    /// and on no other, and bytes that do not prove leave the binary alone.
+    #[test]
+    fn a_service_check_swaps_the_binary_and_asks_for_one_relaunch() {
+        use crate::update::tests::{sealed_feed, windows_release_zip};
+        let target = "x86_64-pc-windows-msvc";
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        let running = semver::Version::parse("0.8.0").unwrap();
+
+        let root = tempfile::tempdir().expect("a service root");
+        let installation = Installation::Service {
+            root: root.path().to_path_buf(),
+        };
+        let bin = root.path().join(SERVICE_BIN_DIR);
+        std::fs::create_dir_all(&bin).expect("the service bin");
+        let lait = bin.join("lait");
+        std::fs::write(&lait, b"the 0.8.0 binary that is running").expect("the live binary");
+
+        let binary = b"lait v0.9.0 as the maintainer built";
+        let archive = windows_release_zip(binary);
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &archive, archive.len() as u64, &digest);
+        let fetch = |u: &str| {
+            objects
+                .get(u)
+                .cloned()
+                .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+        };
+        let resolve = || {
+            feed::resolve_with(
+                fetch,
+                feed::Channel::Test,
+                "https://feed.example",
+                &[pubkey],
+                None,
+            )
+        };
+
+        let first = check_with(
+            resolve,
+            |u, _| fetch(u),
+            &running,
+            target,
+            &installation,
+            None,
+        );
+        assert_eq!(
+            std::fs::read(&lait).expect("the binary is still at its path"),
+            binary,
+            "the bytes at bin/lait must be exactly what the archive carried"
+        );
+        assert_eq!(first.staged_version(), Some("0.9.0"));
+        assert!(
+            swapped_this_check(None, &first),
+            "the check that swapped the binary did not ask for a relaunch"
+        );
+
+        // The next period, still running the old image: the swap is on disk,
+        // nothing is downloaded again, and the relaunch is not asked twice.
+        let second = check_with(
+            resolve,
+            |_, _| panic!("a release already swapped in must not be downloaded again"),
+            &running,
+            target,
+            &installation,
+            Some(first.clone()),
+        );
+        assert_eq!(second, first, "re-observing the swap changed the standing");
+        assert!(
+            !swapped_this_check(Some(&first), &second),
+            "a period that re-observed its own swap asked for another relaunch"
+        );
+
+        // A host serving different bytes of the same length: the digest is
+        // the check that refuses it, the binary is untouched, and the answer
+        // is a refusal rather than "try again later".
+        let tampered = windows_release_zip(b"lait v0.9.0 with a back door added!");
+        assert_eq!(
+            tampered.len(),
+            archive.len(),
+            "the fixture must isolate the digest check"
+        );
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &tampered, archive.len() as u64, &digest);
+        let fetch = |u: &str| {
+            objects
+                .get(u)
+                .cloned()
+                .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+        };
+        std::fs::write(&lait, b"the 0.8.0 binary that is running").expect("the live binary");
+        let refused = check_with(
+            || {
+                feed::resolve_with(
+                    fetch,
+                    feed::Channel::Test,
+                    "https://feed.example",
+                    &[pubkey],
+                    None,
+                )
+            },
+            |u, _| fetch(u),
+            &running,
+            target,
+            &installation,
+            None,
+        );
+        assert!(
+            matches!(&refused, Standing::Refused { why } if why.contains("digest verification failed")),
+            "tampered bytes were not refused by name: {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&lait).expect("the binary is still at its path"),
+            b"the 0.8.0 binary that is running",
+            "bytes that did not prove reached the binary"
+        );
+        assert!(
+            !swapped_this_check(None, &refused),
+            "a refusal asked for a relaunch"
+        );
+    }
+
+    /// The application is found by asking where this daemon runs from, not by
     /// assuming `/Applications`: the person put the bundle where they wanted
     /// it, and a rule that guessed would update a copy nobody launches.
     #[cfg(target_os = "macos")]
@@ -903,25 +1182,25 @@ mod tests {
     /// pointer, which is what keeps `spawn_blocking` free of a generic.
     static REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    fn counting_check(_identity: &Path, _root: &Path) -> Checked {
+    fn counting_check(_identity: &Path, _installation: &Installation) -> Checked {
         REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Checked {
             standing: Standing::Current {
                 channel_version: "0.0.0".into(),
             },
-            worlds_staged: false,
+            relaunch: false,
         }
     }
 
     /// A check that staged a World, once: the first call moves, the rest do
     /// not, which is what a real channel does after a relaunch.
-    fn staging_check(_identity: &Path, _root: &Path) -> Checked {
+    fn staging_check(_identity: &Path, _installation: &Installation) -> Checked {
         let first = REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
         Checked {
             standing: Standing::Current {
                 channel_version: "0.0.0".into(),
             },
-            worlds_staged: first,
+            relaunch: first,
         }
     }
 
@@ -954,7 +1233,7 @@ mod tests {
 
         let loops = tokio::spawn(serve_checking(
             identity.path().to_path_buf(),
-            root.path().to_path_buf(),
+            stub_tree(root.path()),
             receiver,
             Arc::new(Notify::new()),
             nothing_on_staged(),
@@ -1001,7 +1280,7 @@ mod tests {
 
         let loops = tokio::spawn(serve_checking(
             identity.path().to_path_buf(),
-            root.path().to_path_buf(),
+            stub_tree(root.path()),
             receiver,
             wake.clone(),
             nothing_on_staged(),
@@ -1072,7 +1351,7 @@ mod tests {
 
         let loops = tokio::spawn(serve_checking(
             identity.path().to_path_buf(),
-            root.path().to_path_buf(),
+            stub_tree(root.path()),
             receiver,
             Arc::new(Notify::new()),
             on_staged,
