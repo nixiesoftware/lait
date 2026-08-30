@@ -109,8 +109,11 @@ pub fn is_read(req: &Request) -> bool {
         // passphrase…
         | Request::SpaceCustodyExport { .. }
         | Request::SpaceCustodyImport { .. }
-        // …joining and inviting, which act *as* an identity on the wire…
+        // …joining and inviting, which act *as* an identity on the wire, and
+        // minting Coordinates, which signs a ticket as this device even though
+        // the ticket admits nobody…
         | Request::Invite { .. }
+        | Request::Coordinates
         | Request::Join { .. }
         | Request::Connect { .. }
         // …sync drives convergence on the wire (like connect), not a read…
@@ -319,6 +322,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceInvite
+        | Request::Coordinates
         | Request::DeviceAdd { .. }
         | Request::DeviceRevoke { .. }
         | Request::DeviceList
@@ -440,6 +444,15 @@ mod tests {
         assert!(is_host_plane(&confirm));
         assert!(!is_read(&enter));
         assert!(!is_read(&confirm));
+    }
+
+    /// Minting Coordinates signs as this device, so it is not a read even
+    /// though the ticket admits nobody; and it names a Space, so it takes
+    /// the Space route and not the host plane.
+    #[test]
+    fn minting_coordinates_is_a_space_act_and_not_a_read() {
+        assert!(!is_read(&Request::Coordinates));
+        assert!(!is_host_plane(&Request::Coordinates));
     }
 
     /// The book is identity-scoped: every Book verb rides the host plane, its

@@ -851,6 +851,14 @@ pub enum Request {
     /// Print a device-enrollment token for adding another device to *this*
     /// actor (lait/actor/1). The new machine consumes it with `device accept`.
     DeviceInvite,
+    /// Mint an admission-less ticket for this Space: where it is and who
+    /// signs for it here, and nothing that admits anyone. Membership standing
+    /// is all it needs — `Invite` mints a capability and takes an admin, and
+    /// what it admits is a *new actor*, which is the wrong shape for a device
+    /// that is already this person's. A pending joiner is refused: a ticket
+    /// signed by a device with no standing would send another device to a
+    /// Station that cannot seal it anything.
+    Coordinates,
     /// Add a device to our actor from its consent blob (produced by
     /// `device accept`), sealing it the space key.
     DeviceAdd {
@@ -1917,6 +1925,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceInvite
+        | Request::Coordinates
         | Request::DeviceAdd { .. }
         | Request::DeviceRevoke { .. }
         | Request::DeviceList
@@ -2185,6 +2194,7 @@ pub fn representative_requests() -> Vec<Request> {
         Request::KeyRotate,
         Request::InviteRevoke { invite: s() },
         Request::DeviceInvite,
+        Request::Coordinates,
         Request::DeviceAdd { consent: s() },
         Request::DeviceRevoke { device: s() },
         Request::DeviceList,
@@ -2611,6 +2621,15 @@ pub enum Response {
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,
+    },
+    /// Reply to [`Request::Coordinates`]: the rendered `lait://join/…` link,
+    /// and beside it the actor and Space it was minted for — so the device it
+    /// is carried to can check the offer names the Space it says it does
+    /// before it parses anything.
+    Coordinates {
+        link: String,
+        actor: String,
+        space: String,
     },
     Members {
         members: Vec<MemberDto>,

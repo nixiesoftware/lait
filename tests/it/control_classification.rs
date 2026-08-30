@@ -13,6 +13,7 @@ fn every_request_variant_has_a_terminal_owner() {
     // intended mapping for representatives of every owner.
     assert_eq!(classify(&Request::Members), RequestOwner::Mechanics);
     assert_eq!(classify(&Request::DeviceList), RequestOwner::Mechanics);
+    assert_eq!(classify(&Request::Coordinates), RequestOwner::Mechanics);
     assert_eq!(
         classify(&Request::SpaceReshare {
             participants: vec![],
