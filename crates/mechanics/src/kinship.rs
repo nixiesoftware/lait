@@ -282,6 +282,25 @@ pub enum Claim {
         /// A line of self-description. May be empty.
         detail: String,
     },
+    /// The subject's publication was **recorded**: leaf `leaf` sits at index
+    /// `entry` of the signer's chronicle at `size` entries under `root`.
+    ///
+    /// A mark, and never anything more. It says exactly what a
+    /// [`crate::chronicle::Head`] says — which entries exist, in which order —
+    /// so it is an attestation by whoever signed it that they wrote something
+    /// down, not a statement that what they wrote is true and not a licence
+    /// for the subject to do anything. See [`crate::chronicle::verify_mark`].
+    Chronicled {
+        /// The chronicle's entry count at the moment of marking.
+        size: u64,
+        /// The chronicle's root at that size.
+        root: [u8; 32],
+        /// The marked entry's index. Always `< size`.
+        entry: u64,
+        /// The marked entry's leaf hash, so a reader proves inclusion of
+        /// *that* rather than of whatever it was handed alongside.
+        leaf: [u8; 32],
+    },
 }
 
 impl Claim {
@@ -291,6 +310,7 @@ impl Claim {
             Self::Called(_) => b"called",
             Self::Sponsors(_) => b"sponsors",
             Self::Portrait { .. } => b"portrait",
+            Self::Chronicled { .. } => b"chronicled",
         }
     }
 
@@ -313,6 +333,19 @@ impl Claim {
                 framed(&mut out, detail.as_bytes());
                 out
             }
+            Self::Chronicled {
+                size,
+                root,
+                entry,
+                leaf,
+            } => {
+                let mut out = Vec::with_capacity(112);
+                framed(&mut out, &size.to_be_bytes());
+                framed(&mut out, &root[..]);
+                framed(&mut out, &entry.to_be_bytes());
+                framed(&mut out, &leaf[..]);
+                out
+            }
         }
     }
 
@@ -329,6 +362,15 @@ impl Claim {
             Self::Portrait { detail, .. } => {
                 if detail.len() > MAX_DETAIL_BYTES {
                     return Err(Refusal::Bound("detail bytes"));
+                }
+            }
+            Self::Chronicled { size, entry, .. } => {
+                // An entry at or past the size it claims to sit in proves
+                // nothing and cannot be shown to: `verify_inclusion` would
+                // refuse it as out of range, so refuse it at the signature
+                // instead and never mint one.
+                if entry >= size {
+                    return Err(Refusal::Malformed("chronicle entry"));
                 }
             }
             Self::Profile(_) | Self::Sponsors(_) => {}
