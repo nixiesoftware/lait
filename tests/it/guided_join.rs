@@ -650,3 +650,59 @@ fn entering_refuses_a_directory_bound_to_another_space() {
     let _ = std::fs::remove_dir_all(&c_home);
     let _ = std::fs::remove_dir_all(&join_cfg);
 }
+
+/// Entering with no store directory named lands where this device already
+/// holds the Space, not in a fresh allocation.
+///
+/// The first entry names a directory, the way a repo-bound store would. The
+/// second names none — the shape the Welcome form and Astrolabe now send —
+/// and must come back with the *same* store: a re-join is idempotent, and a
+/// second replica of one Space on one device is the two-stores defect. The
+/// inviter is offline throughout, which is fine: the store is bootstrapped
+/// either way, and only admission waits.
+#[test]
+fn entering_without_a_home_reuses_the_store_this_device_already_holds() {
+    let a_home = unique("rejoin-a");
+    let (_mech_a, coords_a) =
+        crate::world_fixture::form_space(&a_home, &FOUNDER_SEED, "Space A").unwrap();
+    let link = coords_a.render();
+
+    let cfg = unique("rejoin-cfg");
+    let first_store = cfg.join("repo").join(".lait");
+    let head = crate::head::Head::start(&cfg, None);
+
+    let (status, first) = head.host(serde_json::json!({
+        "cmd": "host_space_enter",
+        "link": link,
+        "home": first_store.display().to_string(),
+    }));
+    assert_eq!(status, 200, "first entry: {first}");
+    assert_eq!(first["host"], "entered", "{first}");
+    assert_eq!(first["fresh"], true, "{first}");
+
+    let (status, again) = head.host(serde_json::json!({
+        "cmd": "host_space_enter",
+        "link": link,
+    }));
+    assert_eq!(status, 200, "re-entry: {again}");
+    assert_eq!(again["host"], "entered", "{again}");
+    assert_eq!(
+        again["fresh"], false,
+        "a re-join must find the store already bound: {again}"
+    );
+    assert_eq!(
+        crate::head::canonical(std::path::Path::new(again["home"].as_str().unwrap())),
+        crate::head::canonical(&first_store),
+        "no home named must mean the store this device already holds, not a new one: {again}"
+    );
+    assert!(
+        !cfg.join("spaces")
+            .join(again["space"].as_str().unwrap())
+            .exists(),
+        "nothing may be allocated under the spaces root for a Space already held"
+    );
+
+    head.stop();
+    let _ = std::fs::remove_dir_all(&a_home);
+    let _ = std::fs::remove_dir_all(&cfg);
+}

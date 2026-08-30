@@ -224,9 +224,10 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
         Ok(node) => node,
         Err(reason) => return EnterOutcome::Refused { reason },
     };
-    // The store lands under spaces_root/<slug>, the same shape the desktop
-    // Welcome flow suggests: readable, and disambiguated by the space id so
-    // two invites with one nick never collide.
+    // The store lands under spaces_root/<slug>, disambiguated by the space id
+    // so two invites with one nick never collide. The desktop flow names no
+    // directory at all and lets the daemon place the store by id; this caller
+    // still names one, and nothing here depends on the two agreeing.
     let facts = match SignedCoordinates::parse_link(&link).and_then(|c| c.verify()) {
         Ok(verified) => verified,
         Err(invalid) => {
@@ -246,7 +247,7 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
     let original_link = link.clone();
     let request = Request::HostSpaceEnter {
         link,
-        home: home.to_string_lossy().into_owned(),
+        home: Some(home.to_string_lossy().into_owned()),
         nick,
     };
     let response = node.rt.block_on(async {

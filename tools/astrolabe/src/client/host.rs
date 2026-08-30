@@ -84,25 +84,25 @@ impl Client {
         }
     }
 
-    /// Found a new Space in `home`.
+    /// Found a new Space — in `home` if one is named, else where the daemon
+    /// places it (under its spaces root, by the Space's id).
     ///
     /// Nothing is created implicitly. A person with a fresh install has no
     /// Space and no World head, and this is the call that ends that — which is
-    /// exactly why it cannot be a page.
+    /// exactly why it cannot be a page. Placement is not the person's question:
+    /// a store's path is a fact the daemon reports afterwards, not an input a
+    /// founding form has to extract from somebody.
     pub async fn space_found(
         &self,
-        home: &str,
+        home: Option<&str>,
         name: &str,
         nick: Option<String>,
     ) -> ClientResult<()> {
-        if home.trim().is_empty() {
-            return Err(ClientError::invalid("a new Space needs a store directory"));
-        }
         if name.trim().is_empty() {
             return Err(ClientError::invalid("a new Space needs a name"));
         }
         self.host_ok(Request::HostSpaceFound {
-            home: home.to_owned(),
+            home: home.map(str::to_owned),
             name: name.to_owned(),
             nick,
         })
@@ -116,20 +116,15 @@ impl Client {
     pub async fn space_enter(
         &self,
         link: &str,
-        home: &str,
+        home: Option<&str>,
         nick: Option<String>,
     ) -> ClientResult<()> {
         if link.trim().is_empty() {
             return Err(ClientError::invalid("entering a Space needs an invite"));
         }
-        if home.trim().is_empty() {
-            return Err(ClientError::invalid(
-                "entering a Space needs a store directory",
-            ));
-        }
         self.host_ok(Request::HostSpaceEnter {
             link: link.trim().to_owned(),
-            home: home.to_owned(),
+            home: home.map(str::to_owned),
             nick,
         })
         .await
