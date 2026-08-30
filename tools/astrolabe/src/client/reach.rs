@@ -13,7 +13,7 @@
 
 use lait::control::{
     ControlRoute, InterfaceView, MarkerView, OriginView, OwnDeviceView, ReachView, Request,
-    Response,
+    Response, SpaceFanout,
 };
 
 use crate::client::{Client, ClientError, ClientResult};
@@ -47,6 +47,11 @@ pub struct ProfileSnapshot {
     pub markers: Vec<MarkerView>,
     /// The tunnel interface on this machine, when a net plane is mounted.
     pub interface: Option<InterfaceView>,
+    /// One row per Space this daemon holds, with where the last offer of it
+    /// to each other device stood. Carried beside the devices because the
+    /// two only read against each other: which Spaces a device holds is on
+    /// the device row, and *why* it does not hold one is here.
+    pub spaces: Vec<SpaceFanout>,
 }
 
 impl Client {
@@ -61,6 +66,7 @@ impl Client {
             device_set_unknown: view.device_set_unknown,
             markers: view.markers,
             interface: view.interface,
+            spaces: view.spaces,
         })
     }
 

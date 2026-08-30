@@ -992,6 +992,32 @@ pub enum Request {
         pairing: String,
         accept: bool,
     },
+    /// Retire one of this profile's devices, from another one: the signed
+    /// kinship retirement, and then a signed actor op per Space that de-lists
+    /// it there. Two acts on purpose — kinship says who is a device of this
+    /// person and authorizes nothing, so a Space stops naming a device only
+    /// because a device of its actor signed that it should.
+    ///
+    /// Refused when it would leave a Space this daemon holds with no device
+    /// to administer it, naming the Space: a Space nobody can rotate the key
+    /// of is a Space the retired machine can go on reading forever.
+    DeviceRetire {
+        device: String,
+    },
+    /// Exclude one Space from one device of this profile, or lift an
+    /// exclusion.
+    ///
+    /// Holding everything is the default and nothing is opted into; this is
+    /// the one thing a person can say against it. Excluding forgets the
+    /// Space on that device and de-lists it from the actor there — removal,
+    /// never deletion: the store's bytes stay where they are. Lifting it is
+    /// carried to the device too, and the Space goes back through the same
+    /// consent that put it there the first time.
+    HostReplicaExclude {
+        device: String,
+        space: String,
+        excluded: bool,
+    },
     /// Identity-scoped address book. Daemon route only; never places an Orbit.
     /// The book is the one namer: member and presence rows leave the Station
     /// bare and the daemon decorates them from Cards — the `MemberAlias` verb
@@ -2012,6 +2038,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::CorrespondInvite { .. }
         | Request::DevicePairEnter { .. }
         | Request::DevicePairConfirm { .. }
+        | Request::DeviceRetire { .. }
+        | Request::HostReplicaExclude { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -2359,6 +2387,12 @@ pub fn representative_requests() -> Vec<Request> {
             pairing: s(),
             accept: false,
         },
+        Request::DeviceRetire { device: s() },
+        Request::HostReplicaExclude {
+            device: s(),
+            space: s(),
+            excluded: false,
+        },
     ]
 }
 
@@ -2467,6 +2501,11 @@ pub struct ReachView {
     pub devices: Vec<OwnDeviceView>,
     /// The device set has not been restored on this daemon. Never folded
     /// into `devices` being empty: no profile has no devices.
+    ///
+    /// A retirement never sets this, including a retirement of *this* device
+    /// by another one: the set is then known and simply does not name `me`,
+    /// which is a fact worth drawing and not an unread list. What sets it is
+    /// a daemon whose plane never stood up.
     #[serde(default)]
     pub device_set_unknown: bool,
     /// Every Space this daemon holds, and where the fan-out to each own
@@ -2621,6 +2660,12 @@ pub enum FanoutStanding {
     Deferred { why: String },
     /// The device did not answer. Asked again at `retry_at_ms`.
     CouldNotAsk { why: String, retry_at_ms: u64 },
+    /// A person said this Space is not to be held on this device. Kept apart
+    /// from `Declined` — which is the device's own answer — because only one
+    /// of them is a decision somebody made here and can take back. `told` is
+    /// whether the device has heard it; until it has, the decision stands on
+    /// this side and is still owed to that machine.
+    Excluded { told: bool },
 }
 
 /// One marker this identity follows, as a surface reads it.
@@ -3127,6 +3172,19 @@ pub enum HostReply {
     },
     /// The device is one of this profile's now.
     DevicePaired { device: String },
+    /// A device is retired, and what that cost per Space.
+    ///
+    /// `revoked_in` is the Spaces whose ledger stopped naming it — signed
+    /// here, one op each. `unfenced` is the subset where nobody could rotate
+    /// the Space key afterwards, so the retired device can still read what it
+    /// already held: reported per Space rather than folded into the first
+    /// list, because "de-listed" and "de-listed and fenced" are different
+    /// facts and only one of them ends the access.
+    DeviceRetired {
+        device: String,
+        revoked_in: Vec<String>,
+        unfenced: Vec<String>,
+    },
     /// Orientation for the identity this daemon runs as.
     Context {
         /// The build answering, in the form releases are identified by

@@ -270,7 +270,37 @@ export interface ProfileFacts {
    * because a marker is silent about a device.
    */
   markers: Marker[];
+  /**
+   * One row per Space this machine holds, and where the last offer of it to
+   * each other device stood. The only place a surface can tell a decision
+   * ("not on that machine") from a failure ("that machine could not be
+   * asked") from an absence ("nothing has offered it yet") — three things
+   * that look identical on a device row.
+   */
+  spaces: SpaceRow[];
 }
+
+/** One Space this machine holds, as the other devices stand towards it. */
+export interface SpaceRow {
+  space: string;
+  /** The devices the Space's own list names. Never inferred from an offer. */
+  on: string[];
+  standings: { device: string; standing: SpaceStanding }[];
+}
+
+/**
+ * Six answers, and no row at all is a seventh: nothing has offered it yet.
+ * `excluded` is a person's decision and `declined` is the device's own
+ * answer; `couldNotAsk` is neither, and drawing it as either reports a
+ * network as something somebody chose.
+ */
+export type SpaceStanding =
+  | { kind: "held" }
+  | { kind: "declined"; why: string }
+  | { kind: "refused"; why: string }
+  | { kind: "deferred"; why: string }
+  | { kind: "couldNotAsk"; why: string }
+  | { kind: "excluded"; told: boolean };
 
 /**
  * One marker: something that keeps a record of what it was told and signs
@@ -459,6 +489,8 @@ export type ClientAction =
   | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
   | { type: "devicePairEnter"; code: string } | { type: "devicePairConfirm"; pairing: string; accept: boolean }
+  | { type: "deviceRetire"; device: string }
+  | { type: "replicaExclude"; device: string; space: string; excluded: boolean }
   | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
   | { type: "openInvitation"; message: string }
   | { type: "sendInvitation"; to: string; link: string }
@@ -515,6 +547,11 @@ export const actionKey = {
   // key per answer would leave the other control live while this one was in
   // flight.
   devicePairConfirm: (pairing: string) => `device.pair.confirm:${pairing}`,
+  deviceRetire: (device: string) => `device.retire:${device}`,
+  // One key for both answers about one pair: excluding and putting back are
+  // two answers to one question, and a key per answer would leave the other
+  // control live while this one was in flight.
+  replicaExclude: (space: string, device: string) => `space.exclude:${space}:${device}`,
   // Spelled to match `Action::key` in tools/astrolabe/src/runtime.rs. A key that
   // disagrees does not fail — it silently never matches `inFlight`, so the
   // control stays live through its own action and can be pressed twice.
@@ -584,6 +621,8 @@ export function keyFor(action: ClientAction): string {
     case "collectMail": return actionKey.collectMail;
     case "devicePairEnter": return actionKey.devicePairEnter;
     case "devicePairConfirm": return actionKey.devicePairConfirm(action.pairing);
+    case "deviceRetire": return actionKey.deviceRetire(action.device);
+    case "replicaExclude": return actionKey.replicaExclude(action.space, action.device);
     case "blockSender": return actionKey.blockSender(action.person);
     case "acceptContact": return actionKey.acceptContact(action.person);
     case "openConversation": return actionKey.openConversation(action.person);
@@ -1248,6 +1287,10 @@ export const fixtureClientView: ClientView = {
       { marker: "https://quiet.example", standing: { kind: "couldNotAsk" } },
     ],
     interface: { kind: "notPermitted" },
+    spaces: [
+      { space: "orb_fixture", on: ["dev_this", "dev_pi"], standings: [{ device: "dev_pi", standing: { kind: "held" } }] },
+      { space: "orb_quiet", on: ["dev_this"], standings: [{ device: "dev_pi", standing: { kind: "excluded", told: true } }] },
+    ],
     pairing: null,
     offers: [{
       pairing: "pai_fixture",

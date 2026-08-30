@@ -15,6 +15,7 @@ pub(crate) mod markers;
 pub(crate) mod netplane;
 pub(crate) mod own_routes;
 pub(crate) mod pair;
+pub(crate) mod replica;
 pub(crate) mod scope;
 pub(crate) mod sponsorship;
 pub(crate) mod transport_hub;

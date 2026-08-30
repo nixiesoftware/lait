@@ -213,7 +213,7 @@ impl Carry {
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Event>();
-        let fabric = Arc::new(Fabric {
+        let wiring = Arc::new(Wiring {
             routes: Arc::clone(&routes),
             table: Arc::clone(&self.table),
             interface: self.interface.clone(),
@@ -221,7 +221,7 @@ impl Carry {
         let mut running = Running {
             me: transport.my_id(),
             transport,
-            fabric,
+            wiring,
             inbound_tx,
             events: events_tx,
             links: HashMap::new(),
@@ -285,14 +285,16 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
     let _ = stop.wait_for(|stopped| *stopped).await;
 }
 
-/// What the carry's tasks share with the loop that owns them.
-struct Fabric {
+/// What the carry's tasks share with the loop that owns them: the live
+/// routes, what each peer's reach reads as, and the interface those routes
+/// are raised on.
+struct Wiring {
     routes: Routes,
     table: Table,
     interface: Interface,
 }
 
-impl Fabric {
+impl Wiring {
     fn set_reach(&self, peer: &DeviceId, reach: Reach) {
         if let Some(row) = lock(&self.table).get_mut(peer) {
             row.1 = reach;
@@ -390,7 +392,7 @@ struct Link {
 struct Running {
     me: PeerId,
     transport: Arc<dyn Transport>,
-    fabric: Arc<Fabric>,
+    wiring: Arc<Wiring>,
     inbound_tx: std::sync::mpsc::Sender<Vec<u8>>,
     events: mpsc::UnboundedSender<Event>,
     links: HashMap<DeviceId, Link>,
@@ -450,7 +452,7 @@ impl Running {
         // by whoever learned it (the pairing ceremony) will.
         self.transport.learn(peer.clone(), &[]);
         let generation = self.next_generation();
-        lock(&self.fabric.table).insert(peer.clone(), (ula, self.initial_reach()));
+        lock(&self.wiring.table).insert(peer.clone(), (ula, self.initial_reach()));
         let slot = if self.me < peer {
             Slot::Dialing(self.spawn_dial(peer.clone(), generation, Duration::ZERO))
         } else {
@@ -475,8 +477,8 @@ impl Running {
             return;
         };
         Self::close_slot(link.slot, RETIRED, b"retired").await;
-        self.fabric.lower_route(link.ula).await;
-        self.fabric.set_reach(peer, Reach::Retired);
+        self.wiring.lower_route(link.ula).await;
+        self.wiring.set_reach(peer, Reach::Retired);
         tracing::info!(peer = %peer.short(), "retired from the carry");
     }
 
@@ -503,10 +505,10 @@ impl Running {
         for peer in peers {
             if let Some(link) = self.links.remove(&peer) {
                 Self::close_slot(link.slot, 0, b"stopping").await;
-                self.fabric.lower_route(link.ula).await;
+                self.wiring.lower_route(link.ula).await;
             }
         }
-        lock(&self.fabric.table).clear();
+        lock(&self.wiring.table).clear();
     }
 
     fn spawn_dial(&self, peer: DeviceId, generation: u64, first_delay: Duration) -> JoinHandle<()> {
@@ -524,11 +526,11 @@ impl Running {
         send: Box<dyn SendFlow>,
         recv: Box<dyn RecvFlow>,
     ) -> JoinHandle<()> {
-        let fabric = Arc::clone(&self.fabric);
+        let wiring = Arc::clone(&self.wiring);
         let inbound = self.inbound_tx.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
-            serve(&fabric, &peer, ula, via, send, recv, &inbound).await;
+            serve(&wiring, &peer, ula, via, send, recv, &inbound).await;
             let _ = events.send(Event::Ended { peer, generation });
         })
     }
@@ -540,11 +542,11 @@ impl Running {
         ula: Ipv6Addr,
         connection: Arc<dyn Connection>,
     ) -> JoinHandle<()> {
-        let fabric = Arc::clone(&self.fabric);
+        let wiring = Arc::clone(&self.wiring);
         let inbound = self.inbound_tx.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
-            if let Err(error) = accept(&fabric, &peer, ula, &*connection, &inbound).await {
+            if let Err(error) = accept(&wiring, &peer, ula, &*connection, &inbound).await {
                 tracing::warn!(peer = %peer.short(), error = %format!("{error:#}"), "flow refused");
                 connection.close(REFUSED, b"opening");
             }
@@ -579,7 +581,7 @@ impl Running {
         // one connection too many.
         if let Some(link) = self.links.remove(&from) {
             Self::close_slot(link.slot, 0, b"replaced").await;
-            self.fabric.lower_route(link.ula).await;
+            self.wiring.lower_route(link.ula).await;
         }
         let generation = self.next_generation();
         let connection: Arc<dyn Connection> = Arc::from(connection);
@@ -624,14 +626,14 @@ impl Running {
                 let reach = if self.transport.is_isolated() {
                     Reach::NoRoute
                 } else {
-                    match self.fabric.reach(&peer) {
+                    match self.wiring.reach(&peer) {
                         Some(Reach::Unreachable { since }) => Reach::Unreachable { since },
                         _ => Reach::Unreachable {
                             since: Instant::now(),
                         },
                     }
                 };
-                self.fabric.set_reach(&peer, reach);
+                self.wiring.set_reach(&peer, reach);
             }
             Event::Ended { peer, generation } => {
                 if self.links.get(&peer).map(|link| link.generation) != Some(generation) {
@@ -650,7 +652,7 @@ impl Running {
                     link.generation = next;
                     link.slot = slot;
                 }
-                self.fabric.set_reach(&peer, self.initial_reach());
+                self.wiring.set_reach(&peer, self.initial_reach());
             }
         }
     }
@@ -729,7 +731,7 @@ async fn connect(
 /// and check its opening, then serve. No route exists until the opening has
 /// been read whole and its version agreed.
 async fn accept(
-    fabric: &Fabric,
+    wiring: &Wiring,
     peer: &DeviceId,
     ula: Ipv6Addr,
     connection: &dyn Connection,
@@ -743,14 +745,14 @@ async fn accept(
         .context("read opening")?;
     NetOpening::decode(&opening)?;
     let via = connection.quality().via;
-    serve(fabric, peer, ula, via, send, recv, inbound).await;
+    serve(wiring, peer, ula, via, send, recv, inbound).await;
     Ok(())
 }
 
 /// Split one flow pair into a writer (drains this peer's route channel) and a
 /// reader (hands inbound packets to the interface), and run until either ends.
 async fn serve(
-    fabric: &Fabric,
+    wiring: &Wiring,
     peer: &DeviceId,
     ula: Ipv6Addr,
     via: PathKind,
@@ -759,8 +761,8 @@ async fn serve(
     inbound: &std::sync::mpsc::Sender<Vec<u8>>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    fabric.raise_route(ula, tx).await;
-    fabric.set_reach(peer, Reach::Connected { via });
+    wiring.raise_route(ula, tx).await;
+    wiring.set_reach(peer, Reach::Connected { via });
     tracing::info!(peer = %peer.short(), %ula, ?via, "carrying");
 
     let writer = async move {
@@ -784,7 +786,7 @@ async fn serve(
         () = writer => {}
         () = reader => {}
     }
-    fabric.lower_route(ula).await;
+    wiring.lower_route(ula).await;
     tracing::info!(peer = %peer.short(), %ula, "flow ended");
 }
 

@@ -48,6 +48,7 @@ use crate::control::{
 };
 use crate::daemon::correspondence::OwnDevices;
 use crate::daemon::own_routes;
+use crate::daemon::replica::ReplicaPolicy;
 use crate::daemon::OrbitAddress;
 use crate::orbits::{self, bootstrap, Router, StationIdentity};
 
@@ -105,6 +106,15 @@ pub(crate) enum OwnFrame {
     /// so a device that came back on a new port is reachable again without
     /// anybody re-running the pairing.
     Hello { routes: Vec<SocketAddr> },
+    /// "Stop holding this Space" — or, with `excluded: false`, "you may hold
+    /// it again". One frame both ways, because the lift has to travel too:
+    /// the device records the refusal itself, so a holder that only stopped
+    /// asking would leave it refusing a Space the person put back.
+    Exclude {
+        space: String,
+        excluded: bool,
+        routes: Vec<SocketAddr>,
+    },
 }
 
 impl OwnFrame {
@@ -112,7 +122,9 @@ impl OwnFrame {
     /// thing that says so when there is no relay to ask.
     fn routes(&self) -> &[SocketAddr] {
         match self {
-            Self::Offer { routes, .. } | Self::Hello { routes } => routes,
+            Self::Offer { routes, .. } | Self::Hello { routes } | Self::Exclude { routes, .. } => {
+                routes
+            }
         }
     }
 }
@@ -137,6 +149,11 @@ pub(crate) enum OwnAnswer {
     Learned {
         routes: Vec<SocketAddr>,
     },
+    /// A [`OwnFrame::Exclude`] recorded here, whichever way it went. The
+    /// decision is durable on this side now, so the holder can stop owing it.
+    Excluded {
+        excluded: bool,
+    },
 }
 
 /// One answer as remembered: what it was, when, and how many times in a row
@@ -157,6 +174,11 @@ pub(crate) struct Facts {
     standings: Mutex<BTreeMap<(DeviceId, String), Recorded>>,
     liveness: Mutex<BTreeMap<DeviceId, Liveness>>,
     ledger: Mutex<BTreeMap<String, Vec<DeviceId>>>,
+    /// When a person's exclusion decision was last carried at, per pair.
+    /// Kept apart from the standings because it paces one thing only — how
+    /// often an undelivered decision is dialled — and a ledger read writing
+    /// over the standing must not cancel a decision somebody made.
+    carries: Mutex<BTreeMap<(DeviceId, String), u64>>,
 }
 
 impl Facts {
@@ -189,6 +211,20 @@ impl Facts {
     /// which is the same defect as calling an unmeasured device down.
     fn answered(&self, device: &DeviceId) {
         self.liveness.lock_recovering().remove(device);
+    }
+
+    /// Forget everything this daemon remembers about a device that is no
+    /// longer one of the profile's. Only memory of asking goes: what a
+    /// Space's ledger says is the Space's to say, and the next read of it is
+    /// what corrects the rows here.
+    fn forget_device(&self, device: &DeviceId) {
+        self.standings
+            .lock_recovering()
+            .retain(|(held, _), _| held != device);
+        self.liveness.lock_recovering().remove(device);
+        for devices in self.ledger.lock_recovering().values_mut() {
+            devices.retain(|held| held != device);
+        }
     }
 
     /// The Spaces whose ledger, as last read here, names `device`.
@@ -326,6 +362,38 @@ impl Facts {
             .insert(space.to_string(), devices);
     }
 
+    /// Forget one row, so the next tick asks again from nothing. What lifting
+    /// an exclusion needs: a person put the Space back, and the row that said
+    /// otherwise is no longer true of anything.
+    fn forget(&self, device: &DeviceId, space: &str) {
+        let key = (device.clone(), space.to_string());
+        self.standings.lock_recovering().remove(&key);
+        self.carries.lock_recovering().remove(&key);
+    }
+
+    /// Whether a decision the device has not heard is worth dialling again.
+    ///
+    /// Deliberately not [`Facts::due`]: a person's decision is not cancelled
+    /// by whatever the last ledger read wrote over the row, and the standing
+    /// it left — `Held`, most awkwardly — would say never ask again. Only the
+    /// clock spaces these out.
+    fn carry_due(&self, device: &DeviceId, space: &str, now_ms: u64, woken: bool) -> bool {
+        let floor = u64::try_from(RETRY_FLOOR.as_millis()).unwrap_or(u64::MAX);
+        self.carries
+            .lock_recovering()
+            .get(&(device.clone(), space.to_string()))
+            .is_none_or(|tried| woken || now_ms >= tried.saturating_add(floor))
+    }
+
+    /// Note that the decision about this pair has just been put on the wire,
+    /// so a device that does not answer is dialled again on the ordinary
+    /// spacing rather than every tick.
+    fn carrying(&self, device: &DeviceId, space: &str, now_ms: u64) {
+        self.carries
+            .lock_recovering()
+            .insert((device.clone(), space.to_string()), now_ms);
+    }
+
     /// Whether `(device, space)` is worth asking now. Nothing recorded is
     /// due; `Held` never is; a device that could not be asked is due at its
     /// retry time, or at once when woken.
@@ -353,6 +421,10 @@ impl Facts {
                 woken || now_ms >= recorded.at_ms.saturating_add(floor)
             }
             FanoutStanding::Refused { .. } => now_ms >= recorded.at_ms.saturating_add(lifetime),
+            // A person said no to this pair. The loop never re-offers it;
+            // carrying the decision to the device is separate work, on
+            // [`Facts::carry_due`].
+            FanoutStanding::Excluded { .. } => false,
         }
     }
 }
@@ -390,6 +462,16 @@ pub(crate) async fn serve(
     let mut announce_all = true;
     let mut announcements: BTreeMap<DeviceId, u64> = BTreeMap::new();
     let mut failures: BTreeMap<DeviceId, u32> = BTreeMap::new();
+    // The set as this loop last saw it, and the devices it stopped naming.
+    // A retirement is a fact about the profile; de-listing the device in
+    // every Space is a separate signed act per Space, and the diff is what
+    // asks for it — whether the retirement happened here or on the other
+    // machine of this person's that heard it first.
+    let mut known: Vec<DeviceId> = own
+        .borrow()
+        .as_ref()
+        .map_or_else(Vec::new, |set| set.devices.clone());
+    let mut gone: Vec<DeviceId> = Vec::new();
     loop {
         tokio::select! {
             changed = stop.changed() => {
@@ -406,6 +488,17 @@ pub(crate) async fn serve(
                 // that has never heard where this one is.
                 woken = true;
                 announce_all = true;
+                if let Some(set) = own.borrow().as_ref() {
+                    for device in &known {
+                        if !set.devices.contains(device)
+                            && *device != set.me
+                            && !gone.contains(device)
+                        {
+                            gone.push(device.clone());
+                        }
+                    }
+                    known.clone_from(&set.devices);
+                }
             }
             bell = doorbells.recv(), if bells_open => match bell {
                 Ok(bell) if bell.doorbell.authority_advanced => {
@@ -418,6 +511,37 @@ pub(crate) async fn serve(
                 let Some(set) = own.borrow().clone() else {
                     continue;
                 };
+                // Retired by another device of the profile. This daemon keeps
+                // its seed and every store it holds — nothing here deletes
+                // either — and stops speaking on the lane: it offers nothing,
+                // announces nothing, and answers nothing.
+                if !set.devices.contains(&set.me) {
+                    continue;
+                }
+                // A device the set no longer names, de-listed in every Space
+                // whose ledger still names it. One per tick, and one Space at
+                // a time inside it, for the reason offers are: this places a
+                // Station per Space it reads.
+                if let Some(device) = gone.pop() {
+                    tokio::select! {
+                        () = async {
+                            let held = holdings(&router, &facts).await;
+                            let delisted = de_list(&router, &held, &device).await;
+                            if !delisted.revoked_in.is_empty() {
+                                tracing::info!(
+                                    target: "lait::fanout",
+                                    device = %device,
+                                    revoked_in = ?delisted.revoked_in,
+                                    unfenced = ?delisted.unfenced,
+                                    "a device the profile no longer names was de-listed"
+                                );
+                            }
+                            facts.forget_device(&device);
+                        } => {}
+                        _ = stop.changed() => break,
+                    }
+                    continue;
+                }
                 let now = crate::daemon::pair::now_ms();
                 if std::mem::take(&mut announce_all) {
                     announcements = set
@@ -595,6 +719,392 @@ async fn refresh_orbit(router: &Router, facts: &Facts, orbit: &crate::daemon::Lo
     }
 }
 
+/// One Space this daemon holds, as a de-listing has to see it.
+struct Holding {
+    space: String,
+    route: ControlRoute,
+    /// The devices this Space's ledger binds to my actor here.
+    devices: Vec<DeviceId>,
+    /// Whether the actor answering here may rotate the Space key. A revoke
+    /// signed by a non-admin de-lists and fences nothing, and that is a fact
+    /// about one Space rather than about the retirement.
+    admin: bool,
+}
+
+/// Every Space this daemon serves under its own key, with its ledger read
+/// and its own standing in it.
+///
+/// Reading is what places the Station, so this is the expensive half of any
+/// de-listing and is done once for the whole act rather than per device.
+async fn holdings(router: &Router, facts: &Facts) -> Vec<Holding> {
+    let mut held = Vec::new();
+    for (space, path) in own_spaces(router) {
+        if let Some(holding) = holding_of(router, facts, &space, &path).await {
+            held.push(holding);
+        }
+    }
+    held
+}
+
+/// One Space, read: who its ledger names under my actor, and whether that
+/// actor may rotate the key here.
+async fn holding_of(
+    router: &Router,
+    facts: &Facts,
+    space: &str,
+    path: &std::path::Path,
+) -> Option<Holding> {
+    let route = route_for(space, path)?;
+    let devices = match read_ledger(router, facts, &route, space).await {
+        Ok(devices) => devices,
+        Err(error) => {
+            tracing::debug!(space, %error, "could not read this Space's device list");
+            return None;
+        }
+    };
+    let admin = matches!(
+        router.request_routed(route.clone(), &Request::Status, None).await,
+        Ok(Response::Status(info)) if info.membership == "admin"
+    );
+    Some(Holding {
+        space: space.to_string(),
+        route,
+        devices,
+        admin,
+    })
+}
+
+/// The Spaces `device` is the last device of this person's actor in.
+///
+/// Pure, because it is a refusal and a refusal has to be arguable without a
+/// network: a retirement that emptied an actor would leave a Space nobody
+/// could ever rotate the key of or admit anyone to again, while the retired
+/// machine went on reading everything already sealed to it. Losing that is
+/// not worth automating, so the whole retirement is refused and says which
+/// Space it was.
+fn orphaned_by(ledgers: &[(String, Vec<DeviceId>)], device: &DeviceId) -> Vec<String> {
+    ledgers
+        .iter()
+        .filter(|(_, devices)| {
+            devices.contains(device) && devices.iter().all(|held| held == device)
+        })
+        .map(|(space, _)| space.clone())
+        .collect()
+}
+
+/// What a de-listing cost, per Space.
+struct Delisted {
+    /// The Spaces whose ledger stopped naming the device — one signed op
+    /// each, authored here.
+    revoked_in: Vec<String>,
+    /// The subset of those where nobody could rotate the Space key
+    /// afterwards, so the device can still read what it already held.
+    /// Reported apart from the first list because "de-listed" and
+    /// "de-listed and fenced" are different facts and only one ends access.
+    unfenced: Vec<String>,
+}
+
+/// Remove `device` from my actor in every Space this daemon holds that names
+/// it: one signed `RevokeDevice` per Space.
+///
+/// Never derived from the kinship act that retired it. Kinship says who is a
+/// device of this person and authorizes nothing; a Space stops naming a
+/// device only because a device of its actor signed that it should, which is
+/// the same op a person reaches by hand.
+///
+/// A Space that answers "not bound" has already converged — another device of
+/// the profile reacted to the same retirement — and records nothing: a race
+/// that both sides handled is not a refusal.
+async fn de_list(router: &Router, holdings: &[Holding], device: &DeviceId) -> Delisted {
+    let mut delisted = Delisted {
+        revoked_in: Vec::new(),
+        unfenced: Vec::new(),
+    };
+    for holding in holdings
+        .iter()
+        .filter(|holding| holding.devices.contains(device))
+    {
+        let asked = router
+            .request_routed(
+                holding.route.clone(),
+                &Request::DeviceRevoke {
+                    device: device.as_str().to_owned(),
+                },
+                None,
+            )
+            .await;
+        match asked {
+            Ok(Response::Ok { .. }) => {
+                delisted.revoked_in.push(holding.space.clone());
+                if !holding.admin {
+                    delisted.unfenced.push(holding.space.clone());
+                }
+                tracing::info!(
+                    target: "lait::fanout",
+                    space = %holding.space,
+                    device = %device,
+                    fenced = holding.admin,
+                    "de-listed"
+                );
+            }
+            Ok(Response::Error { message, .. }) if message.contains("not bound") => {}
+            Ok(other) => tracing::warn!(
+                space = %holding.space,
+                "the Space answered the revoke in an unexpected shape: {other:?}"
+            ),
+            Err(error) => tracing::warn!(
+                space = %holding.space,
+                %error,
+                "could not de-list the device in this Space"
+            ),
+        }
+    }
+    delisted
+}
+
+/// Retire one of this profile's devices, and de-list it everywhere.
+///
+/// The order is the whole design. The Spaces are read and the refusal is
+/// decided **before** anything is signed, because a retirement that got
+/// halfway would leave a device the profile no longer names still named by
+/// every ledger. Then the kinship entry — which drops the device from the
+/// watch, and with it from the hub's admission, the fan-out and the tunnel's
+/// routes — and only then one signed actor op per Space.
+///
+/// Nothing here deletes a seed or a store byte, on either machine. A retired
+/// device keeps everything it holds and simply stops being spoken to.
+pub(crate) async fn retire(router: &Router, facts: &Facts, device: &str) -> Response {
+    let Some(device) = DeviceId::parse(device) else {
+        return Response::invalid("that is not a device id");
+    };
+    let correspondence = router.correspondence();
+    let Some(own) = correspondence.own_devices().borrow().clone() else {
+        return Response::err("the device set is not held on this daemon");
+    };
+    // The plane refuses both of these too. Refusing here as well is what
+    // keeps a mistyped id from placing a Station and reading a ledger first.
+    if device == own.me {
+        return Response::err("retire this device from another one");
+    }
+    if !own.devices.contains(&device) {
+        return Response::err("that device is not one of this profile's");
+    }
+    let holdings = holdings(router, facts).await;
+    let ledgers: Vec<(String, Vec<DeviceId>)> = holdings
+        .iter()
+        .map(|holding| (holding.space.clone(), holding.devices.clone()))
+        .collect();
+    let orphaned = orphaned_by(&ledgers, &device);
+    if !orphaned.is_empty() {
+        return Response::err(format!(
+            "retiring that device would leave {} with no device of yours — nobody could \
+             rotate the Space key or admit anyone there again",
+            orphaned.join(", ")
+        ));
+    }
+    if let Err(error) =
+        correspondence.retire_device(&device, crate::daemon::correspondence::now_secs())
+    {
+        return Response::err(error);
+    }
+    let delisted = de_list(router, &holdings, &device).await;
+    facts.forget_device(&device);
+    Response::Host(crate::control::HostReply::DeviceRetired {
+        device: device.as_str().to_owned(),
+        revoked_in: delisted.revoked_in,
+        unfenced: delisted.unfenced,
+    })
+}
+
+/// Exclude one Space from one device of this profile, or lift it.
+///
+/// Two records and one signed op. The decision is written here — so this
+/// device stops offering, through a restart — and carried to the device it
+/// is about by the loop, because that machine has to refuse the Space itself
+/// or the next device of the profile that offers it would put it back. The
+/// de-listing runs at once and regardless of delivery: the ledger is what
+/// says who holds a Space, and a decision waiting on a machine that is off
+/// must not leave the Space listed on it in the meantime.
+///
+/// Lifting is the mirror and nothing more: the decision goes, the device is
+/// told, and the Space returns through the same offer and consent that put
+/// it there the first time. Nothing is re-added behind a person's back.
+pub(crate) async fn exclude(
+    router: &Router,
+    facts: &Facts,
+    device: &str,
+    space: &str,
+    excluded: bool,
+) -> Response {
+    let Some(device) = DeviceId::parse(device) else {
+        return Response::invalid("that is not a device id");
+    };
+    if SpaceId::parse(space).is_none() {
+        return Response::invalid("that is not a Space id");
+    }
+    let Some(own) = router.correspondence().own_devices().borrow().clone() else {
+        return Response::err("the device set is not held on this daemon");
+    };
+    if !own.devices.contains(&device) {
+        return Response::err("that device is not one of this profile's");
+    }
+    let here = device == own.me;
+    let identity = router.catalog().identity().to_path_buf();
+    if let Err(error) = ReplicaPolicy::decide(&identity, &device, space, excluded, here) {
+        return Response::err(error);
+    }
+    let mut said = if excluded {
+        format!("{space} is no longer held on that device")
+    } else {
+        format!("{space} may be held on that device again")
+    };
+    if excluded {
+        // The ledger first, whether or not the device can be reached: it is
+        // what says who holds this Space, and it must not go on naming a
+        // device a person has taken it off.
+        if let Some((found, path)) = own_spaces(router)
+            .into_iter()
+            .find(|(held, _)| held == space)
+        {
+            if let Some(holding) = holding_of(router, facts, &found, &path).await {
+                let delisted = de_list(router, std::slice::from_ref(&holding), &device).await;
+                if !delisted.unfenced.is_empty() {
+                    said.push_str(
+                        " — it can still read what it already held there until an admin \
+                         rotates the Space key",
+                    );
+                }
+            }
+        }
+        if here {
+            withdraw_locally(router, space).await;
+        }
+        facts.record(
+            &device,
+            space,
+            FanoutStanding::Excluded { told: here },
+            crate::daemon::pair::now_ms(),
+        );
+    } else {
+        // Nothing recorded is what "ask again" looks like here: the next tick
+        // offers, and the device consents as it did the first time.
+        facts.forget(&device, space);
+    }
+    Response::Ok {
+        message: Some(said),
+    }
+}
+
+/// Stop holding a Space on this device: its Orbit is vacated and its
+/// registration forgotten.
+///
+/// Removal, never deletion. The store's bytes stay exactly where they are —
+/// deleting data is a different act with a different confirmation, and a
+/// single verb that did both would make the safe operation dangerous.
+async fn withdraw_locally(router: &Router, space: &str) {
+    let Some(home) = bootstrap::registered_home(router, space) else {
+        return;
+    };
+    let orbit = crate::daemon::LocalOrbitId::for_store(&home);
+    match router.vacate(&orbit).await {
+        Ok(vacancy) => {
+            // By the store this daemon holds, never by the Space id: the
+            // registry is the machine's, and a second daemon on it — another
+            // identity, or a test standing two devices side by side — has its
+            // own row for the same Space that this decision says nothing
+            // about.
+            if let Err(error) = orbits::forget(&home.to_string_lossy()) {
+                tracing::warn!(space, %error, "the excluded Space stayed registered here");
+            }
+            drop(vacancy);
+        }
+        Err(error) => tracing::warn!(
+            space,
+            %error,
+            "the excluded Space's Orbit could not be vacated; its registration is left alone"
+        ),
+    }
+}
+
+/// Carry one decision to the device it is about, and record that it heard.
+async fn carry_exclusion(
+    router: &Router,
+    transport: &dyn Transport,
+    facts: &Facts,
+    decision: &crate::daemon::replica::Exclusion,
+    now: u64,
+) {
+    facts.carrying(&decision.device, &decision.space, now);
+    let routes = transport
+        .advertised_routes(ROUTES_DEADLINE)
+        .await
+        .unwrap_or_default();
+    let frame = OwnFrame::Exclude {
+        space: decision.space.clone(),
+        excluded: decision.excluded,
+        routes,
+    };
+    let answer = match tokio::time::timeout(
+        ANSWER_DEADLINE,
+        exchange(transport, &decision.device, &frame),
+    )
+    .await
+    {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
+            facts.could_not_ask(&decision.device, &decision.space, format!("{error:#}"), now);
+            // The decision stands on this side whatever the device heard,
+            // so the row keeps saying so rather than reading as a dial
+            // that failed for no reason anybody chose.
+            facts.record(
+                &decision.device,
+                &decision.space,
+                FanoutStanding::Excluded { told: false },
+                now,
+            );
+            return;
+        }
+        Err(_) => {
+            facts.record(
+                &decision.device,
+                &decision.space,
+                FanoutStanding::Excluded { told: false },
+                now,
+            );
+            return;
+        }
+    };
+    facts.answered(&decision.device);
+    match answer {
+        OwnAnswer::Excluded { .. } => {
+            if let Err(error) = ReplicaPolicy::decide(
+                router.catalog().identity(),
+                &decision.device,
+                &decision.space,
+                decision.excluded,
+                true,
+            ) {
+                tracing::warn!(%error, "the carried decision could not be recorded");
+                return;
+            }
+            if decision.excluded {
+                facts.record(
+                    &decision.device,
+                    &decision.space,
+                    FanoutStanding::Excluded { told: true },
+                    now,
+                );
+            } else {
+                facts.forget(&decision.device, &decision.space);
+            }
+        }
+        other => tracing::warn!(
+            space = %decision.space,
+            "the device answered a decision with {other:?}"
+        ),
+    }
+}
+
 /// One step: the first (device, Space) pair worth asking about, asked.
 async fn step(
     router: &Router,
@@ -608,11 +1118,24 @@ async fn step(
     if peers.is_empty() {
         return;
     }
+    let policy = ReplicaPolicy::load(router.catalog().identity());
+    // A person's decision comes before an offer: it is owed to a machine that
+    // may have been off when it was made, and until it arrives that machine
+    // still holds — or still refuses — the Space.
+    if let Some(decision) = policy.untold().into_iter().find(|decision| {
+        peers.contains(&&decision.device)
+            && facts.carry_due(&decision.device, &decision.space, now, skip_backoff)
+    }) {
+        carry_exclusion(router, transport, facts, &decision, now).await;
+        return;
+    }
     let spaces = own_spaces(router);
     let Some((device, space, path)) = spaces.iter().find_map(|(space, path)| {
         peers
             .iter()
-            .find(|device| facts.due(device, space, now, skip_backoff))
+            .find(|device| {
+                policy.admits(device, space) && facts.due(device, space, now, skip_backoff)
+            })
             .map(|device| ((*device).clone(), space.clone(), path.clone()))
     }) else {
         return;
@@ -789,8 +1312,8 @@ async fn offer_one(
         OwnAnswer::Held => FanoutStanding::Held,
         OwnAnswer::Declined { why } => FanoutStanding::Declined { why },
         OwnAnswer::Refused { why } => FanoutStanding::Refused { why },
-        OwnAnswer::Learned { .. } => FanoutStanding::Deferred {
-            why: "the device answered an offer with its routes".into(),
+        OwnAnswer::Learned { .. } | OwnAnswer::Excluded { .. } => FanoutStanding::Deferred {
+            why: "the device answered an offer with something else".into(),
         },
     };
     tracing::info!(
@@ -877,6 +1400,22 @@ impl Drop for Claim {
     }
 }
 
+/// Whether this daemon is still a device of its own profile.
+///
+/// A device retired by another device of the person's is out of the set it
+/// publishes itself, and the fan-out is the first thing that has to notice:
+/// it goes on holding every store and its own seed, and stops offering,
+/// announcing and answering. `None` — the set is not restored — is out too,
+/// for the reason the hub's admission is: unmeasured is absent.
+fn still_own(router: &Router) -> bool {
+    router
+        .correspondence()
+        .own_devices()
+        .borrow()
+        .as_ref()
+        .is_some_and(|own| own.devices.contains(&own.me))
+}
+
 /// The other side of the lane. Everything that arrives here was admitted
 /// by the hub against the device set; what is checked here is the offer
 /// itself — that the ticket was signed by the device offering it, for the
@@ -933,6 +1472,14 @@ async fn answer_one(
     mut incoming: Incoming,
 ) {
     let from = incoming.from.clone();
+    // A device this profile no longer names does not answer for it. The hub
+    // still admits the caller — the set it admits on is this device's own
+    // reading, and being retired does not make a sibling a stranger — but a
+    // machine that is out of the set has nothing to say on this lane and
+    // must not consent itself into anything.
+    if !still_own(&router) {
+        return;
+    }
     let frame: OwnFrame =
         match tokio::time::timeout(ANSWER_DEADLINE, incoming.stream.recv_bounded(MAX_OWN_FRAME))
             .await
@@ -970,6 +1517,9 @@ async fn answer_one(
                 .await
                 .unwrap_or_default(),
         },
+        OwnFrame::Exclude {
+            space, excluded, ..
+        } => answer_exclusion(&router, &space, excluded).await,
     };
     let Ok(bytes) = postcard::to_stdvec(&answer) else {
         return;
@@ -984,6 +1534,41 @@ async fn answer_one(
     // Accept-side contract: the dialer drains, then closes; dropping first
     // would truncate the answer it has not yet read.
     let _ = tokio::time::timeout(ANSWER_DEADLINE, incoming.stream.wait_closed()).await;
+}
+
+/// A decision about this device, recorded here — which is where it is
+/// enforced.
+///
+/// Written before the Space is let go, and written whichever way the decision
+/// went: this record is what makes the refusal survive a restart and hold
+/// against *any* device of the profile that offers the Space, not only the
+/// one that carried the decision. A device that trusted the holder to stop
+/// asking would take the Space back from the next one that asked.
+async fn answer_exclusion(router: &Router, space: &str, excluded: bool) -> OwnAnswer {
+    let me = router
+        .correspondence()
+        .own_devices()
+        .borrow()
+        .as_ref()
+        .map(|own| own.me.clone());
+    let Some(me) = me else {
+        return OwnAnswer::Refused {
+            why: "the device set is not held here".into(),
+        };
+    };
+    if SpaceId::parse(space).is_none() {
+        return OwnAnswer::Refused {
+            why: "that is not a Space id".into(),
+        };
+    }
+    if let Err(why) = ReplicaPolicy::decide(router.catalog().identity(), &me, space, excluded, true)
+    {
+        return OwnAnswer::Refused { why };
+    }
+    if excluded {
+        withdraw_locally(router, space).await;
+    }
+    OwnAnswer::Excluded { excluded }
 }
 
 /// The offer, checked: the ticket verifies, was signed by the device that
@@ -1037,6 +1622,21 @@ async fn answer_offer(
             why: "the offer names a malformed actor".into(),
         };
     }
+    // A person said this Space is not held here. Answered before any consent
+    // is signed, and answered to whichever device asked: the record is this
+    // device's own, so a sibling that never heard the decision cannot put the
+    // Space back by offering it.
+    let me = router
+        .correspondence()
+        .own_devices()
+        .borrow()
+        .as_ref()
+        .map(|own| own.me.clone());
+    if me.is_some_and(|me| !ReplicaPolicy::load(router.catalog().identity()).admits(&me, space)) {
+        return OwnAnswer::Declined {
+            why: "excluded on this device".into(),
+        };
+    }
     // Already a member here: nothing to consent to — but only under the
     // actor the offer names. A device that entered this Space as a person
     // of its own before it was ever paired is a member under a different
@@ -1079,16 +1679,30 @@ async fn answer_offer(
     // of the two lands first.
     let home = registered.unwrap_or_else(|| bootstrap::allocated_home(space));
     let space = space.to_string();
-    // Consent is owed either way — the holder asked and this device agrees —
-    // but the entry is not started twice. A repeat offer while the first
-    // entry is still in flight is answered and dropped here.
-    let Some(claim) = entering.claim(&space) else {
-        tracing::debug!(
-            target: "lait::fanout",
-            space,
-            "already entering this Space; consenting again without a second entry"
-        );
-        return OwnAnswer::Consent { binding };
+
+    // The claim guards *making* the store and nothing else. `enter` is
+    // idempotent once the directory holds this Space, so a device that let
+    // the Space go — an exclusion, lifted again — enters straight away
+    // rather than waiting on the entry that made it, which may still be
+    // draining thirty seconds of admission. Consenting without entering is
+    // how a Space comes back on the holder's list and on nobody's disk.
+    let claim = if crate::orbital::space_store_present(&home) {
+        None
+    } else {
+        match entering.claim(&space) {
+            Some(claim) => Some(claim),
+            // Consent is owed either way — the holder asked and this device
+            // agrees — but a second entry into a directory with no store yet
+            // would be two `enter_space` calls on one directory.
+            None => {
+                tracing::debug!(
+                    target: "lait::fanout",
+                    space,
+                    "already entering this Space; consenting again without a second entry"
+                );
+                return OwnAnswer::Consent { binding };
+            }
+        }
     };
     tokio::spawn(async move {
         let _claim = claim;
@@ -1354,6 +1968,33 @@ mod tests {
 
         fn me(&self) -> DeviceId {
             device_from_seed(&self.seed)
+        }
+
+        /// Take `other` into this side's profile the way the ceremony does:
+        /// a mutual link, adopted by the plane, which republishes the set.
+        /// The watch alone is enough for the fan-out, but not for anything
+        /// that writes to the kinship log — a retirement has to be signed
+        /// against a profile that really names the device.
+        fn adopt(&self, other: &Side) {
+            let (me, them) = (self.me(), other.me());
+            let (nonce, epoch) = ([57u8; 16], 2);
+            let link = mechanics::kinship::DeviceLink::assemble(
+                (
+                    me.clone(),
+                    mechanics::kinship::DeviceLink::half(&self.seed, &them, nonce, epoch),
+                ),
+                (
+                    them,
+                    mechanics::kinship::DeviceLink::half(&other.seed, &me, nonce, epoch),
+                ),
+                nonce,
+                epoch,
+            )
+            .expect("assemble");
+            self.router
+                .correspondence()
+                .adopt_device(link, crate::daemon::correspondence::now_secs())
+                .expect("adopt");
         }
 
         /// Publish `devices` as this side's set, as pairing would have.
@@ -1667,6 +2308,9 @@ mod tests {
                         OwnFrame::Hello { .. } => {
                             postcard::to_stdvec(&OwnAnswer::Learned { routes: Vec::new() })
                         }
+                        OwnFrame::Exclude { excluded, .. } => {
+                            postcard::to_stdvec(&OwnAnswer::Excluded { excluded })
+                        }
                     }
                     .unwrap();
                     incoming.stream.send(&answer).await.unwrap();
@@ -1712,6 +2356,368 @@ mod tests {
         );
 
         answerer.abort();
+        a.stop().await;
+    }
+
+    /// A retirement is refused before anything is signed when it would empty
+    /// an actor: what would be left is a Space nobody could rotate the key of
+    /// or admit anyone to again, with the retired machine still able to read
+    /// everything already sealed to it.
+    #[test]
+    fn a_retirement_that_would_leave_a_space_with_no_device_is_refused() {
+        let a = device_from_seed(&[1; 32]);
+        let d = device_from_seed(&[2; 32]);
+        let ledgers = vec![
+            ("ws_shared".to_string(), vec![a.clone(), d.clone()]),
+            ("ws_theirs".to_string(), vec![d.clone()]),
+            ("ws_mine".to_string(), vec![a.clone()]),
+        ];
+        assert_eq!(
+            orphaned_by(&ledgers, &d),
+            vec!["ws_theirs".to_string()],
+            "only the Space the device is the last of is orphaned by losing it"
+        );
+        assert_eq!(
+            orphaned_by(&ledgers, &a),
+            vec!["ws_mine".to_string()],
+            "the rule is symmetric: whichever device is the last one is the one that orphans"
+        );
+        assert!(
+            orphaned_by(&ledgers[..1], &d).is_empty(),
+            "a Space that keeps a device after the retirement is not orphaned"
+        );
+        assert!(
+            orphaned_by(&ledgers, &device_from_seed(&[3; 32])).is_empty(),
+            "a device no ledger names orphans nothing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_retired_device_is_revoked_in_every_space_it_held() {
+        // A holds two Spaces and fans both to D. Retiring D drops it from the
+        // profile — the set the hub, this loop and the tunnel all admit on —
+        // and then de-lists it in *both* ledgers, one signed op each. Nothing
+        // on D is deleted: it keeps every store it entered.
+        let root = ScopedRoot::new("retired");
+        let net = MemNet::new();
+        let a = Side::stand("a", &net, &root, Vec::new()).await;
+        let d = Side::stand("d", &net, &root, vec![crate::config::spaces_root()]).await;
+        // A really adopts D — the retirement signs against the kinship log,
+        // so a set published for the test alone would have nothing to retire.
+        a.adopt(&d);
+        d.own(&[a.me(), d.me()]);
+        let (first, a_first) = a.found("First");
+        let (second, a_second) = a.found("Second");
+        let mut a = a;
+        let mut d = d;
+        a.start();
+        d.start();
+
+        let d_store = poll_until(Duration::from_secs(60), || async {
+            for (space, store) in [(&first, &a_first), (&second, &a_second)] {
+                let listed = match a.ask(space, store, Request::DeviceList).await {
+                    Response::Text { text } => parse_device_list(&text),
+                    _ => Vec::new(),
+                };
+                if !listed.contains(&d.me()) {
+                    return None;
+                }
+            }
+            // And D really holds one of them: the ledger names it because A
+            // added it, and the store is what the retirement must not touch.
+            bootstrap::registered_home(&d.router, &first)
+        })
+        .await
+        .expect("both Spaces reached D, and D holds the first");
+        assert!(d_store.exists());
+
+        let answer = retire(&a.router, &a.facts, d.me().as_str()).await;
+        let (revoked_in, unfenced) = match answer {
+            Response::Host(crate::control::HostReply::DeviceRetired {
+                device,
+                revoked_in,
+                unfenced,
+            }) => {
+                assert_eq!(device, d.me().as_str());
+                (revoked_in, unfenced)
+            }
+            other => panic!("the retirement answered {other:?}"),
+        };
+        let mut revoked = revoked_in;
+        revoked.sort();
+        let mut both = vec![first.clone(), second.clone()];
+        both.sort();
+        assert_eq!(revoked, both, "a Space it held was left naming it");
+        assert!(
+            unfenced.is_empty(),
+            "the founder administers both Spaces, so both rotated: {unfenced:?}"
+        );
+
+        // The profile first — this is the watch the tunnel drops its routes
+        // off, and the hub stops admitting on.
+        let set = a
+            .router
+            .correspondence()
+            .own_devices()
+            .borrow()
+            .clone()
+            .expect("held");
+        assert!(
+            !set.devices.contains(&d.me()),
+            "the retired device is still one of the profile's"
+        );
+
+        // Then every Space's actor.
+        for (space, store) in [(&first, &a_first), (&second, &a_second)] {
+            match a.ask(space, store, Request::DeviceList).await {
+                Response::Text { text } => assert!(
+                    !parse_device_list(&text).contains(&d.me()),
+                    "{space} still names the retired device"
+                ),
+                other => panic!("no device list: {other:?}"),
+            }
+        }
+
+        // Removal, never deletion: the store D entered is untouched.
+        assert!(
+            d_store.exists(),
+            "retiring a device deleted the store it held"
+        );
+
+        let view = a.reach().await;
+        assert!(
+            !view.devices.iter().any(|row| row.device == d.me().as_str()),
+            "the view still draws a device the profile does not name"
+        );
+        assert!(
+            a.facts.standing(&d.me(), &first).is_none(),
+            "the memory of asking a retired device outlived it"
+        );
+        assert!(matches!(
+            retire(&a.router, &a.facts, d.me().as_str()).await,
+            Response::Error { .. }
+        ));
+        assert!(
+            matches!(retire(&a.router, &a.facts, a.me().as_str()).await, Response::Error { message, .. }
+                if message.contains("from another one")),
+            "a machine retired itself"
+        );
+
+        a.stop().await;
+        d.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_excluded_space_is_withdrawn_without_deleting_it_and_returns_when_it_is_lifted() {
+        // A holds a Space and fans it to D. A person then says: not on that
+        // machine. The ledger stops naming D whether or not D can be reached,
+        // D forgets the Space and keeps every byte of it, and its own record
+        // is what refuses it from then on. Lifting the decision puts it back
+        // through the same offer and consent that put it there the first time.
+        let root = ScopedRoot::new("excluded");
+        let net = MemNet::new();
+        let a = Side::stand("a", &net, &root, Vec::new()).await;
+        let d = Side::stand("d", &net, &root, vec![crate::config::spaces_root()]).await;
+        a.adopt(&d);
+        d.own(&[a.me(), d.me()]);
+        let (space, a_store) = a.found("Shared");
+        let mut a = a;
+        let mut d = d;
+        a.start();
+        d.start();
+
+        async fn listed(side: &Side, store: &Path, space: &str) -> Vec<DeviceId> {
+            match side.ask(space, store, Request::DeviceList).await {
+                Response::Text { text } => parse_device_list(&text),
+                _ => Vec::new(),
+            }
+        }
+        let d_store = poll_until(Duration::from_secs(60), || async {
+            listed(&a, &a_store, &space)
+                .await
+                .contains(&d.me())
+                .then(|| bootstrap::registered_home(&d.router, &space))
+                .flatten()
+        })
+        .await
+        .expect("the Space reached D");
+
+        match exclude(&a.router, &a.facts, d.me().as_str(), &space, true).await {
+            Response::Ok { .. } => {}
+            other => panic!("the exclusion answered {other:?}"),
+        }
+        // The ledger is truth and does not wait on delivery: D is off the
+        // list the moment the decision is made, whether or not it has heard.
+        assert!(
+            !listed(&a, &a_store, &space).await.contains(&d.me()),
+            "an excluded device was left on the Space's list"
+        );
+        poll_until(Duration::from_secs(45), || async {
+            bootstrap::registered_home(&d.router, &space)
+                .is_none()
+                .then_some(())
+        })
+        .await
+        .expect("D was told, and stopped holding the Space");
+        assert!(
+            d_store.exists(),
+            "excluding a Space deleted the store — removal and deletion are different acts"
+        );
+        // The refusal lives where it is enforced, in a file, so it holds
+        // against any device of the profile and through a restart of either.
+        assert!(
+            !crate::daemon::replica::ReplicaPolicy::load(&d.home).admits(&d.me(), &space),
+            "the device kept no record of the decision"
+        );
+        let view = a.reach().await;
+        assert!(
+            matches!(
+                standing_in(&view, &space, &d.me()),
+                Some(FanoutStanding::Excluded { told: true })
+            ),
+            "an exclusion read as something else: {:?}",
+            standing_in(&view, &space, &d.me())
+        );
+
+        // Lifted: carried to the device, then offered and consented to again.
+        match exclude(&a.router, &a.facts, d.me().as_str(), &space, false).await {
+            Response::Ok { .. } => {}
+            other => panic!("the lift answered {other:?}"),
+        }
+        poll_until(Duration::from_secs(45), || async {
+            listed(&a, &a_store, &space)
+                .await
+                .contains(&d.me())
+                .then_some(())
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "a lifted exclusion never reached the ledger; A recorded {:?}, D's policy admits {}",
+                a.facts.standing(&d.me(), &space),
+                crate::daemon::replica::ReplicaPolicy::load(&d.home).admits(&d.me(), &space),
+            )
+        });
+        poll_until(Duration::from_secs(30), || async {
+            bootstrap::registered_home(&d.router, &space)
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the ledger names D again but D holds nothing: the store at {} is {}registered",
+                d_store.display(),
+                if d_store.exists() {
+                    "there and un"
+                } else {
+                    "gone and un"
+                },
+            )
+        });
+        assert!(
+            crate::daemon::replica::ReplicaPolicy::load(&d.home).admits(&d.me(), &space),
+            "the device is still refusing a Space the person put back"
+        );
+
+        a.stop().await;
+        d.stop().await;
+    }
+
+    /// The refusal is the device's own and outlives the process that heard
+    /// it: written on disk by a run nobody here remembers, it is answered to
+    /// *whoever* offers the Space. A device that trusted the holder to stop
+    /// asking would take the Space back from the next device that asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_space_excluded_on_a_device_is_declined_to_whoever_offers_it() {
+        let root = ScopedRoot::new("sticky");
+        let net = MemNet::new();
+        let a = Side::stand("a", &net, &root, Vec::new()).await;
+        let mut d = Side::stand("d", &net, &root, vec![crate::config::spaces_root()]).await;
+        d.own(&[d.me(), a.me()]);
+        let (space, store) = a.found("Refused");
+        let (link_text, actor) = match a.ask(&space, &store, Request::Coordinates).await {
+            Response::Coordinates { link, actor, .. } => (link, actor),
+            other => panic!("no ticket: {other:?}"),
+        };
+        // What a previous run left behind, and the only memory of it.
+        crate::daemon::replica::ReplicaPolicy::decide(&d.home, &d.me(), &space, true, true)
+            .expect("decide");
+        d.start();
+
+        let offer = OwnFrame::Offer {
+            space: space.clone(),
+            actor,
+            coordinates: link_text,
+            routes: Vec::new(),
+        };
+        let answer = tokio::time::timeout(
+            Duration::from_secs(10),
+            exchange(a.transport.as_ref(), &d.me(), &offer),
+        )
+        .await
+        .expect("answered")
+        .expect("an answer came back");
+        match answer {
+            OwnAnswer::Declined { why } => assert_eq!(why, "excluded on this device"),
+            other => panic!("an excluded Space was answered with {other:?}"),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            bootstrap::registered_home(&d.router, &space).is_none(),
+            "an excluded Space was entered anyway"
+        );
+
+        d.stop().await;
+        a.stop().await;
+    }
+
+    /// Retired by the other device of the profile, this one keeps its seed and
+    /// every store it holds and simply stops speaking on the lane. It answers
+    /// no offer — so nothing can consent it back into a Space — and it enters
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_that_is_no_longer_in_the_set_answers_nothing_on_the_lane() {
+        let root = ScopedRoot::new("selfretired");
+        let net = MemNet::new();
+        let a = Side::stand("a", &net, &root, Vec::new()).await;
+        let mut d = Side::stand("d", &net, &root, vec![crate::config::spaces_root()]).await;
+        link(&[&a, &d]);
+        let (space, store) = a.found("Gone");
+        let (link_text, actor) = match a.ask(&space, &store, Request::Coordinates).await {
+            Response::Coordinates { link, actor, .. } => (link, actor),
+            other => panic!("no ticket: {other:?}"),
+        };
+        d.start();
+
+        // The set as another device of the profile publishes it after the
+        // retirement: D is not in it.
+        d.own(&[a.me()]);
+        let offer = OwnFrame::Offer {
+            space: space.clone(),
+            actor,
+            coordinates: link_text,
+            routes: Vec::new(),
+        };
+        let answered = tokio::time::timeout(
+            Duration::from_secs(5),
+            exchange(a.transport.as_ref(), &d.me(), &offer),
+        )
+        .await;
+        assert!(
+            !matches!(answered, Ok(Ok(OwnAnswer::Consent { .. }))),
+            "a retired device consented itself into a Space: {answered:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            bootstrap::registered_home(&d.router, &space).is_none(),
+            "a retired device entered a Space it was offered"
+        );
+        // And nothing was taken from it: the seed it signs with is still here.
+        assert!(
+            d.home.join("secret.key").exists(),
+            "a retirement deleted the device's own key"
+        );
+
+        d.stop().await;
         a.stop().await;
     }
 

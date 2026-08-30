@@ -209,6 +209,13 @@ impl CorrespondenceService {
         let _ = self.fanout.set(facts);
     }
 
+    /// The fan-out's facts, for the acts that change what it remembers.
+    /// `None` on a daemon that runs no fan-out, which is a daemon that has
+    /// never asked — not one whose devices hold nothing.
+    pub(crate) fn fanout(&self) -> Option<&std::sync::Arc<crate::daemon::fanout::Facts>> {
+        self.fanout.get()
+    }
+
     /// Hook the net plane's facts, once, when the daemon mounts the tunnel.
     pub(crate) fn hook_netplane(&self, facts: std::sync::Arc<crate::daemon::netplane::Facts>) {
         let _ = self.netplane.set(facts);
@@ -461,6 +468,46 @@ impl CorrespondenceService {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "the grown device set could not be announced");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Retire one of this profile's devices: append the signed retirement,
+    /// keep, republish the set, then announce so correspondents stop sealing
+    /// to it.
+    ///
+    /// Kept before the watch moves, for the reason adoption is: the hub, the
+    /// fan-out and the tunnel all admit on what this publishes, and a set
+    /// narrowed on a fact a crash could take back would leave a device
+    /// refused here and named on disk. The de-listing that follows in every
+    /// Space is a separate signed act per Space and is never derived from
+    /// this one — kinship says who is a device of this person, and only a
+    /// Space's own ledger says who may write in it.
+    pub fn retire_device(&self, device: &DeviceId, now: u64) -> Result<(), String> {
+        let mut held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        plane
+            .reach
+            .retire_device(device)
+            .map_err(|error| format!("{error}"))?;
+        self.keep(plane)?;
+        self.own.send_replace(Some(own_of(&plane.reach)));
+        if plane.directory.is_some() {
+            match self.present(plane, now) {
+                Ok(()) => {
+                    if let Err(error) = self.keep(plane) {
+                        tracing::warn!(%error, "the announcement's epoch could not be kept");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the narrowed device set could not be announced");
                 }
             }
         }
@@ -1369,6 +1416,75 @@ mod tests {
             service.own_devices().borrow().as_ref(),
             Some(&published),
             "carrying changes nothing about who the devices are"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A retirement republishes the set without the device — the one watch
+    /// the hub admits on, the fan-out offers on and the tunnel routes on, so
+    /// this narrowing is what drops a retired device's live route. Kept
+    /// before it is published, and retiring the device this daemon *is* is
+    /// refused: that seed is the one that would have to sign its own absence.
+    #[tokio::test]
+    async fn a_retirement_narrows_the_set_this_daemon_publishes() {
+        let root = std::env::temp_dir().join(format!("corr-retire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let service = restored(&root);
+        let my_seed = crate::config::load_identity(&root).expect("identity");
+        let me = mechanics::actor::device_from_seed(&my_seed);
+        let other_seed = [93u8; 32];
+        let other = mechanics::actor::device_from_seed(&other_seed);
+        let (nonce, epoch) = ([44u8; 16], 3);
+        let link = mechanics::kinship::DeviceLink::assemble(
+            (
+                me.clone(),
+                mechanics::kinship::DeviceLink::half(&my_seed, &other, nonce, epoch),
+            ),
+            (
+                other.clone(),
+                mechanics::kinship::DeviceLink::half(&other_seed, &me, nonce, epoch),
+            ),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        service.adopt_device(link, now_secs()).expect("adopt");
+        assert_eq!(
+            service
+                .own_devices()
+                .borrow()
+                .as_ref()
+                .map(|own| own.devices.len()),
+            Some(2)
+        );
+
+        assert!(
+            service.retire_device(&me, now_secs()).is_err(),
+            "a daemon retired the device it signs as"
+        );
+        service.retire_device(&other, now_secs()).expect("retire");
+        let published = service
+            .own_devices()
+            .borrow()
+            .clone()
+            .expect("the set is published");
+        assert_eq!(published.devices, vec![me.clone()]);
+
+        // Durable before it is published: a fresh service over the same home
+        // reads the retirement back.
+        let again = CorrespondenceService::open(&root);
+        again.restore(now_secs()).expect("restore");
+        assert_eq!(
+            again
+                .own_devices()
+                .borrow()
+                .as_ref()
+                .map(|own| own.devices.clone()),
+            Some(vec![me])
+        );
+        assert!(
+            service.retire_device(&other, now_secs()).is_err(),
+            "retiring it twice reported as though something happened"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
