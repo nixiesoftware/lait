@@ -1,0 +1,40 @@
+[package]
+name = "lait-feed-notify"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "The feed's notify relay: fans a signed channel pointer out to every subscribed daemon the moment it is published"
+# The instant half of the update seam. The bucket stays the authority and the
+# poll stays the floor; this only shortens the time between a publish and a
+# machine learning of it. One binary, no keys of its own, trivially self-hosted
+# — an operator who runs their own channel runs their own one of these and
+# points `update.notify` at it.
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lait-feed-notify"
+path = "src/main.rs"
+
+[dependencies]
+# Signature verification through the same primitive the daemon opens the
+# feed with: a pointer this relay would not accept is one no machine would.
+mechanics = { path = "../../crates/mechanics" }
+anyhow = "1"
+axum = "0.8"
+data-encoding = "2.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+# Priming the board from the feed: the bucket is the authority, and a relay
+# that restarted or missed an announce re-reads it rather than remembering.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"

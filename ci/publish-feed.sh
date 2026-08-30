@@ -325,3 +325,19 @@ curl -fsSL "$BASE_URL/$POINTER_OBJECT" -o "$WORK/readback-pointer.json"
 cmp "$WORK/pointer.json" "$WORK/readback-pointer.json"
 
 echo "publish-feed: $CHANNEL now points at $VERSION"
+
+# 6. Say so. The bucket is the authority and every machine's period is the
+#    floor; the notify relay is what makes the floor irrelevant. The body is
+#    the very pointer just published — the relay verifies it against the feed
+#    key, so there is nothing to authenticate here. Non-fatal by design: a
+#    relay that is down costs latency, never the publish.
+NOTIFY_URL="${LAIT_FEED_NOTIFY-https://foundation-notify-894246603476.us-central1.run.app}"
+if [ -n "$NOTIFY_URL" ]; then
+  if curl -fsS -X POST -H 'Content-Type: application/json' \
+      --data-binary "@$WORK/pointer.json" \
+      "$NOTIFY_URL/announce/${POINTER_OBJECT#channels/}" -o /dev/null; then
+    echo "publish-feed: announced $CHANNEL to $NOTIFY_URL"
+  else
+    echo "publish-feed: WARNING: $NOTIFY_URL did not take the announcement; machines learn on their period" >&2
+  fi
+fi

@@ -1223,9 +1223,54 @@ impl Daemon {
             return None;
         }
         let stop = self.endpoint.subscribe_stop();
+        // A selected World release is served only by a fresh generation, the
+        // same crossing the consented upgrade makes; the watcher asks for it
+        // the moment a check stages one.
+        let relaunch = GenerationRelaunch {
+            requested: self.relaunch_requested.clone(),
+            endpoint: self.endpoint.clone(),
+        };
+        let on_worlds_staged: crate::update::watch::OnWorldsStaged =
+            Arc::new(move || relaunch.request());
+        let wake = Arc::new(tokio::sync::Notify::new());
+        self.spawn_notify(&identity, stop.clone(), wake.clone());
         Some(tokio::spawn(crate::update::watch::serve(
-            identity, root, stop,
+            identity,
+            root,
+            stop,
+            wake,
+            on_worlds_staged,
         )))
+    }
+
+    /// Subscribe to the notify relay, when one is configured, so a publish
+    /// wakes the staging watcher within the round trip. Silent about a relay
+    /// that is down — the period covers it — and informational about no relay
+    /// at all, which is the ordinary state of a development build.
+    fn spawn_notify(
+        &self,
+        identity: &Path,
+        stop: tokio::sync::watch::Receiver<bool>,
+        wake: Arc<tokio::sync::Notify>,
+    ) {
+        let Some(relay) = crate::config::Settings::load(Some(identity)).notify_url() else {
+            tracing::info!("no notify relay is configured; updates arrive on the check period");
+            return;
+        };
+        let pubkeys = match crate::update::feed::pinned_pubkeys() {
+            Ok(pubkeys) => pubkeys,
+            Err(error) => {
+                tracing::warn!(%error, "the feed keys could not be pinned; not subscribing");
+                return;
+            }
+        };
+        let relevant: crate::update::notify::Relevant = {
+            let identity = identity.to_path_buf();
+            Arc::new(move || crate::update::notify::relevant_keys(&identity))
+        };
+        tokio::spawn(crate::update::notify::serve(
+            relay, pubkeys, stop, relevant, wake,
+        ));
     }
 
     /// Resume consented World updates independently of any client connection.

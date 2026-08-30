@@ -3727,6 +3727,7 @@ dependencies = [
  "hyper-util",
  "interprocess",
  "lait-directory",
+ "lait-feed-notify",
  "lait-issues",
  "lait-issues-app",
  "lait-signage",
@@ -3802,6 +3803,24 @@ dependencies = [
  "tar",
  "tempfile",
  "world-interface",
+]
+
+[[package]]
+name = "lait-feed-notify"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "data-encoding",
+ "mechanics",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

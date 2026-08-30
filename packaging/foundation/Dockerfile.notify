@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+#
+# The notify relay image the Foundation platform runs: `lait-feed-notify`,
+# the instant half of the update seam — a signed-pointer doorbell in front of
+# the feed bucket, stateless because it primes from the bucket it caches.
+# Built by this repository (the envelope it verifies is defined here),
+# deployed by NixieSoftware/foundation which owns where and how it runs.
+# Cloud Build builds it — there is no local Docker in the authoring
+# environment — so the context is whatever `.gcloudignore` admits.
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Pinned to the workspace MSRV (`rust-version` in Cargo.toml). The crypto stack
+# is pure Rust; the only C need is a linker and ring's perl/cc.
+FROM rust:1.92-slim-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config perl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build --release --locked -p lait-feed-notify
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+# ca-certificates lets ureq reach the feed bucket over TLS. Unprivileged; it
+# holds no keys and writes nothing unless `--state` names somewhere.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 lait
+
+COPY --from=build /src/target/release/lait-feed-notify /usr/local/bin/lait-feed-notify
+
+COPY LICENSE /usr/share/doc/lait/LICENSE
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/lait/THIRD-PARTY-NOTICES.md
+
+USER lait
+EXPOSE 8080
+
+# No args baked in: the platform passes --http/--feed/--pubkey. Running with
+# none prints the usage and exits, which is the honest failure for a
+# misconfigured deploy.
+ENTRYPOINT ["lait-feed-notify"]

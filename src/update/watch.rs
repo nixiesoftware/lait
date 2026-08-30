@@ -18,6 +18,15 @@
 //! be missed. Absence is absence: a machine that has never completed a check
 //! has no file, which is neither "up to date" nor "could not ask".
 //!
+//! ## The period is the floor, not the latency
+//!
+//! A machine also holds a subscription to the notify relay
+//! ([`super::notify`]), which wakes this loop the moment a pointer it follows
+//! is announced. The subscription changes *when* a check runs and nothing
+//! about what a check is: the same resolve, the same ratchet, the same
+//! verification. A machine with no relay, or no route to it, still checks on
+//! its period, which is why the period is a floor and not a fallback.
+//!
 //! ## Why the period is jittered
 //!
 //! A fleet that checks on a round number checks together. Chrome's updater
@@ -27,14 +36,23 @@
 //! no `rand`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Notify;
 
 use super::{feed, tree};
 
 /// The base period between channel checks. Chrome's updater uses 4.5 hours
 /// and has the fleet-scale evidence; there is no reason to invent another
-/// number.
+/// number. With the subscription carrying the ordinary case, this is only how
+/// long a machine that cannot hear the relay stays behind.
 pub const CHECK_PERIOD: Duration = Duration::from_secs(4 * 60 * 60 + 30 * 60);
+
+/// The least time between two checks, however many wakes arrive. A relay
+/// that rang falsely, or a burst of announcements, costs one check per gap
+/// rather than one per ring.
+pub const MIN_GAP: Duration = Duration::from_secs(5);
 
 /// The most a period is ever stretched, as a fraction of itself.
 const MAX_STRETCH: f64 = 0.2;
@@ -346,9 +364,16 @@ where
 ///
 /// The parameter is gone rather than defaulted so that threading a
 /// single channel back through here has to fail to compile.
-fn check_worlds(identity: &Path) {
+///
+/// Returns whether any World's release moved. A selected release is served
+/// only by a fresh daemon generation — every Runtime Catalog in this process
+/// is pinned to what it launched — so the caller relaunches when this is
+/// true, and a World a person is looking at changes under them within the
+/// second rather than at the next reboot.
+fn check_worlds(identity: &Path) -> bool {
     let worlds = crate::serve::head::installations_root(identity);
     let installed = crate::world::installed::declarations(&worlds).unwrap_or_default();
+    let mut staged = false;
     for declaration in installed {
         let world = declaration.manifest.id;
         let channel = super::world::channel_for(&worlds, &world);
@@ -360,6 +385,10 @@ fn check_worlds(identity: &Path) {
                 // existed was a log nobody draws.
                 super::world::note(&worlds, &world, &outcome, now());
                 tracing::debug!(%world, ?outcome, "world bundle checked");
+                if let super::world::Outcome::Staged { version } = &outcome {
+                    tracing::info!(%world, %version, "a World release was staged and selected");
+                    staged = true;
+                }
             }
             // Named, never folded into the client's standing: "this World's
             // channel could not be asked" is a different fact from anything
@@ -368,10 +397,20 @@ fn check_worlds(identity: &Path) {
             Err(error) => tracing::warn!(%world, %error, "a world bundle could not be staged"),
         }
     }
+    staged
+}
+
+/// What one check came to: the client's standing, and whether a World moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    pub standing: Standing,
+    /// A World release was staged and selected, and only a fresh daemon
+    /// generation can serve it.
+    pub worlds_staged: bool,
 }
 
 /// The ordinary check, against the real feed and the real host.
-fn check(identity: &Path, root: &Path) -> Standing {
+fn check(identity: &Path, root: &Path) -> Checked {
     let channel = feed::Channel::current();
     let current = semver::Version::parse(env!("LAIT_VERSION_SEMVER"))
         .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
@@ -385,8 +424,11 @@ fn check(identity: &Path, root: &Path) -> Standing {
     );
     record(identity, &standing);
     apply_if_this_platform_has_no_stub(root);
-    check_worlds(identity);
-    standing
+    let worlds_staged = check_worlds(identity);
+    Checked {
+        standing,
+        worlds_staged,
+    }
 }
 
 /// On macOS, apply what was just staged.
@@ -441,7 +483,7 @@ fn next_delay(period: Duration, spread: Duration) -> Duration {
 /// `rand`, and degrading to the midpoint rather than failing: a check that
 /// refused to run because entropy was unavailable would be a machine that
 /// stops updating over a number that only needs to be roughly spread.
-fn draw() -> f64 {
+pub(super) fn draw() -> f64 {
     let mut bytes = [0u8; 4];
     if getrandom::fill(&mut bytes).is_err() {
         return 0.5;
@@ -453,14 +495,37 @@ fn draw() -> f64 {
     f64::from(u32::from_le_bytes(bytes)) / f64::from(u32::MAX)
 }
 
-/// Run periodic staging until the daemon stops.
+/// What the loop does when a check staged a World release: the daemon's
+/// generation relaunch, supplied by the host because only it owns the
+/// endpoint. A `fn` would do but the host's relaunch captures state.
+pub type OnWorldsStaged = Arc<dyn Fn() + Send + Sync>;
+
+/// Run periodic staging until the daemon stops, checking early whenever
+/// `wake` is notified.
 ///
 /// Silent by construction: the only observable effects are the standing file
 /// and a staged tree. A daemon on a machine that is not a stub-managed
 /// installation never starts this at all — there is nowhere to stage to, and
 /// inventing one would put a client tree beside a developer's `target/`.
-pub async fn serve(identity: PathBuf, root: PathBuf, stop: tokio::sync::watch::Receiver<bool>) {
-    serve_checking(identity, root, stop, CHECK_PERIOD, MAX_SPREAD, check).await;
+pub async fn serve(
+    identity: PathBuf,
+    root: PathBuf,
+    stop: tokio::sync::watch::Receiver<bool>,
+    wake: Arc<Notify>,
+    on_worlds_staged: OnWorldsStaged,
+) {
+    serve_checking(
+        identity,
+        root,
+        stop,
+        wake,
+        on_worlds_staged,
+        CHECK_PERIOD,
+        MAX_SPREAD,
+        MIN_GAP,
+        check,
+    )
+    .await;
 }
 
 /// The loop itself, with its period and its check supplied.
@@ -471,31 +536,57 @@ pub async fn serve(identity: PathBuf, root: PathBuf, stop: tokio::sync::watch::R
 /// while every part is correct. A `fn` pointer rather than a closure keeps it
 /// `Send + 'static` for `spawn_blocking` without a generic parameter reaching
 /// into the production path.
+#[allow(clippy::too_many_arguments)]
 async fn serve_checking(
     identity: PathBuf,
     root: PathBuf,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    wake: Arc<Notify>,
+    on_worlds_staged: OnWorldsStaged,
     period: Duration,
     spread: Duration,
-    check: fn(&Path, &Path) -> Standing,
+    gap: Duration,
+    check: fn(&Path, &Path) -> Checked,
 ) {
     tracing::info!(root = %root.display(), "staging updates for this installation");
     // The first check is spread too, so a fleet restarted together by a
     // reboot or a deploy does not arrive at the host together either.
     let mut delay = spread.mul_f64(draw()).min(period);
+    let mut last_check: Option<std::time::Instant> = None;
     loop {
-        tokio::select! {
-            () = tokio::time::sleep(delay) => {}
+        let woken = tokio::select! {
+            () = tokio::time::sleep(delay) => false,
+            () = wake.notified() => true,
             _ = stop.changed() => return,
-        }
+        };
         if *stop.borrow() {
             return;
         }
+        if woken {
+            // Spaced from the last check, whoever asked: a wake is a doorbell
+            // and a doorbell can be leaned on.
+            if let Some(since) = last_check.map(|at| at.elapsed()) {
+                if since < gap {
+                    tokio::select! {
+                        () = tokio::time::sleep(gap.saturating_sub(since)) => {}
+                        _ = stop.changed() => return,
+                    }
+                }
+            }
+            tracing::info!("a newer pointer was announced; checking now rather than on the period");
+        }
         let (identity, root) = (identity.clone(), root.clone());
         match tokio::task::spawn_blocking(move || check(&identity, &root)).await {
-            Ok(standing) => tracing::debug!(?standing, "channel checked"),
+            Ok(checked) => {
+                tracing::debug!(standing = ?checked.standing, "channel checked");
+                if checked.worlds_staged {
+                    tracing::info!("a World release is selected; relaunching the daemon generation to serve it");
+                    on_worlds_staged();
+                }
+            }
             Err(error) => tracing::warn!(%error, "the staging check panicked"),
         }
+        last_check = Some(std::time::Instant::now());
         delay = next_delay(period, spread);
     }
 }
@@ -812,11 +903,30 @@ mod tests {
     /// pointer, which is what keeps `spawn_blocking` free of a generic.
     static REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    fn counting_check(_identity: &Path, _root: &Path) -> Standing {
+    fn counting_check(_identity: &Path, _root: &Path) -> Checked {
         REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Standing::Current {
-            channel_version: "0.0.0".into(),
+        Checked {
+            standing: Standing::Current {
+                channel_version: "0.0.0".into(),
+            },
+            worlds_staged: false,
         }
+    }
+
+    /// A check that staged a World, once: the first call moves, the rest do
+    /// not, which is what a real channel does after a relaunch.
+    fn staging_check(_identity: &Path, _root: &Path) -> Checked {
+        let first = REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        Checked {
+            standing: Standing::Current {
+                channel_version: "0.0.0".into(),
+            },
+            worlds_staged: first,
+        }
+    }
+
+    fn nothing_on_staged() -> OnWorldsStaged {
+        Arc::new(|| {})
     }
 
     /// The gap this issue left open: every part of the check was tested and the
@@ -846,8 +956,11 @@ mod tests {
             identity.path().to_path_buf(),
             root.path().to_path_buf(),
             receiver,
+            Arc::new(Notify::new()),
+            nothing_on_staged(),
             Duration::from_millis(5),
             Duration::from_millis(1),
+            Duration::ZERO,
             counting_check,
         ));
 
@@ -869,6 +982,122 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), loops)
             .await
             .expect("the loop did not end on the stop signal, so a shutdown would hang")
+            .expect("the loop panicked");
+    }
+
+    /// A wake reaches the check well inside a period that would not have, and
+    /// leaning on the doorbell is spaced by the gap rather than answered per
+    /// ring: three wakes in quick succession are at most two checks inside
+    /// one gap (the first, and the one permit `Notify` keeps).
+    #[tokio::test]
+    async fn a_wake_checks_now_and_a_burst_of_wakes_is_spaced_by_the_gap() {
+        REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        let identity = tempfile::tempdir().expect("an identity directory");
+        let root = tempfile::tempdir().expect("an install root");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let wake = Arc::new(Notify::new());
+        let period = Duration::from_secs(3600);
+        let gap = Duration::from_millis(300);
+
+        let loops = tokio::spawn(serve_checking(
+            identity.path().to_path_buf(),
+            root.path().to_path_buf(),
+            receiver,
+            wake.clone(),
+            nothing_on_staged(),
+            period,
+            Duration::ZERO,
+            gap,
+            counting_check,
+        ));
+
+        // The first check is spread by zero, so it lands at once. Wait for it,
+        // then ring three times inside one gap.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first check never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let rung_at = std::time::Instant::now();
+        wake.notify_one();
+        wake.notify_one();
+        wake.notify_one();
+        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a wake did not reach the check inside an hour-long period"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            rung_at.elapsed() >= gap.mul_f64(0.9),
+            "the wake was answered inside the gap: {:?}",
+            rung_at.elapsed()
+        );
+        // Let every permit drain and count: `Notify` coalesces to one, so a
+        // burst of three is one more check, spaced by the gap, and not three.
+        tokio::time::sleep(gap * 3).await;
+        let reached = REACHED.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            reached <= 3,
+            "three wakes became {reached} checks; the gap is not spacing them"
+        );
+
+        stop.send(true).expect("the stop signal is received");
+        tokio::time::timeout(Duration::from_secs(10), loops)
+            .await
+            .expect("the loop did not end on the stop signal")
+            .expect("the loop panicked");
+    }
+
+    /// A check that staged a World asks for the relaunch, and a check that
+    /// did not does not: the whole reason a selected release stopped waiting
+    /// for the next reboot.
+    #[tokio::test]
+    async fn a_staged_world_asks_for_the_generation_relaunch_once() {
+        REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        let identity = tempfile::tempdir().expect("an identity directory");
+        let root = tempfile::tempdir().expect("an install root");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let relaunches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let on_staged: OnWorldsStaged = {
+            let relaunches = relaunches.clone();
+            Arc::new(move || {
+                relaunches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        let loops = tokio::spawn(serve_checking(
+            identity.path().to_path_buf(),
+            root.path().to_path_buf(),
+            receiver,
+            Arc::new(Notify::new()),
+            on_staged,
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+            Duration::ZERO,
+            staging_check,
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the loop did not come back round"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            relaunches.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the relaunch is asked for exactly when a World was staged"
+        );
+        stop.send(true).expect("the stop signal is received");
+        tokio::time::timeout(Duration::from_secs(10), loops)
+            .await
+            .expect("the loop did not end on the stop signal")
             .expect("the loop panicked");
     }
 }

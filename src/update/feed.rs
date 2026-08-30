@@ -232,7 +232,7 @@ pub enum PointerPayload {
 }
 
 impl PointerPayload {
-    fn published_at(&self) -> Option<u64> {
+    pub(crate) fn published_at(&self) -> Option<u64> {
         match self {
             PointerPayload::Release { published_at, .. } => *published_at,
             PointerPayload::Moved { published_at, .. } => *published_at,
