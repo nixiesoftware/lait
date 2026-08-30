@@ -430,9 +430,9 @@ pub fn ratchet(identity: &Path, entry: &MarkerEntry, receipt: Option<&Receipt>) 
             // under it verifies. A receipt that cannot be shown to sit on this
             // log is unproven, and unproven is a standing rather than a flag on
             // a mark nothing reads.
-            let bridge = match placed(&entry.base, &accepted, receipt) {
+            let consistency = match placed(&entry.base, &accepted, receipt) {
                 Placed::NoReceipt => None,
-                Placed::On(bridge) => Some(bridge),
+                Placed::On(consistency) => Some(consistency),
                 Placed::Elsewhere { size } => {
                     return keep(
                         identity,
@@ -469,9 +469,13 @@ pub fn ratchet(identity: &Path, entry: &MarkerEntry, receipt: Option<&Receipt>) 
             };
             let by = accepted.by.clone();
             let mut record = record_of(entry, held, standing.clone());
-            if let Some(bridge) = bridge {
-                record.marks =
-                    marks_of(&accepted, receipt, &bridge, my_devices(identity).as_deref());
+            if let Some(consistency) = consistency {
+                record.marks = marks_of(
+                    &accepted,
+                    receipt,
+                    &consistency,
+                    my_devices(identity).as_deref(),
+                );
             }
             record.pin = Some(accepted);
             save(identity, &by, &record);
@@ -566,7 +570,7 @@ fn placed(base: &str, accepted: &Head, receipt: Option<&Receipt>) -> Placed {
     let Some(signed_at) = receipt.head.as_ref() else {
         return Placed::NoReceipt;
     };
-    let bridge = if signed_at.size < accepted.size {
+    let consistency = if signed_at.size < accepted.size {
         match chronicle_over_http(base, Some(signed_at.size)) {
             Ok(answer) => answer.consistency,
             Err(error) => {
@@ -578,8 +582,8 @@ fn placed(base: &str, accepted: &Head, receipt: Option<&Receipt>) -> Placed {
     } else {
         Vec::new()
     };
-    match advance(Some(&PinnedHead::from(signed_at)), accepted, &bridge) {
-        Ok(_) => Placed::On(bridge),
+    match advance(Some(&PinnedHead::from(signed_at)), accepted, &consistency) {
+        Ok(_) => Placed::On(consistency),
         Err(_) => Placed::Elsewhere {
             size: signed_at.size,
         },
@@ -599,7 +603,7 @@ fn placed(base: &str, accepted: &Head, receipt: Option<&Receipt>) -> Placed {
 fn marks_of(
     accepted: &Head,
     receipt: Option<&Receipt>,
-    bridge: &[[u8; 32]],
+    consistency: &[[u8; 32]],
     mine: Option<&[DeviceId]>,
 ) -> BTreeMap<DeviceId, Mark> {
     let mut marks = BTreeMap::new();
@@ -615,7 +619,7 @@ fn marks_of(
             continue;
         }
         let proven = mechanics::chronicle::verify_mark(avowal, &receipt.inclusion).is_ok()
-            && mechanics::chronicle::consistent_with(&pin, avowal, bridge).is_ok();
+            && mechanics::chronicle::consistent_with(&pin, avowal, consistency).is_ok();
         marks.insert(
             subject.clone(),
             Mark {
