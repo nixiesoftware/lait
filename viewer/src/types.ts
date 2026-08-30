@@ -1579,11 +1579,6 @@ export type Request =
    *  `install_mcp` tells people to come here for. */
   | { cmd: "agent_provision"; name: string }
   | { cmd: "key_rotate" }
-  /** Reply is `text` — `"<actor_id> <space_id>"`, the token the other machine
-   *  signs with `host_device_consent`. */
-  | { cmd: "device_invite" }
-  /** The hex consent blob that machine handed back. Completes enrolment. */
-  | { cmd: "device_add"; consent: string }
   | { cmd: "device_revoke"; device: string }
   /** Reply is `text` — this actor's devices, one per line. */
   | { cmd: "device_list" }
@@ -1664,8 +1659,6 @@ export type SpaceRequest = Extract<
       | "key_rotate"
       | "members"
       | "member_log"
-      | "device_invite"
-      | "device_add"
       | "device_revoke"
       | "device_list"
       | "space_custody_export"
@@ -1706,9 +1699,6 @@ export type HostRequest =
    *  answers, so `admitted` distinguishes "you're in" from "the board stays
    *  encrypted until they come online". */
   | { cmd: "host_space_enter"; link: string; home?: string | null; nick?: string | null }
-  /** Sign this machine's consent to join an existing actor. Store-free: the
-   *  machine running it holds no membership anywhere yet. */
-  | { cmd: "host_device_consent"; token: string }
   | { cmd: "host_context" }
   | { cmd: "host_orbit_forget"; selector: string }
   | { cmd: "host_orbit_prune" }

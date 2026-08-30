@@ -201,9 +201,6 @@ pub enum Action {
         home: Option<String>,
         nick: Option<String>,
     },
-    DeviceConsent {
-        token: String,
-    },
     OrbitForget {
         space: String,
     },
@@ -332,7 +329,6 @@ impl Action {
             Self::SpaceEnter { home, .. } => {
                 format!("space.enter:{}", home.as_deref().unwrap_or_default())
             }
-            Self::DeviceConsent { .. } => "device.consent".into(),
             Self::OrbitForget { space } => format!("orbit.forget:{space}"),
             Self::OrbitRebuild { orbit } => format!("orbit.rebuild:{orbit}"),
             Self::BookPut {
@@ -437,7 +433,6 @@ impl Action {
             Self::CloseConversation(person) => format!("close the chat with {person}"),
             Self::SpaceFound { name, .. } => format!("found the Space '{name}'"),
             Self::SpaceEnter { .. } => "enter a Space from an invite".into(),
-            Self::DeviceConsent { .. } => "sign this machine's consent".into(),
             Self::OrbitForget { space } => format!("forget {space}"),
             Self::OrbitRebuild { orbit } => format!("rebuild {orbit}"),
             Self::BookPut { name, .. } => format!("save the card '{name}'"),
@@ -1666,13 +1661,6 @@ impl Worker {
                     Some(home) => format!("entered a Space into {home}"),
                     None => "entered a Space".into(),
                 }))
-            }
-            Action::DeviceConsent { token } => {
-                client.device_consent(token).await?;
-                Ok(Outcome::Said(
-                    "this machine's consent is signed; hand it back to the device that invited it"
-                        .into(),
-                ))
             }
             Action::OrbitForget { space } => {
                 client.orbit_forget(space).await?;

@@ -311,17 +311,12 @@ impl CorrespondenceService {
         };
         let announcement = announced.map_err(|error| format!("{error}"))?;
         if let Some(directory) = plane.directory.as_deref_mut() {
-            let seed = plane.reach.seed_for(&plane.reach.canonical_device());
-            match seed {
-                Some(seed) => {
-                    match lait_directory::publish_as(directory, &seed, &announcement, now) {
-                        Ok(address) => plane.reach.issued(address.as_str().to_owned()),
-                        Err(refusal) => {
-                            tracing::warn!(%refusal, "the directory did not take this publication");
-                        }
-                    }
+            let seed = plane.reach.seed();
+            match lait_directory::publish_as(directory, &seed, &announcement, now) {
+                Ok(address) => plane.reach.issued(address.as_str().to_owned()),
+                Err(refusal) => {
+                    tracing::warn!(%refusal, "the directory did not take this publication");
                 }
-                None => tracing::warn!("no seed for the canonical device"),
             }
         }
         Ok(())
@@ -642,9 +637,7 @@ impl CorrespondenceService {
                     // only one is worth acting on.
                     return Response::err("no directory is configured to resolve an address");
                 };
-                let Some(seed) = plane.reach.seed_for(&plane.reach.canonical_device()) else {
-                    return Response::err("no seed for the canonical device");
-                };
+                let seed = plane.reach.seed();
                 let announcement = match lait_directory::resolve_as(directory, &seed, &address, now)
                 {
                     Ok(announcement) => announcement,

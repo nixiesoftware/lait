@@ -160,20 +160,6 @@ impl Client {
         .await
     }
 
-    /// Sign this machine's consent to join an existing actor.
-    ///
-    /// The one host request that touches no store: the machine running it has
-    /// no membership anywhere yet, which is the whole point of enrolment.
-    pub async fn device_consent(&self, token: &str) -> ClientResult<()> {
-        if token.trim().is_empty() {
-            return Err(ClientError::invalid("device consent needs an invite token"));
-        }
-        self.host_ok(Request::HostDeviceConsent {
-            token: token.trim().to_owned(),
-        })
-        .await
-    }
-
     /// Add a device to this profile, from the device that already holds it:
     /// the code the new one is showing. `XXXX-XXXX`, or `XXXX-XXXX@host:port`
     /// when the two share a network and nothing relays between them.

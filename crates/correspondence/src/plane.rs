@@ -152,14 +152,11 @@ pub struct DeviceChange {
 }
 
 pub struct ReachPlane {
-    /// This identity's device seeds — exactly one since the genesis is carried:
-    /// a machine holds one device, and every other device of the profile holds
-    /// its own seed on its own machine. The `Vec` outlives its second element
-    /// only until the canonical/seed-for surface collapses onto it.
-    seeds: Vec<[u8; 32]>,
-    /// Which seed composes, signs and avows. Movable: `DeviceLink` is symmetric,
-    /// so no device outranks another and the profile survives the handover.
-    canonical: usize,
+    /// This identity's device seed. Exactly one, because the genesis is
+    /// carried: a machine holds one device, and every other device of the
+    /// profile holds its own seed on its own machine. A set here would be a
+    /// second machine's key material sitting on this one.
+    seed: [u8; 32],
     profile: ProfileId,
     /// Carried, never derived — the link the profile id is the hash of.
     genesis: DeviceLink,
@@ -316,8 +313,7 @@ impl ReachPlane {
         let egress_space = SpaceId::mint(&SystemUlidSource);
         let (egress_events, egress_actor) = incept(&seed, 1, &egress_space);
         Self {
-            seeds: vec![seed],
-            canonical: 0,
+            seed,
             profile,
             genesis,
             origin: state.origin,
@@ -337,7 +333,9 @@ impl ReachPlane {
     pub fn state(&self) -> addressbook::ReachState {
         addressbook::ReachState {
             epoch: self.epoch,
-            canonical: self.canonical,
+            // The envelope keeps the field; a machine holds one seed, so the
+            // index it once chose between is always the first.
+            canonical: 0,
             registry: self.registry.clone(),
             sent: self.sent.clone(),
             address: self.address.clone(),
@@ -457,21 +455,16 @@ impl ReachPlane {
                 &self.profile,
                 portrait,
                 audience.clone(),
-                &self.canonical_seed(),
+                &self.seed,
                 self.epoch,
                 nonce,
             )?;
         }
-        self.registry.avow_reachable(
-            &self.profile,
-            audience,
-            &self.canonical_seed(),
-            self.epoch,
-            nonce,
-        )?;
-        let projection =
-            self.registry
-                .project(&self.profile, &self.canonical_seed(), self.epoch, reader)?;
+        self.registry
+            .avow_reachable(&self.profile, audience, &self.seed, self.epoch, nonce)?;
+        let projection = self
+            .registry
+            .project(&self.profile, &self.seed, self.epoch, reader)?;
         Ok(Announcement::new(
             self.profile.clone(),
             self.genesis.clone(),
@@ -491,7 +484,7 @@ impl ReachPlane {
         }
         let projection = self
             .registry
-            .project(&self.profile, &self.canonical_seed(), self.epoch, reader)
+            .project(&self.profile, &self.seed, self.epoch, reader)
             .ok()?;
         Some(Announcement::new(
             self.profile.clone(),
@@ -515,9 +508,9 @@ impl ReachPlane {
             device: Some(for_device.clone()),
             ..Standing::default()
         };
-        let projection =
-            self.registry
-                .project(&self.profile, &self.canonical_seed(), self.epoch, &reader)?;
+        let projection = self
+            .registry
+            .project(&self.profile, &self.seed, self.epoch, &reader)?;
         Ok(Announcement::new(
             self.profile.clone(),
             self.genesis.clone(),
@@ -601,23 +594,21 @@ impl ReachPlane {
         self.registry.resolve(&self.profile).unwrap_or_default()
     }
 
-    /// The seed that composes, signs and avows for this identity.
+    /// The seed this identity composes, signs and avows with — the one it
+    /// holds. Handed out so a directory publish can sign as this device.
+    ///
+    /// Not a lookup by device: the `Option` the per-device form returned had no
+    /// answer a caller could act on, so a publish that missed it warned and
+    /// silently did not happen.
     #[must_use]
-    fn canonical_seed(&self) -> [u8; 32] {
-        // `restore` refuses an index this identity does not hold, so the seed is
-        // there; falling back to the first rather than panicking keeps that a
-        // construction-time refusal instead of a run-time one.
-        self.seeds
-            .get(self.canonical)
-            .or_else(|| self.seeds.first())
-            .copied()
-            .unwrap_or([0u8; 32])
+    pub fn seed(&self) -> [u8; 32] {
+        self.seed
     }
 
-    /// The device this identity currently composes and is addressed as.
+    /// The device this identity composes and is addressed as.
     #[must_use]
     pub fn canonical_device(&self) -> DeviceId {
-        device_from_seed(&self.canonical_seed())
+        device_from_seed(&self.seed)
     }
 
     /// Adopt a device this identity does not hold the seed for — a placement
@@ -728,30 +719,6 @@ impl ReachPlane {
         Ok(())
     }
 
-    /// Hand the canonical role to another of this identity's devices.
-    ///
-    /// The profile is unchanged — it is the hash of a genesis link that names no
-    /// primary. Refuses a device this identity does not hold the seed for.
-    pub fn make_canonical(&mut self, device: &DeviceId) -> Result<(), Failure> {
-        let at = self
-            .seeds
-            .iter()
-            .position(|seed| &device_from_seed(seed) == device)
-            .ok_or(Failure::NotReachable)?;
-        self.canonical = at;
-        Ok(())
-    }
-
-    /// The seed behind one of this identity's own devices, if it holds it. What a
-    /// per-device carrier signer needs to authorize a fetch on that device.
-    #[must_use]
-    pub fn seed_for(&self, device: &DeviceId) -> Option<[u8; 32]> {
-        self.seeds
-            .iter()
-            .find(|seed| &device_from_seed(seed) == device)
-            .copied()
-    }
-
     /// Seal a message to a resolved recipient and deposit it at the carrier.
     ///
     /// Resolution is the reach: without a device set for `recipient`, there is
@@ -814,32 +781,20 @@ impl ReachPlane {
         content: Content,
         now: u64,
     ) -> Result<String, Failure> {
-        let mut carrier = contractor.carrier_for(&self.canonical_seed());
+        let mut carrier = contractor.carrier_for(&self.seed);
         self.send_content(&mut *carrier, recipient, content, now)
     }
 
-    /// Collect through a contractor, asking as **every** device this identity
-    /// holds.
+    /// Collect through a contractor, asking as the device this machine holds.
     ///
-    /// A sender addresses whichever device resolution named, and a carrier may
-    /// only fetch its own signer's mailbox — so asking as one device leaves the
-    /// rest of the mail to expire unread, which a surface cannot tell from
-    /// nobody having written.
+    /// One device, because a carrier may only fetch its own signer's mailbox and
+    /// this identity's other devices hold their own seeds on their own machines.
+    /// Each of them collects its own mail.
     pub fn collect_via(&mut self, contractor: &dyn crate::Contractor, now: u64) -> Collected {
-        let mut collected = Collected {
-            filed: 0,
-            unasked: None,
-        };
-        for seed in self.seeds.clone() {
-            let device = device_from_seed(&seed);
-            let mut carrier = contractor.carrier_for(&seed);
-            let one = self.collect_on(&mut *carrier, &device, &seed, now);
-            collected.filed = collected.filed.saturating_add(one.filed);
-            if let Some(why) = one.unasked {
-                collected.unasked.get_or_insert(why);
-            }
-        }
-        collected
+        let seed = self.seed;
+        let device = device_from_seed(&seed);
+        let mut carrier = contractor.carrier_for(&seed);
+        self.collect_on(&mut *carrier, &device, &seed, now)
     }
 
     /// What this identity has sent to one correspondent.
@@ -878,7 +833,7 @@ impl ReachPlane {
         if !devices.contains(addressed) {
             return Err(Failure::NotReachable);
         }
-        let letter = Letter::compose(&self.canonical_seed(), content, now);
+        let letter = Letter::compose(&self.seed, content, now);
         let sealed = letter
             .seal_to_devices(&devices, addressed, now.saturating_add(RETENTION))
             .map_err(Failure::Seal)?;
@@ -911,34 +866,27 @@ impl ReachPlane {
         }
     }
 
-    /// Collect anything waiting on any of this identity's devices, open it, and
-    /// file it. Returns how many were newly filed.
+    /// Collect anything waiting on this device, open it, and file it. Returns
+    /// how many were newly filed.
     ///
-    /// Every device is asked because a sender addresses whichever the resolution
-    /// named, and this identity does not know in advance which; the mailbox
-    /// dedups, so asking them all is safe.
+    /// This device only: a carrier fetches its own signer's mailbox, and the
+    /// seeds of this identity's other devices live on their own machines, where
+    /// each collects its own mail.
     pub fn collect(&mut self, carrier: &mut (impl Carrier + ?Sized), now: u64) -> Collected {
-        let mut collected = Collected {
-            filed: 0,
-            unasked: None,
-        };
-        for seed in &self.seeds {
-            let device = device_from_seed(seed);
-            match carrier.collect(&device, now) {
-                Missed::Held(waiting) => {
-                    collected.filed = collected
-                        .filed
-                        .saturating_add(self.mailbox.ingest(seed, &device, &waiting));
-                }
-                // One device going dark does not undo what another answered, and
-                // it does not become quiet either. Keep the first reason: a run
-                // of failures reads better dated from where it started.
-                Missed::Unasked(why) => {
-                    collected.unasked.get_or_insert(why);
-                }
-            }
+        let seed = self.seed;
+        let device = device_from_seed(&seed);
+        match carrier.collect(&device, now) {
+            Missed::Held(waiting) => Collected {
+                filed: self.mailbox.ingest(&seed, &device, &waiting),
+                unasked: None,
+            },
+            // Not "nothing was waiting": a device that could not be asked is a
+            // measurement that was not taken.
+            Missed::Unasked(why) => Collected {
+                filed: 0,
+                unasked: Some(why),
+            },
         }
-        collected
     }
 
     /// The messages this identity has opened, as (proven sender device, body).
@@ -1057,7 +1005,7 @@ impl PostReach {
     /// agree under the hosted carrier's custody fence.
     pub fn send_self(&self, body: &str, now: u64) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
-        let seed = self.plane.canonical_seed();
+        let seed = self.plane.seed;
         let primary = self.plane.canonical_device();
         let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(seed));
         let profile = self.plane.profile().clone();
@@ -1178,8 +1126,7 @@ impl PostReach {
         now: u64,
     ) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
-        let mut carrier =
-            PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
+        let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(self.plane.seed));
         self.plane.send(&mut carrier, recipient, body, now)
     }
 
@@ -1197,8 +1144,7 @@ impl PostReach {
         use crate::post::{PostCarrier, Signer};
         let devices = self.plane.resolve(recipient).ok_or(Failure::NotReachable)?;
         let addressed = devices.first().ok_or(Failure::NotReachable)?.clone();
-        let mut carrier =
-            PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
+        let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(self.plane.seed));
         self.plane.send_addressed(
             &mut carrier,
             recipient,
@@ -1222,26 +1168,15 @@ impl PostReach {
 
     /// Fetch anything waiting for you over the hosted Post, open it, and file it.
     ///
-    /// Asks **every** device this identity holds, one carrier each: a sender
-    /// addresses whichever device resolution named, and a Post signer may only
-    /// fetch its own mailbox. Asking one device leaves the others' mail to
-    /// expire unread, which is indistinguishable from nobody having written.
+    /// Asks as the one device this machine holds: a Post signer may only fetch
+    /// its own mailbox, and this identity's other devices hold their own seeds
+    /// on their own machines.
     pub fn collect(&mut self, now: u64) -> Collected {
         use crate::post::{PostCarrier, Signer};
-        let mut collected = Collected {
-            filed: 0,
-            unasked: None,
-        };
-        for seed in self.plane.seeds.clone() {
-            let device = device_from_seed(&seed);
-            let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(seed));
-            let one = self.plane.collect_on(&mut carrier, &device, &seed, now);
-            collected.filed = collected.filed.saturating_add(one.filed);
-            if let Some(why) = one.unasked {
-                collected.unasked.get_or_insert(why);
-            }
-        }
-        collected
+        let seed = self.plane.seed;
+        let device = device_from_seed(&seed);
+        let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(seed));
+        self.plane.collect_on(&mut carrier, &device, &seed, now)
     }
 
     /// The messages this identity has opened, as (proven sender device, body).
