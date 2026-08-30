@@ -888,6 +888,36 @@ jobs:
             echo "::error::the World candidate workflow can sign or move a channel; publication must stay a local act"
             exit 1
           fi
+      # The Foundation is evidence, never authority, and the only file allowed
+      # to know where it lives is `src/config.rs` — where the shipped default
+      # is one `KeySpec` a person can overwrite or empty out. A constant or a
+      # URL for it anywhere below that is a second place to rotate and a
+      # substrate crate that would stop working for anyone self-hosting.
+      #
+      # Scoped to what is actually forbidden — a `FOUNDATION_*` identifier, or
+      # a URL carrying a scheme — rather than to the word. The word appears in
+      # prose that has to be able to name the service (`crates/directory`'s
+      # doc comments, `crates/correspondence`'s smoke-test note) and in the
+      # Host headers `crates/reach`'s tests parse, none of which reaches
+      # anything at run time. Whole-line comments are dropped for the same
+      # reason: a fence that fired on documentation would be turned off.
+      - name: Foundation fence
+        shell: bash
+        run: |
+          set -uo pipefail
+          fence='\bFOUNDATION_[A-Z_]+\b|https?://[a-z0-9.-]*foundation\.pub'
+          # The fence proves it can still fire before it reports a clean tree.
+          # A pattern that quietly stopped matching would pass forever and
+          # look exactly like an invariant nobody has broken.
+          probe="$(mktemp -d)/probe.rs"
+          printf 'const FOUNDATION_X: &str = "https://post.foundation.pub";\n' > "$probe"
+          grep -qE "$fence" "$probe" \
+            || { echo "::error::the Foundation fence no longer matches a planted constant"; exit 1; }
+          if grep -rnE "$fence" crates/ src/daemon/ --include='*.rs' \
+             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'; then
+            echo "::error::a Foundation constant or host is reachable below the fence (only src/config.rs may name it)"
+            exit 1
+          fi
 
   # The self-updater's in-archive binary path is a claim about our feed's
   # layout, and the unit tests can only check it against our MODEL of that

@@ -940,3 +940,40 @@ fn frame(out: &mut Vec<u8>, part: &[u8]) {
     out.extend_from_slice(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
     out.extend_from_slice(part);
 }
+
+/// The judges that decide anything must never learn to read a mark.
+///
+/// A mark says one publication was recorded, in one log, at one position. It
+/// is evidence a *reader* weighs, and the moment an access decision consults
+/// one, the service that keeps the log has become an authority over a Space
+/// it was never party to — which is the whole failure this plane is shaped to
+/// make impossible. Nothing enforces that but this: the three places a
+/// decision is actually taken, read as source and asserted not to name the
+/// claim at all.
+///
+/// Structural, and deliberately so. A type-level version would need every
+/// judge to take a token proving no mark reached it, which is a large amount
+/// of machinery to say "do not read that one enum variant".
+#[test]
+fn no_judge_reads_a_mark() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the workspace root above crates/mechanics");
+    for judge in [
+        "crates/mechanics/src/acl.rs",
+        "crates/mechanics/src/actor.rs",
+        "crates/mechanics/src/membership.rs",
+        "crates/runtime/src/admission.rs",
+        "src/daemon/transport_hub.rs",
+        "src/orbital/mechanics.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(judge))
+            .unwrap_or_else(|error| panic!("read {judge}: {error}"));
+        assert!(
+            !source.contains("Chronicled"),
+            "{judge} names Claim::Chronicled — a mark confers nothing, and a judge that \
+             reads one has made a marker an authority",
+        );
+    }
+}
