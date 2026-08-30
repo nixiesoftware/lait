@@ -246,7 +246,7 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
     let original_link = link.clone();
     let request = Request::HostSpaceEnter {
         link,
-        home: home.to_string_lossy().into_owned(),
+        home: Some(home.to_string_lossy().into_owned()),
         nick,
     };
     let response = node.rt.block_on(async {

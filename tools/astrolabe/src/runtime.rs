@@ -178,13 +178,15 @@ pub enum Action {
     FocusConversation(String),
     CloseConversation(String),
     SpaceFound {
-        home: String,
+        /// `None` lets the daemon place the store.
+        home: Option<String>,
         name: String,
         nick: Option<String>,
     },
     SpaceEnter {
         link: String,
-        home: String,
+        /// `None` lets the daemon place the store.
+        home: Option<String>,
         nick: Option<String>,
     },
     DeviceConsent {
@@ -307,8 +309,12 @@ impl Action {
             Self::OpenConversation(person) => format!("correspondence.open:{person}"),
             Self::FocusConversation(person) => format!("correspondence.focus:{person}"),
             Self::CloseConversation(person) => format!("correspondence.close:{person}"),
-            Self::SpaceFound { home, .. } => format!("space.found:{home}"),
-            Self::SpaceEnter { home, .. } => format!("space.enter:{home}"),
+            Self::SpaceFound { home, .. } => {
+                format!("space.found:{}", home.as_deref().unwrap_or_default())
+            }
+            Self::SpaceEnter { home, .. } => {
+                format!("space.enter:{}", home.as_deref().unwrap_or_default())
+            }
             Self::DeviceConsent { .. } => "device.consent".into(),
             Self::OrbitForget { space } => format!("orbit.forget:{space}"),
             Self::OrbitRebuild { orbit } => format!("orbit.rebuild:{orbit}"),
@@ -1526,10 +1532,11 @@ impl Worker {
                     .ok_or_else(|| {
                         ClientError::refused("that invitation is no longer in the transcript")
                     })?;
-                let context = client.host_context().await?;
-                client
-                    .space_enter(&link, &context.spaces_root, None)
-                    .await?;
+                // Placement is the daemon's: it lands the store where this
+                // device already holds the Space, else under its spaces root
+                // by id. Naming the root itself here put every entered Space
+                // into one directory, and the second one was refused.
+                client.space_enter(&link, None, None).await?;
                 Ok(Outcome::Said(
                     "entered the Space you were invited to".into(),
                 ))
@@ -1593,12 +1600,22 @@ impl Worker {
                 Ok(Outcome::Silent)
             }
             Action::SpaceFound { home, name, nick } => {
-                client.space_found(home, name, nick.clone()).await?;
-                Ok(Outcome::Said(format!("founded '{name}' in {home}")))
+                client
+                    .space_found(home.as_deref(), name, nick.clone())
+                    .await?;
+                Ok(Outcome::Said(match home {
+                    Some(home) => format!("founded '{name}' in {home}"),
+                    None => format!("founded '{name}'"),
+                }))
             }
             Action::SpaceEnter { link, home, nick } => {
-                client.space_enter(link, home, nick.clone()).await?;
-                Ok(Outcome::Said(format!("entered a Space into {home}")))
+                client
+                    .space_enter(link, home.as_deref(), nick.clone())
+                    .await?;
+                Ok(Outcome::Said(match home {
+                    Some(home) => format!("entered a Space into {home}"),
+                    None => "entered a Space".into(),
+                }))
             }
             Action::DeviceConsent { token } => {
                 client.device_consent(token).await?;

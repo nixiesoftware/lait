@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::config;
 use crate::control::{ControlRoute, HostReply, Request, Response};
@@ -103,6 +103,22 @@ pub struct Entered {
     pub fresh: bool,
 }
 
+impl Founded {
+    /// The registry row this founding produces. The path is whatever the
+    /// store's final location is, which is why the row is written last — after
+    /// an allocated founding has moved the store to its id.
+    fn entry(&self) -> Entry {
+        Entry {
+            space: self.space.clone(),
+            name: self.name.clone(),
+            path: self.home.display().to_string(),
+            origin: Origin::Founded,
+            host_nick: String::new(),
+            last_opened: mechanics::wallclock::now_secs(),
+        }
+    }
+}
+
 /// Found a Space into `home` and register the resulting Orbit.
 ///
 /// `identity_dir` supplies (or mints) the device seed. The store directory is
@@ -110,6 +126,63 @@ pub struct Entered {
 /// directory holds one Space and silently forming beside another is how a node
 /// ends up with two.
 pub fn found(
+    packages: &crate::orbital::WorldPackages,
+    home: &Path,
+    identity_dir: &Path,
+    name: &str,
+    nick: Option<&str>,
+) -> Result<Founded> {
+    let founded = form(packages, home, identity_dir, name, nick)?;
+    register(founded.entry());
+    Ok(founded)
+}
+
+/// Found a Space into a directory this daemon allocates, and register it.
+///
+/// The Space's id is the one name that survives everything — a rename of the
+/// Space (a slug of its name in the path would be a stale name cache, the
+/// exact thing the registry next door refuses to hold), a second Space that
+/// happens to share the name, and a re-join. But genesis is what mints the id,
+/// so the store is formed under a staging name and moved to
+/// `spaces_root()/<space id>` afterwards. That is safe because the store
+/// records no absolute path of its own and nothing serves it until the
+/// registry row is written, which happens last, naming the final location.
+///
+/// A move that fails leaves the formed store where it is and says so, rather
+/// than registering a row under a staging name or deleting a Space that was
+/// just formed; the next attempt takes a fresh staging name.
+pub fn found_allocated(
+    packages: &crate::orbital::WorldPackages,
+    identity_dir: &Path,
+    name: &str,
+    nick: Option<&str>,
+) -> Result<Founded> {
+    let staging = staging_home()?;
+    let mut founded = form(packages, &staging, identity_dir, name, nick)?;
+    let home = allocated_home(&founded.space);
+    if home.exists() {
+        return Err(anyhow!(
+            "{} already exists, but the Space it is named for was only just formed (its store is at {})",
+            home.display(),
+            founded.home.display()
+        ));
+    }
+    std::fs::rename(&founded.home, &home).with_context(|| {
+        format!(
+            "move the new store from {} to {}",
+            founded.home.display(),
+            home.display()
+        )
+    })?;
+    founded.home = config::canonical(&home);
+    register(founded.entry());
+    Ok(founded)
+}
+
+/// Form a Space into `home` without registering it: the half of [`found`] that
+/// touches the store, kept apart so an allocated founding can move the store
+/// before the registry learns where it is.
+fn form(
     packages: &crate::orbital::WorldPackages,
     home: &Path,
     identity_dir: &Path,
@@ -128,15 +201,6 @@ pub fn found(
         .to_string();
     let (space, project) = crate::world::lifecycle::found_space(packages, &home, &seed, name)?;
 
-    register(Entry {
-        space: space.to_string(),
-        name: name.to_string(),
-        path: home.display().to_string(),
-        origin: Origin::Founded,
-        host_nick: String::new(),
-        last_opened: mechanics::wallclock::now_secs(),
-    });
-
     Ok(Founded {
         space: space.to_string(),
         home,
@@ -144,6 +208,52 @@ pub fn found(
         name: name.to_string(),
         project,
     })
+}
+
+/// Where a formation request lands when the caller named no directory: under
+/// [`config::spaces_root`], named by the Space's id. Creates nothing.
+pub fn allocated_home(space: &str) -> PathBuf {
+    config::spaces_root().join(space)
+}
+
+/// The store this device already holds for `space`, if the registry knows one
+/// that is still present. A re-join must land where the Space already lives —
+/// forming a second store beside a repo-bound one is how a node ends up with
+/// two — so an entry that names no directory asks here before allocating.
+pub fn registered_home(space: &str) -> Option<PathBuf> {
+    orbits::list()
+        .into_iter()
+        .filter(|entry| entry.space == space)
+        .map(|entry| PathBuf::from(entry.path))
+        .find(|path| crate::orbital::space_store_present(path))
+}
+
+/// A fresh directory under `spaces_root()/.forming/` for a founding that does
+/// not know its Space's id yet. Random rather than sequential so two foundings
+/// in flight cannot pick the same one.
+fn staging_home() -> Result<PathBuf> {
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|error| anyhow!("getrandom: {error}"))?;
+    Ok(config::spaces_root()
+        .join(".forming")
+        .join(data_encoding::HEXLOWER.encode(&nonce)))
+}
+
+/// The directory a request named, if it named one. Blank is the same as
+/// absent: a form that cleared the box meant "you choose", not "the empty
+/// string".
+fn named(home: Option<&str>) -> Option<&str> {
+    home.map(str::trim).filter(|home| !home.is_empty())
+}
+
+/// The Space an invite link names, verified — the one fact an entry that named
+/// no directory needs before it can be placed.
+fn space_of_link(link: &str) -> Result<String, Response> {
+    runtime::coordinates::SignedCoordinates::parse_link(link.trim())
+        .map_err(|error| Response::err(format!("invalid invite link: {error}")))?
+        .verify()
+        .map(|verified| verified.space.as_str().to_string())
+        .map_err(|error| Response::err(format!("invite: {error}")))
 }
 
 /// Bootstrap a joiner's store from an invite link and register the Orbit.
@@ -356,6 +466,18 @@ fn admit_formation_target(router: &Router, home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The host reply a founding answers with.
+fn founded_reply(founded: Founded) -> HostReply {
+    HostReply::Founded {
+        space: founded.space,
+        home: founded.home.display().to_string(),
+        device: founded.device,
+        name: founded.name,
+        project_key: founded.project.key,
+        project_name: founded.project.name,
+    }
+}
+
 /// Materialize the directory a formation request named, so the custody gate and
 /// the write that follows it are asked about the same place on disk.
 ///
@@ -493,38 +615,61 @@ fn register(entry: Entry) {
 pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Response> {
     Some(match request {
         Request::HostSpaceFound { home, name, nick } => {
+            let identity = router.catalog().identity().to_path_buf();
+            let packages = router.packages();
+            let Some(named) = named(home.as_deref()) else {
+                // No directory named: the daemon allocates one under its own
+                // spaces root. The custody gate below exists for a *caller's*
+                // spelling — a directory that might be another identity's home
+                // — and a fresh staging directory under this daemon's own
+                // config root is nobody's but its own.
+                return Some(
+                    blocking(move || {
+                        found_allocated(&packages, &identity, &name, nick.as_deref())
+                            .map(founded_reply)
+                    })
+                    .await,
+                );
+            };
             // Same gate, same position as the entry below: founding writes a
             // store and a `config.json` into whatever directory it is handed,
             // and a directory holding somebody else's key is not a blank target
             // however empty of Spaces it looks.
-            let home = match materialize_target(&home) {
+            let home = match materialize_target(named) {
                 Ok(home) => home,
                 Err(refusal) => return Some(refusal),
             };
             if let Err(refusal) = admit_formation_target(router, &home) {
                 return Some(Response::err(format!("{refusal:#}")));
             }
-            let identity = router.catalog().identity().to_path_buf();
-            let packages = router.packages();
             blocking(move || {
-                found(&packages, &home, &identity, &name, nick.as_deref()).map(|founded| {
-                    HostReply::Founded {
-                        space: founded.space,
-                        home: founded.home.display().to_string(),
-                        device: founded.device,
-                        name: founded.name,
-                        project_key: founded.project.key,
-                        project_name: founded.project.name,
-                    }
-                })
+                found(&packages, &home, &identity, &name, nick.as_deref()).map(founded_reply)
             })
             .await
         }
         Request::HostSpaceEnter { link, home, nick } => {
+            // An entry that named no directory is placed by the Space the
+            // ticket names: where this device already holds it, else under the
+            // spaces root by id. Either way the result is then gated exactly
+            // as a caller-named directory is — a registered path could still be
+            // one this daemon merely hosts.
+            let spelled = match named(home.as_deref()) {
+                Some(named) => named.to_string(),
+                None => {
+                    let space = match space_of_link(&link) {
+                        Ok(space) => space,
+                        Err(refusal) => return Some(refusal),
+                    };
+                    registered_home(&space)
+                        .unwrap_or_else(|| allocated_home(&space))
+                        .display()
+                        .to_string()
+                }
+            };
             // Before the nick write and before the first Connect: an entry may
             // not spend a seed this daemon only hosts, whether or not the
             // directory it names holds a Space yet.
-            let home = match materialize_target(&home) {
+            let home = match materialize_target(&spelled) {
                 Ok(home) => home,
                 Err(refusal) => return Some(refusal),
             };
@@ -1105,7 +1250,7 @@ mod tests {
             dispatch(
                 &router,
                 Request::HostSpaceFound {
-                    home: agent.display().to_string(),
+                    home: Some(agent.display().to_string()),
                     name: "Borrowed".into(),
                     nick: None,
                 },
@@ -1147,7 +1292,7 @@ mod tests {
                     // Deliberately unparseable: an invite error means the path
                     // got past custody, which is the distinction under test.
                     link: "lait://not-an-invite".into(),
-                    home: home.display().to_string(),
+                    home: Some(home.display().to_string()),
                     nick: None,
                 },
             )

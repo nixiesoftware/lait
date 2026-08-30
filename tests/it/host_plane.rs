@@ -632,3 +632,74 @@ fn restarting_the_daemon_leaves_the_head_able_to_stand_a_new_one_up() {
     head.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Founding with no store directory named: the daemon places the store.
+///
+/// Placement is a coordinate the registry records, never a decision a founding
+/// form has to extract from somebody. When a request names no `home`, the
+/// store lands under the daemon's spaces root, in a directory named by the
+/// Space's id — the one name that survives a rename of the Space, a second
+/// Space with the same name, and a re-join. The reply says where, and the
+/// catalog lists it there.
+///
+/// **What this pins:** the id is minted by genesis, so the daemon forms into
+/// a staging directory and moves the store to its id afterwards. That move
+/// must be complete and clean — nothing left under `.forming/`, and the store
+/// present and served at its final name — before the reply is sent.
+#[test]
+fn founding_without_a_home_lands_the_store_under_the_spaces_root_by_id() {
+    let root = temp_root("allocated");
+    let config = root.join("config");
+
+    let head = Head::start(&config, None);
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "name": "Placed",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
+    assert_eq!(founded["host"], "founded", "{founded}");
+    let space = founded["space"].as_str().expect("space id").to_string();
+    let home = Path::new(founded["home"].as_str().expect("home"));
+
+    let expected = canonical(&config.join("spaces").join(&space));
+    assert_eq!(
+        canonical(home),
+        expected,
+        "the store must be placed under the spaces root, named by the Space id"
+    );
+    assert!(
+        lait::orbital::space_store_present(home),
+        "no Space store at {}",
+        home.display()
+    );
+    let forming = config.join("spaces").join(".forming");
+    let leftovers: Vec<_> = std::fs::read_dir(&forming)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "the staging directory must be empty once the store has moved: {leftovers:?}"
+    );
+
+    // …and it is served at its final name: the catalog row names it, and a
+    // Station answers for it.
+    let orbit = head.orbit_for(home);
+    let (status, info) = head.space(&orbit, serde_json::json!({ "cmd": "status" }));
+    assert_eq!(status, 200, "status: {info}");
+    assert_eq!(info["membership"], "admin", "{info}");
+
+    // A second Space with the very same name does not collide: placement is by
+    // id, not by name.
+    let (status, again) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "name": "Placed",
+    }));
+    assert_eq!(status, 200, "second found: {again}");
+    assert_ne!(
+        again["home"], founded["home"],
+        "two Spaces, two stores: {again}"
+    );
+
+    head.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
