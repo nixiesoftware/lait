@@ -1,0 +1,27 @@
+# The unit `lait install` writes. `@ROOT@` and `@DISPLAY_LINE@` are filled in
+# by `update::service::render_unit`; a `--user` install drops the four lines a
+# user manager cannot honour. LAIT_SUPERVISED=1 is set here and nowhere else:
+# under it a requested relaunch is a clean exit, and Restart= is the spawner.
+[Unit]
+Description=lait — an always-on device of its owner
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lait
+Group=lait
+ExecStart=@ROOT@/bin/lait daemon
+Environment=LAIT_CONFIG_ROOT=@ROOT@ HOME=@ROOT@ LAIT_SUPERVISED=1@DISPLAY_LINE@
+Restart=always
+RestartSec=2
+TimeoutStopSec=45
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@ROOT@
+
+[Install]
+WantedBy=multi-user.target

@@ -16,6 +16,7 @@ pub mod consent;
 pub mod facts;
 pub mod feed;
 pub mod notify;
+pub mod service;
 pub mod tree;
 pub mod watch;
 pub mod world;
@@ -133,7 +134,8 @@ pub fn run() -> Result<Updated> {
     }
     // Stage and prove before the swap, so every failure short of the swap
     // leaves the machine exactly as it was.
-    let Some(binary) = stage_with(feed::http_fetch, &resolved, &current, env!("LAIT_TARGET"))?
+    let Some(binary) = stage_with(feed::http_fetch, &resolved, &current, env!("LAIT_TARGET"))
+        .map_err(|error| anyhow!("{error}"))?
     else {
         return Ok(updated);
     };
@@ -143,6 +145,34 @@ pub fn run() -> Result<Updated> {
     updated.replaced = true;
     Ok(updated)
 }
+
+/// Why a release's binary could not be taken — two facts, never folded.
+///
+/// A service daemon turns these into a standing, and the standing is what an
+/// operator reads: bytes that arrived and did not prove mean the host served
+/// something the signed manifest does not describe, which is worth acting
+/// on, while a download that did not complete is the ordinary "try again
+/// next period". One arm for both would report a compromised host as a
+/// flaky network.
+#[derive(Debug)]
+enum StageFailure {
+    /// The release exists and this machine could not take it yet: no artifact
+    /// for this target, a download that did not complete, an archive that
+    /// does not hold the binary where the layout contract says.
+    CouldNotTake(String),
+    /// Bytes arrived and broke the manifest's size or digest.
+    Refused(String),
+}
+
+impl std::fmt::Display for StageFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CouldNotTake(why) | Self::Refused(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for StageFailure {}
 
 /// Everything an update does before it touches the installed binary: decide
 /// whether there is one, choose the artifact for this target, fetch it, prove
@@ -163,7 +193,7 @@ fn stage_with<F>(
     resolved: &feed::Resolved,
     current: &semver::Version,
     target: &str,
-) -> Result<Option<Vec<u8>>>
+) -> std::result::Result<Option<Vec<u8>>, StageFailure>
 where
     F: Fn(&str, u64) -> std::result::Result<Vec<u8>, feed::Failure>,
 {
@@ -177,34 +207,35 @@ where
         .get("lait")
         .and_then(|targets| targets.get(target))
         .ok_or_else(|| {
-            anyhow!(
+            StageFailure::CouldNotTake(format!(
                 "release {} carries no lait artifact for {target}",
                 resolved.version
-            )
+            ))
         })?;
 
     // The manifest's size is passed as the fetch ceiling as well as checked
     // after, so a host that answers with a hundred gigabytes is refused while
     // streaming rather than after buffering it.
     let bytes = fetch(&artifact.url, artifact.size)
-        .map_err(|error| anyhow!("artifact download: {error}"))?;
+        .map_err(|error| StageFailure::CouldNotTake(format!("artifact download: {error}")))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != artifact.size {
-        bail!(
+        return Err(StageFailure::Refused(format!(
             "artifact size mismatch: manifest says {} bytes, got {}",
             artifact.size,
             bytes.len()
-        );
+        )));
     }
     let digest = blake3::hash(&bytes).to_hex().to_string();
     if digest != artifact.blake3.to_lowercase() {
-        bail!(
+        return Err(StageFailure::Refused(format!(
             "artifact digest verification failed for {}: manifest {}, downloaded {digest}",
-            artifact.url,
-            artifact.blake3
-        );
+            artifact.url, artifact.blake3
+        )));
     }
 
-    Ok(Some(extract_binary(&artifact.url, &bytes, target)?))
+    extract_binary(&artifact.url, &bytes, target)
+        .map(Some)
+        .map_err(|error| StageFailure::CouldNotTake(error.to_string()))
 }
 
 /// Pull the `lait` binary out of a release archive, addressed by
@@ -264,6 +295,33 @@ fn swap_self(binary: &[u8]) -> Result<()> {
     // on others; remove it either way, and never at the cost of the swap.
     let _ = std::fs::remove_file(&staged);
     swapped.context("self-replace")?;
+    Ok(())
+}
+
+/// Replace the binary at `installed` with `binary`: written beside it on the
+/// same filesystem, marked executable, and renamed over it in one step.
+///
+/// The service daemon's swap, addressed by path rather than discovered from
+/// the running process: a service is `<root>/bin/lait` and that *is* the
+/// executable, but naming the path is what lets the swap be proven against a
+/// scratch root, which [`swap_self`] structurally cannot be. A rename over a
+/// running image is the whole trick on Linux — the old inode keeps serving
+/// the process that mapped it, and the next exec reads the new one — which
+/// is why nothing here stops the daemon first.
+fn swap_at(installed: &Path, binary: &[u8]) -> Result<()> {
+    let staged = installed.with_file_name(format!("lait-staged-{}.tmp", std::process::id()));
+    std::fs::write(&staged, binary)
+        .with_context(|| format!("stage binary at {}", staged.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .context("mark staged binary executable")?;
+    }
+    if let Err(error) = std::fs::rename(&staged, installed) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error).with_context(|| format!("swap {} into place", installed.display()));
+    }
     Ok(())
 }
 
@@ -447,7 +505,7 @@ mod tests {
 
     /// A release archive shaped like the real Windows one: flat, `lait.exe` at
     /// the root, carrying `binary`.
-    fn windows_release_zip(binary: &[u8]) -> Vec<u8> {
+    pub(super) fn windows_release_zip(binary: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut bytes = Vec::new();
         {
@@ -463,7 +521,7 @@ mod tests {
 
     /// Seal a whole feed — pointer and manifest — naming one artifact, and hand
     /// back the url map plus the verifying key.
-    fn sealed_feed(
+    pub(super) fn sealed_feed(
         version: &str,
         artifact_url: &str,
         archive: &[u8],

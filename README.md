@@ -50,8 +50,7 @@ Use the exact commands and current release coordinate in
 
 After first install, the daemon resolves the signed `stable` pointer, verifies
 the immutable release manifest and artifact, and stages updates for the
-Astrolabe launcher to apply safely. For an always-on **seed node**, see the
-[Docker setup](docker-compose.yml).
+Astrolabe launcher to apply safely.
 
 ### Nightly / dev builds
 
@@ -172,8 +171,7 @@ point a head at the same `LAIT_HOME` once to enter the space from an invite and
 to admit the node.
 
 The seed holds ciphertext and the signed op-graph — it can neither read (E2EE)
-nor forge (genesis-anchored signatures). See
-[docker-compose.yml](docker-compose.yml).
+nor forge (genesis-anchored signatures).
 
 ## The API is the HTTP head
 

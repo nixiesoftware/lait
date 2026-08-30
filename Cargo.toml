@@ -98,8 +98,6 @@ exclude = [
     ".githooks/",
     ".claude/",
     ".claude-plugin/",
-    "Dockerfile",
-    "docker-compose.yml",
     ".dockerignore",
 ]
 

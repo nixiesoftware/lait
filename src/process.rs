@@ -133,3 +133,14 @@ pub fn restore_default_termination_signals() {
 
 #[cfg(not(unix))]
 pub fn restore_default_termination_signals() {}
+
+/// Whether a supervisor owns this process's restarts.
+///
+/// Set only by the service unit (`LAIT_SUPERVISED=1`). Under it a requested
+/// relaunch is an exit and `Restart=` is the spawner: the daemon's own
+/// detached respawn would put the next generation outside the unit's cgroup,
+/// where `systemctl stop` cannot reach it and the supervisor, seeing its
+/// child gone, starts a second one beside it.
+pub fn supervised() -> bool {
+    std::env::var("LAIT_SUPERVISED").as_deref() == Ok("1")
+}
