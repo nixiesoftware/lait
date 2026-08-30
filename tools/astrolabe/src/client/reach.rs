@@ -11,14 +11,47 @@
 //! client follows, and the case a second copy would have broken is exactly the
 //! one that matters: a letter landing while nobody was looking.
 
-use lait::control::{ControlRoute, ReachView, Request, Response};
+use lait::control::{ControlRoute, OriginView, OwnDeviceView, ReachView, Request, Response};
 
 use crate::client::{Client, ClientError, ClientResult};
 use crate::model::{ChatMessage, Contact, Conversation, Correspondence};
 
 pub use correspondence::plane::{Collected, Failure, Opened, ReachPlane};
 
+/// The profile this device belongs to, and every device that holds it.
+///
+/// Read from the same [`ReachView`] the mailbox comes from — one request, two
+/// readings — because they are one identity's facts and a second request
+/// would be a second moment. Absence keeps its kind here: an empty device set
+/// with `device_set_unknown` is a daemon that has not restored the set, which
+/// is not a profile with no devices.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileSnapshot {
+    /// This identity's own address on the plane.
+    pub profile: String,
+    /// This machine's device in the profile — the join key every row uses.
+    pub me: Option<String>,
+    /// Founded here, or adopted from a device that already held it.
+    pub origin: Option<OriginView>,
+    /// The device set, `me` included.
+    pub devices: Vec<OwnDeviceView>,
+    /// The set was not held. Never folded into `devices` being empty.
+    pub device_set_unknown: bool,
+}
+
 impl Client {
+    /// The profile's devices, as the daemon holds them.
+    pub async fn profile(&self) -> ClientResult<ProfileSnapshot> {
+        let view = self.reach_raw(Request::ReachView).await?;
+        Ok(ProfileSnapshot {
+            profile: view.profile,
+            me: view.me,
+            origin: view.origin,
+            devices: view.devices,
+            device_set_unknown: view.device_set_unknown,
+        })
+    }
+
     /// What this identity's correspondence looks like now.
     pub async fn reach_view(&self) -> ClientResult<Correspondence> {
         self.reach_request(Request::ReachView).await
@@ -57,13 +90,17 @@ impl Client {
     }
 
     async fn reach_request(&self, request: Request) -> ClientResult<Correspondence> {
+        Ok(from_view(self.reach_raw(request).await?))
+    }
+
+    async fn reach_raw(&self, request: Request) -> ClientResult<ReachView> {
         let daemon = self.daemon()?;
         let reply = daemon
             .request(ControlRoute::Daemon, &request, None)
             .await
             .map_err(|error| ClientError::unreachable(format!("{error:#}")))?;
         match reply {
-            Response::Reach(view) => Ok(from_view(*view)),
+            Response::Reach(view) => Ok(*view),
             Response::Error { message, .. } => Err(ClientError::refused(message)),
             other => Err(ClientError::internal(format!(
                 "unexpected correspondence reply: {other:?}"

@@ -85,6 +85,11 @@ pub struct ClientView {
     /// This identity's correspondence — the mailbox and the arrival standing.
     /// `None` until read once, distinct from a mailbox that answered empty.
     pub correspondence: Option<CorrespondenceFacts>,
+    /// This identity's profile: the devices that hold it, the code this one
+    /// is showing if it is waiting to be added, and any device waiting on
+    /// this person to confirm it. `None` until read once — which is not a
+    /// profile with one device.
+    pub profile: Option<ProfileFacts>,
     pub notices: Vec<NoticeRow>,
     pub failures: Vec<FailureRow>,
     /// The keys of actions asked for and not yet answered. A control whose key
@@ -789,6 +794,96 @@ pub struct CorrespondenceFacts {
     pub active_tab: Option<String>,
 }
 
+/// A person's profile, drawn as the devices that are theirs.
+///
+/// Every device of a profile is the same person; there is nothing to approve
+/// per Space and nothing to enrol twice. What a surface draws from this is
+/// three things: this device's own standing, the devices already here, and
+/// the one act — adding another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileFacts {
+    /// The profile's own address on the plane.
+    pub profile: String,
+    /// This machine's device id — the join key every row here uses. `None`
+    /// when the daemon does not know which device it is.
+    pub me: Option<String>,
+    pub origin: Option<OriginRow>,
+    /// The device set, `me` included, in the daemon's order.
+    pub devices: Vec<OwnDeviceRow>,
+    /// The set was not held. Carried rather than folded into an empty
+    /// `devices`, because "not read" and "none" are different facts and only
+    /// one of them is worth acting on.
+    pub device_set_unknown: bool,
+    /// The code this device is showing while it waits to be added to a
+    /// profile. `None` whenever it holds none.
+    pub pairing: Option<PairingCodeRow>,
+    /// Devices that answered a code entered here and are waiting on their six
+    /// words being compared.
+    pub offers: Vec<PairOfferRow>,
+}
+
+/// How a device came to hold its profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginRow {
+    Founded,
+    Adopted { from: String, at: u64 },
+}
+
+/// One device of the profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnDeviceRow {
+    pub device: String,
+    /// Whether this is the device answering.
+    pub me: bool,
+    pub liveness: LivenessRow,
+    /// The Spaces this device is listed in. Empty is an answer; it is not
+    /// "unknown", which is [`LivenessRow::NotProbed`]'s business.
+    pub held: Vec<String>,
+}
+
+/// What asking a device last learned.
+///
+/// `NotProbed` is neither "down" nor "could not be reached": nothing has
+/// asked yet. Folding the three would be the false-disconnection defect, one
+/// layer up from where it was already fixed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LivenessRow {
+    Answered {
+        version: String,
+        at: u64,
+    },
+    CouldNotAsk {
+        why: String,
+    },
+    #[default]
+    NotProbed,
+}
+
+/// The code a device shows while it waits to be added, as a person reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingCodeRow {
+    /// Grouped, `XXXX-XXXX`.
+    pub code: String,
+    /// Addresses to enter beside the code when nothing relays between the two
+    /// devices. Empty under a relay, and an empty list is not a failure.
+    pub direct: Vec<String>,
+    pub expires_at_ms: u64,
+}
+
+/// A device that answered a code entered here, waiting on confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairOfferRow {
+    pub pairing: String,
+    pub device: String,
+    /// The name the device gave for itself.
+    pub name: String,
+    /// The six words the other device also shows. Confirming without them
+    /// matching is the one mistake this ceremony exists to prevent, so they
+    /// cross as the words themselves and never as a "verified" flag.
+    pub phrase: Vec<String>,
+    pub expires_at_ms: u64,
+}
+
 /// One person one can message, with each device that is them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContactRow {
@@ -1027,6 +1122,18 @@ pub enum ActionRequest {
     },
     /// Ask the carrier for anything waiting, and file it into conversations.
     CollectMail,
+    /// Add a device to this profile, by the code it is showing. `XXXX-XXXX`,
+    /// or `XXXX-XXXX@host:port` when the two devices share a network and
+    /// nothing relays between them.
+    DevicePairEnter {
+        code: String,
+    },
+    /// Answer a waiting device once its six words have been compared.
+    /// Rejecting writes nothing and tells that device nothing.
+    DevicePairConfirm {
+        pairing: String,
+        accept: bool,
+    },
     /// Block a person at the carrier, so no device of theirs lands again. Also
     /// how an incoming stranger is dismissed.
     BlockSender {
@@ -1229,6 +1336,10 @@ impl ActionRequest {
             Self::OpenInvitation { message } => Action::OpenInvitation { message },
             Self::SendInvitation { to, link } => Action::SendInvitation { to, link },
             Self::CollectMail => Action::CollectMail,
+            Self::DevicePairEnter { code } => Action::DevicePairEnter { code },
+            Self::DevicePairConfirm { pairing, accept } => {
+                Action::DevicePairConfirm { pairing, accept }
+            }
             Self::BlockSender { person } => Action::BlockSender(person),
             Self::AcceptContact { person } => Action::AcceptContact(person),
             Self::OpenConversation { person } => Action::OpenConversation(person),
@@ -1862,6 +1973,7 @@ fn empty() -> ClientView {
         space: None,
         book: None,
         correspondence: None,
+        profile: None,
         notices: Vec::new(),
         failures: Vec::new(),
         in_flight: Vec::new(),
@@ -2335,6 +2447,68 @@ fn project(app: &App) -> ClientView {
                 .collect(),
             open_tabs: corr.open_tabs.clone(),
             active_tab: corr.active_tab.clone(),
+        }),
+        // Joined here from two reads of the one identity: the device set is
+        // the reach view's and the waiting code and offers are orientation's.
+        // Joining at the boundary rather than in the model keeps each read
+        // the only writer of what it measured.
+        profile: app.profile().map(|profile| ProfileFacts {
+            profile: profile.profile.clone(),
+            me: profile.me.clone(),
+            origin: profile.origin.as_ref().map(|origin| match origin {
+                lait::control::OriginView::Founded => OriginRow::Founded,
+                lait::control::OriginView::Adopted { from, at } => OriginRow::Adopted {
+                    from: from.clone(),
+                    at: *at,
+                },
+            }),
+            devices: profile
+                .devices
+                .iter()
+                .map(|device| OwnDeviceRow {
+                    device: device.device.clone(),
+                    me: device.me,
+                    liveness: match &device.liveness {
+                        lait::control::Liveness::Reported { version, at } => {
+                            LivenessRow::Answered {
+                                version: version.clone(),
+                                at: *at,
+                            }
+                        }
+                        lait::control::Liveness::CouldNotAsk { why } => {
+                            LivenessRow::CouldNotAsk { why: why.clone() }
+                        }
+                        lait::control::Liveness::NotProbed => LivenessRow::NotProbed,
+                    },
+                    held: device.held.clone(),
+                })
+                .collect(),
+            device_set_unknown: profile.device_set_unknown,
+            pairing: app
+                .context()
+                .and_then(|context| context.pairing.as_ref())
+                .map(|pairing| PairingCodeRow {
+                    code: pairing.code.clone(),
+                    direct: pairing
+                        .direct
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect(),
+                    expires_at_ms: pairing.expires_at_ms,
+                }),
+            offers: app
+                .context()
+                .map(|context| context.pair_offers.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .map(|offer| PairOfferRow {
+                    pairing: offer.pairing.clone(),
+                    device: offer.device.clone(),
+                    name: offer.name.clone(),
+                    phrase: offer.phrase.clone(),
+                    expires_at_ms: offer.expires_at_ms,
+                })
+                .collect(),
         }),
         notices: app
             .notices()
@@ -2955,5 +3129,116 @@ mod tests {
         .into_action()
         .expect("a known client was refused");
         assert!(matches!(ok, Action::InstallMcp { .. }));
+    }
+
+    /// The Devices surface is a join of two reads, and both halves have to
+    /// survive the crossing: the device set comes from the reach view, the
+    /// waiting code and the offers from orientation. A projection that took
+    /// only one of them would draw a person's devices with no way to add one,
+    /// or a code with nobody to add it to.
+    #[test]
+    fn a_profile_crosses_with_its_devices_and_the_code_it_is_waiting_on() {
+        use crate::client::reach::ProfileSnapshot;
+        use lait::control::{Liveness, OriginView, OwnDeviceView, PairOffer, PairingCode};
+
+        let mut app = App::new();
+        let mut context = crate::client::host::HostContext {
+            version: "0.9.3".into(),
+            identity_home: "home".into(),
+            spaces_root: "spaces".into(),
+            worlds: Vec::new(),
+            identities: Vec::new(),
+            orbits: Vec::new(),
+            asks: Vec::new(),
+            pairing: None,
+            pair_offers: Vec::new(),
+        };
+        context.pairing = Some(PairingCode {
+            code: "ABCD-EFGH".into(),
+            direct: vec!["127.0.0.1:7717".parse().expect("a socket address")],
+            expires_at_ms: 900_000,
+        });
+        context.pair_offers = vec![PairOffer {
+            pairing: "pai_7".into(),
+            device: "dev_pi".into(),
+            name: "raspberrypi".into(),
+            phrase: "amber basil cedar delta ember flint"
+                .split(' ')
+                .map(str::to_owned)
+                .collect(),
+            expires_at_ms: 600_000,
+        }];
+        app.apply(Update::Context(Box::new(context)));
+        app.apply(Update::Profile(Box::new(ProfileSnapshot {
+            profile: "prf_1".into(),
+            me: Some("dev_laptop".into()),
+            origin: Some(OriginView::Founded),
+            devices: vec![
+                OwnDeviceView {
+                    device: "dev_laptop".into(),
+                    me: true,
+                    liveness: Liveness::Reported {
+                        version: "0.9.3".into(),
+                        at: 5,
+                    },
+                    held: vec!["spc_a".into(), "spc_b".into()],
+                },
+                OwnDeviceView {
+                    device: "dev_pi".into(),
+                    me: false,
+                    liveness: Liveness::CouldNotAsk {
+                        why: "no route".into(),
+                    },
+                    held: Vec::new(),
+                },
+            ],
+            device_set_unknown: false,
+        })));
+
+        let profile = project(&app).profile.expect("the profile did not cross");
+        assert_eq!(profile.me.as_deref(), Some("dev_laptop"));
+        assert_eq!(profile.origin, Some(OriginRow::Founded));
+        assert_eq!(profile.devices.len(), 2);
+        assert_eq!(profile.devices[0].held, ["spc_a", "spc_b"]);
+        // A device that could not be asked keeps its own kind of absence all
+        // the way to the surface: it is neither answered nor unprobed, and
+        // above all it is not missing from the list.
+        assert_eq!(
+            profile.devices[1].liveness,
+            LivenessRow::CouldNotAsk {
+                why: "no route".into()
+            },
+        );
+        assert_eq!(
+            profile.pairing.as_ref().map(|code| code.code.as_str()),
+            Some("ABCD-EFGH"),
+        );
+        assert_eq!(
+            profile.pairing.expect("a code").direct,
+            ["127.0.0.1:7717"],
+            "the addresses to enter beside the code were dropped",
+        );
+        assert_eq!(profile.offers.len(), 1);
+        assert_eq!(profile.offers[0].phrase.len(), 6);
+    }
+
+    /// A device set nobody has restored is not a profile with no devices.
+    #[test]
+    fn an_unread_device_set_crosses_as_unread_rather_than_as_none() {
+        use crate::client::reach::ProfileSnapshot;
+
+        let mut app = App::new();
+        assert!(
+            project(&app).profile.is_none(),
+            "a profile appeared before anything read one",
+        );
+        app.apply(Update::Profile(Box::new(ProfileSnapshot {
+            profile: "prf_1".into(),
+            device_set_unknown: true,
+            ..ProfileSnapshot::default()
+        })));
+        let profile = project(&app).profile.expect("the profile did not cross");
+        assert!(profile.devices.is_empty());
+        assert!(profile.device_set_unknown);
     }
 }

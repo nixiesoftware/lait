@@ -49,6 +49,16 @@ describe("client transport", () => {
     );
   });
 
+  // The same two-sided edit, for the two pairing acts. `Action::key` spells
+  // these strings in tools/astrolabe/src/runtime.rs; renaming one side leaves
+  // Add device and the two answers to an offer live through their own action.
+  it("spells the device-pairing keys the way the core does", () => {
+    expect(keyFor({ type: "devicePairEnter", code: "ABCD-EFGH" })).toBe("device.pair.enter");
+    expect(keyFor({ type: "devicePairConfirm", pairing: "pai_7", accept: true })).toBe(
+      "device.pair.confirm:pai_7",
+    );
+  });
+
   it("returns the in-flight snapshot before publishing the later completion", async () => {
     vi.useFakeTimers();
     const transport = createFixtureTransport(fixtureClientView);
@@ -82,6 +92,7 @@ describe("client transport", () => {
   it("only routes Flutter-owned top-level surfaces into secondary windows", () => {
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=book") as unknown as Location)).toBe("book");
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=displays") as unknown as Location)).toBe("displays");
+    expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=devices") as unknown as Location)).toBe("devices");
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=record") as unknown as Location)).toBeNull();
   });
 

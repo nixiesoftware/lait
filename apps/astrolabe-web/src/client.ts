@@ -237,6 +237,69 @@ export type PresentedScene =
   | { kind: "blank"; reason: string }
   | { kind: "unsupported"; output: string };
 
+/**
+ * A person's profile: the devices that are theirs, and the one act that adds
+ * another. Every device of a profile is the same person — there is nothing to
+ * approve per Space and nothing to enrol twice.
+ */
+export interface ProfileFacts {
+  profile: string;
+  /** This machine's device — the id every row here is keyed on. */
+  me: string | null;
+  origin: DeviceOrigin | null;
+  devices: OwnDevice[];
+  /**
+   * The device list has not been read. Never folded into an empty `devices`:
+   * no profile has no devices, so an empty list carrying this is a question
+   * that went unanswered rather than a person with nothing.
+   */
+  deviceSetUnknown: boolean;
+  /** The code this device shows while it waits to be added; null when it holds none. */
+  pairing: PairingCode | null;
+  /** Devices waiting on their six words being compared here. */
+  offers: PairOffer[];
+}
+
+export type DeviceOrigin =
+  | { kind: "founded" }
+  | { kind: "adopted"; from: string; at: number };
+
+export interface OwnDevice {
+  device: string;
+  me: boolean;
+  liveness: DeviceLiveness;
+  /** The Spaces this device is listed in. Empty is an answer, not an absence. */
+  held: string[];
+}
+
+/**
+ * Three facts, kept apart: a device that answered, one that could not be
+ * reached, and one nothing has asked about yet. Flattening them would make a
+ * surface guess which it had, and the guess it makes is "down".
+ */
+export type DeviceLiveness =
+  | { kind: "answered"; version: string; at: number }
+  | { kind: "couldNotAsk"; why: string }
+  | { kind: "notProbed" };
+
+export interface PairingCode {
+  /** Grouped, `XXXX-XXXX`. */
+  code: string;
+  /** Addresses to type beside the code when nothing relays between the two devices. */
+  direct: string[];
+  expiresAtMs: number;
+}
+
+export interface PairOffer {
+  pairing: string;
+  device: string;
+  /** The name the waiting device gave for itself. */
+  name: string;
+  /** The six words that device also shows. */
+  phrase: string[];
+  expiresAtMs: number;
+}
+
 export type Staleness =
   | { kind: "neverLoaded" }
   | { kind: "signalled"; reason: string };
@@ -257,6 +320,8 @@ export interface ClientView {
   book: Book | null;
   mcp: McpBinding | null;
   correspondence: CorrespondenceFacts | null;
+  /** null until the profile has been read once — not a profile with one device. */
+  profile: ProfileFacts | null;
   presentation: PresentationFacts | null;
   notices: Notice[];
   failures: Failure[];
@@ -325,6 +390,7 @@ export type ClientAction =
   | { type: "displayAssignmentRevoke"; assignment: string } | { type: "displayDeviceRevoke"; device: string }
   | { type: "displayIdentifierAdmitPassphrase"; passphrase: string }
   | { type: "sendMessage"; to: string; body: string } | { type: "collectMail" }
+  | { type: "devicePairEnter"; code: string } | { type: "devicePairConfirm"; pairing: string; accept: boolean }
   | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
   | { type: "openInvitation"; message: string }
   | { type: "sendInvitation"; to: string; link: string }
@@ -376,6 +442,11 @@ export const actionKey = {
   displayIdentifierAdmitPassphrase: "display.identifier.admit",
   sendMessage: (to: string) => `correspondence.send:${to}`,
   collectMail: "correspondence.collect",
+  devicePairEnter: "device.pair.enter",
+  // One key for both answers: Confirm and Reject answer the same offer, and a
+  // key per answer would leave the other control live while this one was in
+  // flight.
+  devicePairConfirm: (pairing: string) => `device.pair.confirm:${pairing}`,
   // Spelled to match `Action::key` in tools/astrolabe/src/runtime.rs. A key that
   // disagrees does not fail — it silently never matches `inFlight`, so the
   // control stays live through its own action and can be pressed twice.
@@ -443,6 +514,8 @@ export function keyFor(action: ClientAction): string {
     case "openInvitation": return actionKey.openInvitation(action.message);
     case "sendInvitation": return actionKey.sendInvitation(action.to);
     case "collectMail": return actionKey.collectMail;
+    case "devicePairEnter": return actionKey.devicePairEnter;
+    case "devicePairConfirm": return actionKey.devicePairConfirm(action.pairing);
     case "blockSender": return actionKey.blockSender(action.person);
     case "acceptContact": return actionKey.acceptContact(action.person);
     case "openConversation": return actionKey.openConversation(action.person);
@@ -476,12 +549,12 @@ export interface ClientTransport extends AstrolabeClientBridge {
   readonly mode: "host" | "tauri" | "fixture" | "unavailable";
 }
 
-/** The three Flutter-owned top-level surfaces. They are singleton OS windows. */
-export type OwnedWindowSurface = "book" | "displays" | "chat";
+/** The client-owned top-level surfaces. They are singleton OS windows. */
+export type OwnedWindowSurface = "book" | "displays" | "chat" | "devices";
 
 export function currentOwnedWindowSurface(location = window.location): OwnedWindowSurface | null {
   const surface = new URLSearchParams(location.search).get("surface");
-  return surface === "book" || surface === "displays" || surface === "chat" ? surface : null;
+  return surface === "book" || surface === "displays" || surface === "chat" || surface === "devices" ? surface : null;
 }
 
 /**
@@ -566,6 +639,7 @@ export async function summonOwnedWindow(surface: OwnedWindowSurface): Promise<vo
     url.searchParams.set("surface", surface);
     const shape = surface === "book" ? "width=370,height=760"
       : surface === "chat" ? "width=760,height=660"
+      : surface === "devices" ? "width=720,height=640"
       : "width=860,height=720";
     window.open(url, `astrolabe-${surface}`, shape);
   }
@@ -621,6 +695,7 @@ export const loadingClientView: ClientView = {
   book: null,
   mcp: null,
   correspondence: null,
+  profile: null,
   presentation: null,
   notices: [],
   failures: [],
@@ -1090,6 +1165,24 @@ export const fixtureClientView: ClientView = {
     // the book popup cannot reach this one the way the shared core does.
     openTabs: ["peer_ada"],
     activeTab: "peer_ada",
+  },
+  profile: {
+    profile: "prf_fixture",
+    me: "dev_this",
+    origin: { kind: "founded" },
+    devices: [
+      { device: "dev_this", me: true, liveness: { kind: "answered", version: "0.0.0-fixture", at: 1_755_552_000_000 }, held: ["orb_fixture"] },
+      { device: "dev_pi", me: false, liveness: { kind: "couldNotAsk", why: "no route" }, held: ["orb_fixture"] },
+    ],
+    deviceSetUnknown: false,
+    pairing: null,
+    offers: [{
+      pairing: "pai_fixture",
+      device: "dev_studio",
+      name: "studio",
+      phrase: ["amber", "basil", "cedar", "delta", "ember", "flint"],
+      expiresAtMs: 1_755_552_600_000,
+    }],
   },
   presentation: null,
   inFlight: [],
