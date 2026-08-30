@@ -182,8 +182,10 @@ pub fn is_read(req: &Request) -> bool {
         // Pairing signs a link as this identity and adopts a device into it.
         | Request::DevicePairEnter { .. }
         | Request::DevicePairConfirm { .. }
-        // Retiring signs a kinship entry and an actor op per Space.
-        | Request::DeviceRetire { .. } => false,
+        // Retiring signs a kinship entry and an actor op per Space, and
+        // excluding writes a decision and de-lists a device in one.
+        | Request::DeviceRetire { .. }
+        | Request::HostReplicaExclude { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -283,6 +285,10 @@ pub fn is_host_plane(req: &Request) -> bool {
         // Retirement is the profile's too: it names a device, not a Space,
         // and the Spaces it de-lists in are whichever ones this daemon holds.
         | Request::DeviceRetire { .. }
+        // Which of a person's devices holds which Space is the profile's
+        // question too — the Space it names is one this daemon holds, not
+        // one it has to be routed to.
+        | Request::HostReplicaExclude { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -456,6 +462,13 @@ mod tests {
         };
         assert!(is_host_plane(&retire));
         assert!(!is_read(&retire));
+        let exclude = Request::HostReplicaExclude {
+            device: String::new(),
+            space: String::new(),
+            excluded: true,
+        };
+        assert!(is_host_plane(&exclude));
+        assert!(!is_read(&exclude));
     }
 
     /// Minting Coordinates signs as this device, so it is not a read even

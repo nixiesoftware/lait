@@ -157,6 +157,39 @@ struct WebProfileFacts {
     /// The markers this device weighs. A tier: the surface draws it and
     /// gates nothing on it.
     markers: Vec<WebMarker>,
+    /// One row per Space this machine holds, with where the last offer of it
+    /// to each other device stood. The only place a surface can tell a
+    /// person's decision from a device that could not be asked from a Space
+    /// nothing has offered yet.
+    spaces: Vec<WebSpaceRow>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSpaceRow {
+    space: String,
+    on: Vec<String>,
+    standings: Vec<WebDeviceStanding>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDeviceStanding {
+    device: String,
+    standing: WebStanding,
+}
+
+/// Tagged for the reason liveness and reach are: a decision, a refusal and a
+/// dial that failed are three facts, and no row at all is a fourth.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebStanding {
+    Held,
+    Declined { why: String },
+    Refused { why: String },
+    Deferred { why: String },
+    CouldNotAsk { why: String },
+    Excluded { told: bool },
 }
 
 /// One marker, and how the last look at it went.
@@ -1151,6 +1184,7 @@ impl From<ClientView> for WebClientView {
                     pairing,
                     offers,
                     markers,
+                    spaces,
                 } = profile;
                 WebProfileFacts {
                     profile,
@@ -1212,6 +1246,38 @@ impl From<ClientView> for WebClientView {
                             name: offer.name,
                             phrase: offer.phrase,
                             expires_at_ms: offer.expires_at_ms,
+                        })
+                        .collect(),
+                    spaces: spaces
+                        .into_iter()
+                        .map(|space| WebSpaceRow {
+                            space: space.space,
+                            on: space.on,
+                            standings: space
+                                .standings
+                                .into_iter()
+                                .map(|row| WebDeviceStanding {
+                                    device: row.device,
+                                    standing: match row.standing {
+                                        api::StandingRow::Held => WebStanding::Held,
+                                        api::StandingRow::Declined { why } => {
+                                            WebStanding::Declined { why }
+                                        }
+                                        api::StandingRow::Refused { why } => {
+                                            WebStanding::Refused { why }
+                                        }
+                                        api::StandingRow::Deferred { why } => {
+                                            WebStanding::Deferred { why }
+                                        }
+                                        api::StandingRow::CouldNotAsk { why } => {
+                                            WebStanding::CouldNotAsk { why }
+                                        }
+                                        api::StandingRow::Excluded { told } => {
+                                            WebStanding::Excluded { told }
+                                        }
+                                    },
+                                })
+                                .collect(),
                         })
                         .collect(),
                     markers: markers
@@ -1564,6 +1630,12 @@ enum WebAction {
     DeviceRetire {
         device: String,
     },
+    /// Say whether one Space is held on one device of this profile.
+    ReplicaExclude {
+        device: String,
+        space: String,
+        excluded: bool,
+    },
     BlockSender {
         person: String,
     },
@@ -1825,6 +1897,15 @@ impl From<WebAction> for ActionRequest {
             WebAction::CollectMail => Self::CollectMail,
             WebAction::DevicePairEnter { code } => Self::DevicePairEnter { code },
             WebAction::DeviceRetire { device } => Self::DeviceRetire { device },
+            WebAction::ReplicaExclude {
+                device,
+                space,
+                excluded,
+            } => Self::ReplicaExclude {
+                device,
+                space,
+                excluded,
+            },
             WebAction::DevicePairConfirm { pairing, accept } => {
                 Self::DevicePairConfirm { pairing, accept }
             }

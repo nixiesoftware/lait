@@ -183,6 +183,14 @@ pub enum Action {
     DeviceRetire {
         device: String,
     },
+    /// Say whether one Space is held on one device of this profile: taken
+    /// off it — removal, never deletion — or put back through the same
+    /// consent that put it there the first time.
+    ReplicaExclude {
+        device: String,
+        space: String,
+        excluded: bool,
+    },
     /// Enter the Space an arriving invitation names, by its deposit id.
     OpenInvitation {
         message: String,
@@ -325,6 +333,10 @@ impl Action {
             // the other control live while this one was in flight.
             Self::DevicePairConfirm { pairing, .. } => format!("device.pair.confirm:{pairing}"),
             Self::DeviceRetire { device } => format!("device.retire:{device}"),
+            // Keyed on the pair, not on the answer: excluding and lifting are
+            // two answers to one question about one Space on one device, and
+            // a key per answer would leave the other control live.
+            Self::ReplicaExclude { device, space, .. } => format!("space.exclude:{space}:{device}"),
             Self::OpenInvitation { message } => format!("invitation.open:{message}"),
             Self::SendInvitation { to, .. } => format!("invitation.send:{to}"),
             Self::BlockSender(person) => format!("correspondence.block:{person}"),
@@ -398,6 +410,10 @@ impl Action {
             Self::DevicePairConfirm { accept: true, .. } => "add the waiting device".into(),
             Self::DevicePairConfirm { accept: false, .. } => "turn the waiting device away".into(),
             Self::DeviceRetire { .. } => "retire that device".into(),
+            Self::ReplicaExclude { excluded: true, .. } => "take that Space off that device".into(),
+            Self::ReplicaExclude {
+                excluded: false, ..
+            } => "put that Space back on that device".into(),
             Self::OpenInvitation { .. } => "enter the Space you were invited to".into(),
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
@@ -1568,6 +1584,18 @@ impl Worker {
             Action::DeviceRetire { device } => {
                 let retired = client.device_retire(device).await?;
                 Ok(Outcome::Said(retired.said()))
+            }
+            Action::ReplicaExclude {
+                device,
+                space,
+                excluded,
+            } => {
+                client.replica_exclude(device, space, *excluded).await?;
+                Ok(Outcome::Said(if *excluded {
+                    "taken off that device — nothing on it was deleted".into()
+                } else {
+                    "put back; that device takes it up again on its own".into()
+                }))
             }
             Action::SendInvitation { to, link } => {
                 self.corresponding(

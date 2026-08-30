@@ -968,6 +968,18 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 .unwrap_or_else(crate::daemon::fanout::Facts::new);
             crate::daemon::fanout::retire(router, &facts, &device).await
         }
+        Request::HostReplicaExclude {
+            device,
+            space,
+            excluded,
+        } => {
+            let facts = router
+                .correspondence()
+                .fanout()
+                .cloned()
+                .unwrap_or_else(crate::daemon::fanout::Facts::new);
+            crate::daemon::fanout::exclude(router, &facts, &device, &space, excluded).await
+        }
         Request::HostContext => match config::list_identities() {
             Ok(identities) => Response::Host(HostReply::Context {
                 version: crate::VERSION.to_string(),

@@ -830,6 +830,53 @@ pub struct ProfileFacts {
     /// certification can be told apart from a marker that could not be
     /// asked.
     pub markers: Vec<MarkerRow>,
+    /// One row per Space this machine holds, and where the last offer of it
+    /// to each other device stood. This is the only place a surface can tell
+    /// "a person said not on that machine" from "that machine could not be
+    /// asked" from "nothing has offered it yet" — three absences that look
+    /// identical on the device row, and only one of which is worth acting on.
+    pub spaces: Vec<SpaceFanoutRow>,
+}
+
+/// One Space this machine holds, as the other devices of the profile stand
+/// towards it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceFanoutRow {
+    pub space: String,
+    /// The devices the Space's own list names. Read from the Space, never
+    /// inferred from how an offer went.
+    pub on: Vec<String>,
+    pub standings: Vec<DeviceStandingRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceStandingRow {
+    pub device: String,
+    pub standing: StandingRow,
+}
+
+/// Where one Space stands towards one device.
+///
+/// Six facts, and absence is a seventh: no row at all means nothing has
+/// offered it yet. `Excluded` is a person's decision and `Declined` is the
+/// device's own answer; `CouldNotAsk` is neither, and drawing it as either
+/// would report a network as a choice somebody made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StandingRow {
+    /// The Space's own list names the device.
+    Held,
+    /// The device answered no.
+    Declined { why: String },
+    /// One side refused the exchange.
+    Refused { why: String },
+    /// Not askable yet for a reason on this machine.
+    Deferred { why: String },
+    /// The device did not answer.
+    CouldNotAsk { why: String },
+    /// A person said this Space is not held on that device. `told` is
+    /// whether that machine has heard it yet — until it has, the decision
+    /// stands here and is still owed to it.
+    Excluded { told: bool },
 }
 
 /// How a device came to hold its profile.
@@ -1228,6 +1275,16 @@ pub enum ActionRequest {
         pairing: String,
         accept: bool,
     },
+    /// Say whether one Space is held on one device of this profile.
+    ///
+    /// `excluded: true` takes it off that machine — removal, never deletion —
+    /// and `false` puts it back through the same consent that put it there
+    /// the first time.
+    ReplicaExclude {
+        device: String,
+        space: String,
+        excluded: bool,
+    },
     /// Retire a device of this profile, from another one.
     ///
     /// The profile stops naming it, and every Space this daemon holds that
@@ -1443,6 +1500,15 @@ impl ActionRequest {
                 Action::DevicePairConfirm { pairing, accept }
             }
             Self::DeviceRetire { device } => Action::DeviceRetire { device },
+            Self::ReplicaExclude {
+                device,
+                space,
+                excluded,
+            } => Action::ReplicaExclude {
+                device,
+                space,
+                excluded,
+            },
             Self::BlockSender { person } => Action::BlockSender(person),
             Self::AcceptContact { person } => Action::AcceptContact(person),
             Self::OpenConversation { person } => Action::OpenConversation(person),
@@ -2652,6 +2718,39 @@ fn project(app: &App) -> ClientView {
                         expires_at_ms: offer.expires_at_ms,
                     })
                     .collect(),
+                spaces: profile
+                    .spaces
+                    .iter()
+                    .map(|space| SpaceFanoutRow {
+                        space: space.space.clone(),
+                        on: space.on.clone(),
+                        standings: space
+                            .standings
+                            .iter()
+                            .map(|row| DeviceStandingRow {
+                                device: row.device.clone(),
+                                standing: match &row.standing {
+                                    lait::control::FanoutStanding::Held => StandingRow::Held,
+                                    lait::control::FanoutStanding::Declined { why } => {
+                                        StandingRow::Declined { why: why.clone() }
+                                    }
+                                    lait::control::FanoutStanding::Refused { why } => {
+                                        StandingRow::Refused { why: why.clone() }
+                                    }
+                                    lait::control::FanoutStanding::Deferred { why } => {
+                                        StandingRow::Deferred { why: why.clone() }
+                                    }
+                                    lait::control::FanoutStanding::CouldNotAsk { why, .. } => {
+                                        StandingRow::CouldNotAsk { why: why.clone() }
+                                    }
+                                    lait::control::FanoutStanding::Excluded { told } => {
+                                        StandingRow::Excluded { told: *told }
+                                    }
+                                },
+                            })
+                            .collect(),
+                    })
+                    .collect(),
                 markers: profile
                     .markers
                     .iter()
@@ -3319,8 +3418,8 @@ mod tests {
     fn a_profile_crosses_with_its_devices_and_the_code_it_is_waiting_on() {
         use crate::client::reach::ProfileSnapshot;
         use lait::control::{
-            Liveness, MarkerStandingView, MarkerView, OriginView, OwnDeviceView, PairOffer,
-            PairingCode,
+            DeviceStanding, FanoutStanding, Liveness, MarkerStandingView, MarkerView, OriginView,
+            OwnDeviceView, PairOffer, PairingCode, SpaceFanout,
         };
 
         let mut app = App::new();
@@ -3394,6 +3493,35 @@ mod tests {
                 },
             ],
             interface: Some(lait::control::InterfaceView::NotPermitted),
+            // Three Spaces, three reasons the Pi does not hold one: a person
+            // said so, the Pi could not be asked, and nothing has offered it
+            // yet — the last of which has no row at all.
+            spaces: vec![
+                SpaceFanout {
+                    space: "spc_a".into(),
+                    on: vec!["dev_laptop".into()],
+                    standings: vec![DeviceStanding {
+                        device: "dev_pi".into(),
+                        standing: FanoutStanding::Excluded { told: true },
+                    }],
+                },
+                SpaceFanout {
+                    space: "spc_b".into(),
+                    on: vec!["dev_laptop".into()],
+                    standings: vec![DeviceStanding {
+                        device: "dev_pi".into(),
+                        standing: FanoutStanding::CouldNotAsk {
+                            why: "no route".into(),
+                            retry_at_ms: 99,
+                        },
+                    }],
+                },
+                SpaceFanout {
+                    space: "spc_c".into(),
+                    on: vec!["dev_laptop".into()],
+                    standings: Vec::new(),
+                },
+            ],
         })));
 
         let profile = project(&app).profile.expect("the profile did not cross");
@@ -3421,6 +3549,35 @@ mod tests {
         );
         assert_eq!(profile.offers.len(), 1);
         assert_eq!(profile.offers[0].phrase.len(), 6);
+        // The three absences cross as three different things. Folding any two
+        // would tell a person a machine refused a Space it was never offered,
+        // or that a decision they made is a network fault.
+        let standing = |space: &str| {
+            profile
+                .spaces
+                .iter()
+                .find(|row| row.space == space)
+                .expect("the Space row crossed")
+                .standings
+                .iter()
+                .find(|row| row.device == "dev_pi")
+                .map(|row| row.standing.clone())
+        };
+        assert_eq!(
+            standing("spc_a"),
+            Some(StandingRow::Excluded { told: true })
+        );
+        assert_eq!(
+            standing("spc_b"),
+            Some(StandingRow::CouldNotAsk {
+                why: "no route".into()
+            })
+        );
+        assert_eq!(
+            standing("spc_c"),
+            None,
+            "a Space nothing has offered yet must have no standing at all"
+        );
         // The tier crosses named the way the marker rows name it, so a
         // surface can join the two without holding a second table.
         assert_eq!(profile.devices[0].certified_by, ["https://post.example"]);

@@ -273,6 +273,31 @@ impl Client {
         }
     }
 
+    /// Say whether one Space is held on one device of this profile.
+    ///
+    /// Excluding takes it off that machine and de-lists it there; the bytes
+    /// stay where they are. Lifting the exclusion offers it again, and the
+    /// device consents to it exactly as it did the first time — nothing is
+    /// put back behind anybody's back.
+    pub async fn replica_exclude(
+        &self,
+        device: &str,
+        space: &str,
+        excluded: bool,
+    ) -> ClientResult<()> {
+        if device.trim().is_empty() || space.trim().is_empty() {
+            return Err(ClientError::invalid(
+                "excluding a Space needs the device and the Space",
+            ));
+        }
+        self.host_ok(Request::HostReplicaExclude {
+            device: device.trim().to_owned(),
+            space: space.trim().to_owned(),
+            excluded,
+        })
+        .await
+    }
+
     /// Forget an Orbit's registration without touching what is on disk.
     ///
     /// Forgetting and deleting are separate here for the same reason they are

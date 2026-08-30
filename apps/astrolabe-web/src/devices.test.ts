@@ -8,10 +8,12 @@ import { describe, expect, it } from "vitest";
 import {
   keyFor, loadingClientView,
   type ClientView, type Marker, type MarkerStanding, type OwnDevice, type ProfileFacts,
+  type SpaceRow, type SpaceStanding,
 } from "./client";
 import {
   answeringOffer, canAddDevice, canRetire, certification, codeToEnter, deviceStanding,
-  devicesAbsence, expiryLabel, markerName, markerStanding, pairEnter, retireWarning, spacesHeld,
+  devicesAbsence, excludeAction, excluding, expiryLabel, markerName, markerStanding, pairEnter,
+  retireWarning, spaceStanding, spacesHeld,
 } from "./devices";
 
 function device(overrides: Partial<OwnDevice> & { device: string }): OwnDevice {
@@ -33,6 +35,7 @@ function profile(overrides: Partial<ProfileFacts> = {}): ProfileFacts {
     pairing: null,
     offers: [],
     markers: [],
+    spaces: [],
     ...overrides,
   };
 }
@@ -175,6 +178,47 @@ describe("the rules for a person's own devices", () => {
     expect(warning).toMatch(/rotated/);
     expect(retireWarning(device({ device: "dev_pi", held: ["spc_a"] }))).toContain("1 Space");
     expect(retireWarning(device({ device: "dev_pi" }))).toContain("not listed in any Space");
+  });
+
+  it("keeps a decision, a failure and an absence apart on every Space row", () => {
+    const pi = device({ device: "dev_pi" });
+    const row = (standings: SpaceRow["standings"], on: string[] = []): SpaceRow =>
+      ({ space: "spc_a", on, standings });
+    const of = (standing: SpaceStanding) => row([{ device: "dev_pi", standing }]);
+
+    // The three that look identical on a device row and are not the same
+    // fact. A person chose the first; nobody chose the second; and the third
+    // is a loop that has not got there yet.
+    expect(spaceStanding(of({ kind: "excluded", told: true }), "dev_pi").label).toBe("Not on this device");
+    expect(spaceStanding(of({ kind: "couldNotAsk", why: "no route" }), "dev_pi").label)
+      .toBe("Could not be reached");
+    expect(spaceStanding(row([]), "dev_pi").label).toBe("Not offered yet");
+    // An exclusion the device has not heard is its own line: the decision
+    // stands here, and that machine still holds the Space until it does.
+    expect(spaceStanding(of({ kind: "excluded", told: false }), "dev_pi").label)
+      .toBe("Coming off this device");
+    // The device's own no is not a person's decision either.
+    expect(spaceStanding(of({ kind: "declined", why: "not on this box" }), "dev_pi").label)
+      .toBe("The device said no");
+    // A Space the list names is held, with or without a standing to say so.
+    expect(spaceStanding(row([], ["dev_pi"]), "dev_pi").label).toBe("Held");
+    expect(spaceStanding(of({ kind: "held" }), "dev_pi").label).toBe("Held");
+    // Only a real failure is a warning: a decision is not a problem.
+    expect(spaceStanding(of({ kind: "excluded", told: true }), "dev_pi").tone).not.toBe("warn");
+    expect(spaceStanding(of({ kind: "couldNotAsk", why: "no route" }), "dev_pi").tone).toBe("warn");
+
+    // The control flips with the decision, and both answers share one key so
+    // pressing either disables both.
+    expect(excludeAction(row([]), pi)).toEqual({
+      type: "replicaExclude", device: "dev_pi", space: "spc_a", excluded: true,
+    });
+    expect(excludeAction(of({ kind: "excluded", told: true }), pi)?.excluded).toBe(false);
+    // Never the machine you are sitting at: taking a Space off *here* is
+    // leaving it, which is a different act with a different confirmation.
+    expect(excludeAction(row([]), device({ device: "dev_laptop", me: true }))).toBeNull();
+    expect(keyFor(excludeAction(row([]), pi)!)).toBe("space.exclude:spc_a:dev_pi");
+    expect(excluding(view({ inFlight: ["space.exclude:spc_a:dev_pi"] }), "spc_a", "dev_pi")).toBe(true);
+    expect(excluding(view({ inFlight: ["space.exclude:spc_b:dev_pi"] }), "spc_a", "dev_pi")).toBe(false);
   });
 
   it("counts a code's remaining life down, and says plainly when it is over", () => {

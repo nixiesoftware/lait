@@ -39,6 +39,7 @@ import {
   type OwnDevice,
   type PairOffer,
   type ProfileFacts,
+  type SpaceRow,
 } from "./client";
 import { Empty, SectionTitle, shortId } from "./kit";
 
@@ -176,6 +177,68 @@ export function certification(
 export function spacesHeld(device: OwnDevice): string {
   if (device.held.length === 0) return "No Spaces yet";
   return device.held.length === 1 ? "1 Space" : `${device.held.length} Spaces`;
+}
+
+/**
+ * Where one Space stands towards one device, as a chip.
+ *
+ * Seven answers, and keeping them apart is the whole point of drawing them
+ * at all. "Not on this device" is something a person chose; "could not be
+ * reached" is a network; "not offered yet" is a loop that has not got there.
+ * Only the first is worth acting on, and folding the other two into it would
+ * put words in a person's mouth.
+ */
+export function spaceStanding(
+  space: SpaceRow,
+  device: string,
+): { label: string; tone: DeviceTone; said: string } {
+  const standing = space.standings.find((row) => row.device === device)?.standing;
+  if (standing === undefined) {
+    return space.on.includes(device)
+      ? { label: "Held", tone: "good", said: "This Space is on that device." }
+      : { label: "Not offered yet", tone: "neutral", said: "Nothing has offered it to that device yet." };
+  }
+  switch (standing.kind) {
+    case "held":
+      return { label: "Held", tone: "good", said: "This Space is on that device." };
+    case "excluded":
+      return standing.told
+        ? { label: "Not on this device", tone: "neutral", said: "You took it off that device. Nothing on it was deleted." }
+        : {
+          label: "Coming off this device",
+          tone: "neutral",
+          said: "That device has not heard yet — it will as soon as it can be reached.",
+        };
+    case "couldNotAsk":
+      return { label: "Could not be reached", tone: "warn", said: `That device did not answer: ${standing.why}` };
+    case "declined":
+      return { label: "The device said no", tone: "neutral", said: standing.why };
+    case "refused":
+      return { label: "Refused", tone: "warn", said: standing.why };
+    case "deferred":
+      return { label: "Not yet", tone: "neutral", said: standing.why };
+  }
+}
+
+/**
+ * Whether the person is asking for this Space to come off that device, or to
+ * go back on it. `null` for the device you are sitting at, which holds what
+ * it holds — taking a Space off *here* is leaving it, and that is the
+ * Library's act rather than this one's.
+ */
+export function excludeAction(
+  space: SpaceRow,
+  device: OwnDevice,
+): Extract<ClientAction, { type: "replicaExclude" }> | null {
+  if (device.me) return null;
+  const standing = space.standings.find((row) => row.device === device.device)?.standing;
+  const excluded = standing?.kind === "excluded";
+  return { type: "replicaExclude", device: device.device, space: space.space, excluded: !excluded };
+}
+
+/** Disabled on the frame it is pressed; both answers share one key. */
+export function excluding(view: ClientView, space: string, device: string): boolean {
+  return view.inFlight.includes(actionKey.replicaExclude(space, device));
 }
 
 /**
@@ -353,7 +416,7 @@ export function DevicesSurface({ view, dispatch, onBack, ownedWindow = false }: 
             : <div className={styles.cards}>
               {profile?.devices.map((device) =>
                 <DeviceRow key={device.device} device={device} markers={profile.markers}
-                  view={view} dispatch={dispatch} />)}
+                  spaces={profile.spaces} view={view} dispatch={dispatch} />)}
             </div>}
         </section>
         {/* Only when this person weighs any. A device with no markers in its
@@ -391,8 +454,8 @@ function WaitingToBeAdded({ code, expiresAtMs }: { code: string; expiresAtMs: nu
   </Card>;
 }
 
-function DeviceRow({ device, markers, view, dispatch }: {
-  device: OwnDevice; markers: Marker[]; view: ClientView; dispatch: Dispatch;
+function DeviceRow({ device, markers, spaces, view, dispatch }: {
+  device: OwnDevice; markers: Marker[]; spaces: SpaceRow[]; view: ClientView; dispatch: Dispatch;
 }) {
   const styles = useStyles();
   const [asking, setAsking] = useState(false);
@@ -416,6 +479,19 @@ function DeviceRow({ device, markers, view, dispatch }: {
           {listings.map((listing) => <Chip key={listing.marker} label={listing.label} tone={listing.tone} />)}
         </div>}
         {asking && <Caption1 className={styles.muted}>{retireWarning(device)}</Caption1>}
+        {!device.me && spaces.map((space) => {
+          const standing = spaceStanding(space, device.device);
+          const act = excludeAction(space, device);
+          return <div key={space.space} className={styles.rowTitle}>
+            <Caption1 className={styles.muted}>{shortId(space.space)}</Caption1>
+            <Chip {...standing} />
+            {act !== null && <Button appearance="subtle" size="small"
+              disabled={excluding(view, space.space, device.device)}
+              onClick={() => void dispatch(act)}>
+              {act.excluded ? "Not on this device" : "Put back"}
+            </Button>}
+          </div>;
+        })}
       </div>
       {/* Asked twice on purpose. Retiring is reversible only by pairing the
           machine again, and the sentence it costs is worth reading. */}
