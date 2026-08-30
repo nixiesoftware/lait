@@ -663,22 +663,7 @@ impl StationHost {
             .build_scoped(
                 &device_seed,
                 &network,
-                comms::Protocols {
-                    framed: &[
-                        runtime::plane::contact::CONTACT_ALPN,
-                        runtime::neighbor::PRESENCE_ALPN,
-                        // Registered before anything dials it: a client refuses
-                        // an unknown ALPN before reading a byte, so an ALPN that
-                        // ships with the feature using it only ever works
-                        // between two already-updated machines.
-                        runtime::correspondence::CORRESPONDENCE_ALPN,
-                    ],
-                    session: &[
-                        runtime::plane::FREIGHT_ALPN,
-                        runtime::plane::LIVE_ALPN,
-                        runtime::plane::EXEC_ALPN,
-                    ],
-                },
+                crate::daemon::transport_hub::STATION_PROTOCOLS,
                 &space,
             )
             .await?;
@@ -1648,6 +1633,7 @@ impl StationHost {
                 },
                 Err(e) => Response::err(format!("{e}")),
             },
+            Request::Coordinates => self.coordinates(),
             Request::DeviceAdd { consent } => self.device_add(&consent),
             Request::DeviceRevoke { device } => match self.mechanics.device_revoke(&device) {
                 Ok(true) => Response::Ok {
@@ -3709,6 +3695,37 @@ impl StationHost {
         ) {
             Ok(coords) => Response::Ref {
                 reff: coords.render(),
+            },
+            Err(e) => Response::err(format!("mint coordinates: {e}")),
+        }
+    }
+
+    /// The admission-less ticket: this Space's self-proof of formation and
+    /// this Station's routes, signed by this device, carrying no capability.
+    ///
+    /// Refused off a device with no standing. A pending joiner has no actor
+    /// here yet and `device_invite` refuses it; a device whose actor lost its
+    /// seat still resolves, so the standing check is explicit — a ticket it
+    /// signed would point another device at a Station that holds no epoch key
+    /// and can seal it nothing.
+    fn coordinates(&self) -> Response {
+        let (actor, space) = match self.mechanics.device_invite() {
+            Ok(pair) => pair,
+            Err(e) => return Response::err(format!("{e}")),
+        };
+        if !self.mechanics.am_i_member() {
+            return Response::err("no standing in this space yet");
+        }
+        match self.mechanics.mint_coordinates(
+            &self.device_seed,
+            "",
+            self.advertised_routes.clone(),
+            None,
+        ) {
+            Ok(ticket) => Response::Coordinates {
+                link: format!("lait://join/{}", ticket.render()),
+                actor: actor.to_string(),
+                space: space.as_str().to_string(),
             },
             Err(e) => Response::err(format!("mint coordinates: {e}")),
         }

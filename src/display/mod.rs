@@ -19,7 +19,7 @@ pub use http::serve_display_on;
 pub(crate) use http::{bind_display, is_port_taken};
 mod live;
 pub mod overlay;
-mod pairing;
+pub(crate) mod pairing;
 mod pin;
 mod publish;
 mod runtime;

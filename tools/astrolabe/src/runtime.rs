@@ -163,6 +163,18 @@ pub enum Action {
     AddCorrespondent {
         announcement: String,
     },
+    /// Add a device to this profile: the code the new device is showing,
+    /// typed on a device that already holds it.
+    DevicePairEnter {
+        code: String,
+    },
+    /// Confirm a waiting device once the six words match on both, or reject
+    /// it. One act, two answers — rejecting writes nothing and tells the
+    /// other device nothing.
+    DevicePairConfirm {
+        pairing: String,
+        accept: bool,
+    },
     /// Enter the Space an arriving invitation names, by its deposit id.
     OpenInvitation {
         message: String,
@@ -188,9 +200,6 @@ pub enum Action {
         /// `None` lets the daemon place the store.
         home: Option<String>,
         nick: Option<String>,
-    },
-    DeviceConsent {
-        token: String,
     },
     OrbitForget {
         space: String,
@@ -302,6 +311,11 @@ impl Action {
             Self::CollectMail => "correspondence.collect".into(),
             Self::ShareReach => "reach.share".into(),
             Self::AddCorrespondent { .. } => "reach.add".into(),
+            Self::DevicePairEnter { .. } => "device.pair.enter".into(),
+            // Keyed on the offer, not on the answer: Confirm and Reject are
+            // two answers to one question, and a key per answer would leave
+            // the other control live while this one was in flight.
+            Self::DevicePairConfirm { pairing, .. } => format!("device.pair.confirm:{pairing}"),
             Self::OpenInvitation { message } => format!("invitation.open:{message}"),
             Self::SendInvitation { to, .. } => format!("invitation.send:{to}"),
             Self::BlockSender(person) => format!("correspondence.block:{person}"),
@@ -315,7 +329,6 @@ impl Action {
             Self::SpaceEnter { home, .. } => {
                 format!("space.enter:{}", home.as_deref().unwrap_or_default())
             }
-            Self::DeviceConsent { .. } => "device.consent".into(),
             Self::OrbitForget { space } => format!("orbit.forget:{space}"),
             Self::OrbitRebuild { orbit } => format!("orbit.rebuild:{orbit}"),
             Self::BookPut {
@@ -372,6 +385,9 @@ impl Action {
             Self::Refresh => "re-read this machine".into(),
             Self::ShareReach => "publish how to reach you".into(),
             Self::AddCorrespondent { .. } => "add a correspondent".into(),
+            Self::DevicePairEnter { .. } => "add a device to your profile".into(),
+            Self::DevicePairConfirm { accept: true, .. } => "add the waiting device".into(),
+            Self::DevicePairConfirm { accept: false, .. } => "turn the waiting device away".into(),
             Self::OpenInvitation { .. } => "enter the Space you were invited to".into(),
             Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
@@ -417,7 +433,6 @@ impl Action {
             Self::CloseConversation(person) => format!("close the chat with {person}"),
             Self::SpaceFound { name, .. } => format!("found the Space '{name}'"),
             Self::SpaceEnter { .. } => "enter a Space from an invite".into(),
-            Self::DeviceConsent { .. } => "sign this machine's consent".into(),
             Self::OrbitForget { space } => format!("forget {space}"),
             Self::OrbitRebuild { orbit } => format!("rebuild {orbit}"),
             Self::BookPut { name, .. } => format!("save the card '{name}'"),
@@ -515,6 +530,10 @@ pub enum Update {
     /// action moved it. A whole snapshot, like [`Book`]: the model is pushed,
     /// never mutated in place by a surface.
     Correspondence(crate::model::Correspondence),
+    /// The profile's devices, after a read or after pairing moved them.
+    /// Not delivered by any stream: the daemon holds the device set and this
+    /// side asks for it, the same way it asks for the mailbox.
+    Profile(Box<crate::client::reach::ProfileSnapshot>),
     /// What passive presence sampling measured this pass — including which
     /// Spaces answered at all, so absence keeps its kind.
     Presence(crate::client::presence::PresenceMap),
@@ -987,6 +1006,10 @@ impl Worker {
         match self.client.book_list().await {
             Ok(book) => self.send(Update::Book(book)),
             Err(error) => self.fail(None, "read the address book", error),
+        }
+        match self.client.profile().await {
+            Ok(profile) => self.send(Update::Profile(Box::new(profile))),
+            Err(error) => self.fail(None, "read your devices", error),
         }
     }
 
@@ -1505,6 +1528,28 @@ impl Worker {
                 .await?;
                 Ok(Outcome::Silent)
             }
+            // Both of these answer with a sentence and nothing else. The
+            // offer to confirm and the device set it ends in reach the model
+            // on the re-read every action takes, so this side never holds the
+            // answer it was handed.
+            Action::DevicePairEnter { code } => Ok(Outcome::Said(
+                match client.device_pair_enter(code).await? {
+                    crate::client::host::PairEntered::Offered { name } => {
+                        format!("{name} answered — check the words match")
+                    }
+                    crate::client::host::PairEntered::AlreadyAdded => {
+                        "that device is already one of yours".into()
+                    }
+                },
+            )),
+            Action::DevicePairConfirm { pairing, accept } => {
+                let added = client.device_pair_confirm(pairing, *accept).await?;
+                Ok(Outcome::Said(if added.is_some() {
+                    "added".into()
+                } else {
+                    "turned away; nothing was written".into()
+                }))
+            }
             Action::SendInvitation { to, link } => {
                 self.corresponding(
                     |_| {
@@ -1616,13 +1661,6 @@ impl Worker {
                     Some(home) => format!("entered a Space into {home}"),
                     None => "entered a Space".into(),
                 }))
-            }
-            Action::DeviceConsent { token } => {
-                client.device_consent(token).await?;
-                Ok(Outcome::Said(
-                    "this machine's consent is signed; hand it back to the device that invited it"
-                        .into(),
-                ))
             }
             Action::OrbitForget { space } => {
                 client.orbit_forget(space).await?;
@@ -2082,5 +2120,46 @@ mod tests {
             preview: true,
         }
         .rereads());
+    }
+
+    /// Confirm and Reject are two answers to one offer, and they share a key.
+    ///
+    /// A key per answer would leave the other control live while this one was
+    /// in flight — and the whole point of the pair is that exactly one of
+    /// them is pressed. The spelling itself is the interface's other half
+    /// (`apps/astrolabe-web/src/client.ts`), where a disagreement fails
+    /// nowhere: a key that does not match `inFlight` simply never disables
+    /// anything.
+    #[test]
+    fn one_offer_is_one_key_however_it_is_answered() {
+        use super::Action;
+
+        assert_eq!(
+            Action::DevicePairEnter {
+                code: "ABCD-EFGH".into()
+            }
+            .key(),
+            "device.pair.enter",
+        );
+        let accept = Action::DevicePairConfirm {
+            pairing: "pai_7".into(),
+            accept: true,
+        };
+        let reject = Action::DevicePairConfirm {
+            pairing: "pai_7".into(),
+            accept: false,
+        };
+        assert_eq!(accept.key(), "device.pair.confirm:pai_7");
+        assert_eq!(accept.key(), reject.key());
+        // Two offers are two questions, and answering one leaves the other
+        // pressable.
+        assert_ne!(
+            accept.key(),
+            Action::DevicePairConfirm {
+                pairing: "pai_8".into(),
+                accept: true,
+            }
+            .key(),
+        );
     }
 }

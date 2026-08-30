@@ -70,6 +70,7 @@ pub mod ids;
 pub mod kinship;
 mod ledger;
 pub mod membership;
+pub mod pake;
 pub mod policy;
 pub mod recovery;
 #[cfg(test)]

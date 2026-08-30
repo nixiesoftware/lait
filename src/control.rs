@@ -851,6 +851,14 @@ pub enum Request {
     /// Print a device-enrollment token for adding another device to *this*
     /// actor (lait/actor/1). The new machine consumes it with `device accept`.
     DeviceInvite,
+    /// Mint an admission-less ticket for this Space: where it is and who
+    /// signs for it here, and nothing that admits anyone. Membership standing
+    /// is all it needs — `Invite` mints a capability and takes an admin, and
+    /// what it admits is a *new actor*, which is the wrong shape for a device
+    /// that is already this person's. A pending joiner is refused: a ticket
+    /// signed by a device with no standing would send another device to a
+    /// Station that cannot seal it anything.
+    Coordinates,
     /// Add a device to our actor from its consent blob (produced by
     /// `device accept`), sealing it the space key.
     DeviceAdd {
@@ -967,6 +975,22 @@ pub enum Request {
     CorrespondInvite {
         to: String,
         link: String,
+    },
+    /// Pair a new device into this identity's profile, from the device that
+    /// already holds it: enter the code the new device printed. `XXXX-XXXX`,
+    /// or `XXXX-XXXX@host:port[,host:port]` when the two share a LAN and no
+    /// relay. Answers [`HostReply::DevicePairOffer`] with the six words the
+    /// new device's journal also shows, or [`HostReply::DevicePaired`] when it
+    /// was already adopted and only the answer had been lost.
+    DevicePairEnter {
+        code: String,
+    },
+    /// Confirm or reject an offer. `accept: false` drops it and sends
+    /// nothing; `accept: true` assembles the link, adopts the device and
+    /// carries the link to it.
+    DevicePairConfirm {
+        pairing: String,
+        accept: bool,
     },
     /// Identity-scoped address book. Daemon route only; never places an Orbit.
     /// The book is the one namer: member and presence rows leave the Station
@@ -1910,6 +1934,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceInvite
+        | Request::Coordinates
         | Request::DeviceAdd { .. }
         | Request::DeviceRevoke { .. }
         | Request::DeviceList
@@ -1985,6 +2010,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. }
+        | Request::DevicePairEnter { .. }
+        | Request::DevicePairConfirm { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -2176,6 +2203,7 @@ pub fn representative_requests() -> Vec<Request> {
         Request::KeyRotate,
         Request::InviteRevoke { invite: s() },
         Request::DeviceInvite,
+        Request::Coordinates,
         Request::DeviceAdd { consent: s() },
         Request::DeviceRevoke { device: s() },
         Request::DeviceList,
@@ -2326,6 +2354,11 @@ pub fn representative_requests() -> Vec<Request> {
         Request::HostWorldUpdateStatus { world: s() },
         Request::HostRestart,
         Request::HostContext,
+        Request::DevicePairEnter { code: s() },
+        Request::DevicePairConfirm {
+            pairing: s(),
+            accept: false,
+        },
     ]
 }
 
@@ -2420,6 +2453,110 @@ pub struct ReachView {
     pub correspondents: Vec<String>,
     /// One transcript per correspondent, in send order.
     pub conversations: Vec<ConversationView>,
+    /// This machine's device in the profile — the join key every other slice
+    /// keys on.
+    #[serde(default)]
+    pub me: Option<String>,
+    /// How this device came to hold the profile.
+    #[serde(default)]
+    pub origin: Option<OriginView>,
+    /// The profile's device set, `me` included. Empty when the set is not
+    /// held — and then `device_set_unknown` says so, because an empty set and
+    /// an unmeasured one are different facts and only one is worth acting on.
+    #[serde(default)]
+    pub devices: Vec<OwnDeviceView>,
+    /// The device set has not been restored on this daemon. Never folded
+    /// into `devices` being empty: no profile has no devices.
+    #[serde(default)]
+    pub device_set_unknown: bool,
+    /// Every Space this daemon holds, and where the fan-out to each own
+    /// device stands. Standing is this daemon's memory of asking; `on` is
+    /// the ledger's answer, and only the second is a fact about the Space.
+    #[serde(default)]
+    pub spaces: Vec<SpaceFanout>,
+}
+
+/// How a device came to hold its profile: founded on this machine, or
+/// adopted from a device that already held it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "snake_case")]
+pub enum OriginView {
+    Founded,
+    Adopted { from: String, at: u64 },
+}
+
+/// One device of the profile, as this daemon holds it. A device in the set
+/// with no other fact known renders with the defaults below — never dropped,
+/// because a device that vanishes from the list when it could not be asked is
+/// the false-disconnection defect one layer down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnDeviceView {
+    /// The device id — the join key.
+    pub device: String,
+    /// Whether this is the device answering.
+    pub me: bool,
+    /// The last thing a probe learned, if one ran.
+    #[serde(default)]
+    pub liveness: Liveness,
+    /// Space ids the ledger lists this device in, under my actor.
+    #[serde(default)]
+    pub held: Vec<String>,
+}
+
+/// What a probe of an own device last learned. `NotProbed` is the default
+/// and is neither "down" nor "could not be asked": nothing has asked yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "liveness", rename_all = "snake_case")]
+pub enum Liveness {
+    Reported {
+        version: String,
+        at: u64,
+    },
+    CouldNotAsk {
+        why: String,
+    },
+    #[default]
+    NotProbed,
+}
+
+/// One Space as the fan-out sees it: which own devices the ledger lists
+/// under my actor, and how the last offer to each of the others stood.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceFanout {
+    pub space: String,
+    /// Devices the ledger names — read from `DeviceList`, never inferred
+    /// from an offer's outcome.
+    pub on: Vec<String>,
+    #[serde(default)]
+    pub standings: Vec<DeviceStanding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceStanding {
+    pub device: String,
+    pub standing: FanoutStanding,
+}
+
+/// Where one offer of one Space to one own device stands, in this daemon's
+/// memory. Absence is a sixth thing — nothing has asked yet — and is never
+/// encoded here. `CouldNotAsk` is kept apart from `Declined` because only
+/// one of them is an answer: a device that could not be reached said
+/// nothing, and treating silence as refusal is the false-disconnection
+/// defect one layer down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "standing", rename_all = "snake_case")]
+pub enum FanoutStanding {
+    /// The ledger names the device.
+    Held,
+    /// The device answered no.
+    Declined { why: String },
+    /// One side refused the exchange — a ticket that did not verify, a
+    /// consent the Space would not take.
+    Refused { why: String },
+    /// Not askable yet for a reason on this side, such as no route to offer.
+    Deferred { why: String },
+    /// The device did not answer. Asked again at `retry_at_ms`.
+    CouldNotAsk { why: String, retry_at_ms: u64 },
 }
 
 /// Everything said with one correspondent.
@@ -2538,6 +2675,15 @@ pub enum Response {
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,
+    },
+    /// Reply to [`Request::Coordinates`]: the rendered `lait://join/…` link,
+    /// and beside it the actor and Space it was minted for — so the device it
+    /// is carried to can check the offer names the Space it says it does
+    /// before it parses anything.
+    Coordinates {
+        link: String,
+        actor: String,
+        space: String,
     },
     Members {
         members: Vec<MemberDto>,
@@ -2845,6 +2991,18 @@ pub enum HostReply {
         #[serde(default)]
         pid: Option<u32>,
     },
+    /// A new device answered the code: the offer to confirm, with the six
+    /// words its journal shows. Also listed on [`HostReply::Context`] until
+    /// it is confirmed, rejected or expires.
+    DevicePairOffer {
+        pairing: String,
+        device: String,
+        name: String,
+        phrase: Vec<String>,
+        expires_at_ms: u64,
+    },
+    /// The device is one of this profile's now.
+    DevicePaired { device: String },
     /// Orientation for the identity this daemon runs as.
     Context {
         /// The build answering, in the form releases are identified by
@@ -2870,7 +3028,42 @@ pub enum HostReply {
         /// never has to exist for this to reach the person who can approve.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         asks: Vec<SponsorshipAsk>,
+        /// The code this device is showing while it waits to be paired into
+        /// a profile. `None` when it holds no code — already paired, a code
+        /// spent and awaiting its confirmation, or none minted yet — which
+        /// is why a headless install's tail reads it as "not yet" and never
+        /// as "paired".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pairing: Option<PairingCode>,
+        /// Offers awaiting this person's confirmation, from codes entered
+        /// here.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pair_offers: Vec<PairOffer>,
     },
+}
+
+/// A pairing code this device is showing, as a person is meant to read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingCode {
+    /// Grouped, `XXXX-XXXX`.
+    pub code: String,
+    /// The direct addresses to enter beside it (`CODE@addr`) when no relay
+    /// carries the dial. Empty under a relay.
+    #[serde(default)]
+    pub direct: Vec<std::net::SocketAddr>,
+    pub expires_at_ms: u64,
+}
+
+/// A device that answered a code entered here, awaiting confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairOffer {
+    pub pairing: String,
+    pub device: String,
+    /// The name the device gave for itself — its hostname.
+    pub name: String,
+    /// The six words its journal shows; confirm only when they match.
+    pub phrase: Vec<String>,
+    pub expires_at_ms: u64,
 }
 
 /// A co-located agent that attached without standing, waiting on a person.

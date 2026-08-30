@@ -834,6 +834,10 @@ mod tests {
             identities: vec![],
             orbits: vec![],
             asks: vec![],
+            // A box mid-install has no code minted and nobody's offer to
+            // confirm; orientation still answers, which is the whole point.
+            pairing: None,
+            pair_offers: vec![],
         });
         assert_eq!(
             read_context(&context, false),

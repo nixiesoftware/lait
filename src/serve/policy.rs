@@ -109,8 +109,11 @@ pub fn is_read(req: &Request) -> bool {
         // passphrase…
         | Request::SpaceCustodyExport { .. }
         | Request::SpaceCustodyImport { .. }
-        // …joining and inviting, which act *as* an identity on the wire…
+        // …joining and inviting, which act *as* an identity on the wire, and
+        // minting Coordinates, which signs a ticket as this device even though
+        // the ticket admits nobody…
         | Request::Invite { .. }
+        | Request::Coordinates
         | Request::Join { .. }
         | Request::Connect { .. }
         // …sync drives convergence on the wire (like connect), not a read…
@@ -175,7 +178,10 @@ pub fn is_read(req: &Request) -> bool {
         | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
-        | Request::CorrespondInvite { .. } => false,
+        | Request::CorrespondInvite { .. }
+        // Pairing signs a link as this identity and adopts a device into it.
+        | Request::DevicePairEnter { .. }
+        | Request::DevicePairConfirm { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -268,6 +274,10 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. }
+        // Pairing is the profile's, not a Space's: the code names a device,
+        // and no Space exists yet on the device being paired.
+        | Request::DevicePairEnter { .. }
+        | Request::DevicePairConfirm { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -312,6 +322,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceInvite
+        | Request::Coordinates
         | Request::DeviceAdd { .. }
         | Request::DeviceRevoke { .. }
         | Request::DeviceList
@@ -414,6 +425,34 @@ mod tests {
             reusable: false,
             ttl_hours: None,
         }));
+    }
+
+    /// Pairing a device rides the host plane — a browser or Astrolabe enters
+    /// the code — and both halves sign as this identity, so neither is a
+    /// read. A pairing verb that slipped into the read set would let a
+    /// hosted identity's page adopt devices into somebody else's profile.
+    #[test]
+    fn device_pairing_is_host_plane_and_never_a_read() {
+        let enter = Request::DevicePairEnter {
+            code: String::new(),
+        };
+        let confirm = Request::DevicePairConfirm {
+            pairing: String::new(),
+            accept: false,
+        };
+        assert!(is_host_plane(&enter));
+        assert!(is_host_plane(&confirm));
+        assert!(!is_read(&enter));
+        assert!(!is_read(&confirm));
+    }
+
+    /// Minting Coordinates signs as this device, so it is not a read even
+    /// though the ticket admits nobody; and it names a Space, so it takes
+    /// the Space route and not the host plane.
+    #[test]
+    fn minting_coordinates_is_a_space_act_and_not_a_read() {
+        assert!(!is_read(&Request::Coordinates));
+        assert!(!is_host_plane(&Request::Coordinates));
     }
 
     /// The book is identity-scoped: every Book verb rides the host plane, its

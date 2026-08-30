@@ -384,6 +384,17 @@ impl Registry {
         self.holdings.keys()
     }
 
+    /// The profiles this identity *authored* — holds the log of, not merely a
+    /// projection. What a boot path asks before founding over a durable
+    /// registry: an authored log names the profile every issued address
+    /// resolves to, and founding beside it would answer a different one.
+    pub fn authored(&self) -> impl Iterator<Item = &ProfileId> {
+        self.holdings
+            .iter()
+            .filter(|(_, holding)| matches!(holding, Holding::Authored(_)))
+            .map(|(profile, _)| profile)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.holdings.len()

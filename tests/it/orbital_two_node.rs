@@ -476,6 +476,118 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
     let _ = std::fs::remove_dir_all(&joiner_home);
 }
 
+/// The admission-less ticket a person's own devices hand each other. It is
+/// refused off a device with no standing, and a member's — not an admin's —
+/// verifies against the Space with no capability inside it and this device
+/// as the Station to approach.
+#[test]
+fn coordinates_are_refused_off_a_non_member_and_carry_no_admission() {
+    const F_SEED: [u8; 32] = [221u8; 32];
+    const J_SEED: [u8; 32] = [222u8; 32];
+    let net = MemNet::new();
+
+    let founder_home = temp_home("coords-founder");
+    let (space, _) =
+        crate::world_fixture::found_space(&founder_home, &F_SEED, "Coordinates Space").unwrap();
+    let founder_handle = spawn_daemon(founder_home.to_path_buf(), F_SEED, net.clone());
+
+    let client = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&client, &founder_home);
+
+    let Response::Ref { reff: invite } = req(
+        &client,
+        &founder_home,
+        Request::Invite {
+            world: None,
+            role: None,
+            reusable: false,
+            ttl_hours: Some(24),
+        },
+    ) else {
+        panic!("expected an invite link");
+    };
+
+    let joiner_home = temp_home("coords-joiner");
+    crate::world_fixture::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
+    let joiner_handle = spawn_daemon(joiner_home.to_path_buf(), J_SEED, net.clone());
+    wait_online(&client, &joiner_home);
+
+    // Pending: the store is bootstrapped from the link, nothing is admitted
+    // yet. No ticket comes out.
+    let Response::Status(info) = req(&client, &joiner_home, Request::Status) else {
+        panic!("expected Status");
+    };
+    assert_eq!(info.membership, "pending");
+    let resp = req(&client, &joiner_home, Request::Coordinates);
+    assert!(
+        matches!(&resp, Response::Error { .. }),
+        "a pending joiner must be refused a ticket, got {resp:?}"
+    );
+
+    // Admit the joiner, then ask again as a member (not an admin: the
+    // founder holds the only admin seat, so this is the standing `Invite`
+    // would refuse).
+    let approach = mechanics::actor::device_from_seed(&F_SEED).to_string();
+    let admitted = poll_until(Duration::from_secs(25), || {
+        req(
+            &client,
+            &joiner_home,
+            Request::Connect {
+                ticket: approach.clone(),
+            },
+        );
+        match req(&client, &joiner_home, Request::Status) {
+            Response::Status(info) if info.membership == "member" => Some(()),
+            _ => None,
+        }
+    });
+    assert!(admitted.is_some(), "the joiner was never admitted");
+
+    let resp = req(&client, &joiner_home, Request::Coordinates);
+    let Response::Coordinates {
+        link,
+        actor,
+        space: named,
+    } = resp
+    else {
+        panic!("a member must be given a ticket, got {resp:?}");
+    };
+    assert_eq!(
+        named,
+        space.as_str(),
+        "the reply names the Space it was minted for"
+    );
+    assert!(
+        actor.starts_with("act_"),
+        "the reply names the actor: {actor}"
+    );
+    assert!(link.starts_with("lait://join/"), "{link}");
+
+    // The link parses back and verifies as the Space's own self-proof, signed
+    // by the device that answered, with nothing inside it that admits anyone.
+    let verified = runtime::coordinates::SignedCoordinates::parse_link(&link)
+        .expect("the rendered link parses")
+        .verify()
+        .expect("the ticket verifies");
+    assert_eq!(verified.space, space);
+    assert_eq!(
+        verified.approach_station,
+        mechanics::actor::device_from_seed(&J_SEED),
+        "the Station to approach is the device that minted"
+    );
+    assert!(
+        verified.admission.is_none(),
+        "an own-device ticket carries no admission capability"
+    );
+
+    let _ = req(&client, &joiner_home, Request::Stop);
+    let _ = req(&client, &founder_home, Request::Stop);
+    let _ = joiner_handle.join();
+    let _ = founder_handle.join();
+    let _ = std::fs::remove_dir_all(&founder_home);
+    let _ = std::fs::remove_dir_all(&joiner_home);
+}
+
 /// GOV-11: elevation and demotion are signed `SetGrants` ops with a real
 /// product surface — promote/demote over the control socket, short-prefix
 /// subject resolution, and the last-admin fence.

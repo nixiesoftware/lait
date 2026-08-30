@@ -227,13 +227,21 @@ pub fn allocated_home(space: &str) -> PathBuf {
 /// that entered this Space earlier holds a store for it that the custody gate
 /// would rightly refuse, and answering with that path would turn a re-join
 /// into a refusal that names nothing the caller asked about.
+///
+/// Asked of the catalog rather than the registry file: the catalog's loader
+/// is what bounds the stores this daemon holds at all, and a lookup that
+/// reads the file directly answers with a store another daemon on this
+/// machine registered — which the fan-out then enters, or refuses, on the
+/// wrong daemon's behalf.
 pub fn registered_home(router: &Router, space: &str) -> Option<PathBuf> {
-    orbits::list()
+    router
+        .catalog()
+        .bindings()
         .into_iter()
-        .filter(|entry| entry.space == space)
-        .map(|entry| PathBuf::from(entry.path))
-        .filter(|path| crate::orbital::space_store_present(path))
-        .find(|path| router.catalog().path_signs_with_own_seed(path))
+        .filter(|binding| binding.identity == orbits::StationIdentity::Own)
+        .filter(|binding| binding.entry.space == space)
+        .map(|binding| PathBuf::from(binding.entry.path))
+        .find(|path| crate::orbital::space_store_present(path))
 }
 
 /// A fresh directory under `spaces_root()/.forming/` for a founding that does
@@ -579,6 +587,47 @@ async fn await_admission(router: &Router, address: OrbitAddress, approach: &str)
     }
 }
 
+/// Enter a Space into `home` and drive admission — the whole of what a
+/// `HostSpaceEnter` does, shared with the fan-out that enters on this
+/// device's behalf, so the two cannot come to mean different things.
+///
+/// The custody gate runs before the nick write and before the first
+/// Connect: an entry may not spend a seed this daemon only hosts, whether or
+/// not the directory it names holds a Space yet. An `Err` is the refusal as
+/// the request would have answered it.
+pub(crate) async fn enter_and_await(
+    router: &Router,
+    home: &str,
+    link: &str,
+    nick: Option<&str>,
+) -> Result<(Entered, Admission), Response> {
+    let home = materialize_target(home)?;
+    if let Err(refusal) = admit_formation_target(router, &home) {
+        return Err(Response::err(format!("{refusal:#}")));
+    }
+    let identity = router.catalog().identity().to_path_buf();
+    let packages = router.packages();
+    let link = link.to_string();
+    let nick = nick.map(str::to_owned);
+    let bootstrapped = tokio::task::spawn_blocking(move || {
+        enter(&packages, &home, &identity, &link, nick.as_deref())
+    })
+    .await;
+    match bootstrapped {
+        Ok(Ok(entered)) => {
+            // Entering is not finished until the joiner holds standing:
+            // the store is bound to the Space, but every Body in it is
+            // still encrypted to a key admission delivers. Driving that
+            // here is what keeps "entered" from meaning "blank board".
+            let address = OrbitAddress::for_store(&entered.home, entered.space_id.clone());
+            let admission = await_admission(router, address, &entered.approach).await;
+            Ok((entered, admission))
+        }
+        Ok(Err(error)) => Err(target_error(error)),
+        Err(error) => Err(Response::err(format!("host task failed: {error}"))),
+    }
+}
+
 /// Refuse a directory that already holds a store of any vintage.
 fn refuse_occupied(home: &Path) -> Result<()> {
     refuse_unsupported(home)?;
@@ -674,44 +723,19 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                         .to_string()
                 }
             };
-            // Before the nick write and before the first Connect: an entry may
-            // not spend a seed this daemon only hosts, whether or not the
-            // directory it names holds a Space yet.
-            let home = match materialize_target(&spelled) {
-                Ok(home) => home,
-                Err(refusal) => return Some(refusal),
-            };
-            if let Err(refusal) = admit_formation_target(router, &home) {
-                return Some(Response::err(format!("{refusal:#}")));
-            }
-            let identity = router.catalog().identity().to_path_buf();
-            let packages = router.packages();
-            let bootstrapped = tokio::task::spawn_blocking(move || {
-                enter(&packages, &home, &identity, &link, nick.as_deref())
-            })
-            .await;
-            match bootstrapped {
-                Ok(Ok(entered)) => {
-                    // Entering is not finished until the joiner holds standing:
-                    // the store is bound to the Space, but every Body in it is
-                    // still encrypted to a key admission delivers. Driving that
-                    // here is what keeps "entered" from meaning "blank board".
-                    let address = OrbitAddress::for_store(&entered.home, entered.space_id.clone());
-                    let admission = await_admission(router, address, &entered.approach).await;
-                    Response::Host(HostReply::Entered {
-                        space: entered.space,
-                        home: entered.home.display().to_string(),
-                        device: entered.device,
-                        approach: entered.approach,
-                        host_nick: entered.host_nick,
-                        fresh: entered.fresh,
-                        admitted: admission.admitted,
-                        contacted: admission.contacted,
-                        last_error: admission.last_error,
-                    })
-                }
-                Ok(Err(error)) => target_error(error),
-                Err(error) => Response::err(format!("host task failed: {error}")),
+            match enter_and_await(router, &spelled, &link, nick.as_deref()).await {
+                Ok((entered, admission)) => Response::Host(HostReply::Entered {
+                    space: entered.space,
+                    home: entered.home.display().to_string(),
+                    device: entered.device,
+                    approach: entered.approach,
+                    host_nick: entered.host_nick,
+                    fresh: entered.fresh,
+                    admitted: admission.admitted,
+                    contacted: admission.contacted,
+                    last_error: admission.last_error,
+                }),
+                Err(refusal) => refusal,
             }
         }
         Request::HostDeviceConsent { token } => {
@@ -894,6 +918,44 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 Err(error) => world_update_state_failure("read status", error),
             }
         }
+        Request::DevicePairEnter { code } => {
+            match router
+                .pair()
+                .enter(&code, crate::daemon::pair::now_ms())
+                .await
+            {
+                Ok(crate::daemon::pair::SponsorOutcome::Offer(offer)) => {
+                    Response::Host(HostReply::DevicePairOffer {
+                        pairing: offer.pairing,
+                        device: offer.device,
+                        name: offer.name,
+                        phrase: offer.phrase,
+                        expires_at_ms: offer.expires_at_ms,
+                    })
+                }
+                Ok(crate::daemon::pair::SponsorOutcome::Paired { device }) => {
+                    Response::Host(HostReply::DevicePaired {
+                        device: device.as_str().to_owned(),
+                    })
+                }
+                Err(error) => Response::err(format!("{error:#}")),
+            }
+        }
+        Request::DevicePairConfirm { pairing, accept } => {
+            match router
+                .pair()
+                .confirm(&pairing, accept, crate::daemon::pair::now_ms())
+                .await
+            {
+                Ok(Some(device)) => Response::Host(HostReply::DevicePaired {
+                    device: device.as_str().to_owned(),
+                }),
+                Ok(None) => Response::Ok {
+                    message: Some("the offer was rejected; nothing was written".into()),
+                },
+                Err(error) => Response::err(format!("{error:#}")),
+            }
+        }
         Request::HostContext => match config::list_identities() {
             Ok(identities) => Response::Host(HostReply::Context {
                 version: crate::VERSION.to_string(),
@@ -907,6 +969,8 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 identities,
                 orbits: orbits::list(),
                 asks: router.asks().list(),
+                pairing: router.pair().status(crate::daemon::pair::now_ms()),
+                pair_offers: router.pair().offers(crate::daemon::pair::now_ms()),
             }),
             Err(error) => Response::err(format!("{error:#}")),
         },

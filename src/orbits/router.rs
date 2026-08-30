@@ -603,7 +603,9 @@ pub struct Router {
     catalog: Catalog,
     occupancy: OrbitOccupancy<Placement>,
     doorbells: broadcast::Sender<OrbitDoorbell>,
-    factory: Arc<dyn TransportFactory>,
+    /// Concrete, not `dyn`: the daemon reaches the identity's own lanes
+    /// through it, and those are the hub's alone.
+    factory: Arc<TransportHubFactory>,
     packages: WorldPackages,
     /// One process-owned admission lane for blocking host/lifecycle work.
     /// Acquiring is a try operation: a control request gets bounded feedback
@@ -613,6 +615,7 @@ pub struct Router {
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
     correspondence: Arc<crate::daemon::correspondence::CorrespondenceService>,
+    pair: Arc<crate::daemon::pair::PairService>,
     asks: crate::daemon::sponsorship::SponsorshipAsks,
 }
 
@@ -642,28 +645,48 @@ impl Router {
         if let Ok(book) = &book {
             correspondence.hook_book(book.clone());
         }
-        // Carried over a hosted Post when one is named. Absent, the plane stands
-        // but carries nothing, and every operation says so — which is a
-        // different fact from an empty mailbox and the only one worth acting on.
-        if let Some(base) = crate::daemon::correspondence::configured_carrier(&identity) {
-            if let Err(error) =
-                correspondence.carry_over(base, crate::daemon::correspondence::now_secs())
-            {
-                tracing::warn!(%error, "correspondence could not be carried");
+        // The plane stands whether or not anything carries: the device set it
+        // publishes is what the hub admits on, and a daemon with no Post still
+        // has devices. Restored first, unconditionally; then carried over a
+        // hosted Post when one is named. Absent a carrier, every send says so —
+        // a different fact from an empty mailbox and the only one worth acting
+        // on.
+        let now = crate::daemon::correspondence::now_secs();
+        match correspondence.restore(now) {
+            Ok(()) => {
+                if let Some(base) = crate::daemon::correspondence::configured_carrier(&identity) {
+                    if let Err(error) = correspondence.carry_over(base, now) {
+                        tracing::warn!(%error, "correspondence could not be carried");
+                    }
+                }
             }
+            Err(error) => tracing::warn!(%error, "the reach plane could not be restored"),
         }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
+        // The hub admits own devices on the set correspondence publishes, so
+        // the service stands first and the hub takes its watch — `None` until
+        // restored, and the hub fails closed on `None`.
+        let factory = Arc::new(TransportHubFactory::new(
+            factory,
+            correspondence.own_devices(),
+        ));
+        let pair = Arc::new(crate::daemon::pair::PairService::open(
+            &identity,
+            correspondence.clone(),
+            factory.clone(),
+        ));
         Self {
             catalog,
             occupancy: OrbitOccupancy::default(),
             doorbells,
-            factory: Arc::new(TransportHubFactory::new(factory)),
+            factory,
             packages,
             blocking: Arc::new(Semaphore::new(HOST_BLOCKING_CAPACITY)),
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
             book,
             correspondence,
+            pair,
             asks,
         }
     }
@@ -683,6 +706,16 @@ impl Router {
 
     pub(crate) fn correspondence(&self) -> &crate::daemon::correspondence::CorrespondenceService {
         &self.correspondence
+    }
+
+    /// The identity's transport hub — where the daemon raises its own lanes.
+    pub(crate) fn hub(&self) -> &Arc<TransportHubFactory> {
+        &self.factory
+    }
+
+    /// The pairing ceremony, both sides.
+    pub(crate) fn pair(&self) -> &Arc<crate::daemon::pair::PairService> {
+        &self.pair
     }
 
     pub(crate) fn asks(&self) -> &crate::daemon::sponsorship::SponsorshipAsks {
@@ -825,7 +858,7 @@ impl Router {
     ) -> Result<(ResolvedOrbit, Arc<Placement>)> {
         let orbit = resolved.address.orbit.clone();
         let doorbells = self.doorbells.clone();
-        let factory = self.factory.clone();
+        let factory: Arc<dyn TransportFactory> = self.factory.clone();
         let packages = self.packages.clone();
         let blocking = self.blocking.clone();
         let placement = self

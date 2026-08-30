@@ -1106,15 +1106,14 @@ async fn stop_daemon(home: &Path) {
 
 /// The identity the daemon serves is the identity the launcher named.
 ///
-/// The new seam in the coordinator-identity work: daemon boot derives the
-/// kinship profile from the identity home's seeds, and receivers anchor on
+/// The new seam in the coordinator-identity work: daemon boot founds or
+/// carries the kinship profile in the identity home, and receivers anchor on
 /// it. Both historical failures of this suite's class were compositions —
 /// a head that served an identity nobody had ever used was the second — so
 /// this asserts the chain and not the parts: start the client against a
-/// fresh home, then require the profile on the wire to equal the profile
-/// independently derived from the seeds the daemon left in *that* home.
-/// A daemon deriving from the wrong directory produces a valid `prf_` id
-/// that fails this exactly.
+/// fresh home, then require the profile on the wire to equal the profile the
+/// genesis the daemon carried in *that* home hashes to. A daemon founding in
+/// the wrong directory produces a valid `prf_` id that fails this exactly.
 ///
 /// Deliberately independent of the display port: a daemon that lost 7443
 /// degrades to serving without the LAN listener, but `display_status` reads
@@ -1146,14 +1145,20 @@ async fn the_daemon_serves_the_identity_profile_of_the_home_it_was_given() {
         .expect("a current daemon reports the profile it answers for");
     assert!(served.starts_with("prf_"), "a kinship profile id: {served}");
 
-    let seeds = lait::config::load_or_create_kinship_seeds(identity.path())
-        .expect("the daemon minted this home's seeds at boot");
-    let derived =
-        correspondence::plane::ReachPlane::profile_for(&seeds).expect("derive from the same seeds");
+    let genesis = addressbook::ReachStore::at(identity.path())
+        .load()
+        .expect("read the store the daemon wrote at boot")
+        .expect("the daemon founded this home's profile at boot")
+        .genesis
+        .expect("and carried its genesis");
+    let carried = mechanics::kinship::KinshipLog::found(genesis)
+        .expect("a genesis that verifies")
+        .profile()
+        .clone();
     assert_eq!(
         served,
-        derived.as_str(),
-        "the profile on the wire is the identity home's own — not another          directory's, not a remint"
+        carried.as_str(),
+        "the profile on the wire is the identity home's own — not another directory's, not a remint"
     );
 
     client.stop_identity_daemon().await;

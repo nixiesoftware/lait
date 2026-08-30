@@ -31,6 +31,7 @@ import {
 } from "./client";
 import { BookSurface } from "./book";
 import { ChatSurface } from "./chat";
+import { DevicesSurface } from "./devices";
 import { DisplaysSurface } from "./displays";
 import { AstrolabeTheme } from "./fluent";
 import { BigPictureSurface } from "./present";
@@ -94,6 +95,7 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
         const target = event.key.toLowerCase() === "b" ? "book"
           : event.key.toLowerCase() === "d" ? "displays"
           : event.key.toLowerCase() === "m" ? "chat"
+          : event.key.toLowerCase() === "y" ? "devices"
           : null;
         if (target !== null) { event.preventDefault(); void summonOwnedWindow(target); }
       }
@@ -204,6 +206,7 @@ function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedW
     {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
     {surface === "displays" && <DisplaysSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
     {surface === "chat" && <ChatSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
+    {surface === "devices" && <DevicesSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
   </main>;
 }
 
@@ -226,6 +229,7 @@ function Caption({ platform, dark, setDark, refreshing, version, loading, onRefr
         <header className="settings-header"><strong>ASTROLABE</strong>{version !== null && <code>v{version}</code>}</header><Separator />
         <span className="settings-section">CLIENT SETTINGS</span>
         <MenuItem id="displays" onAction={() => void onSummonWindow("displays")}>Displays <kbd>⌘⇧D</kbd></MenuItem>
+        <MenuItem id="devices" onAction={() => void onSummonWindow("devices")}>Your devices <kbd>⌘⇧Y</kbd></MenuItem>
         <MenuItem id="refresh" isDisabled={refreshing} onAction={onRefresh}>Refresh local state <kbd>F5</kbd></MenuItem>
         <MenuItem id="theme" onAction={() => setDark(!dark)}>{dark ? "Use light theme" : "Use dark theme"}</MenuItem>
       </Menu></Popover>
@@ -566,6 +570,8 @@ function OperationalBar({ view, onSummonWindow, dispatch }: { view: ClientView; 
       <Button className="bar-icon" aria-label="Displays" onPress={() => void onSummonWindow("displays")}>⌁</Button></span>
     <span className="tip" title="Open the address book">
       <Button className="bar-icon" aria-label="Address book" onPress={() => void onSummonWindow("book")}>◉</Button></span>
+    <span className="tip" title="The devices that are you">
+      <Button className="bar-icon" aria-label="Your devices" onPress={() => void onSummonWindow("devices")}>▭</Button></span>
   </footer>;
 }
 

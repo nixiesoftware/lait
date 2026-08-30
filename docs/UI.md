@@ -125,16 +125,17 @@ Different projects in one Space may use different behavioral RBAC. They remain
 inside one membership and encryption boundary; projects requiring distinct
 read confidentiality belong in distinct Spaces.
 
-The member surface shows actors. Settings → **Devices & recovery** manages the
-keys behind the current actor, and the enrolment round-trip spans two machines:
+The member surface shows actors. Settings → **Devices & recovery** lists and
+revokes the keys behind the current actor:
 
-- `device_invite` (Space plane) creates an enrolment token;
-- `host_device_consent` (**host** plane) runs on the *new* machine and signs its
-  consent — it is on the host plane precisely because that machine has no
-  membership anywhere yet, so there is no space id it could name;
-- `device_add` (Space plane) binds that consent and seals held content keys;
-- `device_revoke` removes a device and rotates when possible;
-- `device_list` lists the current actor's devices.
+- `device_list` lists the current actor's devices;
+- `device_revoke` removes a device and rotates when possible.
+
+It does not enrol. A device is paired once, per profile — Astrolabe →
+**Devices** — and every Space that profile holds follows, so no Space's settings
+page asks a person to repeat per Space what they did once. `device_invite`,
+`host_device_consent` and `device_add` remain on the wire as the per-Space
+authorization primitive the fan-out composes; they are not a person-facing flow.
 
 Space recovery and custody are separate from actor device recovery.
 `space_custody_export` and `space_custody_import` operate on the space recovery

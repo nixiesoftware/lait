@@ -33,6 +33,13 @@ curve25519-dalek = "4"
 chacha20poly1305 = "0.10"
 sha2 = "0.10"
 blake3 = "1"
+# The balanced PAKE the device pairing proves its code with (RFC 9382 SPAKE2
+# over edwards25519). Key schedule and confirmation per the RFC: HKDF-SHA256
+# and HMAC-SHA256, compared in constant time. All three already ride in the
+# tree under ed25519-dalek and hpke; named here rather than re-implemented.
+hkdf = "0.12"
+hmac = "0.12"
+subtle = "2"
 # RFC 9180 HPKE, for the context-bound sealed box. Chosen over the hand-rolled
 # construction it replaced for the parts that are easy to get wrong and give no
 # sign when they are: rejecting a non-contributory agreement (§7.1.4), labeled

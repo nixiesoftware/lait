@@ -9,7 +9,10 @@
 
 pub(crate) mod address_book;
 pub(crate) mod correspondence;
+pub(crate) mod fanout;
 pub(crate) mod host;
+pub(crate) mod own_routes;
+pub(crate) mod pair;
 pub(crate) mod scope;
 pub(crate) mod sponsorship;
 pub(crate) mod transport_hub;

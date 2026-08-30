@@ -571,48 +571,106 @@ pub fn daemon_pid(home: &Path) -> Option<u32> {
 mod tests {
     use super::*;
 
-    /// An identity's correspondence address has to survive a restart, so the
-    /// seeds behind it are read back rather than minted twice. Two homes share
-    /// nothing, which is what keeps two profiles from publicly linking.
+    /// A home founded under the two-seed derivation keeps its address when the
+    /// genesis is carried: the witness in `kinship.key` co-signs the same link,
+    /// is retired, and the key goes. If the id moved, every issued address and
+    /// display pairing of that home would die on the upgrade.
     #[test]
-    fn kinship_seeds_are_the_identitys_own_and_outlive_the_run() {
-        let root = std::env::temp_dir().join(format!("gc-kin-{}", std::process::id()));
-        let (one, two) = (root.join("one"), root.join("two"));
-        fs::create_dir_all(&one).unwrap();
-        fs::create_dir_all(&two).unwrap();
+    fn a_legacy_kinship_key_migrates_to_a_carried_genesis_and_keeps_its_profile() {
+        let home = tempfile::tempdir().unwrap();
+        let identity = load_or_create_identity(home.path()).expect("identity");
+        let witness = [0x77u8; 32];
+        fs::write(
+            kinship_key_path(home.path()),
+            data_encoding::HEXLOWER.encode(&witness),
+        )
+        .unwrap();
+        let legacy = correspondence::plane::ReachPlane::profile_for(&[identity, witness])
+            .expect("the derivation the home used before");
 
-        let identity = load_or_create_identity(&one).expect("mint an identity");
-        let first = load_or_create_kinship_seeds(&one).expect("mint the second seed");
-        assert_eq!(first.len(), 2);
-        assert_eq!(first[0], identity, "the identity's own key is one of them");
-        assert_ne!(
-            first[0], first[1],
-            "a genesis link needs two distinct devices"
+        let migrated = identity_profile(home.path()).expect("migrate");
+        assert_eq!(migrated, legacy, "the profile id did not move");
+        assert!(
+            !kinship_key_path(home.path()).exists(),
+            "the witness key is retired"
+        );
+        let carried = addressbook::ReachStore::at(home.path())
+            .load()
+            .expect("load")
+            .expect("a store was written");
+        let genesis = carried.genesis.expect("the genesis is carried");
+        assert!(genesis.names(&mechanics::actor::device_from_seed(&identity)));
+        assert_eq!(
+            carried.registry.resolve(&legacy),
+            Some(vec![mechanics::actor::device_from_seed(&identity)]),
+            "the witness signed and left"
         );
 
         assert_eq!(
-            load_or_create_kinship_seeds(&one).expect("read them back"),
-            first,
-            "a second launch is the same identity"
+            identity_profile(home.path()).expect("again"),
+            legacy,
+            "a second boot reads"
         );
-
-        load_or_create_identity(&two).expect("mint a second identity");
-        let other = load_or_create_kinship_seeds(&two).expect("its own seeds");
-        assert!(
-            other.iter().all(|seed| !first.contains(seed)),
-            "two identity homes overlap in nothing"
-        );
-
-        let _ = fs::remove_dir_all(&root);
+        let _ = load_identity(home.path()).expect("nothing touched the identity");
     }
 
-    /// Reading is never minting: an identity with no key is reported, not made.
+    /// `kinship.bin` copied from another machine: the genesis verifies, the
+    /// profile is real, and this seed is no device of it. That must refuse
+    /// exactly as an unreconstructable profile does — not boot, anchor the
+    /// coordinator on somebody else's address, and leave the reach plane
+    /// unrestored behind a warning.
     #[test]
-    fn kinship_seeds_are_refused_where_there_is_no_identity() {
-        let empty = std::env::temp_dir().join(format!("gc-kin-none-{}", std::process::id()));
-        fs::create_dir_all(&empty).unwrap();
-        assert!(load_or_create_kinship_seeds(&empty).is_err());
-        let _ = fs::remove_dir_all(&empty);
+    fn a_kinship_store_from_another_machine_refuses_to_boot_here() {
+        let home = tempfile::tempdir().unwrap();
+        let _identity = load_or_create_identity(home.path()).expect("identity");
+        let elsewhere = [0x51u8; 32];
+        let plane =
+            correspondence::plane::ReachPlane::found_here(elsewhere, Some([0x52u8; 32]), None, 1)
+                .expect("found elsewhere");
+        addressbook::ReachStore::at(home.path())
+            .save(&plane.state())
+            .expect("copy the store here");
+        let before = fs::read(home.path().join("kinship.bin")).unwrap();
+
+        let error = identity_profile(home.path()).expect_err("refused");
+        assert!(
+            error.to_string().contains("cannot be reconstructed"),
+            "the refusal must be the boot refusal, got: {error}"
+        );
+        assert_eq!(
+            fs::read(home.path().join("kinship.bin")).unwrap(),
+            before,
+            "a refusal writes nothing"
+        );
+    }
+
+    /// A store authored under a profile this home can no longer reproduce —
+    /// no carried genesis, no witness key — is a refusal. Founding in its
+    /// place would answer a new address under the old log, silently.
+    #[test]
+    fn a_home_that_cannot_reconstruct_its_profile_refuses_to_boot() {
+        let home = tempfile::tempdir().unwrap();
+        let identity = load_or_create_identity(home.path()).expect("identity");
+        let witness = [0x78u8; 32];
+        let plane = correspondence::plane::ReachPlane::found_here(identity, Some(witness), None, 1)
+            .expect("found");
+        let mut state = plane.state();
+        state.genesis = None;
+        let store = addressbook::ReachStore::at(home.path());
+        store.save(&state).expect("a pre-carriage store");
+        let before = fs::read(home.path().join("kinship.bin")).unwrap();
+
+        let error = identity_profile(home.path()).expect_err("refused");
+        assert!(
+            error.to_string().contains("kinship.key"),
+            "the refusal says what would repair it: {error}"
+        );
+        assert_eq!(
+            fs::read(home.path().join("kinship.bin")).unwrap(),
+            before,
+            "nothing was written"
+        );
+        assert!(!kinship_key_path(home.path()).exists());
     }
 
     #[test]
@@ -910,50 +968,105 @@ fn kinship_key_path(home: &Path) -> PathBuf {
     home.join("kinship.key")
 }
 
-/// This identity's correspondence device seeds, creating the second on first run.
-///
-/// A kinship profile's genesis is a mutual link between two *distinct* devices,
-/// and an identity home holds one key. The second is a real key on this machine,
-/// not a derivation of the first — it must be able to be retired independently
-/// once a second machine joins.
-///
-/// Order is not rank: which device composes is [`ReachPlane::canonical`], and it
-/// moves. The profile is the hash of the link, which names no primary, so a
-/// handover leaves the address alone.
 /// The identity's own profile — the address everything anchors on.
 ///
-/// One derivation for the whole daemon: the kinship seeds name a fixed genesis
-/// and the profile is its content address, so this answers the same id on
-/// every call and on every machine holding the same identity. The reach plane
-/// and the display coordinator both anchor here, which is what makes a
-/// receiver paired to the coordinator a receiver paired to the *identity*.
+/// One derivation for the whole daemon: the reach plane and the display
+/// coordinator both anchor here, which is what makes a receiver paired to the
+/// coordinator a receiver paired to the *identity*. The genesis is carried in
+/// `kinship.bin` and read back; it is founded on first boot, a legacy home —
+/// two seeds, the second in `kinship.key` — is carried forward under the same
+/// id with the key retired, and a home whose profile cannot be reconstructed
+/// refuses rather than re-founding under a new address (F-27). The store is
+/// saved before the key is removed, so a crash between the two lands on the
+/// idempotent path next boot.
 pub fn identity_profile(home: &Path) -> Result<mechanics::kinship::ProfileId> {
-    let seeds = load_or_create_kinship_seeds(home)?;
-    correspondence::plane::ReachPlane::profile_for(&seeds)
-        .map_err(|error| anyhow!("derive identity profile: {error}"))
+    use correspondence::plane::{Failure, ReachPlane};
+
+    let identity = load_or_create_identity(home)?;
+    let store = addressbook::ReachStore::at(home);
+    let held = store
+        .load()
+        .map_err(|error| anyhow!("read {}: {error}", home.join("kinship.bin").display()))?;
+    let witness = legacy_witness_seed(home)?;
+    let key = kinship_key_path(home);
+
+    if let Some(genesis) = held.as_ref().and_then(|state| state.genesis.clone()) {
+        let profile = mechanics::kinship::KinshipLog::found(genesis.clone())
+            .map_err(|error| anyhow!("the carried genesis does not verify: {error}"))?
+            .profile()
+            .clone();
+        // A genesis that verifies is not yet this device's: a `kinship.bin`
+        // copied from another machine carries a perfectly good profile that
+        // this seed is no device of. Booting on it would anchor the display
+        // coordinator on an address the daemon cannot sign for and then leave
+        // the reach plane unrestored — the unreconstructable profile wearing a
+        // quieter error. It is the same refusal, asked here.
+        let me = mechanics::actor::device_from_seed(&identity);
+        let mine = held
+            .as_ref()
+            .and_then(|state| state.registry.resolve(&profile))
+            .is_some_and(|devices| devices.contains(&me));
+        if !mine {
+            return Err(anyhow!(
+                "this home's profile cannot be reconstructed; restore kinship.key or re-pair this device (kinship.bin names a profile this device is not part of)"
+            ));
+        }
+        if let Some(witness) = witness {
+            // A key still beside a carried genesis is the crash window between
+            // save and remove, closed here — but only once it is proven to be
+            // the witness that signed this genesis, or it may be somebody's
+            // only copy of something else.
+            match ReachPlane::genesis_for(&[identity, witness]) {
+                Ok(derived) if derived == genesis => remove_kinship_key(&key)?,
+                _ => tracing::warn!(
+                    path = %key.display(),
+                    "kinship.key does not name this home's genesis; leaving it in place"
+                ),
+            }
+        }
+        return Ok(profile);
+    }
+
+    let plane = ReachPlane::found_here(
+        identity,
+        witness,
+        held,
+        mechanics::wallclock::now_secs(),
+    )
+    .map_err(|error| match error {
+        Failure::NoGenesis => anyhow!(
+            "this home's profile cannot be reconstructed; restore kinship.key or re-pair this device"
+        ),
+        other => anyhow!("found identity profile: {other}"),
+    })?;
+    store
+        .save(&plane.state())
+        .map_err(|error| anyhow!("save {}: {error}", home.join("kinship.bin").display()))?;
+    if witness.is_some() {
+        remove_kinship_key(&key)?;
+    }
+    Ok(plane.profile().clone())
 }
 
-pub fn load_or_create_kinship_seeds(home: &Path) -> Result<Vec<[u8; 32]>> {
-    let identity = load_identity(home)?;
+/// The legacy second seed, read-only: `Some` iff `<home>/kinship.key` exists.
+/// A key that exists and does not parse is an error, not an absence — the
+/// absence has a meaning of its own on the boot path.
+pub fn legacy_witness_seed(home: &Path) -> Result<Option<[u8; 32]>> {
     let path = kinship_key_path(home);
-    // `create_new`, because this runs on every client launch and two of them
-    // racing would otherwise mint two profiles for one identity. The loser of
-    // the race reads what the winner wrote.
-    let seed = mechanics::actor::random_seed().context("generate kinship key")?;
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(data_encoding::HEXLOWER.encode(&seed).as_bytes())
-                .context("write kinship key")?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(anyhow::Error::new(e).context("create kinship key")),
+    if !path.exists() {
+        return Ok(None);
     }
-    Ok(vec![identity, read_seed(&path)?])
+    read_seed(&path).map(Some)
+}
+
+/// Idempotent: the key is retired material once the genesis is carried, and
+/// a boot that finds it already gone has nothing to do.
+fn remove_kinship_key(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::Error::new(error).context("remove kinship key")),
+    }
 }
 
 fn read_seed(path: &Path) -> Result<[u8; 32]> {

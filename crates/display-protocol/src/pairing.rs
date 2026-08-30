@@ -318,7 +318,7 @@ pub fn authenticate_pairing_complete(
     )
 }
 
-const CONFIRMATION_WORDS: [&str; 32] = [
+pub const CONFIRMATION_WORDS: [&str; 32] = [
     "amber", "anchor", "apple", "beacon", "birch", "cedar", "comet", "coral", "delta", "ember",
     "falcon", "fjord", "garden", "harbor", "hazel", "indigo", "juniper", "lantern", "maple",
     "meadow", "meteor", "olive", "orbit", "pebble", "quartz", "river", "saffron", "signal",

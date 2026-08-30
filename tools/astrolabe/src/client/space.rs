@@ -88,11 +88,6 @@ pub enum SpaceOp {
         reusable: bool,
         ttl_hours: u64,
     },
-    /// Print a token for enrolling another machine into *this* actor.
-    DeviceInvite,
-    DeviceAdd {
-        consent: String,
-    },
     DeviceRevoke {
         device: String,
     },
@@ -121,8 +116,6 @@ impl SpaceOp {
             Self::MemberSetRole { who, admin: true } => format!("promote {who}"),
             Self::MemberSetRole { who, .. } => format!("demote {who}"),
             Self::Invite { role, .. } => format!("mint a {role} invite"),
-            Self::DeviceInvite => "print a device-enrolment token".into(),
-            Self::DeviceAdd { .. } => "add a device from its consent".into(),
             Self::DeviceRevoke { device } => format!("revoke device {device}"),
             Self::CustodyExport { .. } => "export this device's recovery share".into(),
             Self::CustodyImport { .. } => "restore a recovery share".into(),
@@ -138,8 +131,6 @@ impl SpaceOp {
             Self::MemberRemove { who } => format!("member.remove:{who}"),
             Self::MemberSetRole { who, .. } => format!("member.role:{who}"),
             Self::Invite { .. } => "invite".into(),
-            Self::DeviceInvite => "device.invite".into(),
-            Self::DeviceAdd { .. } => "device.add".into(),
             Self::DeviceRevoke { device } => format!("device.revoke:{device}"),
             Self::CustodyExport { .. } => "custody.export".into(),
             Self::CustodyImport { .. } => "custody.import".into(),
@@ -166,8 +157,6 @@ impl SpaceOp {
                 reusable,
                 ttl_hours: Some(ttl_hours),
             },
-            Self::DeviceInvite => Request::DeviceInvite,
-            Self::DeviceAdd { consent } => Request::DeviceAdd { consent },
             Self::DeviceRevoke { device } => Request::DeviceRevoke { device },
             Self::CustodyExport { path, passphrase } => {
                 Request::SpaceCustodyExport { path, passphrase }

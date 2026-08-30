@@ -187,6 +187,10 @@ pub struct App {
     /// This identity's correspondence, once read. `None` before the first read —
     /// loading, not an empty mailbox.
     correspondence: Option<Correspondence>,
+    /// The profile this device belongs to and the devices that hold it.
+    /// `None` before the first read: a device set that has not been read is
+    /// not a profile with one device.
+    profile: Option<crate::client::reach::ProfileSnapshot>,
     /// What passive presence sampling last measured. `None` until a pass has
     /// run; a pass that could not run leaves the last measurement in place,
     /// under the staleness the model already wears.
@@ -307,6 +311,7 @@ impl App {
             Update::PresentationEnded => self.presentation = None,
             Update::Book(book) => self.book = Some(book),
             Update::Correspondence(correspondence) => self.correspondence = Some(correspondence),
+            Update::Profile(profile) => self.profile = Some(*profile),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
@@ -571,6 +576,12 @@ impl App {
 
     pub fn absorb_correspondence(&mut self, correspondence: Correspondence) {
         self.correspondence = Some(correspondence);
+    }
+
+    /// The profile's devices, as last read. `None` until one read lands —
+    /// which is not a profile that has no devices.
+    pub fn profile(&self) -> Option<&crate::client::reach::ProfileSnapshot> {
+        self.profile.as_ref()
     }
 
     pub fn presence(&self) -> Option<&crate::client::presence::PresenceMap> {
@@ -1068,6 +1079,8 @@ mod tests {
             identities: Vec::new(),
             orbits: Vec::new(),
             asks,
+            pairing: None,
+            pair_offers: Vec::new(),
         }
     }
 

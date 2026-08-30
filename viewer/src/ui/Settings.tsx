@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   Bell,
   Hash,
-  KeyRound,
   Laptop,
   Palette,
   RotateCcw,
@@ -625,12 +624,10 @@ function GeneralPanel({
 /**
  * Devices and recovery custody — the operator's half of a Space.
  *
- * Both halves were unreachable from every head until now, and each was a half
- * flow on its own. Enrolment has three steps on two machines: this one mints a
- * token, the new machine signs it (`host_device_consent`, the host plane —
- * store-free, because a machine joining an actor is a member of nothing yet),
- * and this one adds the signed blob. Shipping only the middle step meant nothing
- * could mint the token it consumes or add the blob it produces.
+ * This panel lists and revokes; it does not enrol. A device is paired once, per
+ * profile, in Astrolabe, and every Space the person holds follows — so a
+ * per-Space "add a device" here would be a second enrolment asking the person to
+ * repeat, per Space, what they already did once.
  *
  * Custody is the remedy the status panel's own warning demands: "Share
  * unreadable" / "Backup unverified" are read straight off `status.recovery`, and
@@ -652,7 +649,6 @@ function DevicesPanel({
   onError: (message: string) => void;
 }) {
   const [devices, setDevices] = useState<string[]>([]);
-  const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [custodyPath, setCustodyPath] = useState("");
   const [passphrase, setPassphrase] = useState("");
@@ -753,76 +749,6 @@ function DevicesPanel({
           )}
         </SettingsSurface>
       </SettingsSection>
-
-      {!readOnly && (
-        <SettingsSection
-          title="Add a device"
-          hint="Three steps, two machines. Nothing here leaves this space unencrypted."
-        >
-          <SettingsSurface>
-            <SettingsField
-              label="Enrollment token"
-              hint="Mint it here, then open lait on the other machine and give it the token. That machine signs its consent."
-              align="start"
-            >
-              <div className="flex flex-col items-end gap-2">
-                <Button
-                  isLoading={busy === "invite"}
-                  isDisabled={busy !== ""}
-                  onClick={() =>
-                    void act("invite", async () => {
-                      const reply = await spaceRpc(spaceId, {
-                        cmd: "device_invite",
-                      });
-                      if (reply.kind === "text") setToken(reply.text.trim());
-                      return null;
-                    })
-                  }
-                  icon={<KeyRound className="size-icon-sm" />}
-                  label="Mint token"
-                  variant="secondary"
-                  size="sm"
-                />
-                {token && (
-                  <code className="border-line bg-hover block w-full rounded-control border p-2 font-mono text-xs break-all">
-                    {token}
-                  </code>
-                )}
-              </div>
-            </SettingsField>
-            <SettingsField
-              label="Signed consent"
-              hint="Paste the consent returned by the other machine to finish enrollment."
-            >
-              <div className="flex justify-end">
-                <Button
-                  isLoading={busy === "add"}
-                  isDisabled={busy !== ""}
-                  onClick={() =>
-                    void act("add", async () => {
-                      const consent = await ask.prompt({
-                        title: "Signed device consent",
-                        body: "The hex blob the other machine produced from the token above.",
-                        label: "Consent",
-                      });
-                      if (!consent?.trim()) return null;
-                      const reply = await spaceRpc(spaceId, {
-                        cmd: "device_add",
-                        consent: consent.trim(),
-                      });
-                      setToken(null);
-                      return reply.kind === "ok" ? reply.message : null;
-                    })
-                  }
-                  label="Add device"
-                  variant="secondary"
-                  size="sm"
-                />
-              </div>
-            </SettingsField>
-          </SettingsSurface>
-        </SettingsSection>
-      )}
 
       {!readOnly && (
         <SettingsSection

@@ -6,7 +6,9 @@
 //! That is why this cannot live in a World: the page that would host it is
 //! unreachable until the thing it creates exists.
 
-use lait::control::{ControlRoute, ErrorKind, HostReply, Request, Response, SponsorshipAsk};
+use lait::control::{
+    ControlRoute, ErrorKind, HostReply, PairOffer, PairingCode, Request, Response, SponsorshipAsk,
+};
 
 use super::{Client, ClientError, ClientResult};
 
@@ -30,6 +32,30 @@ pub struct HostContext {
     /// not, and the first reading of a machine that already has asks *is*
     /// news — a decision is waiting, unlike four peers who were already here.
     pub asks: Vec<SponsorshipAsk>,
+    /// The code this device is showing while it waits to be added to a
+    /// profile. `None` whenever it holds none — already added, a code spent
+    /// and waiting on its confirmation, or none minted yet — which is why a
+    /// surface reads this as "not yet" and never as "already added".
+    pub pairing: Option<PairingCode>,
+    /// Devices that answered a code entered here and are waiting on the six
+    /// words being compared.
+    pub pair_offers: Vec<PairOffer>,
+}
+
+/// What entering another device's code answered.
+///
+/// Two answers, because they end differently: one leaves a person comparing
+/// six words, the other is a device that was already added and whose answer
+/// had merely been lost. Folding them would make a completed pairing look
+/// like a ceremony nobody finished.
+///
+/// The offer itself is not carried here — it is on the next reading of
+/// orientation, where the surface draws it from. Only the name is, and only
+/// so the sentence saying what happened can use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairEntered {
+    Offered { name: String },
+    AlreadyAdded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,12 +86,16 @@ impl Client {
                 identities,
                 orbits,
                 asks,
+                pairing,
+                pair_offers,
             }) => Ok(HostContext {
                 version,
                 identity_home,
                 spaces_root,
                 worlds,
                 identities,
+                pairing,
+                pair_offers,
                 orbits: orbits
                     .into_iter()
                     .map(|orbit| OrbitEntry {
@@ -130,18 +160,52 @@ impl Client {
         .await
     }
 
-    /// Sign this machine's consent to join an existing actor.
+    /// Add a device to this profile, from the device that already holds it:
+    /// the code the new one is showing. `XXXX-XXXX`, or `XXXX-XXXX@host:port`
+    /// when the two share a network and nothing relays between them.
     ///
-    /// The one host request that touches no store: the machine running it has
-    /// no membership anywhere yet, which is the whole point of enrolment.
-    pub async fn device_consent(&self, token: &str) -> ClientResult<()> {
-        if token.trim().is_empty() {
-            return Err(ClientError::invalid("device consent needs an invite token"));
+    /// The code is passed as it was typed. Which spellings of it are the same
+    /// code is the daemon's rule, and a second normalisation here would be a
+    /// second rule that could disagree with it.
+    pub async fn device_pair_enter(&self, code: &str) -> ClientResult<PairEntered> {
+        if code.trim().is_empty() {
+            return Err(ClientError::invalid("adding a device needs its code"));
         }
-        self.host_ok(Request::HostDeviceConsent {
-            token: token.trim().to_owned(),
-        })
-        .await
+        let reply = self
+            .host_reply(Request::DevicePairEnter {
+                code: code.trim().to_owned(),
+            })
+            .await?;
+        match reply {
+            Some(HostReply::DevicePairOffer { name, .. }) => Ok(PairEntered::Offered { name }),
+            Some(HostReply::DevicePaired { .. }) => Ok(PairEntered::AlreadyAdded),
+            other => Err(ClientError::internal(format!(
+                "unexpected answer to a device code: {other:?}"
+            ))),
+        }
+    }
+
+    /// Confirm an offer once the six words match, or reject it.
+    ///
+    /// Rejecting sends the other device nothing: an offer nobody confirmed is
+    /// dropped here, and the code it came from is already spent.
+    pub async fn device_pair_confirm(
+        &self,
+        pairing: &str,
+        accept: bool,
+    ) -> ClientResult<Option<String>> {
+        let reply = self
+            .host_reply(Request::DevicePairConfirm {
+                pairing: pairing.to_owned(),
+                accept,
+            })
+            .await?;
+        // A rejection is answered as plainly as it acts: nothing was written,
+        // so there is no device to name.
+        if let Some(HostReply::DevicePaired { device }) = reply {
+            return Ok(Some(device));
+        }
+        Ok(None)
     }
 
     /// Forget an Orbit's registration without touching what is on disk.
@@ -216,6 +280,27 @@ impl Client {
             Response::Error { message, .. } => Err(ClientError::refused(message)),
             other => Err(ClientError::internal(format!(
                 "unexpected World update status reply: {other:?}"
+            ))),
+        }
+    }
+
+    /// One host-plane request and the reply it produced, if it produced one.
+    ///
+    /// `None` is `Response::Ok` — accepted, with nothing to report but a
+    /// sentence. Kept apart from a reply rather than mapped to a stand-in,
+    /// because the callers here decide differently on each.
+    async fn host_reply(&self, request: Request) -> ClientResult<Option<HostReply>> {
+        let daemon = self.daemon()?;
+        let reply = daemon
+            .request(ControlRoute::Daemon, &request, None)
+            .await
+            .map_err(|error| ClientError::unreachable(format!("reach the daemon: {error:#}")))?;
+        match reply {
+            Response::Host(reply) => Ok(Some(reply)),
+            Response::Ok { .. } => Ok(None),
+            Response::Error { message, .. } => Err(ClientError::refused(message)),
+            other => Err(ClientError::internal(format!(
+                "unexpected reply: {other:?}"
             ))),
         }
     }

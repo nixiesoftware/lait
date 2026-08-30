@@ -40,6 +40,7 @@ struct WebClientView {
     book: Option<WebBook>,
     mcp: Option<WebMcpBinding>,
     correspondence: Option<WebCorrespondenceFacts>,
+    profile: Option<WebProfileFacts>,
     presentation: Option<WebPresentationFacts>,
     notices: Vec<WebNotice>,
     failures: Vec<WebFailure>,
@@ -131,6 +132,74 @@ struct WebChatMessage {
     sent_at: u64,
     from_device: String,
     provenance_agrees: bool,
+}
+
+/// A person's profile: the devices that are theirs, the code this one is
+/// showing while it waits to be added, and any device waiting on six words
+/// being compared.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebProfileFacts {
+    profile: String,
+    me: Option<String>,
+    origin: Option<WebDeviceOrigin>,
+    devices: Vec<WebOwnDevice>,
+    /// The device set was not read. Never folded into an empty `devices`:
+    /// no profile has no devices, so an empty list with this set is a daemon
+    /// that has not answered rather than a person with nothing.
+    device_set_unknown: bool,
+    pairing: Option<WebPairingCode>,
+    offers: Vec<WebPairOffer>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebDeviceOrigin {
+    Founded,
+    Adopted { from: String, at: u64 },
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebOwnDevice {
+    device: String,
+    me: bool,
+    liveness: WebDeviceLiveness,
+    /// The Spaces this device is listed in.
+    held: Vec<String>,
+}
+
+/// Tagged, because the three are different facts: a device that answered, a
+/// device that could not be reached, and a device nothing has asked about
+/// yet. A surface that flattened them would have to guess which it had, and
+/// the guess it would make is "down".
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebDeviceLiveness {
+    Answered { version: String, at: u64 },
+    CouldNotAsk { why: String },
+    NotProbed,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebPairingCode {
+    code: String,
+    /// Addresses to type beside the code when nothing relays between the two
+    /// devices; empty under a relay.
+    direct: Vec<String>,
+    expires_at_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebPairOffer {
+    pairing: String,
+    device: String,
+    name: String,
+    /// The six words the other device also shows.
+    phrase: Vec<String>,
+    expires_at_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -601,6 +670,7 @@ impl From<ClientView> for WebClientView {
             space,
             book,
             correspondence,
+            profile,
             notices,
             failures,
             in_flight,
@@ -1009,6 +1079,63 @@ impl From<ClientView> for WebClientView {
                 open_tabs: corr.open_tabs,
                 active_tab: corr.active_tab,
             }),
+            profile: profile.map(|profile| {
+                // Destructured whole, without `..`, for the reason the view
+                // itself is: a fact added to a person's devices that never
+                // reached the browser would compile perfectly.
+                let api::ProfileFacts {
+                    profile,
+                    me,
+                    origin,
+                    devices,
+                    device_set_unknown,
+                    pairing,
+                    offers,
+                } = profile;
+                WebProfileFacts {
+                    profile,
+                    me,
+                    origin: origin.map(|origin| match origin {
+                        api::OriginRow::Founded => WebDeviceOrigin::Founded,
+                        api::OriginRow::Adopted { from, at } => {
+                            WebDeviceOrigin::Adopted { from, at }
+                        }
+                    }),
+                    devices: devices
+                        .into_iter()
+                        .map(|device| WebOwnDevice {
+                            device: device.device,
+                            me: device.me,
+                            liveness: match device.liveness {
+                                api::LivenessRow::Answered { version, at } => {
+                                    WebDeviceLiveness::Answered { version, at }
+                                }
+                                api::LivenessRow::CouldNotAsk { why } => {
+                                    WebDeviceLiveness::CouldNotAsk { why }
+                                }
+                                api::LivenessRow::NotProbed => WebDeviceLiveness::NotProbed,
+                            },
+                            held: device.held,
+                        })
+                        .collect(),
+                    device_set_unknown,
+                    pairing: pairing.map(|pairing| WebPairingCode {
+                        code: pairing.code,
+                        direct: pairing.direct,
+                        expires_at_ms: pairing.expires_at_ms,
+                    }),
+                    offers: offers
+                        .into_iter()
+                        .map(|offer| WebPairOffer {
+                            pairing: offer.pairing,
+                            device: offer.device,
+                            name: offer.name,
+                            phrase: offer.phrase,
+                            expires_at_ms: offer.expires_at_ms,
+                        })
+                        .collect(),
+                }
+            }),
             presentation: presentation.map(|presentation| WebPresentationFacts {
                 chosen: presentation.chosen.map(|chosen| WebPresentationChoice {
                     orbit: chosen.orbit,
@@ -1318,6 +1445,15 @@ enum WebAction {
         body: String,
     },
     CollectMail,
+    /// Add a device to this profile, by the code it is showing.
+    DevicePairEnter {
+        code: String,
+    },
+    /// Answer a waiting device once its six words have been compared.
+    DevicePairConfirm {
+        pairing: String,
+        accept: bool,
+    },
     BlockSender {
         person: String,
     },
@@ -1366,15 +1502,16 @@ enum WebAction {
     LeavePresentation,
 }
 
-/// The Flutter client owns exactly these three auxiliary top-level windows.
-/// A request is a summon, never a navigation command: the existing window is
-/// restored and focused rather than creating a second view.
+/// The client owns exactly these auxiliary top-level windows. A request is a
+/// summon, never a navigation command: the existing window is restored and
+/// focused rather than creating a second view.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum OwnedWindowSurface {
     Book,
     Displays,
     Chat,
+    Devices,
 }
 
 impl OwnedWindowSurface {
@@ -1384,6 +1521,7 @@ impl OwnedWindowSurface {
             Self::Displays => "displays",
             // Flutter's window key for the chat is `correspondence`.
             Self::Chat => "correspondence",
+            Self::Devices => "devices",
         }
     }
 
@@ -1392,6 +1530,7 @@ impl OwnedWindowSurface {
             Self::Book => "book",
             Self::Displays => "displays",
             Self::Chat => "chat",
+            Self::Devices => "devices",
         }
     }
 
@@ -1400,6 +1539,7 @@ impl OwnedWindowSurface {
             Self::Book => "Address book — Astrolabe",
             Self::Displays => "Displays — Astrolabe",
             Self::Chat => "Chat — Astrolabe",
+            Self::Devices => "Your devices — Astrolabe",
         }
     }
 }
@@ -1573,6 +1713,10 @@ impl From<WebAction> for ActionRequest {
             }
             WebAction::SendMessage { to, body } => Self::SendMessage { to, body },
             WebAction::CollectMail => Self::CollectMail,
+            WebAction::DevicePairEnter { code } => Self::DevicePairEnter { code },
+            WebAction::DevicePairConfirm { pairing, accept } => {
+                Self::DevicePairConfirm { pairing, accept }
+            }
             WebAction::BlockSender { person } => Self::BlockSender { person },
             WebAction::AcceptContact { person } => Self::AcceptContact { person },
             WebAction::ShareReach => Self::ShareReach,
@@ -1928,6 +2072,16 @@ fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result
                 .build()
                 .map_err(|error| error.to_string())?;
         }
+        // A list and one form: the same reading width as the chat, and a
+        // floor that still fits a code and six words on one line.
+        OwnedWindowSurface::Devices => {
+            builder
+                .inner_size(720.0, 640.0)
+                .min_inner_size(520.0, 480.0)
+                .maximizable(true)
+                .build()
+                .map_err(|error| error.to_string())?;
+        }
     }
     Ok(())
 }
@@ -2047,10 +2201,14 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let chat = MenuItemBuilder::with_id("chat", "Chat")
         .accelerator("Cmd+Shift+M")
         .build(app)?;
+    let devices = MenuItemBuilder::with_id("devices", "Your devices")
+        .accelerator("Cmd+Shift+Y")
+        .build(app)?;
     let window = SubmenuBuilder::new(app, "Window")
         .item(&displays)
         .item(&book)
         .item(&chat)
+        .item(&devices)
         .separator()
         .minimize()
         .fullscreen()
@@ -2077,6 +2235,9 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         }
         "chat" => {
             let _ = summon_surface(app, OwnedWindowSurface::Chat);
+        }
+        "devices" => {
+            let _ = summon_surface(app, OwnedWindowSurface::Devices);
         }
         id if dispatch_menu_exit(id) => {}
         _ => {}
@@ -2106,6 +2267,8 @@ mod tests {
             r#"{"type":"removeDevice","id":"dev","deleteData":true}"#,
             r#"{"type":"installMcp","client":"claude","scope":null,"name":"lait","agent":null,"noAgent":false,"project":".","world":null,"preview":true}"#,
             r#"{"type":"displayAssignmentPut","device":"d","orbit":"o","world":"w","surface":"s","inputJson":"{}","theme":"dark","staleAfterMs":1000,"onStale":"blank","syncGroup":null,"syncMode":"positional","staticDelayMs":0,"expiresAtUnixMs":null}"#,
+            r#"{"type":"devicePairEnter","code":"ABCD-EFGH@127.0.0.1:7717"}"#,
+            r#"{"type":"devicePairConfirm","pairing":"pai_7","accept":true}"#,
         ];
         for payload in payloads {
             if let Err(error) = serde_json::from_str::<WebAction>(payload) {

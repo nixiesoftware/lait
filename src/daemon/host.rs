@@ -978,9 +978,9 @@ pub struct Daemon {
     endpoint: Arc<Endpoint>,
     display: Arc<crate::display::DisplayRuntime>,
     relaunch_requested: Arc<AtomicBool>,
-    /// The identity's own seed, held for the overlay endpoint the serve path
-    /// stands up. The display custodian already carries it, so this is a
-    /// second reference to material this process necessarily holds, not a new
+    /// The identity's own seed, held for the identity endpoint the serve path
+    /// raises. The display custodian already carries it, so this is a second
+    /// reference to material this process necessarily holds, not a new
     /// exposure.
     device_seed: [u8; 32],
 }
@@ -1027,6 +1027,45 @@ impl Daemon {
         // standing unchanged.
         let staging = self.spawn_staging();
         let world_upgrades = self.spawn_world_upgrades();
+        // A device that holds no profile but its own shows a code until it
+        // is paired — whatever else this daemon serves, and whether or not
+        // it hosts displays: the headless box is exactly the one this is for.
+        self.spawn_pairing(home);
+
+        // The identity's own endpoint, raised here rather than by the first
+        // Station: the lanes the daemon serves itself — the Own lane, the
+        // display overlay — have no Space to wait for, and a device with no
+        // Space yet is exactly the one that needs to be reachable. Every
+        // Station placed later joins this endpoint. A refusal is a
+        // degradation, never a reason for the daemon not to exist.
+        let identity_transport = match crate::config::Settings::load(Some(home)).network() {
+            Ok(network) => match self
+                .router
+                .hub()
+                .identity_transport(&self.device_seed, &network)
+                .await
+            {
+                Ok(transport) => Some(transport),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the identity endpoint could not be raised; serving without its lanes"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "no network policy; serving without the identity's lanes");
+                None
+            }
+        };
+
+        // Every Space this person holds reaches every device they own, from
+        // here: mounted before the display gate below, because the headless
+        // box with no display is exactly the device the fan-out exists for.
+        let fanout = identity_transport
+            .as_ref()
+            .map(|transport| self.spawn_fanout(transport.clone()));
 
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
@@ -1038,6 +1077,7 @@ impl Daemon {
             let served = self.endpoint.clone().serve(home).await;
             Self::join_staging(staging).await;
             Self::join_world_upgrades(world_upgrades).await;
+            Self::join_fanout(fanout).await;
             return served;
         }
         // Take the port before committing to it, so "another daemon already holds
@@ -1066,20 +1106,30 @@ impl Daemon {
                 );
                 let served = self.endpoint.clone().serve(home).await;
                 Self::join_staging(staging).await;
+                Self::join_world_upgrades(world_upgrades).await;
+                Self::join_fanout(fanout).await;
                 return served;
             }
             Err(error) => {
+                self.endpoint.begin_stop();
                 Self::join_staging(staging).await;
+                Self::join_world_upgrades(world_upgrades).await;
+                Self::join_fanout(fanout).await;
                 return Err(error).context("serve daemon display HTTPS");
             }
         };
         // The same router the TCP path serves, reachable over the overlay:
-        // addressed by endpoint id, no port, no inbound hole. A failure here
-        // is a degradation — the LAN listener is already up — never a reason
-        // for the daemon not to exist.
-        let overlay_task = match crate::config::Settings::load(Some(home)).network() {
-            Ok(network) => {
-                let seed = self.device_seed;
+        // addressed by endpoint id, no port, no inbound hole. The overlay is
+        // one lane of the identity endpoint above — one endpoint per key —
+        // so a missing lane is a degradation: the LAN listener is already
+        // up, and the daemon goes on.
+        let overlay = identity_transport.as_ref().and_then(|transport| {
+            transport
+                .take_session_queue(crate::display::overlay::DISPLAY_ALPN)
+                .map(|queue| (transport.clone(), queue))
+        });
+        let overlay_task = match overlay {
+            Some((transport, queue)) => {
                 let state = crate::display::DisplayHttpState {
                     coordinator: self.display.coordinator.clone(),
                     pairing: self.display.pairing.clone(),
@@ -1091,25 +1141,6 @@ impl Daemon {
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| home.to_path_buf());
                 Some(tokio::spawn(async move {
-                    let transport = match comms::DefaultTransport::new(
-                        &seed,
-                        &network,
-                        comms::Protocols {
-                            framed: &[],
-                            session: &[crate::display::overlay::DISPLAY_ALPN],
-                        },
-                    )
-                    .await
-                    {
-                        Ok(transport) => std::sync::Arc::new(transport),
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "display overlay endpoint could not bind;                                  serving the LAN listener only"
-                            );
-                            return;
-                        }
-                    };
                     // Say where this identity answers, when it has a label and
                     // a registry to say it to. Publication is evidence signed
                     // by this device; a refusal is logged and serving goes on,
@@ -1145,7 +1176,7 @@ impl Daemon {
                         }
                     }
                     if let Err(error) = crate::display::overlay::serve_display_overlay(
-                        transport,
+                        queue,
                         crate::display::display_http_router(state),
                         overlay_stop,
                     )
@@ -1155,8 +1186,10 @@ impl Daemon {
                     }
                 }))
             }
-            Err(error) => {
-                tracing::warn!(%error, "no overlay network policy; serving the LAN listener only");
+            None => {
+                tracing::warn!(
+                    "no display lane on the identity endpoint; serving the LAN listener only"
+                );
                 None
             }
         };
@@ -1197,7 +1230,38 @@ impl Daemon {
         }
         Self::join_staging(staging).await;
         Self::join_world_upgrades(world_upgrades).await;
+        Self::join_fanout(fanout).await;
         outcome
+    }
+
+    /// Start the fan-out over the identity's Own lane. Its facts are hooked
+    /// into the reach view here, so `ReachView.devices[].held` and
+    /// `spaces` read what the loop learned from the ledger.
+    fn spawn_fanout(&self, transport: Arc<dyn comms::Transport>) -> tokio::task::JoinHandle<()> {
+        let facts = crate::daemon::fanout::Facts::new();
+        self.router.correspondence().hook_fanout(facts.clone());
+        let own = self.router.correspondence().own_devices();
+        let stop = self.endpoint.subscribe_stop();
+        tokio::spawn(crate::daemon::fanout::serve(
+            self.router.clone(),
+            transport,
+            own,
+            facts,
+            stop,
+        ))
+    }
+
+    async fn join_fanout(fanout: Option<tokio::task::JoinHandle<()>>) {
+        let Some(fanout) = fanout else {
+            return;
+        };
+        match tokio::time::timeout(Duration::from_secs(5), fanout).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the fan-out ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the fan-out did not finish in time; leaving it to the process exit"
+            ),
+        }
     }
 
     /// Start the continuous staging watcher, when this daemon runs inside an
@@ -1243,6 +1307,23 @@ impl Daemon {
             wake,
             on_relaunch_needed,
         )))
+    }
+
+    /// Show a pairing code while this device is nobody's but its own, and
+    /// answer the sponsor that enters it. Ends the moment the device is
+    /// adopted — by asking for a fresh generation, because the display
+    /// coordinator anchored on the throwaway profile at boot and re-anchors
+    /// only by restarting — or when the daemon stops.
+    fn spawn_pairing(&self, home: &Path) -> tokio::task::JoinHandle<()> {
+        let pair = self.router.pair().clone();
+        let stop = self.endpoint.subscribe_stop();
+        let relaunch = GenerationRelaunch {
+            requested: self.relaunch_requested.clone(),
+            endpoint: self.endpoint.clone(),
+        };
+        let on_adopted: OnAdopted = Arc::new(move || relaunch.request());
+        let network = crate::config::Settings::load(Some(home)).network();
+        tokio::spawn(serve_pairing(pair, network, stop, on_adopted))
     }
 
     /// Subscribe to the notify relay, when one is configured, so a publish
@@ -1313,6 +1394,69 @@ impl Daemon {
             ),
         }
     }
+}
+
+/// The joiner's loop: mint when a code is wanted, answer dials until it is
+/// spent, burnt or expired, and mint again. A mint that fails — no route
+/// yet, no identity endpoint — is retried on a jittered delay rather than
+/// tightly, because the ordinary cause is a network that is not up yet.
+/// What the daemon does the moment this device is adopted: ask for a fresh
+/// generation. A closure rather than the relaunch handle itself, so the loop
+/// can be driven without a listener.
+type OnAdopted = Arc<dyn Fn() + Send + Sync>;
+
+async fn serve_pairing(
+    pair: Arc<crate::daemon::pair::PairService>,
+    network: Result<comms::policy::Network>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    on_adopted: OnAdopted,
+) {
+    use crate::daemon::pair::Accepted;
+    let network = match network {
+        Ok(network) => network,
+        Err(error) => {
+            tracing::info!(%error, "no network policy; this device shows no pairing code");
+            return;
+        }
+    };
+    loop {
+        if *stop.borrow() || !pair.unpaired() {
+            break;
+        }
+        let now = crate::daemon::pair::now_ms();
+        if pair.wants_code(now) {
+            if let Err(error) = pair.mint(&network, now).await {
+                tracing::warn!(%error, "no pairing code could be minted; trying again later");
+                let delay = crate::update::watch::next_delay(
+                    Duration::from_secs(30),
+                    Duration::from_secs(10),
+                );
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => continue,
+                    _ = stop.changed() => break,
+                }
+            }
+        }
+        let turn = tokio::select! {
+            turn = pair.accept_one() => turn,
+            _ = stop.changed() => break,
+        };
+        match turn {
+            Ok(Accepted::Adopted) => {
+                tracing::info!(
+                    target: "lait::pair",
+                    "this device is now one of the profile's; restarting to serve as it"
+                );
+                on_adopted();
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "the pairing endpoint could not answer a dial");
+            }
+        }
+    }
+    pair.close().await;
 }
 
 #[derive(Clone)]
@@ -2466,5 +2610,78 @@ mod tests {
             .unwrap();
         completion.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The joiner's loop, end to end on the in-memory network: it mints on
+    /// its own, replaces a burnt code without being asked, and on adoption
+    /// asks for a fresh generation and closes the endpoint.
+    #[tokio::test]
+    async fn serve_pairing_re_mints_on_burn_and_relaunches_on_adoption() {
+        use crate::daemon::pair::tests::{sorted, wrong_secret, Side};
+        use crate::daemon::pair::{now_ms, SponsorOutcome};
+        use std::sync::atomic::AtomicBool;
+
+        async fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+            for _ in 0..250 {
+                if let Some(value) = check() {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("never: {what}");
+        }
+
+        let net = comms::mem::MemNet::new();
+        let sponsor = Side::stand("host-sponsor", &net);
+        let joiner = Side::stand("host-joiner", &net);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let relaunched = Arc::new(AtomicBool::new(false));
+        let on_adopted: OnAdopted = {
+            let relaunched = relaunched.clone();
+            Arc::new(move || relaunched.store(true, Ordering::SeqCst))
+        };
+        let network = joiner.pair.network().expect("network");
+        let loop_task = tokio::spawn(serve_pairing(
+            joiner.pair.clone(),
+            Ok(network),
+            stop_rx,
+            on_adopted,
+        ));
+
+        let first = wait_for("a code is minted on its own", || {
+            joiner.pair.status(now_ms()).map(|code| code.code)
+        })
+        .await;
+        let wrong = wrong_secret(&first);
+        for _ in 0..3 {
+            assert!(sponsor.pair.enter(&wrong, now_ms()).await.is_err());
+        }
+        let second = wait_for("a fresh code replaces the burnt one", || {
+            joiner
+                .pair
+                .status(now_ms())
+                .map(|code| code.code)
+                .filter(|code| code != &first)
+        })
+        .await;
+
+        let offer = match sponsor.pair.enter(&second, now_ms()).await.expect("enter") {
+            SponsorOutcome::Offer(offer) => offer,
+            other => panic!("expected an offer, got {other:?}"),
+        };
+        sponsor
+            .pair
+            .confirm(&offer.pairing, true, now_ms())
+            .await
+            .expect("confirm");
+        wait_for("adoption asks for a relaunch", || {
+            relaunched.load(Ordering::SeqCst).then_some(())
+        })
+        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), loop_task).await;
+        assert!(!joiner.pair.endpoint_open(), "the endpoint is closed");
+        assert!(!joiner.pair.unpaired());
+        assert_eq!(joiner.devices(), sorted(vec![sponsor.me(), joiner.me()]));
+        stop_tx.send_replace(true);
     }
 }

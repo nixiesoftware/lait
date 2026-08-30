@@ -995,6 +995,26 @@ mod reach_tests {
             }
         }
     }
+
+    /// `Request::Coordinates` mints a ticket that leads another device to this
+    /// Space. It is a Station-routed act between a person's own devices and
+    /// has no agent surface: nothing an injected instruction could reach for
+    /// would mint one, sealed session or not.
+    #[test]
+    fn coordinates_is_not_a_shell_tool() {
+        let tag = serde_json::to_value(crate::control::Request::Coordinates).unwrap()["cmd"]
+            .as_str()
+            .expect("a request serializes with a cmd tag")
+            .to_owned();
+        assert!(
+            ShellTool::ALL.iter().all(|tool| tool.name() != tag),
+            "{tag} is classified as a shell tool"
+        );
+        assert!(
+            super::shell_tool_names().iter().all(|name| *name != tag),
+            "{tag} is offered by the MCP router"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -29,7 +29,9 @@ use std::sync::Mutex;
 
 use correspondence::Contractor;
 use lait_directory::Directory;
+use mechanics::ids::DeviceId;
 use mechanics::kinship::{Audience, ProfileId};
+use tokio::sync::watch;
 
 use crate::control::{Request, Response};
 
@@ -70,6 +72,18 @@ pub(crate) fn now_secs() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
+/// The device set a plane holds, as it is published. Sorted so two daemons
+/// holding the same log publish the same value.
+fn own_of(reach: &correspondence::plane::ReachPlane) -> OwnDevices {
+    let mut devices = reach.my_devices();
+    devices.sort();
+    OwnDevices {
+        profile: reach.profile().clone(),
+        me: reach.canonical_device(),
+        devices,
+    }
+}
+
 /// The correspondents a plane holds, as address spellings.
 fn correspondents(reach: &correspondence::plane::ReachPlane) -> Vec<String> {
     let mine = reach.profile().clone();
@@ -98,12 +112,37 @@ pub fn is_correspondence_request(request: &Request) -> bool {
     )
 }
 
+/// The profile's live device set as this daemon holds it.
+///
+/// `None` on the watch is "not restored, not held" — unmeasured is absent, and
+/// an empty `Vec` would read as a profile with no devices, which no profile
+/// is. The hub's own-admission fails closed on `None` for exactly that reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnDevices {
+    pub profile: ProfileId,
+    pub me: DeviceId,
+    /// Sorted, and includes `me`.
+    pub devices: Vec<DeviceId>,
+}
+
+/// What a sponsor hands a joiner at `Start`: its own card, which device is
+/// speaking, and the epoch the plane is at.
+pub struct OwnCard {
+    pub card: addressbook::Announcement,
+    pub epoch: u64,
+}
+
 /// The identity's correspondence plane, and the durable state under it.
 pub struct CorrespondenceService {
     identity: PathBuf,
-    /// `None` until a carrier is configured. Correspondence with no carrier is
-    /// not an empty mailbox — every operation refuses in words, because the two
-    /// are different facts and only one is worth acting on.
+    /// The device set, published to whoever admits on it. `None` until the
+    /// plane is restored, and republished by every act that changes the set;
+    /// the hub fails closed on `None`.
+    own: watch::Sender<Option<OwnDevices>>,
+    /// `None` until the plane is restored. Restoring needs no carrier: the
+    /// device set is this identity's whether or not anything carries, and a
+    /// plane that only stood beside a Post would leave the hub admitting
+    /// nobody on every daemon without one.
     plane: Mutex<Option<Plane>>,
     /// The identity's book, hooked once at wiring. The one seam between the
     /// two services, and it carries gestures, not state: learning a
@@ -111,15 +150,22 @@ pub struct CorrespondenceService {
     /// Absent (tests, a book that failed to open), both halves simply do not
     /// happen — reach itself never depends on the book.
     book: std::sync::OnceLock<std::sync::Arc<crate::daemon::address_book::AddressBookService>>,
+    /// What the fan-out knows about the own devices, hooked once at wiring
+    /// like the book. Absent, every device renders unprobed and holding
+    /// nothing known — a daemon that runs no fan-out has not asked.
+    fanout: std::sync::OnceLock<std::sync::Arc<crate::daemon::fanout::Facts>>,
 }
 
-/// What a configured plane holds: the identity's reach, and something to carry
+/// What a restored plane holds: the identity's reach, and something to carry
 /// by. The carrier is boxed because which contractor is carrying is a
 /// deployment choice rather than an architecture commitment — memory in tests,
 /// a hosted Post today, a direct peer later — and the plane never learns which.
 struct Plane {
     reach: correspondence::plane::ReachPlane,
-    contractor: Box<dyn Contractor>,
+    /// `None` until a carrier is configured. Correspondence with no carrier is
+    /// not an empty mailbox — every send and collect refuses in words, because
+    /// the two are different facts and only one is worth acting on.
+    contractor: Option<Box<dyn Contractor>>,
     /// Where a short address is issued and resolved. Separate from the carrier
     /// on purpose: the two answer different questions — *who is this person and
     /// which devices do they hold* against *may you read this mailbox* — and
@@ -128,19 +174,40 @@ struct Plane {
 }
 
 impl CorrespondenceService {
-    /// Open the service for one identity. Carrying nothing yet is normal: a
-    /// carrier is configured, and until one is this refuses honestly.
+    /// Open the service for one identity. Nothing stands yet: the plane is
+    /// restored by [`Self::restore`], and until then this refuses honestly.
     pub fn open(identity: &Path) -> Self {
         Self {
             identity: identity.to_path_buf(),
+            own: watch::Sender::new(None),
             plane: Mutex::new(None),
             book: std::sync::OnceLock::new(),
+            fanout: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The device set as it is republished: by restore, and by every act that
+    /// changes it. A reader sees `None` until the first publication.
+    #[must_use]
+    pub fn own_devices(&self) -> watch::Receiver<Option<OwnDevices>> {
+        self.own.subscribe()
     }
 
     /// Hook the identity's book, once, at wiring time.
     pub fn hook_book(&self, book: std::sync::Arc<crate::daemon::address_book::AddressBookService>) {
         let _ = self.book.set(book);
+    }
+
+    /// Hook the fan-out's facts, once, when the daemon mounts the loop.
+    pub(crate) fn hook_fanout(&self, facts: std::sync::Arc<crate::daemon::fanout::Facts>) {
+        let _ = self.fanout.set(facts);
+    }
+
+    /// Publish a device set as if the plane held it. For tests that stand
+    /// two daemons as one profile without running the pairing ceremony.
+    #[cfg(test)]
+    pub(crate) fn set_own_for_test(&self, own: Option<OwnDevices>) {
+        self.own.send_replace(own);
     }
 
     /// Where this identity's durable correspondence state lives.
@@ -149,11 +216,46 @@ impl CorrespondenceService {
         &self.identity
     }
 
-    /// Stand the plane up over a carrier.
+    /// Stand the plane up from what the identity home holds, and publish the
+    /// device set.
     ///
-    /// Founding is deterministic from this identity's own seeds, so the address
-    /// a person hands out names them on every start. Durable reach state is
-    /// read here and written back by anything that changes it.
+    /// Reads the carried genesis back and never derives: a store that is
+    /// absent or carries no genesis is refused, because boot founds or
+    /// migrates the home before this runs (`config::identity_profile`) and a
+    /// plane that founded here in its place would answer a new profile under
+    /// an old address. Needs no carrier — the set is this identity's either
+    /// way, and the hub admits on it. A carrier already configured survives a
+    /// second restore.
+    pub fn restore(&self, now: u64) -> Result<(), String> {
+        let seed =
+            crate::config::load_identity(&self.identity).map_err(|error| error.to_string())?;
+        let held = addressbook::ReachStore::at(&self.identity)
+            .load()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "this identity carries no kinship store".to_string())?;
+        let reach = correspondence::plane::ReachPlane::restore(seed, held, now)
+            .map_err(|error| format!("{error}"))?;
+        let own = own_of(&reach);
+        {
+            let mut plane = self
+                .plane
+                .lock()
+                .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+            let (contractor, directory) = plane
+                .take()
+                .map_or((None, None), |held| (held.contractor, held.directory));
+            *plane = Some(Plane {
+                reach,
+                contractor,
+                directory,
+            });
+        }
+        self.own.send_replace(Some(own));
+        Ok(())
+    }
+
+    /// Carry over a Post. Sets the carrier only: the plane must already be
+    /// restored, because carrying was never what made it stand.
     pub fn carry_over(&self, contractor: Box<dyn Contractor>, now: u64) -> Result<(), String> {
         self.carry_over_with(contractor, configured_directory(&self.identity), now)
     }
@@ -165,24 +267,18 @@ impl CorrespondenceService {
         &self,
         contractor: Box<dyn Contractor>,
         directory: Option<Box<dyn Directory + Send>>,
-        now: u64,
+        _now: u64,
     ) -> Result<(), String> {
-        let seeds = crate::config::load_or_create_kinship_seeds(&self.identity)
-            .map_err(|error| error.to_string())?;
-        let held = addressbook::ReachStore::at(&self.identity)
-            .load()
-            .map_err(|error| error.to_string())?;
-        let reach = correspondence::plane::ReachPlane::restore(seeds, held, now)
-            .map_err(|error| format!("{error}"))?;
-        let mut plane = self
+        let mut held = self
             .plane
             .lock()
             .map_err(|_| "the correspondence plane is poisoned".to_string())?;
-        *plane = Some(Plane {
-            reach,
-            contractor,
-            directory,
-        });
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        plane.contractor = Some(contractor);
+        plane.directory = directory;
+        drop(held);
         Ok(())
     }
 
@@ -191,6 +287,138 @@ impl CorrespondenceService {
         addressbook::ReachStore::at(&self.identity)
             .save(&plane.reach.state())
             .map_err(|error| error.to_string())
+    }
+
+    /// Announce this identity's reach publicly, presenting My Card when one
+    /// is claimed, and publish it to the directory when one is configured.
+    ///
+    /// Sharing reach is the gesture that presents: a person who claimed My
+    /// Card and now publishes where they answer means to be recognized there.
+    /// No card claimed, nothing presented — authoring is never publishing on
+    /// its own. Publishing to a directory is best-effort and deliberately so:
+    /// announcing is what makes this identity reachable *at all* — the pasted
+    /// artifact works with no service anywhere — and a directory being down
+    /// must not take that with it. What is lost when it fails is the short
+    /// spelling, and the next share publishes again. The caller keeps.
+    fn present(&self, plane: &mut Plane, now: u64) -> Result<(), String> {
+        let reader = plane.reach.standing();
+        let portrait = self.book.get().and_then(|book| book.my_portrait());
+        let announced = match &portrait {
+            Some(portrait) => plane
+                .reach
+                .announce_presenting(Audience::Public, &reader, portrait),
+            None => plane.reach.announce(Audience::Public, &reader),
+        };
+        let announcement = announced.map_err(|error| format!("{error}"))?;
+        if let Some(directory) = plane.directory.as_deref_mut() {
+            let seed = plane.reach.seed();
+            match lait_directory::publish_as(directory, &seed, &announcement, now) {
+                Ok(address) => plane.reach.issued(address.as_str().to_owned()),
+                Err(refusal) => {
+                    tracing::warn!(%refusal, "the directory did not take this publication");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// This identity's card for its own device, with the epoch a sponsor's
+    /// pairing `Start` seals the link one past.
+    pub fn own_card(&self) -> Result<OwnCard, String> {
+        let held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_ref()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        let me = plane.reach.canonical_device();
+        let card = plane
+            .reach
+            .own_card(&me)
+            .map_err(|error| format!("{error}"))?;
+        Ok(OwnCard {
+            card,
+            epoch: plane.reach.state().epoch,
+        })
+    }
+
+    /// How this device came to hold its profile; `None` until restored.
+    #[must_use]
+    pub fn origin(&self) -> Option<addressbook::reach_store::Origin> {
+        self.plane
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|plane| plane.reach.origin().clone())
+    }
+
+    /// The sponsor's adoption: append the assembled link, keep, republish the
+    /// device set, then — when a directory is configured — announce so
+    /// correspondents learn the grown set. Kept before the watch moves: a hub
+    /// admitting a device the store does not yet name would be admitting on
+    /// a fact a crash could take back.
+    pub fn adopt_device(
+        &self,
+        link: mechanics::kinship::DeviceLink,
+        now: u64,
+    ) -> Result<(), String> {
+        let mut held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        plane
+            .reach
+            .adopt_device(link)
+            .map_err(|error| format!("{error}"))?;
+        self.keep(plane)?;
+        self.own.send_replace(Some(own_of(&plane.reach)));
+        // Announcing comes after the link is durable: a publication that
+        // avowed a device the store did not yet name would be evidence of a
+        // fact a crash could take back. Best-effort, and kept again on
+        // success because it moves the epoch.
+        if plane.directory.is_some() {
+            match self.present(plane, now) {
+                Ok(()) => {
+                    if let Err(error) = self.keep(plane) {
+                        tracing::warn!(%error, "the announcement's epoch could not be kept");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the grown device set could not be announced");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The joiner's adoption: become a device of the carried profile, keep,
+    /// republish. Refuses — through the plane — a device that has already
+    /// corresponded as its own profile.
+    pub fn become_device_of(
+        &self,
+        card: addressbook::Announcement,
+        from: DeviceId,
+        link: mechanics::kinship::DeviceLink,
+        now: u64,
+    ) -> Result<(), String> {
+        let mut held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        plane
+            .reach
+            .become_device_of(card, from, link, now)
+            .map_err(|error| format!("{error}"))?;
+        self.keep(plane)?;
+        self.own.send_replace(Some(own_of(&plane.reach)));
+        Ok(())
     }
 
     /// The book half of learning somebody. The consent was the learn itself —
@@ -310,6 +538,36 @@ impl CorrespondenceService {
             })
             .collect();
 
+        // The device set as published, not re-read from the registry: the
+        // view and the hub's admission must never disagree about who is own.
+        let own = self.own.borrow().clone();
+        let facts = self.fanout.get();
+        let devices = own.as_ref().map_or_else(Vec::new, |own| {
+            own.devices
+                .iter()
+                .map(|device| crate::control::OwnDeviceView {
+                    device: device.as_str().to_owned(),
+                    me: device == &own.me,
+                    liveness: facts
+                        .map_or_else(Default::default, |facts| facts.liveness_of(device)),
+                    held: facts.map_or_else(Vec::new, |facts| facts.held_by(device)),
+                })
+                .collect()
+        });
+        let spaces = match (facts, own.as_ref()) {
+            (Some(facts), Some(own)) => facts.view(own),
+            _ => Vec::new(),
+        };
+        let origin = match plane.reach.origin() {
+            addressbook::reach_store::Origin::Founded => crate::control::OriginView::Founded,
+            addressbook::reach_store::Origin::Adopted { from, at } => {
+                crate::control::OriginView::Adopted {
+                    from: from.as_str().to_owned(),
+                    at: *at,
+                }
+            }
+        };
+
         Response::Reach(Box::new(crate::control::ReachView {
             announcement: plane
                 .reach
@@ -319,13 +577,22 @@ impl CorrespondenceService {
             address: plane.reach.address().map(ToOwned::to_owned),
             correspondents: held,
             conversations,
+            me: Some(my_device),
+            origin: Some(origin),
+            devices,
+            device_set_unknown: own.is_none(),
+            spaces,
         }))
     }
 
     /// Whether a carrier is configured.
     #[must_use]
     pub fn carrying(&self) -> bool {
-        self.plane.lock().is_ok_and(|plane| plane.is_some())
+        self.plane.lock().is_ok_and(|plane| {
+            plane
+                .as_ref()
+                .is_some_and(|plane| plane.contractor.is_some())
+        })
     }
 
     /// Answer one control-plane request.
@@ -334,54 +601,23 @@ impl CorrespondenceService {
             return Response::err("the correspondence plane is poisoned");
         };
         let Some(plane) = held.as_mut() else {
-            // Not an empty mailbox. A caller has to be able to tell "nobody
-            // wrote to you" from "we are carrying nothing at all", and only one
-            // of those is worth acting on.
-            return Response::err("correspondence is not connected to a carrier");
+            // Not "no devices" and not an empty mailbox: nothing stands. The
+            // boot path says why in its own log; here a caller only needs to
+            // know the plane was never restored.
+            return Response::err("the reach plane is not restored");
         };
         let now = now_secs();
+        // Not an empty mailbox. A caller has to be able to tell "nobody wrote
+        // to you" from "we are carrying nothing at all", and only one of those
+        // is worth acting on.
+        const NO_CARRIER: &str = "no carrier is configured for correspondence";
 
         match request {
             Request::ReachView => self.reach_view(plane),
 
             Request::ReachShare => {
-                let reader = plane.reach.standing();
-                // Sharing reach is the gesture that presents: a person who
-                // claimed My Card and now publishes where they answer means
-                // to be recognized there. No card claimed, nothing presented
-                // — authoring is never publishing on its own.
-                let portrait = self.book.get().and_then(|book| book.my_portrait());
-                let announced = match &portrait {
-                    Some(portrait) => {
-                        plane
-                            .reach
-                            .announce_presenting(Audience::Public, &reader, portrait)
-                    }
-                    None => plane.reach.announce(Audience::Public, &reader),
-                };
-                let announcement = match announced {
-                    Ok(announcement) => announcement,
-                    Err(error) => return Response::err(format!("{error}")),
-                };
-                // Publishing to a directory is best-effort and deliberately so.
-                // Announcing is what makes this identity reachable *at all* —
-                // the pasted artifact works with no service anywhere — and a
-                // directory being down must not take that with it. What is lost
-                // when it fails is the short spelling, and the next share
-                // publishes again.
-                if let Some(directory) = plane.directory.as_deref_mut() {
-                    let seed = plane.reach.seed_for(&plane.reach.canonical_device());
-                    match seed {
-                        Some(seed) => {
-                            match lait_directory::publish_as(directory, &seed, &announcement, now) {
-                                Ok(address) => plane.reach.issued(address.as_str().to_owned()),
-                                Err(refusal) => {
-                                    tracing::warn!(%refusal, "the directory did not take this publication");
-                                }
-                            }
-                        }
-                        None => tracing::warn!("no seed for the canonical device"),
-                    }
+                if let Err(error) = self.present(plane, now) {
+                    return Response::err(error);
                 }
                 match self.keep(plane) {
                     Ok(()) => self.reach_view(plane),
@@ -401,9 +637,7 @@ impl CorrespondenceService {
                     // only one is worth acting on.
                     return Response::err("no directory is configured to resolve an address");
                 };
-                let Some(seed) = plane.reach.seed_for(&plane.reach.canonical_device()) else {
-                    return Response::err("no seed for the canonical device");
-                };
+                let seed = plane.reach.seed();
                 let announcement = match lait_directory::resolve_as(directory, &seed, &address, now)
                 {
                     Ok(announcement) => announcement,
@@ -458,11 +692,11 @@ impl CorrespondenceService {
                 let Some(profile) = ProfileId::parse(&to) else {
                     return Response::err("that is not an address");
                 };
+                let Some(contractor) = plane.contractor.as_deref() else {
+                    return Response::err(NO_CARRIER);
+                };
                 let content = correspondence::Content::Message { body };
-                match plane
-                    .reach
-                    .send_via(plane.contractor.as_ref(), &profile, content, now)
-                {
+                match plane.reach.send_via(contractor, &profile, content, now) {
                     // Durable before it is reported. The carrier forgets a
                     // letter once its recipient acknowledges, so this copy is
                     // the only one there will ever be — and a send that answered
@@ -493,11 +727,11 @@ impl CorrespondenceService {
                 // Opaque the whole way. This service carries an invitation and
                 // never judges one: it verifies at the Space that issued it, and
                 // delivery was never admission.
+                let Some(contractor) = plane.contractor.as_deref() else {
+                    return Response::err(NO_CARRIER);
+                };
                 let content = correspondence::Content::Invitation { coordinates };
-                match plane
-                    .reach
-                    .send_via(plane.contractor.as_ref(), &profile, content, now)
-                {
+                match plane.reach.send_via(contractor, &profile, content, now) {
                     // Durable before it is reported. The carrier forgets a
                     // letter once its recipient acknowledges, so this copy is
                     // the only one there will ever be — and a send that answered
@@ -512,7 +746,10 @@ impl CorrespondenceService {
             }
 
             Request::CorrespondCollect => {
-                let collected = plane.reach.collect_via(plane.contractor.as_ref(), now);
+                let Some(contractor) = plane.contractor.as_deref() else {
+                    return Response::err(NO_CARRIER);
+                };
+                let collected = plane.reach.collect_via(contractor, now);
                 if let Err(error) = self.keep(plane) {
                     return Response::err(error);
                 }
@@ -537,6 +774,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("corr-svc-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         CorrespondenceService::open(&dir)
+    }
+
+    /// What boot does before the router stands: mint the identity and found
+    /// (or carry) its profile. The service restores from that and never
+    /// founds, so a test that skipped this would be testing a refusal.
+    fn found(home: &Path) {
+        std::fs::create_dir_all(home).unwrap();
+        crate::config::load_or_create_identity(home).expect("identity");
+        crate::config::identity_profile(home).expect("profile");
+    }
+
+    /// A service stood up over a founded home, carrying nothing yet.
+    fn restored(home: &Path) -> CorrespondenceService {
+        found(home);
+        let service = CorrespondenceService::open(home);
+        service.restore(now_secs()).expect("restore");
+        service
     }
 
     #[test]
@@ -583,16 +837,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("corr-mem-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (ada_home, grace_home) = (root.join("ada"), root.join("grace"));
-        for home in [&ada_home, &grace_home] {
-            std::fs::create_dir_all(home).unwrap();
-            crate::config::load_or_create_identity(home).expect("identity");
-        }
 
         // One carrier, two services: the shared store two people deposit into,
         // which is exactly the Post's role without the Post.
         let shared = correspondence::SharedMem::new();
-        let ada = CorrespondenceService::open(&ada_home);
-        let grace = CorrespondenceService::open(&grace_home);
+        let ada = restored(&ada_home);
+        let grace = restored(&grace_home);
         let now = now_secs();
         ada.carry_over(Box::new(shared.clone()), now).expect("ada");
         grace
@@ -674,7 +924,7 @@ mod tests {
 
         // The daemon goes away entirely and comes back from disk.
         drop(ada);
-        let ada = CorrespondenceService::open(&ada_home);
+        let ada = restored(&ada_home);
         ada.carry_over(Box::new(shared.clone()), now)
             .expect("ada again");
         let after = reach(&ada.handle(Request::ReachView).await).clone();
@@ -877,9 +1127,7 @@ mod tests {
     async fn with_no_directory_an_address_refuses_in_words() {
         let root = std::env::temp_dir().join(format!("corr-nodir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        crate::config::load_or_create_identity(&root).expect("identity");
-        let service = CorrespondenceService::open(&root);
+        let service = restored(&root);
         service
             .carry_over_with(Box::new(correspondence::SharedMem::new()), None, now_secs())
             .expect("carry");
@@ -918,9 +1166,7 @@ mod tests {
             let mut services = BTreeMap::new();
             for name in who {
                 let home = root.join(name);
-                std::fs::create_dir_all(&home).unwrap();
-                crate::config::load_or_create_identity(&home).expect("identity");
-                let service = CorrespondenceService::open(&home);
+                let service = restored(&home);
                 service
                     .carry_over_with(
                         Box::new(carrier.clone()),
@@ -972,11 +1218,105 @@ mod tests {
     /// waiting" here would be the false-disconnection defect one layer down.
     #[tokio::test]
     async fn with_no_carrier_every_operation_refuses_in_words() {
-        let service = service("nocarrier");
+        let root = std::env::temp_dir().join(format!("corr-nocarrier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let service = restored(&root);
         assert!(!service.carrying());
         let answer = service.handle(Request::CorrespondCollect).await;
         assert!(
-            matches!(&answer, Response::Error { message, .. } if message.contains("carrier")),
+            matches!(&answer, Response::Error { message, .. } if message.contains("no carrier")),
+            "{answer:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The device set is this identity's whether or not anything carries. A
+    /// daemon with no Post configured — every debug build, and any deployment
+    /// that opted out — still answers who its devices are, and the hub admits
+    /// on that answer; only sending needs a carrier, and it says so in words a
+    /// caller can tell from an empty mailbox.
+    #[tokio::test]
+    async fn a_daemon_with_no_post_still_answers_its_device_set() {
+        let root = std::env::temp_dir().join(format!("corr-nopost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let service = restored(&root);
+        assert!(!service.carrying(), "nothing carries");
+
+        let me = mechanics::actor::device_from_seed(
+            &crate::config::load_identity(&root).expect("identity"),
+        );
+        let published = service
+            .own_devices()
+            .borrow()
+            .clone()
+            .expect("restore published the set");
+        assert_eq!(published.me, me);
+        assert_eq!(published.devices, vec![me.clone()]);
+
+        let view = reach(&service.handle(Request::ReachView).await).clone();
+        assert!(!view.device_set_unknown);
+        assert_eq!(view.me.as_deref(), Some(me.as_str()));
+        assert_eq!(view.devices.len(), 1, "{:?}", view.devices);
+        assert_eq!(view.devices[0].device, me.as_str());
+        assert!(view.devices[0].me);
+        assert_eq!(
+            view.devices[0].liveness,
+            crate::control::Liveness::NotProbed,
+            "nothing has asked, and that is not \"down\""
+        );
+        assert_eq!(view.origin, Some(crate::control::OriginView::Founded));
+        assert_eq!(view.profile, published.profile.as_str());
+
+        let answer = service
+            .handle(Request::CorrespondSend {
+                to: view.profile.clone(),
+                body: "to nowhere".into(),
+            })
+            .await;
+        assert!(
+            matches!(&answer, Response::Error { message, .. } if message.contains("no carrier")),
+            "{answer:?}"
+        );
+
+        // A carrier configured afterwards does not restore again, and the
+        // published set is untouched by it.
+        service
+            .carry_over_with(Box::new(correspondence::SharedMem::new()), None, now_secs())
+            .expect("carry");
+        assert!(service.carrying());
+        assert_eq!(
+            service.own_devices().borrow().as_ref(),
+            Some(&published),
+            "carrying changes nothing about who the devices are"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Unmeasured is absent. Before restore the watch holds `None`, not an
+    /// empty set — the hub fails closed on it, and an empty `Vec` would read
+    /// as a profile with no devices, which no profile is. Carrying over a
+    /// plane that never stood is refused rather than standing it up.
+    #[tokio::test]
+    async fn the_watch_is_none_until_restored() {
+        let service = service("unrestored");
+        assert!(service.own_devices().borrow().is_none());
+        assert!(!service.carrying());
+        assert!(
+            service
+                .carry_over_with(Box::new(correspondence::SharedMem::new()), None, now_secs())
+                .is_err(),
+            "a carrier does not stand the plane up"
+        );
+        // A restore that fails — nothing founded here — publishes nothing:
+        // the watch stays `None`, never `Some(empty)`.
+        assert!(
+            service.restore(now_secs()).is_err(),
+            "nothing is founded in this home, so restore must refuse"
+        );
+        assert!(service.own_devices().borrow().is_none());
+        let answer = service.handle(Request::ReachView).await;
+        assert!(
+            matches!(&answer, Response::Error { message, .. } if message.contains("not restored")),
             "{answer:?}"
         );
     }
@@ -1022,8 +1362,8 @@ mod tests {
         }
 
         let shared = correspondence::SharedMem::new();
-        let ada = CorrespondenceService::open(&ada_home);
-        let grace = CorrespondenceService::open(&grace_home);
+        let ada = restored(&ada_home);
+        let grace = restored(&grace_home);
         ada.hook_book(std::sync::Arc::new(
             crate::daemon::address_book::AddressBookService::open(&ada_home).expect("ada book"),
         ));
