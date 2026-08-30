@@ -1279,6 +1279,12 @@ mod tests {
                 .is_err(),
             "a carrier does not stand the plane up"
         );
+        // A restore that fails — nothing founded here — publishes nothing:
+        // the watch stays `None`, never `Some(empty)`.
+        assert!(
+            service.restore(now_secs()).is_err(),
+            "nothing is founded in this home, so restore must refuse"
+        );
         assert!(service.own_devices().borrow().is_none());
         let answer = service.handle(Request::ReachView).await;
         assert!(

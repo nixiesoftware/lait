@@ -614,6 +614,36 @@ mod tests {
         let _ = load_identity(home.path()).expect("nothing touched the identity");
     }
 
+    /// `kinship.bin` copied from another machine: the genesis verifies, the
+    /// profile is real, and this seed is no device of it. That must refuse
+    /// exactly as an unreconstructable profile does — not boot, anchor the
+    /// coordinator on somebody else's address, and leave the reach plane
+    /// unrestored behind a warning.
+    #[test]
+    fn a_kinship_store_from_another_machine_refuses_to_boot_here() {
+        let home = tempfile::tempdir().unwrap();
+        let _identity = load_or_create_identity(home.path()).expect("identity");
+        let elsewhere = [0x51u8; 32];
+        let plane =
+            correspondence::plane::ReachPlane::found_here(elsewhere, Some([0x52u8; 32]), None, 1)
+                .expect("found elsewhere");
+        addressbook::ReachStore::at(home.path())
+            .save(&plane.state())
+            .expect("copy the store here");
+        let before = fs::read(home.path().join("kinship.bin")).unwrap();
+
+        let error = identity_profile(home.path()).expect_err("refused");
+        assert!(
+            error.to_string().contains("cannot be reconstructed"),
+            "the refusal must be the boot refusal, got: {error}"
+        );
+        assert_eq!(
+            fs::read(home.path().join("kinship.bin")).unwrap(),
+            before,
+            "a refusal writes nothing"
+        );
+    }
+
     /// A store authored under a profile this home can no longer reproduce —
     /// no carried genesis, no witness key — is a refusal. Founding in its
     /// place would answer a new address under the old log, silently.
@@ -965,6 +995,22 @@ pub fn identity_profile(home: &Path) -> Result<mechanics::kinship::ProfileId> {
             .map_err(|error| anyhow!("the carried genesis does not verify: {error}"))?
             .profile()
             .clone();
+        // A genesis that verifies is not yet this device's: a `kinship.bin`
+        // copied from another machine carries a perfectly good profile that
+        // this seed is no device of. Booting on it would anchor the display
+        // coordinator on an address the daemon cannot sign for and then leave
+        // the reach plane unrestored — the unreconstructable profile wearing a
+        // quieter error. It is the same refusal, asked here.
+        let me = mechanics::actor::device_from_seed(&identity);
+        let mine = held
+            .as_ref()
+            .and_then(|state| state.registry.resolve(&profile))
+            .is_some_and(|devices| devices.contains(&me));
+        if !mine {
+            return Err(anyhow!(
+                "this home's profile cannot be reconstructed; restore kinship.key or re-pair this device (kinship.bin names a profile this device is not part of)"
+            ));
+        }
         if let Some(witness) = witness {
             // A key still beside a carried genesis is the crash window between
             // save and remove, closed here — but only once it is proven to be
