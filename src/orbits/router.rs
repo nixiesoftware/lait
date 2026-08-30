@@ -615,6 +615,7 @@ pub struct Router {
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
     correspondence: Arc<crate::daemon::correspondence::CorrespondenceService>,
+    pair: Arc<crate::daemon::pair::PairService>,
     asks: crate::daemon::sponsorship::SponsorshipAsks,
 }
 
@@ -669,6 +670,11 @@ impl Router {
             factory,
             correspondence.own_devices(),
         ));
+        let pair = Arc::new(crate::daemon::pair::PairService::open(
+            &identity,
+            correspondence.clone(),
+            factory.clone(),
+        ));
         Self {
             catalog,
             occupancy: OrbitOccupancy::default(),
@@ -680,6 +686,7 @@ impl Router {
             shutting_down: AtomicBool::new(false),
             book,
             correspondence,
+            pair,
             asks,
         }
     }
@@ -704,6 +711,11 @@ impl Router {
     /// The identity's transport hub — where the daemon raises its own lanes.
     pub(crate) fn hub(&self) -> &Arc<TransportHubFactory> {
         &self.factory
+    }
+
+    /// The pairing ceremony, both sides.
+    pub(crate) fn pair(&self) -> &Arc<crate::daemon::pair::PairService> {
+        &self.pair
     }
 
     pub(crate) fn asks(&self) -> &crate::daemon::sponsorship::SponsorshipAsks {

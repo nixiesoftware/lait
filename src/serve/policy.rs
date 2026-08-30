@@ -175,7 +175,10 @@ pub fn is_read(req: &Request) -> bool {
         | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
-        | Request::CorrespondInvite { .. } => false,
+        | Request::CorrespondInvite { .. }
+        // Pairing signs a link as this identity and adopts a device into it.
+        | Request::DevicePairEnter { .. }
+        | Request::DevicePairConfirm { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -268,6 +271,10 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. }
+        // Pairing is the profile's, not a Space's: the code names a device,
+        // and no Space exists yet on the device being paired.
+        | Request::DevicePairEnter { .. }
+        | Request::DevicePairConfirm { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -414,6 +421,25 @@ mod tests {
             reusable: false,
             ttl_hours: None,
         }));
+    }
+
+    /// Pairing a device rides the host plane — a browser or Astrolabe enters
+    /// the code — and both halves sign as this identity, so neither is a
+    /// read. A pairing verb that slipped into the read set would let a
+    /// hosted identity's page adopt devices into somebody else's profile.
+    #[test]
+    fn device_pairing_is_host_plane_and_never_a_read() {
+        let enter = Request::DevicePairEnter {
+            code: String::new(),
+        };
+        let confirm = Request::DevicePairConfirm {
+            pairing: String::new(),
+            accept: false,
+        };
+        assert!(is_host_plane(&enter));
+        assert!(is_host_plane(&confirm));
+        assert!(!is_read(&enter));
+        assert!(!is_read(&confirm));
     }
 
     /// The book is identity-scoped: every Book verb rides the host plane, its

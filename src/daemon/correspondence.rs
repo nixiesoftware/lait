@@ -125,6 +125,13 @@ pub struct OwnDevices {
     pub devices: Vec<DeviceId>,
 }
 
+/// What a sponsor hands a joiner at `Start`: its own card, which device is
+/// speaking, and the epoch the plane is at.
+pub struct OwnCard {
+    pub card: addressbook::Announcement,
+    pub epoch: u64,
+}
+
 /// The identity's correspondence plane, and the durable state under it.
 pub struct CorrespondenceService {
     identity: PathBuf,
@@ -263,6 +270,132 @@ impl CorrespondenceService {
         addressbook::ReachStore::at(&self.identity)
             .save(&plane.reach.state())
             .map_err(|error| error.to_string())
+    }
+
+    /// Announce this identity's reach publicly, presenting My Card when one
+    /// is claimed, and publish it to the directory when one is configured.
+    ///
+    /// Sharing reach is the gesture that presents: a person who claimed My
+    /// Card and now publishes where they answer means to be recognized there.
+    /// No card claimed, nothing presented — authoring is never publishing on
+    /// its own. Publishing to a directory is best-effort and deliberately so:
+    /// announcing is what makes this identity reachable *at all* — the pasted
+    /// artifact works with no service anywhere — and a directory being down
+    /// must not take that with it. What is lost when it fails is the short
+    /// spelling, and the next share publishes again. The caller keeps.
+    fn present(&self, plane: &mut Plane, now: u64) -> Result<(), String> {
+        let reader = plane.reach.standing();
+        let portrait = self.book.get().and_then(|book| book.my_portrait());
+        let announced = match &portrait {
+            Some(portrait) => plane
+                .reach
+                .announce_presenting(Audience::Public, &reader, portrait),
+            None => plane.reach.announce(Audience::Public, &reader),
+        };
+        let announcement = announced.map_err(|error| format!("{error}"))?;
+        if let Some(directory) = plane.directory.as_deref_mut() {
+            let seed = plane.reach.seed_for(&plane.reach.canonical_device());
+            match seed {
+                Some(seed) => {
+                    match lait_directory::publish_as(directory, &seed, &announcement, now) {
+                        Ok(address) => plane.reach.issued(address.as_str().to_owned()),
+                        Err(refusal) => {
+                            tracing::warn!(%refusal, "the directory did not take this publication");
+                        }
+                    }
+                }
+                None => tracing::warn!("no seed for the canonical device"),
+            }
+        }
+        Ok(())
+    }
+
+    /// This identity's card for its own device, with the epoch a sponsor's
+    /// pairing `Start` seals the link one past.
+    pub fn own_card(&self) -> Result<OwnCard, String> {
+        let held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_ref()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        let me = plane.reach.canonical_device();
+        let card = plane
+            .reach
+            .own_card(&me)
+            .map_err(|error| format!("{error}"))?;
+        Ok(OwnCard {
+            card,
+            epoch: plane.reach.state().epoch,
+        })
+    }
+
+    /// How this device came to hold its profile; `None` until restored.
+    #[must_use]
+    pub fn origin(&self) -> Option<addressbook::reach_store::Origin> {
+        self.plane
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|plane| plane.reach.origin().clone())
+    }
+
+    /// The sponsor's adoption: append the assembled link, keep, republish the
+    /// device set, and — when a directory is configured — announce so
+    /// correspondents learn the grown set. Kept before the watch moves: a hub
+    /// admitting a device the store does not yet name would be admitting on
+    /// a fact a crash could take back.
+    pub fn adopt_device(
+        &self,
+        link: mechanics::kinship::DeviceLink,
+        now: u64,
+    ) -> Result<(), String> {
+        let mut held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        plane
+            .reach
+            .adopt_device(link)
+            .map_err(|error| format!("{error}"))?;
+        if plane.directory.is_some() {
+            if let Err(error) = self.present(plane, now) {
+                tracing::warn!(%error, "the grown device set could not be announced");
+            }
+        }
+        self.keep(plane)?;
+        self.own.send_replace(Some(own_of(&plane.reach)));
+        Ok(())
+    }
+
+    /// The joiner's adoption: become a device of the carried profile, keep,
+    /// republish. Refuses — through the plane — a device that has already
+    /// corresponded as its own profile.
+    pub fn become_device_of(
+        &self,
+        card: addressbook::Announcement,
+        from: DeviceId,
+        link: mechanics::kinship::DeviceLink,
+        now: u64,
+    ) -> Result<(), String> {
+        let mut held = self
+            .plane
+            .lock()
+            .map_err(|_| "the correspondence plane is poisoned".to_string())?;
+        let plane = held
+            .as_mut()
+            .ok_or_else(|| "the reach plane is not restored".to_string())?;
+        plane
+            .reach
+            .become_device_of(card, from, link, now)
+            .map_err(|error| format!("{error}"))?;
+        self.keep(plane)?;
+        self.own.send_replace(Some(own_of(&plane.reach)));
+        Ok(())
     }
 
     /// The book half of learning somebody. The consent was the learn itself —
@@ -453,43 +586,8 @@ impl CorrespondenceService {
             Request::ReachView => self.reach_view(plane),
 
             Request::ReachShare => {
-                let reader = plane.reach.standing();
-                // Sharing reach is the gesture that presents: a person who
-                // claimed My Card and now publishes where they answer means
-                // to be recognized there. No card claimed, nothing presented
-                // — authoring is never publishing on its own.
-                let portrait = self.book.get().and_then(|book| book.my_portrait());
-                let announced = match &portrait {
-                    Some(portrait) => {
-                        plane
-                            .reach
-                            .announce_presenting(Audience::Public, &reader, portrait)
-                    }
-                    None => plane.reach.announce(Audience::Public, &reader),
-                };
-                let announcement = match announced {
-                    Ok(announcement) => announcement,
-                    Err(error) => return Response::err(format!("{error}")),
-                };
-                // Publishing to a directory is best-effort and deliberately so.
-                // Announcing is what makes this identity reachable *at all* —
-                // the pasted artifact works with no service anywhere — and a
-                // directory being down must not take that with it. What is lost
-                // when it fails is the short spelling, and the next share
-                // publishes again.
-                if let Some(directory) = plane.directory.as_deref_mut() {
-                    let seed = plane.reach.seed_for(&plane.reach.canonical_device());
-                    match seed {
-                        Some(seed) => {
-                            match lait_directory::publish_as(directory, &seed, &announcement, now) {
-                                Ok(address) => plane.reach.issued(address.as_str().to_owned()),
-                                Err(refusal) => {
-                                    tracing::warn!(%refusal, "the directory did not take this publication");
-                                }
-                            }
-                        }
-                        None => tracing::warn!("no seed for the canonical device"),
-                    }
+                if let Err(error) = self.present(plane, now) {
+                    return Response::err(error);
                 }
                 match self.keep(plane) {
                     Ok(()) => self.reach_view(plane),

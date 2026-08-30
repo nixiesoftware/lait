@@ -1027,6 +1027,10 @@ impl Daemon {
         // standing unchanged.
         let staging = self.spawn_staging();
         let world_upgrades = self.spawn_world_upgrades();
+        // A device that holds no profile but its own shows a code until it
+        // is paired — whatever else this daemon serves, and whether or not
+        // it hosts displays: the headless box is exactly the one this is for.
+        self.spawn_pairing(home);
 
         // The identity's own endpoint, raised here rather than by the first
         // Station: the lanes the daemon serves itself — the Own lane, the
@@ -1259,6 +1263,22 @@ impl Daemon {
         )))
     }
 
+    /// Show a pairing code while this device is nobody's but its own, and
+    /// answer the sponsor that enters it. Ends the moment the device is
+    /// adopted — by asking for a fresh generation, because the display
+    /// coordinator anchored on the throwaway profile at boot and re-anchors
+    /// only by restarting — or when the daemon stops.
+    fn spawn_pairing(&self, home: &Path) -> tokio::task::JoinHandle<()> {
+        let pair = self.router.pair().clone();
+        let stop = self.endpoint.subscribe_stop();
+        let relaunch = GenerationRelaunch {
+            requested: self.relaunch_requested.clone(),
+            endpoint: self.endpoint.clone(),
+        };
+        let network = crate::config::Settings::load(Some(home)).network();
+        tokio::spawn(serve_pairing(pair, network, stop, relaunch))
+    }
+
     /// Subscribe to the notify relay, when one is configured, so a publish
     /// wakes the staging watcher within the round trip. Silent about a relay
     /// that is down — the period covers it — and informational about no relay
@@ -1327,6 +1347,64 @@ impl Daemon {
             ),
         }
     }
+}
+
+/// The joiner's loop: mint when a code is wanted, answer dials until it is
+/// spent, burnt or expired, and mint again. A mint that fails — no route
+/// yet, no identity endpoint — is retried on a jittered delay rather than
+/// tightly, because the ordinary cause is a network that is not up yet.
+async fn serve_pairing(
+    pair: Arc<crate::daemon::pair::PairService>,
+    network: Result<comms::policy::Network>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    relaunch: GenerationRelaunch,
+) {
+    use crate::daemon::pair::Accepted;
+    let network = match network {
+        Ok(network) => network,
+        Err(error) => {
+            tracing::info!(%error, "no network policy; this device shows no pairing code");
+            return;
+        }
+    };
+    loop {
+        if *stop.borrow() || !pair.unpaired() {
+            break;
+        }
+        let now = crate::daemon::pair::now_ms();
+        if pair.wants_code(now) {
+            if let Err(error) = pair.mint(&network, now).await {
+                tracing::warn!(%error, "no pairing code could be minted; trying again later");
+                let delay = crate::update::watch::next_delay(
+                    Duration::from_secs(30),
+                    Duration::from_secs(10),
+                );
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => continue,
+                    _ = stop.changed() => break,
+                }
+            }
+        }
+        let turn = tokio::select! {
+            turn = pair.accept_one() => turn,
+            _ = stop.changed() => break,
+        };
+        match turn {
+            Ok(Accepted::Adopted) => {
+                tracing::info!(
+                    target: "lait::pair",
+                    "this device is now one of the profile's; restarting to serve as it"
+                );
+                relaunch.request();
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "the pairing endpoint could not answer a dial");
+            }
+        }
+    }
+    pair.close().await;
 }
 
 #[derive(Clone)]

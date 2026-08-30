@@ -60,6 +60,10 @@ impl Client {
                 identities,
                 orbits,
                 asks,
+                // The client's Devices surface (S2-4) maps these; until then
+                // they are named so the destructure stays exhaustive.
+                pairing: _,
+                pair_offers: _,
             }) => Ok(HostContext {
                 version,
                 identity_home,

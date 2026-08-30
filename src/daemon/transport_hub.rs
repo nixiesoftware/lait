@@ -187,6 +187,16 @@ impl TransportHubFactory {
         }
     }
 
+    /// The raw factory beneath the hubs — for the code-derived pairing
+    /// endpoint only. That endpoint is a different key, alive for one code's
+    /// life, and never a hub: a hub is one endpoint per identity, registered
+    /// with the identity's whole set, and a pairing door raised through it
+    /// would advertise every lane under a key anyone holding the code can
+    /// derive.
+    pub(crate) fn inner(&self) -> Arc<dyn TransportFactory> {
+        self.inner.clone()
+    }
+
     fn slot(&self, identity: DeviceId) -> HubSlot {
         self.hubs
             .lock_recovering()
@@ -250,7 +260,10 @@ impl TransportHubFactory {
     ) -> Result<Arc<dyn Transport>> {
         let hub = self.hub_for(identity_seed, network).await?;
         hub.require_network(network)?;
-        Ok(Arc::new(IdentityTransport { hub }))
+        Ok(Arc::new(IdentityTransport {
+            hub,
+            own_lane: Mutex::new(None),
+        }))
     }
 }
 
@@ -405,9 +418,12 @@ struct IdentityTransportHub {
     stopping: watch::Sender<bool>,
     accept_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     session_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
-    /// The Own lane's receive half. Every identity view reads it through one
-    /// lock, so two views are two readers of one lane rather than two lanes.
-    own_lane: Mutex<mpsc::Receiver<Incoming>>,
+    /// The Own lane's receive half, handed over once — to the first identity
+    /// view that accepts on it, the way every session queue is handed to its
+    /// first taker. Two readers of one lane would each take half its frames
+    /// and neither would know; a second reader here gets `None` and a warning
+    /// instead.
+    own_lane: StdMutex<Option<mpsc::Receiver<Incoming>>>,
     /// One un-taken queue per identity session lane, handed over once.
     identity_session_queues: StdMutex<Vec<(comms::Alpn, Option<comms::ConnectionQueue>)>>,
 }
@@ -443,7 +459,7 @@ impl IdentityTransportHub {
             stopping: watch::Sender::new(false),
             accept_task: StdMutex::new(None),
             session_task: StdMutex::new(None),
-            own_lane: Mutex::new(framed_rx),
+            own_lane: StdMutex::new(Some(framed_rx)),
             identity_session_queues: StdMutex::new(queues),
         });
         let task = tokio::spawn(run_accept_pump(
@@ -1025,11 +1041,14 @@ async fn dispatch_incoming(
             dropped(&incoming.alpn, "not one of this identity's devices");
             return;
         }
-        tokio::select! {
-            _ = lanes.framed.send(incoming) => {}
-            changed = hub_stopping.changed() => {
-                let _ = changed;
-            }
+        // Not awaited, for the reason the session lanes are not: this task
+        // holds one of the shared framed-opener permits, and a lane whose
+        // consumer is slow — or not yet reading — would park it here until
+        // every permit was parked and no Station could be placed. A full
+        // lane refuses, and the dropped stream tells the dialer so.
+        if let Err(refused) = lanes.framed.try_send(incoming) {
+            let refused = refused.into_inner();
+            dropped(&refused.alpn, "the Own lane is full or closed");
         }
         return;
     }
@@ -1285,6 +1304,11 @@ impl Transport for ScopedTransport {
 /// through its queue. It never owns the endpoint, so it never closes it.
 struct IdentityTransport {
     hub: Arc<IdentityTransportHub>,
+    /// The Own lane once this view has taken it. Taken on the first
+    /// `accept`, not at construction: a view raised only to dial (the
+    /// sponsor's side of a pairing) must not silently claim the lane the
+    /// daemon's serve path is about to read.
+    own_lane: Mutex<Option<mpsc::Receiver<Incoming>>>,
 }
 
 impl IdentityTransport {
@@ -1315,13 +1339,22 @@ impl Transport for IdentityTransport {
     }
 
     /// The Own lane, pre-admitted: everything here came from a device in the
-    /// profile's set, or the hub would not have forwarded it.
+    /// profile's set, or the hub would not have forwarded it. The lane is
+    /// this view's from its first `accept`; a second view finds it taken and
+    /// is told so, rather than sharing frames with the first.
     async fn accept(&self) -> Option<Incoming> {
         let mut stopping = self.hub.stopping.subscribe();
         if *stopping.borrow() {
             return None;
         }
-        let mut incoming = self.hub.own_lane.lock().await;
+        let mut held = self.own_lane.lock().await;
+        if held.is_none() {
+            *held = self.hub.own_lane.lock_recovering().take();
+        }
+        let Some(incoming) = held.as_mut() else {
+            tracing::warn!("the Own lane was already taken by another identity view");
+            return None;
+        };
         tokio::select! {
             value = incoming.recv() => value,
             _ = stopping.wait_for(|value| *value) => None,

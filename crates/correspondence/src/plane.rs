@@ -46,6 +46,12 @@ pub enum Failure {
     /// an old log, and every address a person handed out would stop naming
     /// them; the boot path decides what a genesis-less home is.
     NoGenesis,
+    /// This plane has already corresponded as its own profile — learned
+    /// somebody, sent a letter, or been issued an address — so adopting another
+    /// profile would orphan every one of those under an id nobody answers
+    /// for. A device becomes somebody's before it speaks for itself, or not
+    /// at all.
+    AlreadyCorresponded,
     /// The recipient profile is not held, or resolves to no device — there is
     /// nothing to seal to. Never rendered as "the message failed"; it is "we do
     /// not know how to reach them yet".
@@ -68,6 +74,10 @@ impl std::fmt::Display for Failure {
             Self::NoGenesis => write!(
                 f,
                 "this store carries no genesis, and a profile is never re-derived"
+            ),
+            Self::AlreadyCorresponded => write!(
+                f,
+                "this device has already corresponded as its own profile and cannot be adopted"
             ),
             Self::NotReachable => write!(f, "we do not know how to reach them yet"),
             Self::Kinship(failure) => write!(f, "the kinship plane refused: {failure:?}"),
@@ -622,14 +632,93 @@ impl ReachPlane {
     /// walks it — but it cannot compose from this plane, which holds no seed
     /// for it and says so rather than pretending.
     pub fn adopt_device(&mut self, link: mechanics::kinship::DeviceLink) -> Result<(), Failure> {
+        Self::adopt_into(&mut self.registry, &self.profile, link)
+    }
+
+    /// The append behind [`Self::adopt_device`], on a registry that is not
+    /// yet this plane's — so a joiner can build its adopted holding whole and
+    /// take it on only once every step has passed.
+    fn adopt_into(
+        registry: &mut Registry,
+        profile: &ProfileId,
+        link: mechanics::kinship::DeviceLink,
+    ) -> Result<(), Failure> {
         link.verify()
             .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
-        let rooted = self.registry.resolve(&self.profile).unwrap_or_default();
+        let rooted = registry.resolve(profile).unwrap_or_default();
         if !link.devices.iter().any(|device| rooted.contains(device)) {
             return Err(Failure::NotReachable);
         }
-        self.registry
-            .extend(&self.profile, mechanics::kinship::Entry::Link(link))?;
+        registry.extend(profile, mechanics::kinship::Entry::Link(link))?;
+        Ok(())
+    }
+
+    /// Become a device of the profile `card` carries — the joiner's half of
+    /// a pairing, once the sponsor has assembled the link.
+    ///
+    /// The throwaway profile this plane was founded under is dropped, not
+    /// merged: nothing was ever said under it, or this refuses with
+    /// [`Failure::AlreadyCorresponded`] — a profile that has learned somebody,
+    /// sent a letter or been issued an address has correspondents who would
+    /// otherwise be sealing to an id nobody answers for any more.
+    ///
+    /// The card is taken as **authored**, not absorbed: the sponsor projected
+    /// it under `Standing { own: true }` so the structural bodies ride, and
+    /// this device will sign heads over that log from now on. Every step is
+    /// checked against a holding built beside the current one, and the plane
+    /// takes it on only at the end — a refusal half-way leaves the throwaway
+    /// profile standing, which is the state that can be retried.
+    pub fn become_device_of(
+        &mut self,
+        card: Announcement,
+        from: DeviceId,
+        link: DeviceLink,
+        now: u64,
+    ) -> Result<(), Failure> {
+        if self.registry.profiles().count() > 1 || !self.sent.is_empty() || self.address.is_some() {
+            return Err(Failure::AlreadyCorresponded);
+        }
+        let log = mechanics::kinship::KinshipLog::found(card.genesis.clone())
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+        if log.profile() != &card.profile {
+            return Err(Failure::Kinship(registry::Failure::Unanchored));
+        }
+        let reader = Standing {
+            own: true,
+            device: Some(from.clone()),
+            ..Standing::default()
+        };
+        card.projection
+            .verify(&reader)
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
+
+        let mut registry = Registry::new();
+        let profile = registry.found(card.genesis.clone())?;
+        for body in &card.projection.bodies {
+            match body {
+                Entry::Link(carried) if carried == &card.genesis => {}
+                Entry::Link(_) | Entry::Retire(_) => registry.extend(&profile, body.clone())?,
+                Entry::Avow(_) => {}
+            }
+        }
+        if !registry
+            .resolve(&profile)
+            .is_some_and(|devices| devices.contains(&from))
+        {
+            return Err(Failure::NotReachable);
+        }
+        let me = self.canonical_device();
+        if !link.names(&me) {
+            return Err(Failure::NotReachable);
+        }
+        Self::adopt_into(&mut registry, &profile, link)?;
+
+        let theirs = card.projection.head.as_ref().map_or(0, |head| head.epoch);
+        self.epoch = self.epoch.max(theirs).saturating_add(1);
+        self.profile = profile;
+        self.genesis = card.genesis;
+        self.registry = registry;
+        self.origin = addressbook::reach_store::Origin::Adopted { from, at: now };
         Ok(())
     }
 
@@ -1445,6 +1534,131 @@ mod tests {
         theirs
             .absorb(projection, &genesis, &reader)
             .expect("an adopted placement's head is evidence to a stranger");
+    }
+
+    /// The pairing's two ends, minus the transport: the sponsor hands its own
+    /// card, both sides sign the same preimage where their seeds live, the
+    /// sponsor assembles and adopts, and the joiner becomes a device of the
+    /// carried profile. Both then resolve to the same set under the same id,
+    /// and a stranger takes the joiner's head — which fails if the Own gate
+    /// withheld the links the joiner has to walk from the genesis.
+    #[test]
+    fn a_device_becomes_a_device_of_a_carried_profile() {
+        let mut sponsor = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("found");
+        let mut joiner = ReachPlane::found_here(ALICE_B, None, None, NOW).expect("founded alone");
+        let sponsor_device = device_from_seed(&ALICE_A);
+        let joiner_device = device_from_seed(&ALICE_B);
+        let throwaway = joiner.profile().clone();
+        assert_ne!(&throwaway, sponsor.profile());
+
+        let card = sponsor.own_card(&sponsor_device).expect("own card");
+        let (nonce, epoch) = ([21u8; 16], 2);
+        let joiner_half = DeviceLink::half(&ALICE_B, &sponsor_device, nonce, epoch);
+        let sponsor_half = DeviceLink::half(&ALICE_A, &joiner_device, nonce, epoch);
+        let link = DeviceLink::assemble(
+            (sponsor_device.clone(), sponsor_half),
+            (joiner_device.clone(), joiner_half),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        sponsor
+            .adopt_device(link.clone())
+            .expect("the sponsor adopts");
+        joiner
+            .become_device_of(card, sponsor_device.clone(), link, NOW)
+            .expect("the joiner becomes a device of the profile");
+
+        assert_eq!(joiner.profile(), sponsor.profile());
+        assert_ne!(
+            joiner.profile(),
+            &throwaway,
+            "the throwaway profile is dropped"
+        );
+        assert_eq!(joiner.my_devices(), sponsor.my_devices());
+        assert_eq!(joiner.my_devices(), {
+            let mut both = vec![sponsor_device.clone(), joiner_device.clone()];
+            both.sort();
+            both
+        });
+        assert!(matches!(
+            joiner.origin(),
+            addressbook::reach_store::Origin::Adopted { from, at: NOW } if from == &sponsor_device
+        ));
+        assert_eq!(joiner.canonical_device(), joiner_device);
+        assert!(
+            joiner.state().genesis.as_ref() == sponsor.state().genesis.as_ref(),
+            "the carried genesis is the sponsor's"
+        );
+
+        // A stranger takes the joiner's head: the chain from the genesis to
+        // the joiner rides the projection.
+        let reader = Standing {
+            device: Some(device_from_seed(&BOB_A)),
+            ..Standing::default()
+        };
+        let announced = joiner
+            .announce(Audience::Public, &reader)
+            .expect("the joiner announces as the profile");
+        let mut theirs = Registry::new();
+        theirs
+            .absorb(announced.projection, &announced.genesis, &reader)
+            .expect("a joined device's head is evidence to a stranger");
+        let resolved = theirs.resolve(sponsor.profile()).expect("held");
+        assert!(resolved.contains(&joiner_device) && resolved.contains(&sponsor_device));
+
+        // Becoming a device twice is refused, and refused as "already
+        // corresponded" would be wrong too: what is held is the adopted
+        // profile, which a second card cannot replace.
+        let again = sponsor.own_card(&sponsor_device).expect("card");
+        let unrelated = DeviceLink::seal(&[85u8; 32], &[86u8; 32], [14u8; 16], 10).expect("seal");
+        assert!(joiner
+            .become_device_of(again, sponsor_device, unrelated, NOW)
+            .is_err());
+    }
+
+    /// A joiner that has spoken as its own profile keeps it. Learning
+    /// somebody and being issued an address are each enough: either leaves a
+    /// correspondent holding an id this device would stop answering for.
+    #[test]
+    fn a_joiner_that_has_corresponded_refuses_adoption() {
+        let sponsor = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("found");
+        let sponsor_device = device_from_seed(&ALICE_A);
+        let joiner_device = device_from_seed(&ALICE_B);
+        let (nonce, epoch) = ([22u8; 16], 2);
+        let link = DeviceLink::assemble(
+            (
+                sponsor_device.clone(),
+                DeviceLink::half(&ALICE_A, &joiner_device, nonce, epoch),
+            ),
+            (
+                joiner_device,
+                DeviceLink::half(&ALICE_B, &sponsor_device, nonce, epoch),
+            ),
+            nonce,
+            epoch,
+        )
+        .expect("assemble");
+        let card = sponsor.own_card(&sponsor_device).expect("card");
+
+        let mut learned = ReachPlane::found_here(ALICE_B, None, None, NOW).expect("found");
+        let mut bob = ReachPlane::found_here(BOB_A, None, None, NOW).expect("found");
+        let bobs = bob
+            .announce(Audience::Public, &learned.standing())
+            .expect("announce");
+        learned.learn(bobs, &bob.standing()).expect("learn bob");
+        assert!(matches!(
+            learned.become_device_of(card.clone(), sponsor_device.clone(), link.clone(), NOW),
+            Err(Failure::AlreadyCorresponded)
+        ));
+        assert_ne!(learned.profile(), sponsor.profile(), "nothing changed");
+
+        let mut addressed = ReachPlane::found_here(ALICE_B, None, None, NOW).expect("found");
+        addressed.issued("tin-harbor-quiet-4417".into());
+        assert!(matches!(
+            addressed.become_device_of(card, sponsor_device, link, NOW),
+            Err(Failure::AlreadyCorresponded)
+        ));
     }
 
     /// A device set that grew is a question, not a badge: the correspondent

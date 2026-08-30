@@ -31,7 +31,7 @@ const PAIRING_RETRY_AFTER_MS: u32 = 1_500;
 /// How long a minted code stays good for. Longer than a pairing, because the
 /// code is carried between rooms; short enough that a code left on a screen
 /// is not a standing door.
-const RENDEZVOUS_LIFETIME_MS: u64 = 15 * 60 * 1_000;
+pub(crate) const RENDEZVOUS_LIFETIME_MS: u64 = 15 * 60 * 1_000;
 
 /// How many unspent codes one coordinator holds at once. A bound on a table
 /// anyone with a controller can grow, not a limit anyone will meet.
@@ -842,7 +842,7 @@ fn validate_label(label: &str) -> Result<()> {
 /// Eight symbols of the code alphabet: five bits from each of eight random
 /// bytes, so the randomness is the operating system's and the alphabet does
 /// the rest.
-fn random_rendezvous_code() -> Result<String> {
+pub(crate) fn random_rendezvous_code() -> Result<String> {
     let mut bytes = [0u8; RENDEZVOUS_CODE_CHARS];
     getrandom::fill(&mut bytes).context("obtain display rendezvous randomness")?;
     bytes

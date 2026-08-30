@@ -468,7 +468,7 @@ fn apply_if_this_platform_has_no_stub(_root: &Path) {}
 /// How long to wait before the next check: the period, stretched one time in
 /// five, plus a spread of up to a minute so two daemons started together do
 /// not stay together.
-fn next_delay(period: Duration, spread: Duration) -> Duration {
+pub(crate) fn next_delay(period: Duration, spread: Duration) -> Duration {
     let stretch = if draw() < 0.2 {
         1.0 + MAX_STRETCH * draw()
     } else {

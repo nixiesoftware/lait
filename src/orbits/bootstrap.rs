@@ -741,6 +741,44 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 Err(error) => world_update_state_failure("read status", error),
             }
         }
+        Request::DevicePairEnter { code } => {
+            match router
+                .pair()
+                .enter(&code, crate::daemon::pair::now_ms())
+                .await
+            {
+                Ok(crate::daemon::pair::SponsorOutcome::Offer(offer)) => {
+                    Response::Host(HostReply::DevicePairOffer {
+                        pairing: offer.pairing,
+                        device: offer.device,
+                        name: offer.name,
+                        phrase: offer.phrase,
+                        expires_at_ms: offer.expires_at_ms,
+                    })
+                }
+                Ok(crate::daemon::pair::SponsorOutcome::Paired { device }) => {
+                    Response::Host(HostReply::DevicePaired {
+                        device: device.as_str().to_owned(),
+                    })
+                }
+                Err(error) => Response::err(format!("{error:#}")),
+            }
+        }
+        Request::DevicePairConfirm { pairing, accept } => {
+            match router
+                .pair()
+                .confirm(&pairing, accept, crate::daemon::pair::now_ms())
+                .await
+            {
+                Ok(Some(device)) => Response::Host(HostReply::DevicePaired {
+                    device: device.as_str().to_owned(),
+                }),
+                Ok(None) => Response::Ok {
+                    message: Some("the offer was rejected; nothing was written".into()),
+                },
+                Err(error) => Response::err(format!("{error:#}")),
+            }
+        }
         Request::HostContext => match config::list_identities() {
             Ok(identities) => Response::Host(HostReply::Context {
                 version: crate::VERSION.to_string(),
@@ -754,6 +792,8 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                 identities,
                 orbits: orbits::list(),
                 asks: router.asks().list(),
+                pairing: router.pair().status(crate::daemon::pair::now_ms()),
+                pair_offers: router.pair().offers(crate::daemon::pair::now_ms()),
             }),
             Err(error) => Response::err(format!("{error:#}")),
         },

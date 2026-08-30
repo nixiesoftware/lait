@@ -968,6 +968,22 @@ pub enum Request {
         to: String,
         link: String,
     },
+    /// Pair a new device into this identity's profile, from the device that
+    /// already holds it: enter the code the new device printed. `XXXX-XXXX`,
+    /// or `XXXX-XXXX@host:port[,host:port]` when the two share a LAN and no
+    /// relay. Answers [`HostReply::DevicePairOffer`] with the six words the
+    /// new device's journal also shows, or [`HostReply::DevicePaired`] when it
+    /// was already adopted and only the answer had been lost.
+    DevicePairEnter {
+        code: String,
+    },
+    /// Confirm or reject an offer. `accept: false` drops it and sends
+    /// nothing; `accept: true` assembles the link, adopts the device and
+    /// carries the link to it.
+    DevicePairConfirm {
+        pairing: String,
+        accept: bool,
+    },
     /// Identity-scoped address book. Daemon route only; never places an Orbit.
     /// The book is the one namer: member and presence rows leave the Station
     /// bare and the daemon decorates them from Cards — the `MemberAlias` verb
@@ -1976,6 +1992,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. }
+        | Request::DevicePairEnter { .. }
+        | Request::DevicePairConfirm { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -2317,6 +2335,11 @@ pub fn representative_requests() -> Vec<Request> {
         Request::HostWorldUpdateStatus { world: s() },
         Request::HostRestart,
         Request::HostContext,
+        Request::DevicePairEnter { code: s() },
+        Request::DevicePairConfirm {
+            pairing: s(),
+            accept: false,
+        },
     ]
 }
 
@@ -2895,6 +2918,18 @@ pub enum HostReply {
         #[serde(default)]
         pid: Option<u32>,
     },
+    /// A new device answered the code: the offer to confirm, with the six
+    /// words its journal shows. Also listed on [`HostReply::Context`] until
+    /// it is confirmed, rejected or expires.
+    DevicePairOffer {
+        pairing: String,
+        device: String,
+        name: String,
+        phrase: Vec<String>,
+        expires_at_ms: u64,
+    },
+    /// The device is one of this profile's now.
+    DevicePaired { device: String },
     /// Orientation for the identity this daemon runs as.
     Context {
         /// The build answering, in the form releases are identified by
@@ -2920,7 +2955,42 @@ pub enum HostReply {
         /// never has to exist for this to reach the person who can approve.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         asks: Vec<SponsorshipAsk>,
+        /// The code this device is showing while it waits to be paired into
+        /// a profile. `None` when it holds no code — already paired, a code
+        /// spent and awaiting its confirmation, or none minted yet — which
+        /// is why a headless install's tail reads it as "not yet" and never
+        /// as "paired".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pairing: Option<PairingCode>,
+        /// Offers awaiting this person's confirmation, from codes entered
+        /// here.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pair_offers: Vec<PairOffer>,
     },
+}
+
+/// A pairing code this device is showing, as a person is meant to read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingCode {
+    /// Grouped, `XXXX-XXXX`.
+    pub code: String,
+    /// The direct addresses to enter beside it (`CODE@addr`) when no relay
+    /// carries the dial. Empty under a relay.
+    #[serde(default)]
+    pub direct: Vec<std::net::SocketAddr>,
+    pub expires_at_ms: u64,
+}
+
+/// A device that answered a code entered here, awaiting confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairOffer {
+    pub pairing: String,
+    pub device: String,
+    /// The name the device gave for itself — its hostname.
+    pub name: String,
+    /// The six words its journal shows; confirm only when they match.
+    pub phrase: Vec<String>,
+    pub expires_at_ms: u64,
 }
 
 /// A co-located agent that attached without standing, waiting on a person.
