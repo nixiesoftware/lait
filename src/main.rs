@@ -23,6 +23,8 @@
 //! an agent; bare `lait` starts the daemon and serves the HTTP head a browser
 //! uses. Everything a command used to do is a request one of those three
 //! carries, so there is no grammar here to parse — only a mode to pick.
+//! `lait install` is the one thing that runs before any of them exist: it
+//! writes the always-on service a headless box runs the daemon under.
 //!
 //! Hand-rolled rather than clap: a handful of argv shapes, all of them already
 //! deployed (`daemon_spawn` self-execs `<exe> daemon`, agent configs run
@@ -83,15 +85,29 @@ enum Mode {
         /// on the answer speculative.
         world: Option<String>,
     },
+    /// Install the channel's proven binary as the always-on service, and
+    /// print what the daemon under it has to say.
+    ///
+    /// Prints for a person at a terminal — a pairing code, or where to look —
+    /// and never a readiness line for a parser, which is why `--json` is
+    /// refused here rather than inherited from the app arm.
+    Install {
+        channel: Option<lait::update::feed::Channel>,
+        user: bool,
+        displays: bool,
+        root: Option<String>,
+    },
 }
 
-const USAGE: &str = "lait is not a command surface — it has three host modes:\n\
+const USAGE: &str = "lait is not a command surface — it has three host modes and an installer:\n\
      \x20 lait daemon [--home <dir>]      the identity-scoped host\n\
      \x20 lait mcp                        the stdio head for an agent\n\
      \x20 lait [--json] [--port <n>] [--orbit <sel>] [--open] [--home <dir>]\n\
      \x20      [--world <mount>]           one head, one World\n\
      \x20                                 the local app, and the daemon under it\n\
      \x20 lait --version                  which build this is\n\
+     \x20 lait install [--user] [--displays] [--channel <stable|test>] [--root <dir>]\n\
+     \x20                                 the always-on service, from the release the channel proves\n\
      everything else is a request one of those three carries.";
 
 #[tokio::main]
@@ -138,6 +154,35 @@ impl Mode {
                 Mode::Mcp
             }
             Some("--version" | "-V") => Mode::Version,
+            Some("install") => {
+                args.next();
+                let (mut user, mut displays) = (false, false);
+                let (mut channel, mut root) = (None, None);
+                while let Some(flag) = args.next() {
+                    match flag {
+                        "--user" => user = true,
+                        "--displays" => displays = true,
+                        "--channel" => {
+                            let name = next(&mut args, "--channel")?;
+                            channel = Some(lait::update::feed::Channel::parse(&name).ok_or_else(
+                                || {
+                                    format!(
+                                        "--channel must be stable or test, got {name:?}\n{USAGE}"
+                                    )
+                                },
+                            )?);
+                        }
+                        "--root" => root = Some(next(&mut args, "--root")?),
+                        other => return Err(unknown(other)),
+                    }
+                }
+                Mode::Install {
+                    channel,
+                    user,
+                    displays,
+                    root,
+                }
+            }
             _ => {
                 let (mut json, mut open) = (false, false);
                 let (mut port, mut orbit, mut home) = (None, None, None);
@@ -290,6 +335,41 @@ impl Mode {
                     world.or_else(|| std::env::var("LAIT_WORLD").ok().filter(|s| !s.is_empty()));
                 lait::serve::run(port, open, json, selection, world).await
             }
+            Mode::Install {
+                channel,
+                user,
+                displays,
+                root,
+            } => {
+                // The feed's refusals are `warn!`s on the way to an error
+                // that names only the last link; to stderr so they are not
+                // lost, and so stdout stays the person's two lines.
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "lait=warn,warn".into()),
+                    )
+                    .try_init();
+                use lait::update::service;
+                // Blocking HTTP and archive work; the reactor is this process's
+                // and nothing else is on it, but a worker thread costs nothing.
+                let plan = tokio::task::spawn_blocking(move || {
+                    service::plan(channel, user, displays, root.map(std::path::PathBuf::from))
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("the install plan panicked: {error}"))??;
+                service::apply(&plan)?;
+                println!(
+                    "Installed {} as {} under {}",
+                    plan.version,
+                    service::unit_label(plan.user),
+                    plan.root.display()
+                );
+                let tail = service::tail(&plan.root).await?;
+                println!("{tail}");
+                Ok(())
+            }
         }
     }
 }
@@ -367,14 +447,47 @@ mod tests {
     }
 
     /// The install line prints for a person at a terminal — a pairing code,
-    /// or where to look — and never a readiness line for a parser. Pinned
-    /// before the mode exists so that landing it cannot inherit `--json`
-    /// from the app arm by accident.
+    /// or where to look — and never a readiness line for a parser. Refused
+    /// by the mode's own parser, so it cannot inherit `--json` from the app
+    /// arm by accident.
     #[test]
     fn the_install_line_refuses_json() {
         assert!(
             parse(&["install", "--json"]).is_err(),
             "install accepted --json, which belongs to the app"
         );
+    }
+
+    /// The installer's flags are its own, and a channel is one of the two the
+    /// feed serves — a typo here would follow nothing and install stable.
+    #[test]
+    fn the_install_line_takes_its_own_flags() {
+        let Ok(Mode::Install {
+            channel,
+            user,
+            displays,
+            root,
+        }) = parse(&["install", "--user", "--channel", "test"])
+        else {
+            panic!("install --user --channel test did not parse");
+        };
+        assert_eq!(channel, Some(lait::update::feed::Channel::Test));
+        assert!(user);
+        assert!(!displays, "the display coordinator is off unless asked");
+        assert_eq!(root, None);
+
+        let Ok(Mode::Install { root, displays, .. }) =
+            parse(&["install", "--displays", "--root", "/srv/lait"])
+        else {
+            panic!("install --displays --root did not parse");
+        };
+        assert!(displays);
+        assert_eq!(root.as_deref(), Some("/srv/lait"));
+
+        assert!(
+            parse(&["install", "--channel", "nightly"]).is_err(),
+            "a channel the feed does not serve was accepted"
+        );
+        assert!(parse(&["install", "--home", "d"]).is_err());
     }
 }

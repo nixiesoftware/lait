@@ -16,6 +16,7 @@ pub mod consent;
 pub mod facts;
 pub mod feed;
 pub mod notify;
+pub mod service;
 pub mod tree;
 pub mod watch;
 pub mod world;

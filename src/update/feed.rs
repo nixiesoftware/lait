@@ -144,9 +144,16 @@ impl Channel {
     /// Record this channel as the node's choice. Opting in is an explicit act
     /// (CLIENT-52); this is only its persistence.
     pub fn record(self) -> anyhow::Result<()> {
-        let dir = crate::config::identity_dir()?;
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("update-channel"), self.as_str())?;
+        self.record_at(&crate::config::identity_dir()?)
+    }
+
+    /// [`record`](Self::record) at a named identity directory: the install
+    /// line's call, made before the daemon that will read it has ever run,
+    /// against a root the installer chose rather than the one this process
+    /// resolves to.
+    pub fn record_at(self, identity: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(identity)?;
+        std::fs::write(identity.join("update-channel"), self.as_str())?;
         Ok(())
     }
 

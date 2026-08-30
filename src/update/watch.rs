@@ -283,7 +283,7 @@ impl Installation {
 }
 
 /// Now, in unix seconds.
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
