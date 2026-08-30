@@ -20,6 +20,13 @@ RestartSec=2
 TimeoutStopSec=45
 KillSignal=SIGTERM
 NoNewPrivileges=yes
+# The net plane's TUN and its routes. Ambient so the daemon holds it without
+# being root, bounded so nothing it starts can gain anything else. A daemon
+# without this reports `interface: not permitted` and carries on — which is
+# why a user-manager install, which cannot grant capabilities at all, simply
+# drops these two lines.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 ProtectSystem=strict
 ReadWritePaths=@ROOT@
 

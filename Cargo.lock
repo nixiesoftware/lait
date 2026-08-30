@@ -3738,6 +3738,7 @@ dependencies = [
  "mediabox",
  "mp4-atom",
  "n0-future",
+ "netstack",
  "postcard",
  "rand_core 0.6.4",
  "rcgen",
@@ -3874,17 +3875,6 @@ dependencies = [
  "runtime",
  "world-runner",
  "world-sdk",
-]
-
-[[package]]
-name = "lait-net"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "comms",
- "mechanics",
- "netstack",
- "tokio",
 ]
 
 [[package]]

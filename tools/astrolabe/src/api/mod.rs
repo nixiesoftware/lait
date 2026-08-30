@@ -814,6 +814,10 @@ pub struct ProfileFacts {
     /// `devices`, because "not read" and "none" are different facts and only
     /// one of them is worth acting on.
     pub device_set_unknown: bool,
+    /// The tunnel interface on this machine. `None` when the daemon carries
+    /// no net plane at all — which is not the same as a machine that will not
+    /// give one, and neither is a failure.
+    pub interface: Option<InterfaceRow>,
     /// The code this device is showing while it waits to be added to a
     /// profile. `None` whenever it holds none.
     pub pairing: Option<PairingCodeRow>,
@@ -839,6 +843,46 @@ pub struct OwnDeviceRow {
     /// The Spaces this device is listed in. Empty is an answer; it is not
     /// "unknown", which is [`LivenessRow::NotProbed`]'s business.
     pub held: Vec<String>,
+    /// How the tunnel reaches this device. `None` is "nothing carried", which
+    /// is not "unreachable" — and the three ways of not being reached below
+    /// are not each other either.
+    pub reach: Option<ReachRow>,
+}
+
+/// The tunnel interface on the machine this client is talking to.
+///
+/// `NotPermitted` is the one a person can act on: a daemon started by hand
+/// holds no `CAP_NET_ADMIN`, and installing the service is what gives it one.
+/// `Unsupported` is a platform whose seam is not built yet, and `Off` is the
+/// operator's own switch. None of the three is a failure, and none of them
+/// says anything about how many devices a person has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterfaceRow {
+    Up { name: String, address: String },
+    NotPermitted,
+    Unsupported,
+    Off,
+}
+
+/// How the tunnel reaches one own device.
+///
+/// `NoRoute` (nothing ever taught this device where that one is),
+/// `Unreachable` (a dial was made and failed) and `Retired` (the set no
+/// longer names it) are three different facts. Folding them would draw a
+/// revoked device as a flaky one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReachRow {
+    /// `via` is the path the transport chose: `direct`, `relay`, `unknown`.
+    Connected {
+        via: String,
+    },
+    Dialing,
+    NoRoute,
+    /// Unix seconds.
+    Unreachable {
+        since: u64,
+    },
+    Retired,
 }
 
 /// What asking a device last learned.
@@ -2481,9 +2525,29 @@ fn project(app: &App) -> ClientView {
                         lait::control::Liveness::NotProbed => LivenessRow::NotProbed,
                     },
                     held: device.held.clone(),
+                    reach: device.reach.as_ref().map(|reach| match reach {
+                        lait::control::ReachKind::Connected { via } => {
+                            ReachRow::Connected { via: via.clone() }
+                        }
+                        lait::control::ReachKind::Dialing => ReachRow::Dialing,
+                        lait::control::ReachKind::NoRoute => ReachRow::NoRoute,
+                        lait::control::ReachKind::Unreachable { since } => {
+                            ReachRow::Unreachable { since: *since }
+                        }
+                        lait::control::ReachKind::Retired => ReachRow::Retired,
+                    }),
                 })
                 .collect(),
             device_set_unknown: profile.device_set_unknown,
+            interface: profile.interface.as_ref().map(|interface| match interface {
+                lait::control::InterfaceView::Up { name, address } => InterfaceRow::Up {
+                    name: name.clone(),
+                    address: address.clone(),
+                },
+                lait::control::InterfaceView::NotPermitted => InterfaceRow::NotPermitted,
+                lait::control::InterfaceView::Unsupported => InterfaceRow::Unsupported,
+                lait::control::InterfaceView::Off => InterfaceRow::Off,
+            }),
             pairing: app
                 .context()
                 .and_then(|context| context.pairing.as_ref())
@@ -3182,6 +3246,7 @@ mod tests {
                         at: 5,
                     },
                     held: vec!["spc_a".into(), "spc_b".into()],
+                    reach: None,
                 },
                 OwnDeviceView {
                     device: "dev_pi".into(),
@@ -3190,9 +3255,11 @@ mod tests {
                         why: "no route".into(),
                     },
                     held: Vec::new(),
+                    reach: Some(lait::control::ReachKind::Unreachable { since: 12 }),
                 },
             ],
             device_set_unknown: false,
+            interface: Some(lait::control::InterfaceView::NotPermitted),
         })));
 
         let profile = project(&app).profile.expect("the profile did not cross");
@@ -3220,6 +3287,15 @@ mod tests {
         );
         assert_eq!(profile.offers.len(), 1);
         assert_eq!(profile.offers[0].phrase.len(), 6);
+        // A machine that will not give an interface is a fact about the
+        // machine, and a device nothing has routed to is not the same as one
+        // that was dialed and did not answer. Both cross whole.
+        assert_eq!(profile.interface, Some(InterfaceRow::NotPermitted));
+        assert_eq!(profile.devices[0].reach, None);
+        assert_eq!(
+            profile.devices[1].reach,
+            Some(ReachRow::Unreachable { since: 12 })
+        );
     }
 
     /// A device set nobody has restored is not a profile with no devices.

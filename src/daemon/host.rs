@@ -1067,6 +1067,14 @@ impl Daemon {
             .as_ref()
             .map(|transport| self.spawn_fanout(transport.clone()));
 
+        // The tunnel between this person's devices, mounted here for the same
+        // reason: a Pi under the service unit is the node with
+        // `LAIT_DISPLAY=off`, and mounting this inside the display branch
+        // below would skip exactly the device the plane exists for.
+        let netplane = identity_transport
+            .as_ref()
+            .and_then(|transport| self.spawn_netplane(transport.clone()));
+
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
         // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
@@ -1078,6 +1086,7 @@ impl Daemon {
             Self::join_staging(staging).await;
             Self::join_world_upgrades(world_upgrades).await;
             Self::join_fanout(fanout).await;
+            Self::join_netplane(netplane).await;
             return served;
         }
         // Take the port before committing to it, so "another daemon already holds
@@ -1108,6 +1117,7 @@ impl Daemon {
                 Self::join_staging(staging).await;
                 Self::join_world_upgrades(world_upgrades).await;
                 Self::join_fanout(fanout).await;
+                Self::join_netplane(netplane).await;
                 return served;
             }
             Err(error) => {
@@ -1115,6 +1125,7 @@ impl Daemon {
                 Self::join_staging(staging).await;
                 Self::join_world_upgrades(world_upgrades).await;
                 Self::join_fanout(fanout).await;
+                Self::join_netplane(netplane).await;
                 return Err(error).context("serve daemon display HTTPS");
             }
         };
@@ -1231,6 +1242,7 @@ impl Daemon {
         Self::join_staging(staging).await;
         Self::join_world_upgrades(world_upgrades).await;
         Self::join_fanout(fanout).await;
+        Self::join_netplane(netplane).await;
         outcome
     }
 
@@ -1260,6 +1272,39 @@ impl Daemon {
             Ok(Err(error)) => tracing::warn!(%error, "the fan-out ended abnormally"),
             Err(_) => tracing::debug!(
                 "the fan-out did not finish in time; leaving it to the process exit"
+            ),
+        }
+    }
+
+    /// Mount the net plane on the identity's endpoint, and hook what it
+    /// learns into the reach view, so `ReachView.interface` and
+    /// `devices[].reach` say what this machine's tunnel is doing.
+    ///
+    /// `None` when the endpoint has no net lane to hand over — a degradation
+    /// the daemon goes on without, like a missing display lane.
+    fn spawn_netplane(
+        &self,
+        transport: Arc<dyn comms::Transport>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let own = self.router.correspondence().own_devices();
+        let stop = self.endpoint.subscribe_stop();
+        let (facts, task) = crate::daemon::netplane::mount(transport, own, stop)?;
+        self.router.correspondence().hook_netplane(facts);
+        Some(task)
+    }
+
+    /// Joined on every exit, like the fan-out: the carry holds an endpoint
+    /// lane and blocking packet threads, and a plane that outlived the daemon
+    /// would be a route nothing can revoke.
+    async fn join_netplane(netplane: Option<tokio::task::JoinHandle<()>>) {
+        let Some(netplane) = netplane else {
+            return;
+        };
+        match tokio::time::timeout(Duration::from_secs(5), netplane).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the net plane ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the net plane did not finish in time; leaving it to the process exit"
             ),
         }
     }
@@ -2103,6 +2148,21 @@ fn embedded() -> bool {
 fn display_hosting() -> bool {
     !matches!(
         std::env::var("LAIT_DISPLAY").as_deref(),
+        Ok("off" | "0" | "false")
+    )
+}
+
+/// Whether this daemon raises the tunnel interface for its own devices.
+///
+/// On by default, and cheap where it cannot be had: only a daemon holding
+/// `CAP_NET_ADMIN` — the service unit `lait install` writes — gets an
+/// interface at all, so a desktop daemon costs one log line. `LAIT_NET=off`
+/// withholds it deliberately, which the plane reports as `Off` rather than as
+/// a machine that could not: an operator's choice and a machine's limit are
+/// different facts, and only one of them is worth telling somebody about.
+pub(super) fn net_hosting() -> bool {
+    !matches!(
+        std::env::var("LAIT_NET").as_deref(),
         Ok("off" | "0" | "false")
     )
 }

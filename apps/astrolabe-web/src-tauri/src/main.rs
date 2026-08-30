@@ -148,8 +148,21 @@ struct WebProfileFacts {
     /// no profile has no devices, so an empty list with this set is a daemon
     /// that has not answered rather than a person with nothing.
     device_set_unknown: bool,
+    /// The tunnel interface on this machine. `None` when the daemon carries
+    /// no net plane; the variants below are the machine's own answers, and
+    /// none of them is a failure or a statement about the device set.
+    interface: Option<WebInterface>,
     pairing: Option<WebPairingCode>,
     offers: Vec<WebPairOffer>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebInterface {
+    Up { name: String, address: String },
+    NotPermitted,
+    Unsupported,
+    Off,
 }
 
 #[derive(Clone, Serialize)]
@@ -167,6 +180,21 @@ struct WebOwnDevice {
     liveness: WebDeviceLiveness,
     /// The Spaces this device is listed in.
     held: Vec<String>,
+    /// How the tunnel reaches this device; `null` when nothing carries.
+    reach: Option<WebDeviceReach>,
+}
+
+/// Tagged for the reason liveness is: "nothing ever routed here", "a dial
+/// failed" and "the set no longer names it" are three facts, and a surface
+/// that flattened them would draw a revoked device as a flaky one.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebDeviceReach {
+    Connected { via: String },
+    Dialing,
+    NoRoute,
+    Unreachable { since: u64 },
+    Retired,
 }
 
 /// Tagged, because the three are different facts: a device that answered, a
@@ -1089,6 +1117,7 @@ impl From<ClientView> for WebClientView {
                     origin,
                     devices,
                     device_set_unknown,
+                    interface,
                     pairing,
                     offers,
                 } = profile;
@@ -1116,9 +1145,28 @@ impl From<ClientView> for WebClientView {
                                 api::LivenessRow::NotProbed => WebDeviceLiveness::NotProbed,
                             },
                             held: device.held,
+                            reach: device.reach.map(|reach| match reach {
+                                api::ReachRow::Connected { via } => {
+                                    WebDeviceReach::Connected { via }
+                                }
+                                api::ReachRow::Dialing => WebDeviceReach::Dialing,
+                                api::ReachRow::NoRoute => WebDeviceReach::NoRoute,
+                                api::ReachRow::Unreachable { since } => {
+                                    WebDeviceReach::Unreachable { since }
+                                }
+                                api::ReachRow::Retired => WebDeviceReach::Retired,
+                            }),
                         })
                         .collect(),
                     device_set_unknown,
+                    interface: interface.map(|interface| match interface {
+                        api::InterfaceRow::Up { name, address } => {
+                            WebInterface::Up { name, address }
+                        }
+                        api::InterfaceRow::NotPermitted => WebInterface::NotPermitted,
+                        api::InterfaceRow::Unsupported => WebInterface::Unsupported,
+                        api::InterfaceRow::Off => WebInterface::Off,
+                    }),
                     pairing: pairing.map(|pairing| WebPairingCode {
                         code: pairing.code,
                         direct: pairing.direct,
