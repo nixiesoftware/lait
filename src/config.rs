@@ -755,6 +755,89 @@ mod tests {
         }
     }
 
+    /// The book is an ordering, and the ordering is the reader's: it resolves
+    /// through the same three layers every endpoint does, keeps the position
+    /// it was written in, and an empty value weighs nobody rather than falling
+    /// through to whatever the build shipped.
+    #[test]
+    fn the_marker_book_reads_env_then_key_then_built_in_and_empty_opts_out() {
+        let device = |seed: u8| mechanics::actor::device_from_seed(&[seed; 32]);
+        let with_key = |value: &str| Settings {
+            global: {
+                let mut g = ConfigMap::default();
+                g.set("marks.book", value);
+                g
+            },
+            store: ConfigMap::default(),
+        };
+
+        let book = with_key(&format!(
+            "https://first.example/@{}, https://second.example",
+            device(3).as_str()
+        ))
+        .book("marks.book", "LAIT_TEST_BOOK_UNSET")
+        .expect("the key names two markers");
+        assert_eq!(
+            book.iter().map(|m| m.base.as_str()).collect::<Vec<_>>(),
+            vec!["https://first.example", "https://second.example"],
+            "position is the weight, so the written order is the read order"
+        );
+        assert_eq!(
+            book[0].by.as_ref(),
+            Some(&device(3)),
+            "the signer ships inside the entry"
+        );
+        assert_eq!(book[1].by, None, "an entry may name no signer at all");
+
+        assert_eq!(
+            with_key("https://ok.example, nonsense, https://bad.example@not-a-device")
+                .book("marks.book", "LAIT_TEST_BOOK_UNSET")
+                .map(|book| book.len()),
+            Some(1),
+            "a malformed entry is dropped, never repaired, and never the whole book"
+        );
+
+        // A bespoke env name per case: the real override is process-global and
+        // this suite is parallel.
+        std::env::set_var("LAIT_TEST_BOOK_A", "https://override.example");
+        assert_eq!(
+            with_key("https://key.example")
+                .book("marks.book", "LAIT_TEST_BOOK_A")
+                .map(|book| book[0].base.clone()),
+            Some("https://override.example".to_string()),
+            "the env override wins over the key"
+        );
+        std::env::set_var("LAIT_TEST_BOOK_B", "");
+        assert_eq!(
+            with_key("https://key.example").book("marks.book", "LAIT_TEST_BOOK_B"),
+            None,
+            "present-but-empty weighs nobody"
+        );
+        std::env::remove_var("LAIT_TEST_BOOK_A");
+        std::env::remove_var("LAIT_TEST_BOOK_B");
+        assert_eq!(
+            with_key("").book("marks.book", "LAIT_TEST_BOOK_UNSET"),
+            None,
+            "an emptied key opts out too, rather than falling through to the built-in"
+        );
+
+        // The shipped pole. Its signer is the whole of F-19: an entry that
+        // named only a host would have every fresh install pin whatever key
+        // answered there.
+        let shipped = MarkerEntry::parse(FOUNDATION_MARKS_BOOK).expect("the shipped entry parses");
+        assert!(
+            shipped.by.is_some(),
+            "the shipped marker names its signer — there is no trust on first use here"
+        );
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                Settings::default().marks_book(),
+                None,
+                "development builds weigh nobody; the Foundation rides built_in in release"
+            );
+        }
+    }
+
     /// Named relays are lait's own rendezvous; none is the public mesh. The
     /// explicit `LAIT_NETWORK` semantics stay whole above both.
     #[test]
@@ -1158,6 +1241,24 @@ pub const FOUNDATION_RELAY: &str = "https://relay.foundation.pub";
 /// exists this moves behind the name like the relay and the Post did.
 pub const FOUNDATION_NOTIFY: &str = "https://foundation-notify-894246603476.us-central1.run.app";
 
+/// The marker book a release build ships with: the Foundation's chronicle,
+/// and **the device that signs it**.
+///
+/// The signer rides inside the entry because trust on first use is poisonable
+/// exactly where a reader is weakest — a fresh install asking a *name* whose
+/// host has moved. Two deployments have answered at this name; one brought up
+/// without `REGISTRY_CHRONICLE_SEED` mints an ephemeral signer, every client
+/// that pinned it would then read the real marker as a stranger, and the only
+/// recovery would be deleting a file per device. Naming the signer makes the
+/// impostor a refusal at first contact instead of a pin nobody can undo.
+///
+/// The id is what `GET /registry/chronicle` answers as `head.by`; it survives
+/// a revision roll because the seed is a stored secret and not a mint.
+/// Rotating that seed is a fleet-wide `WrongSigner` and has to ship with a
+/// release that moves this line.
+pub const FOUNDATION_MARKS_BOOK: &str =
+    "https://post.foundation.pub@7b974cb04849e56e7e6bf2226cfd33a7ca55fb197e2f4644a783562cea3cac9c";
+
 /// The cloud default for a hosted-service endpoint.
 ///
 /// Present only in release builds — the product connects out of the box, and
@@ -1242,6 +1343,16 @@ pub const KEYS: &[KeySpec] = &[
         help: "Identity directory addresses publish and resolve against (applies at next daemon start; LAIT_DIRECTORY_URL overrides; release default is the Foundation cloud, empty opts out).",
         built_in: || cloud_default(FOUNDATION_SERVICES),
     },
+    // The markers this identity weighs, in the order it weighs them. Position
+    // is the weight and the ordering is the *reader's* — no marker states its
+    // own rank, and a mark confers nothing wherever it lands in the list.
+    KeySpec {
+        name: "marks.book",
+        layers: KeyLayers::GlobalAndStore,
+        daemon_read: false,
+        help: "Ordered comma-separated markers whose chronicles this identity follows, each `base[@device-id]`, first weighed most (applies at next daemon start; LAIT_MARKS_BOOK overrides; release default is the Foundation, empty weighs nobody).",
+        built_in: || cloud_default(FOUNDATION_MARKS_BOOK),
+    },
     // Not `daemon_read`: the port is spent at bind, so a live daemon cannot
     // honour a change without dropping the listener every receiver is on. The
     // help says so rather than a reload pretending otherwise.
@@ -1253,6 +1364,39 @@ pub const KEYS: &[KeySpec] = &[
         built_in: || Some(crate::display::DEFAULT_DISPLAY_PORT.to_string()),
     },
 ];
+
+/// One marker this identity follows: where its chronicle answers, and — when
+/// the book names one — the only device allowed to sign that chronicle.
+///
+/// A named signer is what makes the *first* answer checkable. Without it the
+/// reader has nothing to compare against and must take whatever key replies,
+/// which is a decision made by whoever happens to be answering at that host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerEntry {
+    pub base: String,
+    pub by: Option<mechanics::ids::DeviceId>,
+}
+
+impl MarkerEntry {
+    /// Parse one `base[@device-id]` entry, or `None`.
+    ///
+    /// A malformed entry is dropped rather than repaired: repairing it would
+    /// mean following a marker nobody wrote down, and the empty book is a
+    /// perfectly good answer.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let (base, by) = match text.rsplit_once('@') {
+            Some((base, by)) => (base, Some(mechanics::ids::DeviceId::parse(by)?)),
+            None => (text, None),
+        };
+        let base = base.trim_end_matches('/');
+        (base.starts_with("http://") || base.starts_with("https://")).then(|| Self {
+            base: base.to_string(),
+            by,
+        })
+    }
+}
 
 /// Look up a key in the table. `space.*` names get the reserved-namespace
 /// error (future synced space settings); anything else unknown lists the
@@ -1418,6 +1562,40 @@ impl Settings {
             .map(|url| url.trim_end_matches('/').to_string())
             .collect();
         (!relays.is_empty()).then_some(relays)
+    }
+
+    /// The markers this identity follows, in the order it weighs them.
+    ///
+    /// Same chain as every service endpoint — `LAIT_MARKS_BOOK` first
+    /// (present-but-empty weighs nobody, the whole opt-out), then the key,
+    /// then the Foundation in release builds — and the same tolerance
+    /// `relay.urls` extends: a comma list with malformed entries dropped
+    /// rather than the book refused.
+    ///
+    /// **Position is the weight, and the ordering is this reader's.** Nothing
+    /// a marker says sets its own rank, and nothing in the list confers
+    /// admission, membership, a grant or standing on anybody — a book of
+    /// markers is a book of witnesses.
+    pub fn marks_book(&self) -> Option<Vec<MarkerEntry>> {
+        self.book("marks.book", "LAIT_MARKS_BOOK")
+    }
+
+    /// The book resolution, with its env name supplied so the layering is
+    /// testable without reaching for a process-global the parallel suite
+    /// shares — the split `service_url` already uses.
+    fn book(&self, key: &str, env_override: &str) -> Option<Vec<MarkerEntry>> {
+        let candidate = match std::env::var(env_override) {
+            Ok(value) => Some(value),
+            Err(_) => self
+                .get(key)
+                .map(str::to_string)
+                .or_else(|| (key_spec(key).ok()?.built_in)()),
+        }?;
+        let markers: Vec<MarkerEntry> = candidate
+            .split(',')
+            .filter_map(MarkerEntry::parse)
+            .collect();
+        (!markers.is_empty()).then_some(markers)
     }
 
     /// The transport environment this identity's daemon builds against.

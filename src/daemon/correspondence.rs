@@ -313,17 +313,42 @@ impl CorrespondenceService {
         if let Some(directory) = plane.directory.as_deref_mut() {
             let seed = plane.reach.seed();
             match lait_directory::publish_as(directory, &seed, &announcement, now) {
-                // The receipt rides back with the address. Nothing here reads
-                // it yet: what a marker recorded is a tier a reader weighs, and
-                // it must never gate the share that made this identity
-                // reachable at all.
-                Ok(issued) => plane.reach.issued(issued.address.as_str().to_owned()),
+                Ok(issued) => {
+                    plane.reach.issued(issued.address.as_str().to_owned());
+                    // The receipt rides back with the address, and this is
+                    // where it stops being the directory's word: the head is
+                    // ratcheted against the pin this identity holds for that
+                    // marker, and the marks are checked under it. Best effort
+                    // by construction — what a marker recorded is a tier a
+                    // reader weighs, and it must never gate the share that
+                    // made this identity reachable at all.
+                    self.follow_marker(&issued.receipt);
+                }
                 Err(refusal) => {
                     tracing::warn!(%refusal, "the directory did not take this publication");
                 }
             }
         }
         Ok(())
+    }
+
+    /// Ratchet the directory's chronicle on the receipt it just answered.
+    ///
+    /// The directory was chronicle-blind: it received receipts and never
+    /// judged one, so nothing this identity published through it was ever
+    /// placed in a log it follows. It goes through the same store the route
+    /// publication does — one pin per marker, whoever brought the receipt —
+    /// and a refusal is a line in the journal, never a failed share.
+    fn follow_marker(&self, receipt: &lait_directory::Receipt) {
+        let Some(base) = crate::config::Settings::load(Some(&self.identity)).directory_url() else {
+            return;
+        };
+        let entry = crate::daemon::markers::entry_for(&self.identity, &base);
+        if let Some(why) =
+            crate::daemon::markers::ratchet(&self.identity, &entry, Some(receipt)).refused()
+        {
+            tracing::warn!(%why, "the directory's chronicle did not check out");
+        }
     }
 
     /// This identity's card for its own device, with the epoch a sponsor's

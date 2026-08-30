@@ -20,7 +20,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use lait_directory::registry::{
-    chronicle_entry, chronicle_over_http, publish_over_http, Chronicled, Label, RoutePublish,
+    chronicle_entry, publish_over_http, Chronicled, Label, RoutePublish,
 };
 use lait_directory::Receipt;
 
@@ -57,134 +57,36 @@ pub fn publish_route(
     let publish = RoutePublish::sign(label, announcement, endpoint.to_string(), epoch, &first);
     let chronicled = publish_over_http(registry_base, &publish)?;
     check_receipt(&publish, &chronicled.receipt)?;
-    ratchet(identity_home, registry_base, &chronicled.receipt)?;
+    follow(identity_home, registry_base, &chronicled.receipt)?;
     Ok(chronicled)
 }
 
-/// The forward-only half: pin the first head this identity accepts, and
-/// thereafter require every later one to prove it extends the pin. Refusals
-/// stay distinct sentences, because they are distinct facts — a registrar
-/// that could not be *asked* is not one that *lied*, and a *different signer*
-/// is not the pinned holder equivocating.
+/// Follow the registrar as a marker: the pin, the ratchet and its distinct
+/// refusals live in [`crate::daemon::markers`], which is the identity's one
+/// pin store — the display was never the right owner of a fact every other
+/// follower of the same log would need, and two stores would have been two
+/// answers to "has this service equivocated".
 ///
-/// The head judged is the one the **chronicle surface** serves, not the one
-/// the receipt carried: a receipt head can be minted over a private side
-/// branch, so the canonical head is the authority, and the receipt is then
-/// checked to sit on that same chain (below).
-fn ratchet(identity_home: &Path, registry_base: &str, receipt: &Receipt) -> Result<()> {
-    use mechanics::chronicle::{advance, Advance, Refusal};
-
-    let held = crate::display::pin::load(identity_home);
-
-    // Ask for the current head first (no size), so a chronicle now *shorter*
-    // than the pin comes back as a head the ratchet reads as Rollback rather
-    // than a 404 that would fold into "could not be asked".
-    let current = chronicle_over_http(registry_base, None)
-        .context("the registrar's chronicle could not be asked; the pin holds")?;
-
-    let Some(held) = held else {
-        // Trust on first use. But a registrar that answered a *chronicled*
-        // receipt and then serves no head is not a fresh pin — it is one
-        // suppressing the ratchet, so a receipt head with no pin still pins.
-        let first = receipt.head.as_ref().unwrap_or(&current.head);
-        first
-            .verify()
-            .map_err(|refusal| anyhow::anyhow!("the chronicle head did not verify: {refusal}"))?;
-        crate::display::pin::save(identity_home, first);
-        return Ok(());
-    };
-    let pinned = mechanics::chronicle::PinnedHead::from(&held);
-
-    // A pin is held. A receipt that now carries *no* head is a registrar that
-    // stopped chronicling after we pinned — suppression, not a fresh start —
-    // and must be loud, never a silent Ok.
+/// A refusal fails the publication, as it always has: a route this identity
+/// cannot place in the log the registrar claims to have put it in is not a
+/// published route, and the daemon logs the sentence and serves anyway.
+fn follow(identity_home: &Path, registry_base: &str, receipt: &Receipt) -> Result<()> {
+    let entry = crate::daemon::markers::entry_for(identity_home, registry_base);
+    // A receipt that now carries *no* head, to an identity that already holds
+    // a pin, is a registrar that stopped chronicling after we pinned —
+    // suppression, not a fresh start — and must be loud, never a silent Ok.
     if receipt.head.is_none() {
-        anyhow::bail!(
-            "the registrar answered without a chronicle head, but this identity holds a pin \
-             at size {} — it has stopped proving its memory; the pin holds",
-            pinned.size
-        );
-    }
-
-    // If the current head already covers the pin, fetch the consistency path
-    // from the pin's size; advance judges rollback/divergence/extension.
-    let consistency = if current.head.size > pinned.size {
-        chronicle_over_http(registry_base, Some(pinned.size))
-            .context("the registrar's chronicle could not be asked; the pin holds")?
-            .consistency
-    } else {
-        Vec::new()
-    };
-
-    let outcome = advance(Some(&pinned), &current.head, &consistency);
-    match outcome {
-        Ok(Advance::Unchanged) => Ok(()),
-        Ok(_) => {
-            // The head is honest against the pin. Now bind the receipt to it:
-            // the entry we just published must sit on the canonical chronicle,
-            // not on a side branch the receipt could have been minted over.
-            reconcile_receipt(receipt, registry_base)?;
-            crate::display::pin::save(identity_home, &current.head);
-            Ok(())
-        }
-        Err(Refusal::Diverged) => {
-            crate::display::pin::keep_divergence(identity_home, &held, &current.head);
+        if let Some(pinned) = crate::daemon::markers::pinned(identity_home, &entry) {
             anyhow::bail!(
-                "the registrar's chronicle DIVERGED from the head this identity pinned \
-                 (both signed by the pinned device at size {}, different roots) — the \
-                 registrar equivocated, and both artifacts are retained beside the identity \
-                 as evidence",
+                "the registrar answered without a chronicle head, but this identity holds a pin \
+                 at size {} — it has stopped proving its memory; the pin holds",
                 pinned.size
-            )
+            );
         }
-        Err(Refusal::WrongSigner) => anyhow::bail!(
-            "the registrar's chronicle head is signed by a different device than the one this \
-             identity pinned — it is not the holder you followed; the pin holds"
-        ),
-        Err(Refusal::Unproven) => anyhow::bail!(
-            "the registrar could not prove its chronicle (size {}) extends the pinned head \
-             (size {}) — the pin holds",
-            current.head.size,
-            pinned.size
-        ),
-        Err(Refusal::Rollback) => anyhow::bail!(
-            "the registrar served a chronicle head older than the pinned one \
-             (size {} against {}) — a replayed or truncated copy; the pin holds",
-            current.head.size,
-            pinned.size
-        ),
-        Err(refusal) => anyhow::bail!("the registrar's chronicle head did not verify: {refusal}"),
     }
-}
-
-/// Bind the just-published entry to the registrar's *canonical* chronicle.
-///
-/// `check_receipt` already proved the entry is included under the receipt's
-/// own head; this proves that head is on the public chronicle, not a private
-/// side branch. Treat the receipt head as a mini-pin and ask the chronicle
-/// surface to prove its current head extends it: a genuine receipt head is a
-/// prefix of the canonical log (the consistency proof validates), while a
-/// side-branch head that includes the entry cannot be a prefix of a canonical
-/// log that omits it, so the proof fails and the false receipt is caught. A
-/// canonical head *behind* the receipt's claimed size is a rollback, also
-/// caught. Same-signer is required by `advance`, so a receipt signed by a
-/// different key than the public head fails too.
-fn reconcile_receipt(receipt: &Receipt, registry_base: &str) -> Result<()> {
-    use mechanics::chronicle::{advance, Advance, PinnedHead};
-
-    let Some(receipt_head) = &receipt.head else {
-        return Ok(());
-    };
-    let as_pin = PinnedHead::from(receipt_head);
-    let answer = chronicle_over_http(registry_base, Some(receipt_head.size))
-        .context("the registrar's chronicle could not be asked to place the receipt")?;
-    match advance(Some(&as_pin), &answer.head, &answer.consistency) {
-        Ok(Advance::Unchanged | Advance::Extended | Advance::Pinned) => Ok(()),
-        Ok(other) => anyhow::bail!("unexpected receipt reconciliation outcome: {other:?}"),
-        Err(err) => anyhow::bail!(
-            "the receipt's head is not on the registrar's canonical chronicle ({err}) — the \
-             registrar proved a recording its public log does not contain"
-        ),
+    match crate::daemon::markers::ratchet(identity_home, &entry, Some(receipt)).refused() {
+        Some(why) => anyhow::bail!(why),
+        None => Ok(()),
     }
 }
 
@@ -209,13 +111,22 @@ fn check_receipt(publish: &RoutePublish, receipt: &Receipt) -> Result<()> {
 /// These assert the chain and not the parts, per the rule `launch.rs` states:
 /// a real identity home, real HTTP against the mounted registry surface, and
 /// the pin moving — or refusing to — on disk where the daemon will read it.
+///
+/// The dishonest registrars answer **at the base the honest one did**: the pin
+/// store is keyed by signer and indexed by base, so a lying registrar on a
+/// second port is a second marker rather than the same one caught changing its
+/// story. Swapping the registrar behind one listener is what a key rotation, a
+/// truncation and an equivocation actually look like from a reader.
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use lait_directory::registry::{ChronicleStore, Label, MemRegistry, Registrar, RegistryStore};
     use lait_directory::Chronicler;
+    use mechanics::chronicle::Head;
     use mechanics::kinship::ProfileId;
+
+    type Held = Arc<Mutex<Registrar<MemRegistry>>>;
 
     fn home_with_identity() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -234,34 +145,38 @@ mod tests {
             .to_string()
     }
 
-    async fn spawn_registry(chronicle: MemRegistry, profile: &ProfileId) -> String {
-        spawn_registry_signed(chronicle, profile, [51u8; 32]).await
-    }
-
     /// A registrar over a fresh route store, feeding a chronicle the caller
-    /// supplies — so a test can hand it a log with a history of its own.
-    async fn spawn_registry_signed(
+    /// supplies — so a test can hand it a log with a history of its own — and
+    /// signing under a seed the caller names.
+    fn registrar(
         chronicle: MemRegistry,
         profile: &ProfileId,
         seed: [u8; 32],
-    ) -> String {
+    ) -> Registrar<MemRegistry> {
         let mut store = MemRegistry::default();
         store
             .bind(&Label::parse("acme").expect("label"), profile)
             .expect("bind");
         let chronicler = Chronicler::shared(chronicle, seed).expect("open the chronicle");
-        let registrar = Registrar::with_chronicler(store, chronicler);
+        Registrar::with_chronicler(store, chronicler)
+    }
+
+    async fn spawn(held: Held) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
-        let held = Arc::new(Mutex::new(registrar));
         tokio::spawn(async move {
             axum::serve(listener, lait_directory::registry::router(held))
                 .await
                 .ok();
         });
         base
+    }
+
+    /// The same host, answering as somebody else from now on.
+    fn becomes(held: &Held, replacement: Registrar<MemRegistry>) {
+        *held.lock().expect("the registrar is not poisoned") = replacement;
     }
 
     async fn publish(home: std::path::PathBuf, base: String) -> anyhow::Result<()> {
@@ -275,22 +190,42 @@ mod tests {
         .expect("join")
     }
 
+    /// The head this identity holds for the registrar it publishes to, read
+    /// back out of the one marker store the way the daemon reads it.
+    fn pinned(home: &std::path::Path, base: &str) -> Option<Head> {
+        let entry = crate::daemon::markers::entry_for(home, base);
+        let by = crate::daemon::markers::pinned(home, &entry)?.by;
+        crate::daemon::markers::load(home, &by)?.pin
+    }
+
+    fn evidence_against(home: &std::path::Path, seed: [u8; 32]) -> std::path::PathBuf {
+        home.join("markers").join(format!(
+            "{}.diverged",
+            mechanics::actor::device_from_seed(&seed).as_str()
+        ))
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn publishing_pins_the_head_and_a_second_publish_extends_it() {
         let home = home_with_identity();
         let profile = profile_of(home.path());
-        let base = spawn_registry(MemRegistry::default(), &profile).await;
+        let held: Held = Arc::new(Mutex::new(registrar(
+            MemRegistry::default(),
+            &profile,
+            [51u8; 32],
+        )));
+        let base = spawn(held).await;
 
         publish(home.path().to_path_buf(), base.clone())
             .await
             .expect("first publish");
-        let pinned = crate::display::pin::load(home.path()).expect("a pin was taken");
-        assert_eq!(pinned.size, 1);
+        let taken = pinned(home.path(), &base).expect("a pin was taken");
+        assert_eq!(taken.size, 1);
 
-        publish(home.path().to_path_buf(), base)
+        publish(home.path().to_path_buf(), base.clone())
             .await
             .expect("second publish");
-        let moved = crate::display::pin::load(home.path()).expect("the pin survived");
+        let moved = pinned(home.path(), &base).expect("the pin survived");
         assert_eq!(moved.size, 2, "the pin advanced along a proven extension");
     }
 
@@ -298,18 +233,26 @@ mod tests {
     async fn a_registrar_with_a_different_memory_at_the_pinned_size_is_caught() {
         let home = home_with_identity();
         let profile = profile_of(home.path());
-        let honest = spawn_registry(MemRegistry::default(), &profile).await;
-        publish(home.path().to_path_buf(), honest)
+        let held: Held = Arc::new(Mutex::new(registrar(
+            MemRegistry::default(),
+            &profile,
+            [51u8; 32],
+        )));
+        let base = spawn(held.clone()).await;
+        publish(home.path().to_path_buf(), base.clone())
             .await
             .expect("first publish");
-        let held = crate::display::pin::load(home.path()).expect("pinned");
+        let was = pinned(home.path(), &base).expect("pinned");
 
-        // A second registrar with the same binding and no shared history:
-        // after it accepts this publication its chronicle also has size 1 —
-        // a different signed head at the pinned size. The constructed
-        // equivocation, and the ratchet catches it cold.
-        let forked = spawn_registry(MemRegistry::default(), &profile).await;
-        let error = publish(home.path().to_path_buf(), forked)
+        // The same signer, with no memory of what it recorded: after it accepts
+        // this publication its chronicle also has size 1 — a different signed
+        // head at the pinned size. The constructed equivocation, and the
+        // ratchet catches it cold.
+        becomes(
+            &held,
+            registrar(MemRegistry::default(), &profile, [51u8; 32]),
+        );
+        let error = publish(home.path().to_path_buf(), base.clone())
             .await
             .expect_err("a diverged chronicle is a refusal");
         assert!(
@@ -317,59 +260,71 @@ mod tests {
             "the refusal names the divergence: {error}"
         );
         assert!(
-            std::fs::metadata(home.path().join("registry-chronicle.diverged")).is_ok(),
+            std::fs::metadata(evidence_against(home.path(), [51u8; 32])).is_ok(),
             "both signed heads were retained as evidence"
         );
-        let unmoved = crate::display::pin::load(home.path()).expect("still pinned");
-        assert_eq!(unmoved, held, "a caught lie does not move the pin");
+        let unmoved = pinned(home.path(), &base).expect("still pinned");
+        assert_eq!(unmoved, was, "a caught lie does not move the pin");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_registrar_that_cannot_link_to_the_pin_does_not_move_it() {
         let home = home_with_identity();
         let profile = profile_of(home.path());
-        let honest = spawn_registry(MemRegistry::default(), &profile).await;
-        publish(home.path().to_path_buf(), honest)
+        let held: Held = Arc::new(Mutex::new(registrar(
+            MemRegistry::default(),
+            &profile,
+            [51u8; 32],
+        )));
+        let base = spawn(held.clone()).await;
+        publish(home.path().to_path_buf(), base.clone())
             .await
             .expect("first publish");
-        let held = crate::display::pin::load(home.path()).expect("pinned");
+        let was = pinned(home.path(), &base).expect("pinned");
 
-        // A registrar with a longer, foreign history: its consistency path is
-        // valid for *its* chronicle and still cannot link to the pin. That is
-        // suspicion, not proof — a different sentence than DIVERGED, and the
-        // same unmoved pin.
+        // A longer, foreign history: its consistency path is valid for *that*
+        // chronicle and still cannot link to the pin. That is suspicion, not
+        // proof — a different sentence than DIVERGED, and the same unmoved pin.
         let mut foreign = MemRegistry::default();
         foreign.append_chronicle(0, [1u8; 32]).expect("seed");
         foreign.append_chronicle(1, [2u8; 32]).expect("seed");
-        let rewritten = spawn_registry(foreign, &profile).await;
-        let error = publish(home.path().to_path_buf(), rewritten)
+        becomes(&held, registrar(foreign, &profile, [51u8; 32]));
+        let error = publish(home.path().to_path_buf(), base.clone())
             .await
             .expect_err("an unprovable extension is a refusal");
         assert!(
             error.to_string().contains("could not prove"),
             "the refusal says unproven, not diverged: {error}"
         );
-        let unmoved = crate::display::pin::load(home.path()).expect("still pinned");
-        assert_eq!(unmoved, held);
+        let unmoved = pinned(home.path(), &base).expect("still pinned");
+        assert_eq!(unmoved, was);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_registrar_signing_under_a_new_key_is_not_the_holder_you_pinned() {
         let home = home_with_identity();
         let profile = profile_of(home.path());
-        let honest = spawn_registry_signed(MemRegistry::default(), &profile, [51u8; 32]).await;
-        publish(home.path().to_path_buf(), honest)
+        let held: Held = Arc::new(Mutex::new(registrar(
+            MemRegistry::default(),
+            &profile,
+            [51u8; 32],
+        )));
+        let base = spawn(held.clone()).await;
+        publish(home.path().to_path_buf(), base.clone())
             .await
             .expect("first publish");
-        let held = crate::display::pin::load(home.path()).expect("pinned");
+        let was = pinned(home.path(), &base).expect("pinned");
 
         // A registrar that serves a well-formed, honestly-extending chronicle
         // but signs it under a *different* device. Without the signer bind
         // this passed as a normal extension and an attacker who minted a key
         // owned the ratchet. It must read as WrongSigner, not Diverged (no
         // accusation against the pinned holder) and never as fine.
-        let usurper = spawn_registry_signed(MemRegistry::default(), &profile, [99u8; 32]).await;
-        let error = publish(home.path().to_path_buf(), usurper)
+        becomes(
+            &held,
+            registrar(MemRegistry::default(), &profile, [99u8; 32]),
+        );
+        let error = publish(home.path().to_path_buf(), base.clone())
             .await
             .expect_err("a different signer is refused");
         assert!(
@@ -377,10 +332,10 @@ mod tests {
             "the refusal names the wrong signer: {error}"
         );
         assert!(
-            std::fs::metadata(home.path().join("registry-chronicle.diverged")).is_err(),
+            std::fs::metadata(evidence_against(home.path(), [51u8; 32])).is_err(),
             "a stranger's head is not equivocation evidence against the pinned holder"
         );
-        let unmoved = crate::display::pin::load(home.path()).expect("still pinned");
-        assert_eq!(unmoved, held, "a foreign signer does not move the pin");
+        let unmoved = pinned(home.path(), &base).expect("still pinned");
+        assert_eq!(unmoved, was, "a foreign signer does not move the pin");
     }
 }
