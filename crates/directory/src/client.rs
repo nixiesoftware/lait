@@ -20,7 +20,7 @@ use std::time::Duration;
 use mechanics::ids::DeviceId;
 
 use crate::{
-    address::Address, http::Refused, wire::Challenge, Directory, Refusal, SignedPublish,
+    address::Address, http::Refused, wire::Challenge, Directory, Issued, Refusal, SignedPublish,
     SignedResolve,
 };
 
@@ -98,7 +98,7 @@ impl Directory for Remote {
             .map_err(|error| Refusal::Unavailable(format!("challenge: {error}")))
     }
 
-    fn publish(&mut self, request: &SignedPublish, _now: u64) -> Result<Address, Refusal> {
+    fn publish(&mut self, request: &SignedPublish, _now: u64) -> Result<Issued, Refusal> {
         let answered: crate::http::Published = self
             .agent
             .post(&format!("{}/directory/publish", self.base))
@@ -109,7 +109,15 @@ impl Directory for Remote {
         // Parsed rather than trusted. A service that answered with something
         // this build could not spell back would have handed a person an address
         // they could not type, and finding that out here costs one parse.
-        Address::parse(&answered.address)
+        //
+        // The receipt is carried through unchecked, deliberately: verifying a
+        // mark needs the leaf the *publisher* recomputes from what it signed,
+        // and a client that pre-judged it here would be inviting its caller to
+        // trust this crate's opinion instead of the marker's signature.
+        Ok(Issued {
+            address: Address::parse(&answered.address)?,
+            receipt: answered.receipt,
+        })
     }
 
     fn resolve(&mut self, request: &SignedResolve, _now: u64) -> Result<Vec<u8>, Refusal> {

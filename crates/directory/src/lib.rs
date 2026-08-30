@@ -35,10 +35,19 @@
 //!
 //! The directory learns who looks up whom, which is contact discovery, and that
 //! is a real cost rather than one to deny. It is minimised, not claimed away.
+//!
+//! One more cost is paid deliberately: an accepted publication is appended to
+//! the deployment's [`chronicle`], the log the label registry already keeps, so
+//! that a person with no label still gets a receipt somebody can check. A leaf
+//! is a hash, so what becomes public is that *some* publication happened — never
+//! whose, and never what it said. The alternative was a second log with a second
+//! signer for every reader to follow, which buys nothing the refusal shape above
+//! does not already protect.
 
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod chronicle;
 pub mod client;
 pub mod firestore;
 pub mod http;
@@ -49,9 +58,10 @@ pub mod wire;
 mod words;
 
 pub use address::Address;
+pub use chronicle::{ChronicleStore, Chronicler, Receipt};
 pub use client::Remote;
 pub use firestore::{Credentials, FirestoreStore};
-pub use service::{Service, Shared};
+pub use service::{chronicle_entry_for, Service, Shared};
 pub use store::{MemStore, Published, Store};
 pub use wire::{sign, Challenge, SignedPublish, SignedResolve};
 
@@ -113,6 +123,19 @@ pub mod bounds {
     pub const RATE_WINDOW: u64 = 60;
 }
 
+/// What publishing answered: the address, and the chronicle's receipt for it.
+///
+/// The address alone is what a person needs; the receipt is what a *reader*
+/// needs to check that this publication was recorded, by a marker it follows,
+/// before it renders anything as certified. Carried together because they are
+/// answers to one act — a receipt fetched separately would be a receipt for
+/// some other publication.
+#[derive(Debug, Clone)]
+pub struct Issued {
+    pub address: Address,
+    pub receipt: Receipt,
+}
+
 /// What the service does, independent of how it is reached.
 ///
 /// A trait so the HTTP surface, the client's carrier-side adapter and the tests
@@ -131,8 +154,9 @@ pub trait Directory {
     /// Publish a profile's signed device events, verified on their own terms.
     ///
     /// Returns the address this profile answers to — minted on first publish and
-    /// stable afterwards. The service chooses it; the publisher does not.
-    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal>;
+    /// stable afterwards. The service chooses it; the publisher does not — and,
+    /// beside it, the receipt for the chronicle entry this publication became.
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Issued, Refusal>;
 
     /// Resolve one exact address to the announcement its profile published.
     ///
@@ -155,7 +179,7 @@ impl<S: Store> Directory for Service<S> {
         Service::challenge(self, device, now)
     }
 
-    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal> {
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Issued, Refusal> {
         Service::publish(self, request, now)
     }
 
@@ -164,23 +188,45 @@ impl<S: Store> Directory for Service<S> {
     }
 }
 
+/// One completed publication: what the service answered, and the chronicle
+/// leaf these exact bytes must appear as if the receipt is about them.
+///
+/// The leaf is recomputed here from the request this process signed, never read
+/// out of the answer — that recomputation is the *only* thing that binds a
+/// receipt to a publication. Without it a receipt proves that the service
+/// recorded something, somewhere, and a service that answers an **older**
+/// receipt hands back marks that verify perfectly against a head the reader
+/// follows. A reader that replaces its mark set with those has re-certified a
+/// device the newest publication withdrew, which is the whole of the
+/// per-receipt revocation gone.
+#[derive(Debug, Clone)]
+pub struct Publication {
+    pub issued: Issued,
+    /// `Chronicle::leaf_of(chronicle_entry_for(&request))` for the request
+    /// this call signed.
+    pub leaf: [u8; 32],
+}
+
 /// Publish `announcement` and learn the address it answers to.
 ///
 /// The round trip in one call, because challenge-then-sign-then-send is the
 /// *protocol* and a caller reimplementing it is a caller that can get the order
 /// wrong. Takes a seed and runs in the caller's process; nothing here is the
-/// service's.
+/// service's — including the leaf, which is why it comes back beside the
+/// answer rather than inside it.
 pub fn publish_as(
     directory: &mut dyn Directory,
     seed: &[u8; 32],
     announcement: &addressbook::Announcement,
     now: u64,
-) -> Result<Address, Refusal> {
+) -> Result<Publication, Refusal> {
     let device = mechanics::actor::device_from_seed(seed);
     let challenge = directory.challenge(&device, now)?;
     let encoded = announcement.encode().map_err(|_| Refusal::TooLarge)?;
     let request = wire::sign::publish(seed, &challenge, encoded);
-    directory.publish(&request, now)
+    let issued = directory.publish(&request, now)?;
+    let leaf = mechanics::chronicle::Chronicle::leaf_of(&service::chronicle_entry_for(&request));
+    Ok(Publication { issued, leaf })
 }
 
 /// Ask for one exact address, and get back what its holder published.

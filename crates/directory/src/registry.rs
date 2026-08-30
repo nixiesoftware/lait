@@ -16,29 +16,32 @@
 //! cannot author. A compromise is a denial, which is detectable, not an
 //! impersonation.
 //!
-//! # The registrar keeps a chronicle, and that is the one key it holds
+//! # The deployment keeps a chronicle, and that is the one key it holds
 //!
 //! A mirror that holds no key cannot author — but it can serve two readers
-//! two different worlds, silently. So the registrar keeps a
-//! [`mechanics::chronicle`]: every accepted publication is appended to a
-//! committed log **before** its route goes live, and the surface signs a head
-//! over that log. That key signs **which publications were recorded, in which
-//! order** — never their contents, which remain self-signed by their subjects
+//! two different worlds, silently. So the deployment keeps a
+//! [`crate::chronicle::Chronicler`] and the registrar feeds it: every accepted
+//! publication is appended to a committed log **before** its route goes live,
+//! and the surface signs a head over that log. That key signs **which
+//! publications were recorded, in which order** — never their contents, which
+//! remain self-signed by their subjects
 //! and verified against their own geneses exactly as before. The asymmetry
 //! survives the key: a compromise can still only deny or equivocate, and
 //! equivocation against anyone who pins is now non-repudiable instead of
 //! silent, because two irreconcilable heads *from the pinned signer* are the
 //! proof of it. The key that could impersonate a *person* still does not
-//! exist here.
+//! exist here. The address directory feeds the same log, which is why it lives
+//! beside both surfaces rather than inside this module.
 //!
 //! What each answer carries, precisely, because the strength differs by
 //! surface:
 //!
 //! - A **publish receipt** ([`Chronicled`] from [`Registrar::publish`]) carries
-//!   the head, the entry index, and the inclusion path for that entry, so the
-//!   publisher proves *its own* publication was recorded — and reconciles that
-//!   receipt against the canonical chronicle so a head minted over a private
-//!   side branch cannot stand in for it.
+//!   the head, the entry index, the inclusion path for that entry, and a mark
+//!   per device the publication avows, so the publisher proves *its own*
+//!   publication was recorded — and reconciles that receipt against the
+//!   canonical chronicle so a head minted over a private side branch cannot
+//!   stand in for it.
 //! - The **chronicle surface** ([`Registrar::answer`]) serves the current head
 //!   and, from a pinned size, the consistency path — the equivocation ratchet
 //!   any pinning follower runs.
@@ -61,11 +64,15 @@
 //! walkable — a deliberate, recorded trade: existence leaks, content never
 //! does, and the ceremony above this is what admits a receiver, not the name.
 
+use mechanics::ids::DeviceId;
 use mechanics::kinship::{KinshipLog, ProfileId};
 use serde::{Deserialize, Serialize};
 
+use crate::chronicle::{held, Receipt, SharedChronicler};
 use crate::wire::{framed, verify};
 use crate::Refusal;
+
+pub use crate::chronicle::{ChronicleAnswer, ChronicleStore};
 
 /// Domain separator for the route signature.
 const ROUTE_DOMAIN: &[u8] = b"lait-registry/route/v1";
@@ -221,36 +228,27 @@ pub fn chronicle_entry(publish: &RoutePublish) -> Vec<u8> {
 
 /// A registry answer, wearing the chronicle's memory beside it.
 ///
-/// The `Resolved` fields are flattened, so a reader that knows nothing of
-/// chronicles decodes the answer it always did and ignores the rest.
+/// Both halves are flattened, so a reader that knows nothing of chronicles
+/// decodes the answer it always did and ignores the rest — and the receipt is
+/// the same shape the address directory answers with, because it is the same
+/// log talking about a different kind of entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chronicled {
     #[serde(flatten)]
     pub resolved: Resolved,
-    /// The signed chronicle head at answer time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<mechanics::chronicle::Head>,
-    /// This publication's entry index — publish receipts only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<u64>,
-    /// Inclusion path for `entry` under `head` — publish receipts only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub inclusion: Vec<[u8; 32]>,
-}
-
-/// The chronicle surface's answer: the current signed head, and — when a
-/// reader named the size it pinned — the path proving this head extends it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChronicleAnswer {
-    pub head: mechanics::chronicle::Head,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub consistency: Vec<[u8; 32]>,
+    #[serde(flatten)]
+    pub receipt: Receipt,
 }
 
 /// The registry's persistence surface. `&mut` for the same reason the
 /// directory's store is: the network-backed implementation holds a credential
 /// it refreshes.
-pub trait RegistryStore {
+///
+/// The chronicle half is [`ChronicleStore`], required here rather than spelled
+/// again: the log is one thing the whole deployment shares, and a registry
+/// store that could not be a chronicle store would have been the second log
+/// this design spent its structure avoiding.
+pub trait RegistryStore: ChronicleStore {
     /// The profile bound to `label`, if an operator has bound one.
     fn binding(&mut self, label: &Label) -> anyhow::Result<Option<ProfileId>>;
 
@@ -265,16 +263,6 @@ pub trait RegistryStore {
     /// Record a verified route. `Ok(false)` when `epoch` does not advance the
     /// held one — a replay is refused without an error a prober can read.
     fn record_route(&mut self, resolved: &Resolved) -> anyhow::Result<bool>;
-
-    /// Every chronicle leaf hash, in append order. Read once at open, and
-    /// again after a raced append.
-    fn chronicle_leaves(&mut self) -> anyhow::Result<Vec<[u8; 32]>>;
-
-    /// Append a leaf at `index`. `Ok(false)` when the index is already taken
-    /// — another holder appended first; the caller reloads and takes the next
-    /// slot. Refusing a taken index is the linearization point: two holders
-    /// can never write different leaves at one index, so roots cannot fork.
-    fn append_chronicle(&mut self, index: u64, leaf: [u8; 32]) -> anyhow::Result<bool>;
 }
 
 /// Verify and apply one route publication against a store.
@@ -353,31 +341,41 @@ pub fn verify_route<S: RegistryStore>(
     })
 }
 
-/// How many times an append retries after losing an index race before the
-/// answer is "unavailable". Each loss means another holder appended; losing
-/// this many in a row means the store is churning faster than one request
-/// deserves to wait.
-const MAX_APPEND_RACES: usize = 8;
+/// The devices a route publication is *about*: the ones its announcement avows
+/// reachable to a public reader, and — when it avows none, which is what the
+/// lean route projection carries today — the device that presented it.
+///
+/// A publication that named no subject would be chronicled and certify nobody,
+/// which is a receipt a person cannot act on. The avowed set is preferred
+/// because it is the whole live set, so a device adopted into the profile is
+/// marked as soon as its holder republishes.
+fn route_subjects(publish: &RoutePublish) -> Vec<DeviceId> {
+    let presenting = || vec![publish.device.clone()];
+    let Ok(announcement) = addressbook::Announcement::decode(&publish.announcement) else {
+        return presenting();
+    };
+    match crate::service::anchored(&announcement) {
+        Ok((_, devices, _)) if !devices.is_empty() => devices,
+        _ => presenting(),
+    }
+}
 
-/// The registrar: the store, the chronicle over it, and the one key — which
-/// signs the chronicle's heads and nothing else.
+/// The registrar: the store, and the chronicle the deployment shares.
+///
+/// The log, the seed and the append race used to live here. They moved to
+/// [`crate::chronicle::Chronicler`] when the address directory grew a need to
+/// record too: one chronicle with two feeders, rather than a second log with a
+/// second signer for a reader to follow.
 pub struct Registrar<S> {
     store: S,
-    chronicle: mechanics::chronicle::Chronicle,
-    seed: [u8; 32],
+    chronicler: SharedChronicler,
 }
 
 impl<S: RegistryStore> Registrar<S> {
-    /// Open over a store, restoring the chronicle from its persisted leaves.
-    pub fn open(mut store: S, seed: [u8; 32]) -> anyhow::Result<Self> {
-        let leaves = store.chronicle_leaves()?;
-        let chronicle = mechanics::chronicle::Chronicle::from_leaves(leaves)
-            .map_err(|refusal| anyhow::anyhow!("chronicle restore: {refusal}"))?;
-        Ok(Self {
-            store,
-            chronicle,
-            seed,
-        })
+    /// Open over a store, feeding the chronicle this deployment keeps.
+    #[must_use]
+    pub fn with_chronicler(store: S, chronicler: SharedChronicler) -> Self {
+        Self { store, chronicler }
     }
 
     /// The store, for the operator acts that bypass the request surface.
@@ -385,27 +383,11 @@ impl<S: RegistryStore> Registrar<S> {
         &mut self.store
     }
 
-    fn reload(&mut self) -> Result<(), Refusal> {
-        let leaves = self
-            .store
-            .chronicle_leaves()
-            .map_err(|error| Refusal::Unavailable(error.to_string()))?;
-        self.chronicle = mechanics::chronicle::Chronicle::from_leaves(leaves)
-            .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?;
-        Ok(())
-    }
-
-    fn head(&self) -> Result<mechanics::chronicle::Head, Refusal> {
-        self.chronicle
-            .head(&self.seed)
-            .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))
-    }
-
     /// Verify, chronicle, then record one publication — in that order, so the
     /// chronicle is a superset of every live route rather than a lagging
-    /// shadow. The receipt carries the signed head and the inclusion path for
-    /// the entry just appended, and (when the pin's size is offered) a
-    /// consistency path so the publisher's ratchet runs on this same act.
+    /// shadow. The receipt carries the signed head, the inclusion path for the
+    /// entry just appended, and a mark per device the announcement avows, so
+    /// the publisher's ratchet and its certification both run on this one act.
     pub fn publish(&mut self, publish: &RoutePublish) -> Result<Chronicled, Refusal> {
         let resolved = verify_route(&mut self.store, publish)?;
         // Refuse a non-advancing epoch before touching the chronicle, so a
@@ -422,30 +404,8 @@ impl<S: RegistryStore> Registrar<S> {
                 return Err(Refusal::NotAvailable);
             }
         }
-        let leaf = mechanics::chronicle::Chronicle::leaf_of(&chronicle_entry(publish));
-        let mut races = 0;
-        let entry = loop {
-            let index = self.chronicle.size();
-            if index >= mechanics::chronicle::MAX_CHRONICLE_ENTRIES {
-                return Err(Refusal::Unavailable("the chronicle is full".into()));
-            }
-            match self.store.append_chronicle(index, leaf) {
-                Ok(true) => {
-                    self.chronicle
-                        .append_leaf(leaf)
-                        .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?;
-                    break index;
-                }
-                Ok(false) => {
-                    races += 1;
-                    if races > MAX_APPEND_RACES {
-                        return Err(Refusal::Unavailable("chronicle append raced out".into()));
-                    }
-                    self.reload()?;
-                }
-                Err(error) => return Err(Refusal::Unavailable(error.to_string())),
-            }
-        };
+        let receipt = held(&self.chronicler)
+            .chronicle(&chronicle_entry(publish), &route_subjects(publish))?;
         // Now make the route live. A lost race here (a higher epoch landed in
         // the window) leaves this publication chronicled but not live, which
         // is honest — the log records what was accepted, not only what won.
@@ -456,21 +416,13 @@ impl<S: RegistryStore> Registrar<S> {
         {
             return Err(Refusal::NotAvailable);
         }
-        let head = self.head()?;
-        let inclusion = self
-            .chronicle
-            .inclusion(entry)
-            .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?;
-        Ok(Chronicled {
-            resolved,
-            head: Some(head),
-            entry: Some(entry),
-            inclusion,
-        })
+        Ok(Chronicled { resolved, receipt })
     }
 
     /// Resolve a label. The answer wears the current signed head; a reader's
-    /// ratchet runs on that even when the route itself is what it wanted.
+    /// ratchet runs on that even when the route itself is what it wanted. No
+    /// entry, no inclusion and no mark: a resolution is somebody else's
+    /// publication, and only its publisher holds the bytes that place it.
     pub fn resolve(&mut self, label: &Label) -> Result<Option<Chronicled>, Refusal> {
         let Some(resolved) = self
             .store
@@ -479,35 +431,21 @@ impl<S: RegistryStore> Registrar<S> {
         else {
             return Ok(None);
         };
-        let head = self.head()?;
+        let head = held(&self.chronicler).answer(None)?.head;
         Ok(Some(Chronicled {
             resolved,
-            head: Some(head),
-            entry: None,
-            inclusion: Vec::new(),
+            receipt: Receipt {
+                head: Some(head),
+                ..Receipt::default()
+            },
         }))
     }
 
-    /// The chronicle surface: always the current signed head, and — when the
-    /// reader named a pin size this log still covers — the consistency path
-    /// from it.
-    ///
-    /// A `first` *past* the current head is not an error and must not 404: a
-    /// chronicle now shorter than a reader's pin is a **rollback**, the
-    /// strongest signal of a rewritten log, and the reader's own [`advance`]
-    /// is what must see it. So the head goes back regardless (with an empty
-    /// path), and `offered.size < pinned.size` is judged where the pin lives,
-    /// not folded into "not found" here.
+    /// The chronicle surface, served from the log this deployment shares. See
+    /// [`crate::chronicle::Chronicling::answer`] for why a `first` past the
+    /// current head is not a 404.
     pub fn answer(&self, first: Option<u64>) -> Result<ChronicleAnswer, Refusal> {
-        let head = self.head()?;
-        let consistency = match first {
-            Some(first) if first <= self.chronicle.size() && first > 0 => self
-                .chronicle
-                .consistency(first)
-                .map_err(|refusal| Refusal::Unavailable(refusal.to_string()))?,
-            _ => Vec::new(),
-        };
-        Ok(ChronicleAnswer { head, consistency })
+        held(&self.chronicler).answer(first)
     }
 }
 
@@ -685,7 +623,9 @@ impl RegistryStore for MemRegistry {
             .insert(resolved.label.as_str().to_string(), resolved.clone());
         Ok(true)
     }
+}
 
+impl ChronicleStore for MemRegistry {
     fn chronicle_leaves(&mut self) -> anyhow::Result<Vec<[u8; 32]>> {
         Ok(self.chronicle.clone())
     }
@@ -833,7 +773,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_route_publishes_and_resolves_over_the_wire() {
         let (announcement, profile) = identity();
-        let registrar = Registrar::open(MemRegistry::default(), [51u8; 32]).expect("open");
+        let chronicler = crate::chronicle::Chronicler::shared(MemRegistry::default(), [51u8; 32])
+            .expect("open the chronicle");
+        let registrar = Registrar::with_chronicler(MemRegistry::default(), chronicler);
         let registrar = std::sync::Arc::new(std::sync::Mutex::new(registrar));
         {
             let mut held = registrar.lock().unwrap();
@@ -867,15 +809,15 @@ mod tests {
         assert_eq!(published.resolved.endpoint, endpoint());
 
         // The receipt proves this very publication was recorded.
-        let head = published.head.expect("a chronicled receipt");
+        let head = published.receipt.head.expect("a chronicled receipt");
         head.verify().expect("the head verifies");
         let leaf = mechanics::chronicle::Chronicle::leaf_of(&chronicle_entry(&publish));
         mechanics::chronicle::verify_inclusion(
             &leaf,
-            published.entry.expect("an entry index"),
+            published.receipt.entry.expect("an entry index"),
             head.size,
             &head.root,
-            &published.inclusion,
+            &published.receipt.inclusion,
         )
         .expect("the inclusion path verifies");
 

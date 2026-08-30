@@ -800,3 +800,180 @@ fn a_portraits_fields_cannot_trade_bytes_across_their_boundary() {
         "moving the boundary between the fields is a different signed statement"
     );
 }
+
+/// A mark: what a chronicle holder signs about one entry of its own log.
+/// `epoch = size` and `nonce = leaf[..16]`, so marking one publication twice
+/// yields one artifact rather than two.
+fn mark(marker: &[u8; 32], subject: &Party, size: u64, entry: u64) -> Result<Avowal, Refusal> {
+    let leaf = [7u8; 32];
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&leaf[..16]);
+    Avowal::seal(
+        marker,
+        subject.clone(),
+        Claim::Chronicled {
+            size,
+            root: [8u8; 32],
+            entry,
+            leaf,
+        },
+        Audience::Public,
+        size,
+        nonce,
+    )
+}
+
+#[test]
+fn a_chronicled_claim_is_an_attestation_and_confers_nothing() {
+    let mut log = founded();
+    let before = log.devices();
+    let subject = Party::Device(device_from_seed(&FIRST));
+
+    // Signed by a device outside the profile: an attestation, never an
+    // avowal, and the type says which without being told.
+    let attestation = mark(&STRANGER, &subject, 12, 5).expect("mark");
+    attestation
+        .verify()
+        .expect("a stranger signs their own statement");
+    assert!(
+        !attestation.is_self_signed(&before),
+        "a marker is outside the subject profile; self-signed would be a different fact"
+    );
+
+    // It is recordable, and recording it moves nothing. A device set is what
+    // links and retirements say it is; no third party's assertion adds to it,
+    // and nothing here converts one into membership, a grant or standing.
+    log.append(Entry::Avow(attestation.clone()))
+        .expect("append");
+    assert_eq!(
+        log.devices(),
+        before,
+        "a mark is evidence about a log, never a device of the profile"
+    );
+
+    // Public: legible to a reader with no standing at all — which is exactly
+    // why it must confer nothing. A stranger holding it gains a fact about
+    // what a service wrote down, and no position anywhere.
+    attestation
+        .legible_to(&Standing::default())
+        .expect("a mark carries no confidentiality claim");
+
+    // An entry at or past the size it claims can never be proven, so it is
+    // refused at the signature rather than minted and refused later.
+    assert_eq!(
+        mark(&STRANGER, &subject, 5, 5).unwrap_err(),
+        Refusal::Malformed("chronicle entry")
+    );
+    assert_eq!(
+        mark(&STRANGER, &subject, 0, 0).unwrap_err(),
+        Refusal::Malformed("chronicle entry")
+    );
+}
+
+#[test]
+fn the_claim_encoding_is_append_only_and_round_trips() {
+    // Postcard discriminants are positional: inserting a variant rather than
+    // appending one silently reinterprets every artifact already signed. This
+    // pins the order, so a future variant has to go last.
+    let claims = [
+        (0u8, Claim::Profile(founded().profile().clone())),
+        (1, Claim::Called("nix".to_string())),
+        (2, Claim::Sponsors(Party::Device(device_from_seed(&FIRST)))),
+        (
+            3,
+            Claim::Portrait {
+                picture: Some([1u8; 32]),
+                detail: "here".to_string(),
+            },
+        ),
+        (
+            4,
+            Claim::Chronicled {
+                size: 12,
+                root: [8u8; 32],
+                entry: 5,
+                leaf: [7u8; 32],
+            },
+        ),
+    ];
+    for (discriminant, claim) in &claims {
+        let bytes = postcard::to_stdvec(claim).expect("encode");
+        assert_eq!(bytes.first(), Some(discriminant), "{claim:?} moved");
+        let back: Claim = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(&back, claim);
+    }
+
+    // And the signed bytes: every field framed, in this order. Re-derived
+    // here rather than compared to itself, so a reordering or an unframed
+    // concatenation fails instead of agreeing with the mistake.
+    let by = device_from_seed(&STRANGER);
+    let subject = Party::Device(device_from_seed(&FIRST));
+    let claim = Claim::Chronicled {
+        size: 12,
+        root: [8u8; 32],
+        entry: 5,
+        leaf: [7u8; 32],
+    };
+    let mut body = Vec::new();
+    frame(&mut body, &12u64.to_be_bytes());
+    frame(&mut body, &[8u8; 32]);
+    frame(&mut body, &5u64.to_be_bytes());
+    frame(&mut body, &[7u8; 32]);
+    let mut expected = Vec::new();
+    frame(&mut expected, b"lait/kinship/1/avowal");
+    frame(&mut expected, by.as_str().as_bytes());
+    frame(&mut expected, subject.wire().as_bytes());
+    frame(&mut expected, b"chronicled");
+    frame(&mut expected, &body);
+    frame(&mut expected, b"public");
+    frame(&mut expected, b"");
+    frame(&mut expected, &12u64.to_be_bytes());
+    frame(&mut expected, &[3u8; 16]);
+    assert_eq!(
+        Avowal::preimage(&by, &subject, &claim, &Audience::Public, 12, &[3u8; 16]),
+        expected
+    );
+}
+
+/// The framing every preimage in this plane uses, written out independently.
+fn frame(out: &mut Vec<u8>, part: &[u8]) {
+    out.extend_from_slice(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+    out.extend_from_slice(part);
+}
+
+/// The judges that decide anything must never learn to read a mark.
+///
+/// A mark says one publication was recorded, in one log, at one position. It
+/// is evidence a *reader* weighs, and the moment an access decision consults
+/// one, the service that keeps the log has become an authority over a Space
+/// it was never party to — which is the whole failure this plane is shaped to
+/// make impossible. Nothing enforces that but this: the three places a
+/// decision is actually taken, read as source and asserted not to name the
+/// claim at all.
+///
+/// Structural, and deliberately so. A type-level version would need every
+/// judge to take a token proving no mark reached it, which is a large amount
+/// of machinery to say "do not read that one enum variant".
+#[test]
+fn no_judge_reads_a_mark() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the workspace root above crates/mechanics");
+    for judge in [
+        "crates/mechanics/src/acl.rs",
+        "crates/mechanics/src/actor.rs",
+        "crates/mechanics/src/membership.rs",
+        "crates/runtime/src/admission.rs",
+        "src/daemon/transport_hub.rs",
+        "src/orbital/mechanics.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(judge))
+            .unwrap_or_else(|error| panic!("read {judge}: {error}"));
+        assert!(
+            !source.contains("Chronicled"),
+            "{judge} names Claim::Chronicled — a mark confers nothing, and a judge that \
+             reads one has made a marker an authority",
+        );
+    }
+}

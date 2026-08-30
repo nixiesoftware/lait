@@ -154,6 +154,33 @@ struct WebProfileFacts {
     interface: Option<WebInterface>,
     pairing: Option<WebPairingCode>,
     offers: Vec<WebPairOffer>,
+    /// The markers this device weighs. A tier: the surface draws it and
+    /// gates nothing on it.
+    markers: Vec<WebMarker>,
+}
+
+/// One marker, and how the last look at it went.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebMarker {
+    marker: String,
+    standing: WebMarkerStanding,
+}
+
+/// Tagged for the same reason liveness is: a marker nothing has asked, one
+/// that could not be reached, and one that answered are three facts, and only
+/// the third of them can make a device "not listed".
+#[derive(Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WebMarkerStanding {
+    Answering,
+    NeverAsked,
+    CouldNotAsk,
+    AnsweredAsAnother,
+    AnsweredOlder,
+    Unproven,
+    Contradicted,
+    Unreadable,
 }
 
 #[derive(Clone, Serialize)]
@@ -180,6 +207,9 @@ struct WebOwnDevice {
     liveness: WebDeviceLiveness,
     /// The Spaces this device is listed in.
     held: Vec<String>,
+    /// The markers that have recorded this device, named as `markers` names
+    /// them.
+    certified_by: Vec<String>,
     /// How the tunnel reaches this device; `null` when nothing carries.
     reach: Option<WebDeviceReach>,
 }
@@ -1120,6 +1150,7 @@ impl From<ClientView> for WebClientView {
                     interface,
                     pairing,
                     offers,
+                    markers,
                 } = profile;
                 WebProfileFacts {
                     profile,
@@ -1145,6 +1176,7 @@ impl From<ClientView> for WebClientView {
                                 api::LivenessRow::NotProbed => WebDeviceLiveness::NotProbed,
                             },
                             held: device.held,
+                            certified_by: device.certified_by,
                             reach: device.reach.map(|reach| match reach {
                                 api::ReachRow::Connected { via } => {
                                     WebDeviceReach::Connected { via }
@@ -1180,6 +1212,32 @@ impl From<ClientView> for WebClientView {
                             name: offer.name,
                             phrase: offer.phrase,
                             expires_at_ms: offer.expires_at_ms,
+                        })
+                        .collect(),
+                    markers: markers
+                        .into_iter()
+                        .map(|marker| WebMarker {
+                            marker: marker.marker,
+                            standing: match marker.standing {
+                                api::MarkerStandingRow::Answering => WebMarkerStanding::Answering,
+                                api::MarkerStandingRow::NeverAsked => WebMarkerStanding::NeverAsked,
+                                api::MarkerStandingRow::CouldNotAsk => {
+                                    WebMarkerStanding::CouldNotAsk
+                                }
+                                api::MarkerStandingRow::AnsweredAsAnother => {
+                                    WebMarkerStanding::AnsweredAsAnother
+                                }
+                                api::MarkerStandingRow::AnsweredOlder => {
+                                    WebMarkerStanding::AnsweredOlder
+                                }
+                                api::MarkerStandingRow::Unproven => WebMarkerStanding::Unproven,
+                                api::MarkerStandingRow::Contradicted => {
+                                    WebMarkerStanding::Contradicted
+                                }
+                                api::MarkerStandingRow::Unreadable => {
+                                    WebMarkerStanding::Unreadable
+                                }
+                            },
                         })
                         .collect(),
                 }

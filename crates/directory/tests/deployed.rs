@@ -14,9 +14,11 @@
 
 use addressbook::{Announcement, Registry};
 use lait_directory::registry::{
-    chronicle_entry, Label, Registrar, RegistryStore, Resolved, RoutePublish,
+    chronicle_entry, ChronicleStore, Label, Registrar, RegistryStore, Resolved, RoutePublish,
 };
-use lait_directory::{address::Address, Credentials, Directory, FirestoreStore, Refusal, Remote};
+use lait_directory::{
+    address::Address, Chronicler, Credentials, Directory, FirestoreStore, Refusal, Remote,
+};
 use mechanics::{
     actor::device_from_seed,
     kinship::{Audience, DeviceLink, Standing},
@@ -61,16 +63,42 @@ fn a_deployed_directory_issues_an_address_and_answers_it() {
     };
 
     let (seed, announcement) = fresh_profile();
-    let address = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
+    let published = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
         .expect("the deployed directory took the publication");
+    let issued = &published.issued;
+    let address = issued.address.clone();
     assert!(
         address.is_mintable(),
         "{address} came back off the word list"
     );
+    // Every mark the deployed chronicle signed is about a device this
+    // announcement avows, and proves itself under the receipt's own path. A
+    // deployment that keeps no chronicle answers no mark, which is a smaller
+    // service and not a broken one — but a mark that does not verify is a
+    // marker claiming a recording it cannot prove.
+    for mark in &issued.receipt.marks {
+        mechanics::chronicle::verify_mark(mark, &issued.receipt.inclusion)
+            .expect("the deployed marker proved what it recorded");
+    }
+    // And the receipt is about *this* publication: the leaf is recomputed from
+    // the bytes this process signed, so an older receipt whose marks verify
+    // perfectly is still caught here and nowhere else.
+    if let (Some(head), Some(entry)) = (issued.receipt.head.as_ref(), issued.receipt.entry) {
+        mechanics::chronicle::verify_inclusion(
+            &published.leaf,
+            entry,
+            head.size,
+            &head.root,
+            &issued.receipt.inclusion,
+        )
+        .expect("the receipt proves the publication that was just made, not another");
+    }
 
     // Stable afterwards — the property a person's card depends on.
-    let again =
-        lait_directory::publish_as(&mut directory, &seed, &announcement, now()).expect("republish");
+    let again = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
+        .expect("republish")
+        .issued
+        .address;
     assert_eq!(address, again, "the address moved under its holder");
 
     // A stranger, holding nothing but the spoken address.
@@ -127,8 +155,10 @@ fn a_deployed_directory_spends_a_challenge_exactly_once() {
     };
 
     let (seed, announcement) = fresh_profile();
-    let address =
-        lait_directory::publish_as(&mut directory, &seed, &announcement, now()).expect("publish");
+    let address = lait_directory::publish_as(&mut directory, &seed, &announcement, now())
+        .expect("publish")
+        .issued
+        .address;
 
     let asker = mechanics::actor::random_seed().expect("randomness");
     let device = device_from_seed(&asker);
@@ -213,13 +243,19 @@ fn a_real_firestore_chronicle_proves_every_publication_it_records() {
         return;
     };
     // A stable-per-process signer, so heads across the run share one identity.
-    let mut registrar = Registrar::open(store, [131u8; 32]).expect("open over Firestore");
+    let Some(chronicle_store) = firestore_chronicle() else {
+        return;
+    };
+    let chronicler = Chronicler::shared(chronicle_store, [131u8; 32])
+        .expect("open the chronicle over Firestore");
+    let mut registrar = Registrar::with_chronicler(store, chronicler);
 
     // First publication: the receipt must prove its own entry is in the head.
     let (_label_a, publish_a, _ann_a) = bound_publication(registrar.store());
-    let receipt = registrar
+    let chronicled = registrar
         .publish(&publish_a)
         .expect("Firestore took the route");
+    let receipt = chronicled.receipt;
     let head = receipt.head.clone().expect("a chronicled receipt");
     head.verify().expect("the head signature verifies");
     let entry = receipt.entry.expect("an entry index");

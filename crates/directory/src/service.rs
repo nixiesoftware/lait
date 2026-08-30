@@ -12,9 +12,10 @@ use mechanics::{
 use crate::{
     address::Address,
     bounds,
+    chronicle::{Receipt, SharedChronicler},
     store::{Published, Store},
-    wire::{self, Challenge, SignedPublish, SignedResolve},
-    Refusal,
+    wire::{self, framed, Challenge, SignedPublish, SignedResolve},
+    Issued, Refusal,
 };
 
 /// How many spellings a mint will try before giving up.
@@ -34,11 +35,34 @@ const MINT_ATTEMPTS: usize = 8;
 /// would not be.
 pub struct Service<S: Store> {
     store: S,
+    /// The deployment's chronicle, when it keeps one. Optional because a
+    /// directory that records nothing is a directory that certifies nobody,
+    /// which is a smaller service rather than a broken one — and because the
+    /// answer it then gives is an empty [`Receipt`], never a refusal.
+    chronicler: Option<SharedChronicler>,
 }
 
 impl<S: Store> Service<S> {
     pub const fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            chronicler: None,
+        }
+    }
+
+    /// A directory that chronicles what it accepts, into the log the whole
+    /// deployment shares.
+    ///
+    /// The same chronicler the label registry holds, deliberately: an identity
+    /// that never chose a label publishes a device set and nothing else, and a
+    /// registry-only chronicle would certify only the people who happened to
+    /// want a name.
+    #[must_use]
+    pub fn with_chronicler(store: S, chronicler: SharedChronicler) -> Self {
+        Self {
+            store,
+            chronicler: Some(chronicler),
+        }
     }
 
     /// Issue a single-use nonce for `device`.
@@ -73,7 +97,7 @@ impl<S: Store> Service<S> {
     /// events *signed under their own domain by the devices being bound*, checks
     /// them on their own terms, and stores what it is handed. It never authors,
     /// which is why no account-side path can change a published device set.
-    pub fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal> {
+    pub fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Issued, Refusal> {
         if request.announcement.len() > bounds::MAX_PUBLISH_BYTES {
             return Err(Refusal::TooLarge);
         }
@@ -96,6 +120,11 @@ impl<S: Store> Service<S> {
             Some(held) => held,
             None => self.mint_for(&profile)?,
         };
+        // Chronicled before the record goes live, so the log is a superset of
+        // what this service serves rather than a lagging shadow of it, and the
+        // marks name the devices *this* publication avowed — which is what
+        // makes the next receipt able to withdraw one.
+        let receipt = self.chronicled(request, &devices)?;
         self.store
             .record(
                 &profile,
@@ -105,7 +134,25 @@ impl<S: Store> Service<S> {
                 },
             )
             .map_err(unavailable)?;
-        Ok(address)
+        Ok(Issued { address, receipt })
+    }
+
+    /// Append this publication to the shared chronicle, marking every device it
+    /// avows — or answer an empty receipt where no chronicle is kept.
+    ///
+    /// An empty receipt is not a refusal and must never be rendered as one: a
+    /// deployment without a chronicler records nothing, which is different from
+    /// a chronicler that could not answer (that is [`Refusal::Unavailable`],
+    /// and it fails the publish rather than quietly certifying nobody).
+    fn chronicled(
+        &self,
+        request: &SignedPublish,
+        devices: &[DeviceId],
+    ) -> Result<Receipt, Refusal> {
+        let Some(chronicler) = &self.chronicler else {
+            return Ok(Receipt::default());
+        };
+        crate::chronicle::held(chronicler).chronicle(&chronicle_entry_for(request), devices)
     }
 
     /// Resolve one exact address to the announcement its profile published.
@@ -190,6 +237,29 @@ impl<S: Store> Service<S> {
     }
 }
 
+/// Domain separator for a chronicle entry over a device-set publication.
+/// Distinct from the registry's, so one log holding both kinds can never read
+/// an entry of one as an entry of the other.
+const CHRONICLE_ENTRY_DOMAIN: &[u8] = b"lait-directory/chronicle-entry/v1";
+
+/// The canonical bytes one accepted publication contributes to the chronicle.
+///
+/// Deterministic and serde-free, so the publisher recomputes the same leaf from
+/// the request it signed. That recomputation is the only way anybody but this
+/// service proves a mark is about *them*: a mark on its own establishes the
+/// marker's memory — something was recorded, there — and the leaf is what binds
+/// that entry to a publication somebody holds the bytes of.
+#[must_use]
+pub fn chronicle_entry_for(request: &SignedPublish) -> Vec<u8> {
+    let mut out = Vec::with_capacity(160_usize.saturating_add(request.announcement.len()));
+    framed(&mut out, CHRONICLE_ENTRY_DOMAIN);
+    framed(&mut out, request.device.as_str().as_bytes());
+    framed(&mut out, &request.nonce);
+    framed(&mut out, &request.announcement);
+    framed(&mut out, &request.signature);
+    out
+}
+
 /// Verify an announcement on its own terms, and answer what it establishes.
 ///
 /// A scratch registry, deliberately: `absorb` is the one implementation of
@@ -200,7 +270,9 @@ impl<S: Store> Service<S> {
 /// The reader is `Standing::default()`, which is the public audience: no device,
 /// no actor, no Space. That is what the directory is, and it is why only material
 /// avowed to `Audience::Public` is visible in what it stores.
-fn anchored(announcement: &Announcement) -> Result<(ProfileId, Vec<DeviceId>, u64), Refusal> {
+pub(crate) fn anchored(
+    announcement: &Announcement,
+) -> Result<(ProfileId, Vec<DeviceId>, u64), Refusal> {
     let mut scratch = addressbook::Registry::new();
     let profile = scratch
         .absorb(
@@ -272,7 +344,7 @@ impl crate::Directory for Shared {
         self.held().challenge(device, now)
     }
 
-    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal> {
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Issued, Refusal> {
         self.held().publish(request, now)
     }
 

@@ -106,6 +106,8 @@ pub struct MemStore {
     challenges: BTreeMap<[u8; 32], Challenge>,
     /// asker → resolution timestamps, newest last.
     resolves: BTreeMap<String, Vec<u64>>,
+    /// The chronicle's leaves, in append order.
+    chronicle: Vec<[u8; 32]>,
 }
 
 impl MemStore {
@@ -193,5 +195,25 @@ impl Store for MemStore {
             !seen.is_empty()
         });
         Ok(before.saturating_sub(self.challenges.len()))
+    }
+}
+
+/// The same log a deployed chronicler keeps, in a `Vec`.
+///
+/// Here so a hermetic test drives the *shared* chronicle through the directory's
+/// own store type: the two feeders being one log is a property of the wiring,
+/// and a test that had to borrow the registry's store to see it would be
+/// testing the borrowing.
+impl crate::chronicle::ChronicleStore for MemStore {
+    fn chronicle_leaves(&mut self) -> anyhow::Result<Vec<[u8; 32]>> {
+        Ok(self.chronicle.clone())
+    }
+
+    fn append_chronicle(&mut self, index: u64, leaf: [u8; 32]) -> anyhow::Result<bool> {
+        if index != u64::try_from(self.chronicle.len())? {
+            return Ok(false);
+        }
+        self.chronicle.push(leaf);
+        Ok(true)
     }
 }

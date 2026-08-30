@@ -64,7 +64,7 @@ pub const MIN_GAP: Duration = Duration::from_secs(5);
 const MAX_STRETCH: f64 = 0.2;
 
 /// The most a single check is ever delayed after its period elapses.
-const MAX_SPREAD: Duration = Duration::from_secs(60);
+pub(crate) const MAX_SPREAD: Duration = Duration::from_secs(60);
 
 /// Where the standing is recorded under the identity directory.
 pub const STANDING_FILE: &str = "update-standing.json";
@@ -597,7 +597,7 @@ pub(crate) fn next_delay(period: Duration, spread: Duration) -> Duration {
 /// `rand`, and degrading to the midpoint rather than failing: a check that
 /// refused to run because entropy was unavailable would be a machine that
 /// stops updating over a number that only needs to be roughly spread.
-pub(super) fn draw() -> f64 {
+pub(crate) fn draw() -> f64 {
     let mut bytes = [0u8; 4];
     if getrandom::fill(&mut bytes).is_err() {
         return 0.5;

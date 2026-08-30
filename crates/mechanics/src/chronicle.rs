@@ -47,6 +47,20 @@
 //! Folding any two of those together is the false-disconnection defect one
 //! plane up, and the reason they are variants rather than a boolean.
 //!
+//! # A mark confers nothing
+//!
+//! [`verify_mark`] checks a [`crate::kinship::Claim::Chronicled`] avowal — a
+//! **mark**: one device's signed statement that a leaf sits at an index of
+//! *its* chronicle. It asserts exactly what a head asserts and inherits the
+//! same limit: a publication was recorded, in a log, at a position. It is
+//! never admission, membership, a grant or standing, and there is deliberately
+//! no conversion from one into any of those — the same exclusion
+//! [`crate::kinship`] states for every avowal, restated here because a mark is
+//! the one that arrives from a service a reader did not found and could
+//! otherwise be mistaken for a certificate. Who a reader *weighs*, and how
+//! much, is that reader's own configured ordering and lives above this crate;
+//! nothing here names a marker.
+//!
 //! # Shape
 //!
 //! The tree is the RFC 6962 Merkle shape over append-ordered leaves — splits
@@ -59,7 +73,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::{device_from_seed, sign_detached, verify_detached};
 use crate::ids::DeviceId;
-use crate::kinship::Signature;
+use crate::kinship::{self, Avowal, Claim, Signature};
 
 /// Signing domain for a chronicle head.
 pub const CHRONICLE_HEAD_DOMAIN: &[u8] = b"lait/chronicle/1/head";
@@ -471,6 +485,104 @@ pub fn advance(
     .map(|()| Advance::Extended)
 }
 
+/// Translate a kinship refusal into this plane's vocabulary.
+///
+/// Only what [`Avowal::verify`] can actually produce is named; the rest cannot
+/// arise from a mark and is reported as malformed rather than folded into a
+/// milder fact — a signature failure that reads as "not a mark" is the kind of
+/// collapse the refusal variants exist to prevent.
+fn from_kinship(refusal: &kinship::Refusal) -> Refusal {
+    match refusal {
+        kinship::Refusal::BadSignature => Refusal::BadSignature,
+        kinship::Refusal::Unaddressable => Refusal::Unaddressable,
+        kinship::Refusal::Semantics => Refusal::Semantics,
+        kinship::Refusal::Bound(what) => Refusal::Bound(what),
+        kinship::Refusal::Malformed(what) => Refusal::Malformed(what),
+        _ => Refusal::Malformed("mark"),
+    }
+}
+
+/// The four numbers a mark commits to, or a refusal if the avowal is some
+/// other claim. Taking the avowal rather than the claim keeps every caller
+/// honest about which artifact it verified.
+fn marked(mark: &Avowal) -> Result<(u64, [u8; 32], u64, [u8; 32]), Refusal> {
+    match &mark.claim {
+        Claim::Chronicled {
+            size,
+            root,
+            entry,
+            leaf,
+        } => Ok((*size, *root, *entry, *leaf)),
+        _ => Err(Refusal::Malformed("not a mark")),
+    }
+}
+
+/// Verify a mark on its own terms: the signature is the signer's, and the leaf
+/// it names provably sits at the index it names in a tree of the size and root
+/// it names.
+///
+/// Pure, and deliberately **not** given a head. A mark is self-verifying —
+/// binding it to whatever head happened to arrive beside it would make an
+/// honest mark unverifiable the moment the reader's pin moved on, which is a
+/// certification that quietly expires on the marker's next publication.
+/// Relating a verified mark to a pin is [`consistent_with`], separately,
+/// because "this was signed and proven" and "this is the log I follow" are
+/// different facts and a reader acts on them differently.
+///
+/// What this establishes is the marker's *memory*: something was recorded,
+/// there. It does not establish that the marked entry is about the mark's
+/// subject — only whoever holds the published bytes can recompute the leaf and
+/// prove that binding — and it confers nothing on anybody either way.
+pub fn verify_mark(mark: &Avowal, inclusion: &[[u8; 32]]) -> Result<(), Refusal> {
+    mark.verify().map_err(|refusal| from_kinship(&refusal))?;
+    let (size, root, entry, leaf) = marked(mark)?;
+    verify_inclusion(&leaf, entry, size, &root, inclusion)
+}
+
+/// Relate a verified mark to the chronicle a reader follows: same signer, and
+/// the marked tree and the pinned tree are one log rather than two.
+///
+/// `consistency` is the path the holder served between the two sizes; it is
+/// unused where the sizes are equal. A mark older than the pin must prove it
+/// is a prefix of it; a mark newer than the pin must prove the pin is a prefix
+/// of it. Same size and a different root under the pinned signer's own key is
+/// [`Refusal::Diverged`] — the caught lie — and never merely unproven.
+pub fn consistent_with(
+    pin: &PinnedHead,
+    mark: &Avowal,
+    consistency: &[[u8; 32]],
+) -> Result<(), Refusal> {
+    // The whole trust anchor, checked before anything else for the reason
+    // `advance` checks it first: a mark from a device this reader does not
+    // follow is a stranger's assertion, not this marker's, and it must not be
+    // able to reach any branch below.
+    if mark.by != pin.by {
+        return Err(Refusal::WrongSigner);
+    }
+    let (size, root, _, _) = marked(mark)?;
+    if size == pin.size {
+        return if root == pin.root {
+            Ok(())
+        } else {
+            Err(Refusal::Diverged)
+        };
+    }
+    if pin.size == 0 {
+        // The empty chronicle is a prefix of every chronicle — but only the
+        // empty root may claim to be it.
+        return if pin.root == empty_root() {
+            Ok(())
+        } else {
+            Err(Refusal::Diverged)
+        };
+    }
+    if size < pin.size {
+        verify_consistency(size, &root, pin.size, &pin.root, consistency)
+    } else {
+        verify_consistency(pin.size, &pin.root, size, &root, consistency)
+    }
+}
+
 /// The log itself, held by the service side. Leaf hashes only: the entries'
 /// bytes live wherever the holder stores what it serves.
 #[derive(Debug, Clone, Default)]
@@ -564,18 +676,160 @@ impl Chronicle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kinship::{Audience, Party};
 
     fn seed(tag: u8) -> [u8; 32] {
         [tag; 32]
     }
 
     fn filled(count: usize) -> Chronicle {
+        filled_with("entry", count)
+    }
+
+    fn filled_with(prefix: &str, count: usize) -> Chronicle {
         let mut log = Chronicle::new();
         for index in 0..count {
-            log.append(format!("entry-{index}").as_bytes())
+            log.append(format!("{prefix}-{index}").as_bytes())
                 .expect("append");
         }
         log
+    }
+
+    /// A mark as the minter shapes one: subject device, `Public`, `epoch =
+    /// size`, `nonce = leaf[..16]` so marking a publication twice is one
+    /// artifact.
+    fn sealed(
+        marker: &[u8; 32],
+        subject: &[u8; 32],
+        claim: Claim,
+    ) -> Result<Avowal, kinship::Refusal> {
+        let (epoch, nonce) = match &claim {
+            Claim::Chronicled { size, leaf, .. } => {
+                let mut nonce = [0u8; 16];
+                nonce.copy_from_slice(&leaf[..16]);
+                (*size, nonce)
+            }
+            _ => (0, [0u8; 16]),
+        };
+        Avowal::seal(
+            marker,
+            Party::Device(device_from_seed(subject)),
+            claim,
+            Audience::Public,
+            epoch,
+            nonce,
+        )
+    }
+
+    fn chronicled(log: &Chronicle, entry: u64) -> Claim {
+        Claim::Chronicled {
+            size: log.size(),
+            root: log.root(),
+            entry,
+            leaf: log.leaves()[usize::try_from(entry).expect("entry")],
+        }
+    }
+
+    #[test]
+    fn a_mark_proves_only_under_the_head_that_signed_it() {
+        let marker = seed(1);
+        let stranger = seed(9);
+        let subject = seed(2);
+        let log = filled(6);
+        let pin = PinnedHead::from(&log.head(&marker).expect("head"));
+        let path = log.inclusion(3).expect("path");
+        let mark = sealed(&marker, &subject, chronicled(&log, 3)).expect("mark");
+
+        // Self-verifying given the path, and on the log this reader follows.
+        verify_mark(&mark, &path).expect("the marker's own mark");
+        consistent_with(&pin, &mark, &[]).expect("its own head");
+
+        // A stranger's signature over the same numbers is a perfectly valid
+        // artifact — and not this marker speaking. Only the pin catches it,
+        // which is why the signer check lives there and not in `verify_mark`.
+        let forged = sealed(&stranger, &subject, chronicled(&log, 3)).expect("forged");
+        verify_mark(&forged, &path).expect("a stranger signs their own mark");
+        assert_eq!(
+            consistent_with(&pin, &forged, &[]),
+            Err(Refusal::WrongSigner)
+        );
+
+        // Another key's signature carried on this marker's mark.
+        let mut lifted = mark.clone();
+        lifted.signature = forged.signature;
+        assert_eq!(verify_mark(&lifted, &path), Err(Refusal::BadSignature));
+
+        // The right leaf at the wrong index, and a leaf the log never held.
+        let misplaced = sealed(
+            &marker,
+            &subject,
+            Claim::Chronicled {
+                size: log.size(),
+                root: log.root(),
+                entry: 4,
+                leaf: log.leaves()[3],
+            },
+        )
+        .expect("misplaced");
+        assert!(verify_mark(&misplaced, &path).is_err());
+        let absent = sealed(
+            &marker,
+            &subject,
+            Claim::Chronicled {
+                size: log.size(),
+                root: log.root(),
+                entry: 3,
+                leaf: [9u8; 32],
+            },
+        )
+        .expect("absent");
+        assert_eq!(verify_mark(&absent, &path), Err(Refusal::Unproven));
+
+        // A same-size head with another root, under the pinned signer's own
+        // key: the caught lie, never merely unproven.
+        let other = filled_with("other", 6);
+        let diverged = sealed(
+            &marker,
+            &subject,
+            Claim::Chronicled {
+                size: other.size(),
+                root: other.root(),
+                entry: 3,
+                leaf: other.leaves()[3],
+            },
+        )
+        .expect("diverged");
+        assert_eq!(
+            consistent_with(&pin, &diverged, &[]),
+            Err(Refusal::Diverged)
+        );
+
+        // A mark past the size it claims cannot be minted at all: nothing
+        // could ever prove it, so it never becomes a signature.
+        assert_eq!(
+            sealed(
+                &marker,
+                &subject,
+                Claim::Chronicled {
+                    size: log.size(),
+                    root: log.root(),
+                    entry: log.size(),
+                    leaf: log.leaves()[3],
+                },
+            )
+            .unwrap_err(),
+            kinship::Refusal::Malformed("chronicle entry")
+        );
+
+        // The pin moves on; the old mark still proves itself, and still
+        // belongs to this log along the served consistency path.
+        let mut later = log.clone();
+        later.append(b"entry-6").expect("append");
+        let moved = PinnedHead::from(&later.head(&marker).expect("head"));
+        let consistency = later.consistency(log.size()).expect("consistency");
+        verify_mark(&mark, &path).expect("still self-verifying");
+        consistent_with(&moved, &mark, &consistency).expect("a prefix of the pin");
+        assert!(consistent_with(&moved, &mark, &[]).is_err());
     }
 
     #[test]

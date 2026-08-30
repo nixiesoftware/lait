@@ -12,7 +12,8 @@
 //! one that matters: a letter landing while nobody was looking.
 
 use lait::control::{
-    ControlRoute, InterfaceView, OriginView, OwnDeviceView, ReachView, Request, Response,
+    ControlRoute, InterfaceView, MarkerView, OriginView, OwnDeviceView, ReachView, Request,
+    Response,
 };
 
 use crate::client::{Client, ClientError, ClientResult};
@@ -39,6 +40,11 @@ pub struct ProfileSnapshot {
     pub devices: Vec<OwnDeviceView>,
     /// The set was not held. Never folded into `devices` being empty.
     pub device_set_unknown: bool,
+    /// The markers this identity weighs, in its own order. Carried beside
+    /// the devices because a device's certification is only readable against
+    /// the list — "no marker says so" and "the marker could not be asked"
+    /// are different answers and the second one lives here.
+    pub markers: Vec<MarkerView>,
     /// The tunnel interface on this machine, when a net plane is mounted.
     pub interface: Option<InterfaceView>,
 }
@@ -53,6 +59,7 @@ impl Client {
             origin: view.origin,
             devices: view.devices,
             device_set_unknown: view.device_set_unknown,
+            markers: view.markers,
             interface: view.interface,
         })
     }

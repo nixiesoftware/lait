@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2913
-pr-platform    2386
-nightly        2942
+pr             2968
+pr-platform    2433
+nightly        2997
 mutants        106
 
 [gates]
@@ -546,10 +546,12 @@ lait config::tests::settings_store_layer_wins_over_global
 lait config::tests::socket_path_stays_under_the_unix_limit
 lait config::tests::the_display_port_is_configured_and_degrades_to_the_built_in
 lait config::tests::the_lock_holder_stays_identifiable_while_it_holds_the_lock
+lait config::tests::the_marker_book_reads_env_then_key_then_built_in_and_empty_opts_out
 lait config::tests::the_network_follows_the_relay_list_and_debug_defaults_public
 lait control::tests::a_different_executable_is_never_stale_however_new_we_are
 lait control::tests::a_drained_signal_says_how_many_were_lost
 lait control::tests::a_first_live_read_carries_no_generation_at_all
+lait control::tests::a_reach_view_from_before_markers_still_decodes_as_nobody_asked
 lait control::tests::a_rebuild_of_the_same_path_is_detected
 lait control::tests::a_release_ahead_displaces_and_nothing_else_does
 lait control::tests::an_equal_timestamp_is_never_a_takeover
@@ -595,6 +597,13 @@ lait daemon::host::tests::host_rejects_a_stale_space_expectation_before_placemen
 lait daemon::host::tests::one_host_endpoint_places_routes_streams_and_drains_an_orbit
 lait daemon::host::tests::restart_drift_skips_an_unbound_space_and_keeps_operation_progress
 lait daemon::host::tests::serve_pairing_re_mints_on_burn_and_relaunches_on_adoption
+lait daemon::markers::tests::a_legacy_registry_pin_is_adopted_once
+lait daemon::markers::tests::a_mark_is_proven_under_the_pinned_signer_and_refused_under_another
+lait daemon::markers::tests::a_receipt_head_off_the_accepted_chronicle_is_unproven
+lait daemon::markers::tests::an_unasked_marker_has_no_file_and_a_record_round_trips_whole
+lait daemon::markers::tests::each_ratchet_outcome_is_its_own_standing
+lait daemon::markers::tests::irreconcilable_heads_from_one_signer_are_kept_as_evidence
+lait daemon::markers::tests::the_book_reads_as_a_tier_and_never_as_a_verdict
 lait daemon::netplane::tests::a_set_that_is_not_held_names_no_devices
 lait daemon::netplane::tests::a_stranger_never_becomes_a_route_and_a_retired_device_loses_the_one_it_had
 lait daemon::netplane::tests::an_interface_the_machine_will_not_give_is_never_read_as_no_peers
@@ -686,8 +695,7 @@ lait display::overlay::tests::the_display_router_answers_over_the_overlay
 lait display::pairing::tests::a_code_dies_on_its_own_and_can_be_withdrawn_and_the_long_way_stays_open
 lait display::pairing::tests::a_code_enrolls_a_receiver_without_a_second_screen_and_keeps_its_promise
 lait display::pairing::tests::approval_enrolls_only_after_receiver_proves_the_new_key
-lait display::pin::tests::a_corrupt_pin_reads_as_absent_not_as_a_head
-lait display::pin::tests::a_pin_round_trips_and_absence_is_none
+lait display::publish::tests::a_pinned_signer_in_the_book_refuses_a_different_signer_at_first_contact
 lait display::publish::tests::a_registrar_signing_under_a_new_key_is_not_the_holder_you_pinned
 lait display::publish::tests::a_registrar_that_cannot_link_to_the_pin_does_not_move_it
 lait display::publish::tests::a_registrar_with_a_different_memory_at_the_pinned_size_is_caught
@@ -1045,6 +1053,7 @@ lait-directory::deployed a_deployed_directory_spends_a_challenge_exactly_once
 lait-directory::deployed a_real_firestore_chronicle_proves_every_publication_it_records
 lait-directory::deployed real_firestore_admits_exactly_one_leaf_per_index
 lait-directory::directory a_challenge_issued_to_one_device_cannot_be_answered_by_another
+lait-directory::directory a_publication_is_chronicled_and_marked_for_every_device_it_avows
 lait-directory::directory a_publisher_the_announcement_does_not_avow_is_refused
 lait-directory::directory a_replayed_publication_fails
 lait-directory::directory a_replayed_resolution_fails
@@ -1057,8 +1066,11 @@ lait-directory::directory an_expired_challenge_is_not_open_and_does_not_stay_pro
 lait-directory::directory an_older_publication_does_not_replace_a_newer_one
 lait-directory::directory nothing_the_service_accepts_can_be_produced_without_a_seed
 lait-directory::directory probing_for_addresses_nobody_holds_still_spends_the_askers_budget
+lait-directory::directory the_directory_and_the_registry_write_one_chronicle
+lait-directory::directory the_newest_receipt_is_the_whole_certification_and_the_next_one_withdraws_a_device
 lait-directory::directory two_profiles_on_one_machine_share_no_address_no_identifier_and_no_device
 lait-directory::over_http a_malformed_device_is_refused_without_describing_the_service
+lait-directory::over_http a_receipt_rides_beside_the_address_and_an_old_client_still_decodes_it
 lait-directory::over_http an_address_is_published_and_resolved_over_http
 lait-directory::over_http an_address_nobody_holds_is_a_404_that_says_nothing_about_existence
 lait-feed-notify tests::a_key_is_a_channel_path_and_nothing_else
@@ -1687,6 +1699,7 @@ mechanics authority_checkpoint_tests::undecodable_checkpoint_rebuilds_from_signe
 mechanics ceremony::tests::a_fenced_generation_signing_transcript_is_terminal
 mechanics ceremony::tests::an_active_next_generation_transcript_is_retained
 mechanics chronicle::tests::a_head_signs_and_verifies_and_a_tampered_one_does_not
+mechanics chronicle::tests::a_mark_proves_only_under_the_head_that_signed_it
 mechanics chronicle::tests::a_rewritten_history_cannot_prove_it_extends_the_honest_one
 mechanics chronicle::tests::a_stranger_cannot_move_the_pin_forge_a_fork_or_hijack_an_empty_pin
 mechanics chronicle::tests::a_wrong_leaf_index_or_truncated_path_does_not_verify
@@ -1911,6 +1924,7 @@ mechanics::it device_sealing::admitting_a_reader_needs_a_reader_and_re_encrypts_
 mechanics::it device_sealing::sealing_to_nobody_is_a_failure_not_an_empty_success
 mechanics::it kinship::a_body_not_in_the_committed_head_is_refused
 mechanics::it kinship::a_chain_through_a_retired_device_is_dead_past_the_break
+mechanics::it kinship::a_chronicled_claim_is_an_attestation_and_confers_nothing
 mechanics::it kinship::a_device_cannot_link_to_itself
 mechanics::it kinship::a_forged_link_roots_nobody
 mechanics::it kinship::a_genesis_signer_disloses_no_chain
@@ -1937,8 +1951,10 @@ mechanics::it kinship::attribution_states_what_the_audience_size_actually_buys
 mechanics::it kinship::editing_the_committed_entry_set_breaks_the_commitment
 mechanics::it kinship::every_refusal_carries_a_name_rather_than_a_boolean
 mechanics::it kinship::losing_one_device_leaves_every_other_link_standing
+mechanics::it kinship::no_judge_reads_a_mark
 mechanics::it kinship::own_and_kin_cannot_be_decided_without_being_resolved
 mechanics::it kinship::retirement_severs_and_a_stranger_cannot_wield_it
+mechanics::it kinship::the_claim_encoding_is_append_only_and_round_trips
 mechanics::it kinship::the_profile_id_is_the_genesis_links_content_address
 mechanics::it kinship::widening_the_audience_breaks_the_signature
 mechanics::it world_policy::delegation_permits_granting_but_not_meta_capability

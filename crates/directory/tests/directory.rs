@@ -6,19 +6,31 @@
 //! service as a whole — what it refuses is as much the product as what it
 //! answers.
 
+use std::sync::Arc;
+
 use addressbook::{Announcement, Registry};
 use lait_directory::{
     address::Address,
+    registry::{Label, MemRegistry, Registrar, RegistryStore, RoutePublish},
+    service::chronicle_entry_for,
     wire::{sign, Challenge},
-    Directory, MemStore, Refusal, Service,
+    Chronicler, Directory, Issued, MemStore, Receipt, Refusal, Service,
 };
 use mechanics::{
     actor::device_from_seed,
+    chronicle::{
+        advance, consistent_with, verify_inclusion, verify_mark, Advance, Chronicle, PinnedHead,
+    },
     ids::DeviceId,
-    kinship::{Audience, DeviceLink, ProfileId, Standing},
+    kinship::{Audience, DeviceLink, Entry, Party, ProfileId, Retirement, Standing},
 };
 
 const NOW: u64 = 1_700_000_000;
+
+/// The marker's seed: the chronicle key, which signs which publications were
+/// recorded and in which order — and now the marks over them. Never an operator
+/// key; a mark asserts log facts and steers nothing.
+const MARKER: [u8; 32] = [77u8; 32];
 
 /// One identity home: two device seeds, a genesis link between them, and the
 /// registry that authored it. Two seeds because a kinship genesis needs two
@@ -66,10 +78,37 @@ impl Home {
         device_from_seed(&self.seeds[0])
     }
 
+    /// The devices this home's next announcement will avow: its live set.
+    fn devices(&self) -> Vec<DeviceId> {
+        self.registry
+            .resolve(&self.profile)
+            .expect("a held profile")
+    }
+
+    /// Retire a device from the profile, so the next announcement avows fewer.
+    fn retire(&mut self, device: &DeviceId, epoch: u64) {
+        let retirement = Retirement::seal(&self.seeds[0], device.clone(), epoch, [5u8; 16])
+            .expect("seal a retirement");
+        self.registry
+            .extend(&self.profile, Entry::Retire(retirement))
+            .expect("retire");
+    }
+
     /// Announce at `epoch` and publish it, as this home's canonical device.
     fn publish(&mut self, service: &mut Service<MemStore>, epoch: u64) -> Result<Address, Refusal> {
+        self.publish_issued(service, epoch)
+            .map(|issued| issued.address)
+    }
+
+    /// The same act, keeping the receipt the chronicle answered with.
+    fn publish_issued(
+        &mut self,
+        service: &mut Service<MemStore>,
+        epoch: u64,
+    ) -> Result<Issued, Refusal> {
         let announcement = self.announce(epoch);
         lait_directory::publish_as(service, &self.seeds[0], &announcement, NOW)
+            .map(|published| published.issued)
     }
 }
 
@@ -406,7 +445,9 @@ fn an_older_publication_does_not_replace_a_newer_one() {
     let new = home.announce(5);
 
     let address = lait_directory::publish_as(&mut service, &home.seeds[0], &new, NOW)
-        .expect("publish the newer");
+        .expect("publish the newer")
+        .issued
+        .address;
     let _ = lait_directory::publish_as(&mut service, &home.seeds[0], &old, NOW)
         .expect("an older publication is accepted rather than errored");
 
@@ -441,5 +482,230 @@ fn nothing_the_service_accepts_can_be_produced_without_a_seed() {
     assert_eq!(
         Directory::publish(&mut service, &request, NOW).unwrap_err(),
         Refusal::NotAuthentic
+    );
+}
+
+// --------------------------------------------------------------- chronicling
+
+/// The subjects a receipt's marks name, sorted. Panics on a mark about anything
+/// but a device: a mark names the device it recorded a publication for, and a
+/// reader that had to handle some other party would be reading a claim this
+/// service does not make.
+fn marked(receipt: &Receipt) -> Vec<DeviceId> {
+    let mut devices: Vec<DeviceId> = receipt
+        .marks
+        .iter()
+        .map(|mark| match &mark.subject {
+            Party::Device(device) => device.clone(),
+            other => panic!("a mark named {other:?} rather than a device"),
+        })
+        .collect();
+    devices.sort();
+    devices
+}
+
+/// A chronicled directory over a chronicle nothing else feeds.
+fn chronicled() -> (
+    Service<MemStore>,
+    lait_directory::chronicle::SharedChronicler,
+) {
+    let chronicler = Chronicler::shared(MemStore::new(), MARKER).expect("open the chronicle");
+    (
+        Service::with_chronicler(MemStore::new(), Arc::clone(&chronicler)),
+        chronicler,
+    )
+}
+
+/// A device set publication is recorded and marked, so an identity that never
+/// chose a label is certified exactly as one that did — and every mark proves
+/// itself on its own terms, against the entry the publisher can recompute.
+#[test]
+fn a_publication_is_chronicled_and_marked_for_every_device_it_avows() {
+    let mut home = Home::found(21, 22);
+    let (mut service, _chronicler) = chronicled();
+
+    // Composed field by field rather than through `publish_as`, because the
+    // subject binding is exactly the part only a holder of the signed request
+    // can prove: it recomputes the leaf and finds it under the head.
+    let announcement = home.announce(2);
+    let challenge = challenge_for(&mut service, &home.seeds[0]);
+    let request = sign::publish(
+        &home.seeds[0],
+        &challenge,
+        announcement.encode().expect("encode"),
+    );
+    let receipt = Directory::publish(&mut service, &request, NOW)
+        .expect("publish")
+        .receipt;
+
+    let head = receipt
+        .head
+        .clone()
+        .expect("a chronicled publication carries its head");
+    head.verify().expect("the head verifies");
+    assert_eq!(head.size, 1, "one publication, one entry");
+    assert_eq!(receipt.entry, Some(0));
+    let leaf = Chronicle::leaf_of(&chronicle_entry_for(&request));
+    verify_inclusion(&leaf, 0, head.size, &head.root, &receipt.inclusion)
+        .expect("the publisher recomputes its own leaf and finds it recorded");
+
+    assert_eq!(
+        marked(&receipt),
+        home.devices(),
+        "the marks name exactly the devices this publication avows"
+    );
+    let pin = PinnedHead::from(&head);
+    for mark in &receipt.marks {
+        assert_eq!(
+            mark.by, head.by,
+            "a mark is signed by the marker whose head it names"
+        );
+        assert_eq!(mark.audience, Audience::Public);
+        verify_mark(mark, &receipt.inclusion).expect("the mark proves what it says");
+        consistent_with(&pin, mark, &[]).expect("and sits on the log this reader follows");
+    }
+
+    // A directory that keeps no chronicle records nothing and marks nobody.
+    // That is a smaller service, never a refusal, and never rendered as one.
+    let mut unchronicled = Service::new(MemStore::new());
+    assert_eq!(
+        home.publish_issued(&mut unchronicled, 3)
+            .expect("publish")
+            .receipt,
+        Receipt::default(),
+        "an unchronicled directory answered something other than an empty receipt"
+    );
+}
+
+/// Invariant 7's revoke arm. Certification is per receipt: the newest one is the
+/// whole of it, so a device the next publication does not avow loses its mark
+/// with nothing retracted and no history rewritten — and the earlier mark stays
+/// exactly as true as it was, because it only ever named an entry.
+#[test]
+fn the_newest_receipt_is_the_whole_certification_and_the_next_one_withdraws_a_device() {
+    let mut home = Home::found(21, 22);
+    let (mut service, _chronicler) = chronicled();
+    let witness = device_from_seed(&home.seeds[1]);
+
+    let first = home
+        .publish_issued(&mut service, 2)
+        .expect("publish")
+        .receipt;
+    assert!(
+        marked(&first).contains(&witness),
+        "the witness was avowed and should have been marked"
+    );
+    let earlier = first
+        .marks
+        .iter()
+        .find(|mark| mark.subject == Party::Device(witness.clone()))
+        .cloned()
+        .expect("the witness's mark");
+
+    home.retire(&witness, 3);
+    let second = home
+        .publish_issued(&mut service, 4)
+        .expect("republish")
+        .receipt;
+
+    assert_eq!(
+        marked(&second),
+        vec![home.device()],
+        "a device the newest publication does not avow is no longer certified"
+    );
+    assert_eq!(
+        second.head.expect("a head").size,
+        2,
+        "the withdrawal is a later entry, never an erased one"
+    );
+    verify_mark(&earlier, &first.inclusion)
+        .expect("the earlier mark still proves the entry it named");
+}
+
+/// One chronicle, two feeders. A route publication and an address publication
+/// by the same identity land in one log, each provable under it, and the head
+/// the registry serves is the head the directory answered with — which is what
+/// makes a reader's single pin cover both.
+#[test]
+fn the_directory_and_the_registry_write_one_chronicle() {
+    let mut home = Home::found(21, 22);
+    let (mut service, chronicler) = chronicled();
+    let label = Label::parse("acme").expect("a label");
+    let mut routes = MemRegistry::default();
+    routes
+        .bind(&label, &home.profile)
+        .expect("the curated bind");
+    let mut registrar = Registrar::with_chronicler(routes, Arc::clone(&chronicler));
+
+    let announcement = home.announce(2);
+    let route = RoutePublish::sign(
+        label,
+        announcement.encode().expect("encode"),
+        device_from_seed(&[99u8; 32]).as_str().to_owned(),
+        2,
+        &home.seeds[0],
+    );
+    let answer = registrar.publish(&route).expect("the route is taken");
+    let routed = answer.receipt.clone();
+    let first = routed.head.clone().expect("a chronicled route");
+    assert_eq!(routed.entry, Some(0));
+    assert_eq!(
+        marked(&routed),
+        home.devices(),
+        "the registry marks the devices the announcement avows, not only the presenter"
+    );
+    verify_inclusion(
+        &Chronicle::leaf_of(&lait_directory::registry::chronicle_entry(&route)),
+        0,
+        first.size,
+        &first.root,
+        &routed.inclusion,
+    )
+    .expect("the route's own entry is provable");
+
+    // The registry's answer keeps every key it had: the receipt is flattened
+    // beside the route, so a reader that knows only `Resolved` decodes exactly
+    // what it always did. Checked against the wire rather than assumed — the
+    // flatten is the whole of that compatibility claim.
+    let wire = serde_json::to_value(&answer).expect("serialize the answer");
+    for key in ["label", "profile", "endpoint", "epoch", "head", "entry"] {
+        assert!(
+            wire.get(key).is_some(),
+            "the registry answer lost `{key}`: {wire}"
+        );
+    }
+    assert!(
+        wire.get("inclusion").is_none(),
+        "an empty path is still omitted rather than serialized, as it always was: {wire}"
+    );
+    serde_json::from_value::<lait_directory::registry::Resolved>(wire)
+        .expect("a chronicle-blind reader still decodes the route");
+
+    let published = home
+        .publish_issued(&mut service, 3)
+        .expect("publish")
+        .receipt;
+    let second = published.head.clone().expect("a chronicled publication");
+    assert_eq!(second.size, 2, "both feeders wrote into one log");
+    assert_eq!(published.entry, Some(1));
+    assert_eq!(second.by, first.by, "one log, one signer");
+
+    // The registry's chronicle surface serves what the directory just wrote,
+    // and proves it extends what a reader pinned at the route.
+    let answer = registrar
+        .answer(Some(first.size))
+        .expect("the chronicle answers");
+    assert_eq!(
+        answer.head, second,
+        "the shared surface serves the shared head"
+    );
+    assert_eq!(
+        advance(
+            Some(&PinnedHead::from(&first)),
+            &answer.head,
+            &answer.consistency
+        ),
+        Ok(Advance::Extended),
+        "a reader following one marker covers both surfaces"
     );
 }

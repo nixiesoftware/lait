@@ -824,6 +824,12 @@ pub struct ProfileFacts {
     /// Devices that answered a code entered here and are waiting on their six
     /// words being compared.
     pub offers: Vec<PairOfferRow>,
+    /// The markers this person's device weighs, in its own order. A tier:
+    /// nothing on this surface is withheld, disabled or refused because a
+    /// marker is silent, and the list exists so that a device with no
+    /// certification can be told apart from a marker that could not be
+    /// asked.
+    pub markers: Vec<MarkerRow>,
 }
 
 /// How a device came to hold its profile.
@@ -843,10 +849,54 @@ pub struct OwnDeviceRow {
     /// The Spaces this device is listed in. Empty is an answer; it is not
     /// "unknown", which is [`LivenessRow::NotProbed`]'s business.
     pub held: Vec<String>,
+    /// The markers that have recorded this device, named as
+    /// [`MarkerRow::marker`] names them so a surface joins on it. Empty is
+    /// the ordinary answer for a device nobody has recorded yet, and it
+    /// costs that device nothing.
+    pub certified_by: Vec<String>,
     /// How the tunnel reaches this device. `None` is "nothing carried", which
     /// is not "unreachable" — and the three ways of not being reached below
     /// are not each other either.
     pub reach: Option<ReachRow>,
+}
+
+/// One marker this person's device weighs.
+///
+/// Evidence, never authority. A marker records what it was told and signs
+/// what it recorded; nothing on this client asks one for permission, and no
+/// control anywhere is enabled or disabled by what one says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRow {
+    /// Where the marker answers — the only part of one a person is shown.
+    pub marker: String,
+    pub standing: MarkerStandingRow,
+}
+
+/// How one marker's last check went, in the client's vocabulary.
+///
+/// Eight facts, kept apart. The three that matter most: a marker nothing has
+/// asked yet, a marker that could not be reached, and a marker that answered.
+/// Only the last of those can make a device "not listed" — for the other two
+/// there is no answer to be listed in, and a surface that said "not listed"
+/// for them would be reporting a network as a judgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerStandingRow {
+    /// It answered, and its record checked out.
+    Answering,
+    /// Nothing has asked it yet.
+    NeverAsked,
+    /// It could not be reached.
+    CouldNotAsk,
+    /// It answered as a device other than the one this identity follows.
+    AnsweredAsAnother,
+    /// It answered with a record older than the one this identity holds.
+    AnsweredOlder,
+    /// It could not show its record carries the held one forward.
+    Unproven,
+    /// It gave two records that cannot both be true.
+    Contradicted,
+    /// Its answer was not a record this device can read.
+    Unreadable,
 }
 
 /// The tunnel interface on the machine this client is talking to.
@@ -2496,83 +2546,139 @@ fn project(app: &App) -> ClientView {
         // the reach view's and the waiting code and offers are orientation's.
         // Joining at the boundary rather than in the model keeps each read
         // the only writer of what it measured.
-        profile: app.profile().map(|profile| ProfileFacts {
-            profile: profile.profile.clone(),
-            me: profile.me.clone(),
-            origin: profile.origin.as_ref().map(|origin| match origin {
-                lait::control::OriginView::Founded => OriginRow::Founded,
-                lait::control::OriginView::Adopted { from, at } => OriginRow::Adopted {
-                    from: from.clone(),
-                    at: *at,
-                },
-            }),
-            devices: profile
-                .devices
+        profile: app.profile().map(|profile| {
+            // A device's certification names the marker's device; a person is
+            // shown where the marker answers. Joined once here rather than at
+            // every row, and only for markers the book still weighs.
+            let named: std::collections::BTreeMap<&str, &str> = profile
+                .markers
                 .iter()
-                .map(|device| OwnDeviceRow {
-                    device: device.device.clone(),
-                    me: device.me,
-                    liveness: match &device.liveness {
-                        lait::control::Liveness::Reported { version, at } => {
-                            LivenessRow::Answered {
-                                version: version.clone(),
-                                at: *at,
-                            }
-                        }
-                        lait::control::Liveness::CouldNotAsk { why } => {
-                            LivenessRow::CouldNotAsk { why: why.clone() }
-                        }
-                        lait::control::Liveness::NotProbed => LivenessRow::NotProbed,
+                .filter_map(|marker| marker.by.as_deref().map(|by| (by, marker.base.as_str())))
+                .collect();
+            ProfileFacts {
+                profile: profile.profile.clone(),
+                me: profile.me.clone(),
+                origin: profile.origin.as_ref().map(|origin| match origin {
+                    lait::control::OriginView::Founded => OriginRow::Founded,
+                    lait::control::OriginView::Adopted { from, at } => OriginRow::Adopted {
+                        from: from.clone(),
+                        at: *at,
                     },
-                    held: device.held.clone(),
-                    reach: device.reach.as_ref().map(|reach| match reach {
-                        lait::control::ReachKind::Connected { via } => {
-                            ReachRow::Connected { via: via.clone() }
-                        }
-                        lait::control::ReachKind::Dialing => ReachRow::Dialing,
-                        lait::control::ReachKind::NoRoute => ReachRow::NoRoute,
-                        lait::control::ReachKind::Unreachable { since } => {
-                            ReachRow::Unreachable { since: *since }
-                        }
-                        lait::control::ReachKind::Retired => ReachRow::Retired,
-                    }),
-                })
-                .collect(),
-            device_set_unknown: profile.device_set_unknown,
-            interface: profile.interface.as_ref().map(|interface| match interface {
-                lait::control::InterfaceView::Up { name, address } => InterfaceRow::Up {
-                    name: name.clone(),
-                    address: address.clone(),
-                },
-                lait::control::InterfaceView::NotPermitted => InterfaceRow::NotPermitted,
-                lait::control::InterfaceView::Unsupported => InterfaceRow::Unsupported,
-                lait::control::InterfaceView::Off => InterfaceRow::Off,
-            }),
-            pairing: app
-                .context()
-                .and_then(|context| context.pairing.as_ref())
-                .map(|pairing| PairingCodeRow {
-                    code: pairing.code.clone(),
-                    direct: pairing
-                        .direct
-                        .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect(),
-                    expires_at_ms: pairing.expires_at_ms,
                 }),
-            offers: app
-                .context()
-                .map(|context| context.pair_offers.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .map(|offer| PairOfferRow {
-                    pairing: offer.pairing.clone(),
-                    device: offer.device.clone(),
-                    name: offer.name.clone(),
-                    phrase: offer.phrase.clone(),
-                    expires_at_ms: offer.expires_at_ms,
-                })
-                .collect(),
+                devices: profile
+                    .devices
+                    .iter()
+                    .map(|device| OwnDeviceRow {
+                        device: device.device.clone(),
+                        me: device.me,
+                        liveness: match &device.liveness {
+                            lait::control::Liveness::Reported { version, at } => {
+                                LivenessRow::Answered {
+                                    version: version.clone(),
+                                    at: *at,
+                                }
+                            }
+                            lait::control::Liveness::CouldNotAsk { why } => {
+                                LivenessRow::CouldNotAsk { why: why.clone() }
+                            }
+                            lait::control::Liveness::NotProbed => LivenessRow::NotProbed,
+                        },
+                        held: device.held.clone(),
+                        // Resolved to the name the marker rows carry, so the
+                        // surface joins on something a person can be shown. A
+                        // certification by a marker the book no longer weighs is
+                        // dropped: this reader's book is what this reader trusts,
+                        // and a chip naming a marker with no row would be a
+                        // claim with nothing behind it.
+                        certified_by: device
+                            .certified_by
+                            .iter()
+                            .filter_map(|by| named.get(by.as_str()).map(|base| (*base).to_owned()))
+                            .collect(),
+                        reach: device.reach.as_ref().map(|reach| match reach {
+                            lait::control::ReachKind::Connected { via } => {
+                                ReachRow::Connected { via: via.clone() }
+                            }
+                            lait::control::ReachKind::Dialing => ReachRow::Dialing,
+                            lait::control::ReachKind::NoRoute => ReachRow::NoRoute,
+                            lait::control::ReachKind::Unreachable { since } => {
+                                ReachRow::Unreachable { since: *since }
+                            }
+                            lait::control::ReachKind::Retired => ReachRow::Retired,
+                        }),
+                    })
+                    .collect(),
+                device_set_unknown: profile.device_set_unknown,
+                interface: profile.interface.as_ref().map(|interface| match interface {
+                    lait::control::InterfaceView::Up { name, address } => InterfaceRow::Up {
+                        name: name.clone(),
+                        address: address.clone(),
+                    },
+                    lait::control::InterfaceView::NotPermitted => InterfaceRow::NotPermitted,
+                    lait::control::InterfaceView::Unsupported => InterfaceRow::Unsupported,
+                    lait::control::InterfaceView::Off => InterfaceRow::Off,
+                }),
+                pairing: app
+                    .context()
+                    .and_then(|context| context.pairing.as_ref())
+                    .map(|pairing| PairingCodeRow {
+                        code: pairing.code.clone(),
+                        direct: pairing
+                            .direct
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect(),
+                        expires_at_ms: pairing.expires_at_ms,
+                    }),
+                offers: app
+                    .context()
+                    .map(|context| context.pair_offers.as_slice())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|offer| PairOfferRow {
+                        pairing: offer.pairing.clone(),
+                        device: offer.device.clone(),
+                        name: offer.name.clone(),
+                        phrase: offer.phrase.clone(),
+                        expires_at_ms: offer.expires_at_ms,
+                    })
+                    .collect(),
+                markers: profile
+                    .markers
+                    .iter()
+                    .map(|marker| MarkerRow {
+                        marker: marker.base.clone(),
+                        standing: match &marker.standing {
+                            None => MarkerStandingRow::NeverAsked,
+                            Some(standing) => match standing {
+                                lait::control::MarkerStandingView::Pinned
+                                | lait::control::MarkerStandingView::Unchanged
+                                | lait::control::MarkerStandingView::Extended => {
+                                    MarkerStandingRow::Answering
+                                }
+                                lait::control::MarkerStandingView::CouldNotAsk { .. } => {
+                                    MarkerStandingRow::CouldNotAsk
+                                }
+                                lait::control::MarkerStandingView::WrongSigner => {
+                                    MarkerStandingRow::AnsweredAsAnother
+                                }
+                                lait::control::MarkerStandingView::Rollback => {
+                                    MarkerStandingRow::AnsweredOlder
+                                }
+                                lait::control::MarkerStandingView::Unproven => {
+                                    MarkerStandingRow::Unproven
+                                }
+                                lait::control::MarkerStandingView::Diverged => {
+                                    MarkerStandingRow::Contradicted
+                                }
+                                lait::control::MarkerStandingView::Refused { .. } => {
+                                    MarkerStandingRow::Unreadable
+                                }
+                            },
+                        },
+                    })
+                    .collect(),
+            }
         }),
         notices: app
             .notices()
@@ -3203,7 +3309,10 @@ mod tests {
     #[test]
     fn a_profile_crosses_with_its_devices_and_the_code_it_is_waiting_on() {
         use crate::client::reach::ProfileSnapshot;
-        use lait::control::{Liveness, OriginView, OwnDeviceView, PairOffer, PairingCode};
+        use lait::control::{
+            Liveness, MarkerStandingView, MarkerView, OriginView, OwnDeviceView, PairOffer,
+            PairingCode,
+        };
 
         let mut app = App::new();
         let mut context = crate::client::host::HostContext {
@@ -3246,6 +3355,7 @@ mod tests {
                         at: 5,
                     },
                     held: vec!["spc_a".into(), "spc_b".into()],
+                    certified_by: vec!["dev_marker".into()],
                     reach: None,
                 },
                 OwnDeviceView {
@@ -3255,10 +3365,25 @@ mod tests {
                         why: "no route".into(),
                     },
                     held: Vec::new(),
+                    certified_by: Vec::new(),
                     reach: Some(lait::control::ReachKind::Unreachable { since: 12 }),
                 },
             ],
             device_set_unknown: false,
+            markers: vec![
+                MarkerView {
+                    base: "https://post.example".into(),
+                    by: Some("dev_marker".into()),
+                    standing: Some(MarkerStandingView::Extended),
+                    checked_at: Some(9),
+                },
+                MarkerView {
+                    base: "https://quiet.example".into(),
+                    by: None,
+                    standing: None,
+                    checked_at: None,
+                },
+            ],
             interface: Some(lait::control::InterfaceView::NotPermitted),
         })));
 
@@ -3287,6 +3412,25 @@ mod tests {
         );
         assert_eq!(profile.offers.len(), 1);
         assert_eq!(profile.offers[0].phrase.len(), 6);
+        // The tier crosses named the way the marker rows name it, so a
+        // surface can join the two without holding a second table.
+        assert_eq!(profile.devices[0].certified_by, ["https://post.example"]);
+        // A device no marker has recorded is not a problem and carries no
+        // finding — it simply says nothing.
+        assert!(profile.devices[1].certified_by.is_empty());
+        // And a marker nothing has asked yet is its own standing, never
+        // folded into the one that could not be reached.
+        assert_eq!(
+            profile
+                .markers
+                .iter()
+                .map(|marker| (marker.marker.as_str(), marker.standing))
+                .collect::<Vec<_>>(),
+            [
+                ("https://post.example", MarkerStandingRow::Answering),
+                ("https://quiet.example", MarkerStandingRow::NeverAsked),
+            ],
+        );
         // A machine that will not give an interface is a fact about the
         // machine, and a device nothing has routed to is not the same as one
         // that was dialed and did not answer. Both cross whole.

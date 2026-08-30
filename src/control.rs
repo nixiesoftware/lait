@@ -2474,6 +2474,12 @@ pub struct ReachView {
     /// the ledger's answer, and only the second is a fact about the Space.
     #[serde(default)]
     pub spaces: Vec<SpaceFanout>,
+    /// The markers this identity weighs, in the order its book weighs them.
+    /// Evidence, never authority: nothing in an ACL, an admission or the
+    /// hub reads a row of this, and an empty list is a person with no
+    /// witnesses rather than a person who failed a check.
+    #[serde(default)]
+    pub markers: Vec<MarkerView>,
     /// The tunnel interface on this machine. `None` when no net plane is
     /// mounted at all; otherwise it always says something, including that
     /// this machine will not give one.
@@ -2506,6 +2512,14 @@ pub struct OwnDeviceView {
     /// Space ids the ledger lists this device in, under my actor.
     #[serde(default)]
     pub held: Vec<String>,
+    /// The markers that have recorded a publication naming this device, by
+    /// the device each marker signs with — the join key into `markers`.
+    ///
+    /// A tier and never a gate: an empty list withholds nothing, refuses
+    /// nothing and hides nothing, and a marker that could not be asked
+    /// leaves whatever it last proved standing rather than emptying this.
+    #[serde(default)]
+    pub certified_by: Vec<String>,
     /// How the tunnel reaches this device, if a net plane is carrying.
     /// `None` is "nothing carried", which is not "unreachable".
     #[serde(default)]
@@ -2607,6 +2621,66 @@ pub enum FanoutStanding {
     Deferred { why: String },
     /// The device did not answer. Asked again at `retry_at_ms`.
     CouldNotAsk { why: String, retry_at_ms: u64 },
+}
+
+/// One marker this identity follows, as a surface reads it.
+///
+/// A marker keeps a record of what it was told and signs what it recorded.
+/// This row says only how the last look at that record went; what it never
+/// says is whether anybody may do anything, because a mark confers nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkerView {
+    /// Where this marker answers — the book's key, and the only part of a
+    /// marker a person can be shown.
+    pub base: String,
+    /// The device this identity follows at that base, once one has answered
+    /// or the book named one. The join key `OwnDeviceView.certified_by`
+    /// uses.
+    #[serde(default)]
+    pub by: Option<String>,
+    /// How the last check went, or `None` for a marker nothing has asked
+    /// yet. Absence is the fourth thing: it is neither an answer nor a
+    /// failure, and folding it into either is what makes a surface say
+    /// something false about a machine that has simply just started.
+    #[serde(default)]
+    pub standing: Option<MarkerStandingView>,
+    /// Unix seconds of the last completed check. `None` alongside a `None`
+    /// standing.
+    #[serde(default)]
+    pub checked_at: Option<u64>,
+}
+
+/// How one marker's last check went.
+///
+/// Every refusal is its own variant because every one of them is a different
+/// fact about the marker, and a surface says a different sentence for each.
+/// The sizes and device ids the daemon's own record keeps are deliberately
+/// not carried: a log position is not something to show a person, and a view
+/// that carried one would invite a surface to print it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "standing", rename_all = "snake_case")]
+pub enum MarkerStandingView {
+    /// The first record this identity accepted from this marker.
+    Pinned,
+    /// The same record again — the marker has recorded nothing since.
+    Unchanged,
+    /// A longer record that proved it carries the earlier one forward.
+    Extended,
+    /// The marker could not be reached. Never "not listed": an unreachable
+    /// witness is not a witness who said no, and what it last proved stands.
+    CouldNotAsk { why: String },
+    /// The record came back signed by a device this identity does not
+    /// follow.
+    WrongSigner,
+    /// A record shorter than the one held: a replayed or truncated copy.
+    Rollback,
+    /// Longer, and not shown to carry the held one forward.
+    Unproven,
+    /// Two signed records that cannot both be true. The marker equivocated.
+    Diverged,
+    /// The marker answered, and what it said was not a record this identity
+    /// can read at all. Categorically not `CouldNotAsk` — something replied.
+    Refused { why: String },
 }
 
 /// Everything said with one correspondent.
@@ -4677,6 +4751,27 @@ pub async fn subscribe_live_routed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon that predates markers answers a `ReachView` with no `markers`
+    /// key and devices with no `certified_by`, and a client built after them
+    /// must read that as "nobody has been asked" rather than failing to
+    /// decode. The tier is additive by construction: a client that refused an
+    /// older daemon's answer would take a person's whole Devices surface away
+    /// over a chip.
+    #[test]
+    fn a_reach_view_from_before_markers_still_decodes_as_nobody_asked() {
+        let older = serde_json::json!({
+            "announcement": null,
+            "profile": "prf_1",
+            "correspondents": [],
+            "conversations": [],
+            "devices": [{ "device": "dev_pi", "me": false }],
+        });
+        let view: ReachView = serde_json::from_value(older).expect("an older daemon's view");
+        assert!(view.markers.is_empty());
+        assert!(view.devices[0].certified_by.is_empty());
+        assert_eq!(view.devices[0].liveness, Liveness::NotProbed);
+    }
 
     #[test]
     fn client_request_envelope_is_wire_backward_compatible() {

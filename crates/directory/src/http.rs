@@ -128,21 +128,29 @@ async fn challenge<S: Store>(
     Ok(Json(issued))
 }
 
-/// The address a publication answers with.
+/// The address a publication answers with, and the chronicle's receipt for it.
+///
+/// The receipt is flattened rather than nested, and every one of its fields
+/// defaults: a client built before the directory chronicled anything decodes
+/// `{address}` exactly as it always did and ignores the rest. Growing the
+/// answer this way is why an old daemon keeps publishing through a new Post.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Published {
     pub address: String,
+    #[serde(flatten, default)]
+    pub receipt: crate::Receipt,
 }
 
 async fn publish<S: Store>(
     State(shared): State<Shared<S>>,
     Json(request): Json<SignedPublish>,
 ) -> Result<Json<Published>, (StatusCode, Json<Refused>)> {
-    let address = held(&shared)
+    let issued = held(&shared)
         .publish(&request, now())
         .map_err(|refusal| refused(&refusal))?;
     Ok(Json(Published {
-        address: address.as_str().to_owned(),
+        address: issued.address.as_str().to_owned(),
+        receipt: issued.receipt,
     }))
 }
 

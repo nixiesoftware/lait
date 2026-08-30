@@ -5,13 +5,21 @@
 
 import { describe, expect, it } from "vitest";
 
-import { keyFor, loadingClientView, type ClientView, type OwnDevice, type ProfileFacts } from "./client";
 import {
-  answeringOffer, canAddDevice, codeToEnter, deviceStanding, devicesAbsence, expiryLabel, pairEnter, spacesHeld,
+  keyFor, loadingClientView,
+  type ClientView, type Marker, type MarkerStanding, type OwnDevice, type ProfileFacts,
+} from "./client";
+import {
+  answeringOffer, canAddDevice, certification, codeToEnter, deviceStanding, devicesAbsence,
+  expiryLabel, markerName, markerStanding, pairEnter, spacesHeld,
 } from "./devices";
 
 function device(overrides: Partial<OwnDevice> & { device: string }): OwnDevice {
-  return { me: false, liveness: { kind: "notProbed" }, held: [], reach: null, ...overrides };
+  return { me: false, liveness: { kind: "notProbed" }, held: [], certifiedBy: [], reach: null, ...overrides };
+}
+
+function marker(base: string, standing: MarkerStanding): Marker {
+  return { marker: base, standing };
 }
 
 function profile(overrides: Partial<ProfileFacts> = {}): ProfileFacts {
@@ -24,6 +32,7 @@ function profile(overrides: Partial<ProfileFacts> = {}): ProfileFacts {
     interface: null,
     pairing: null,
     offers: [],
+    markers: [],
     ...overrides,
   };
 }
@@ -92,6 +101,57 @@ describe("the rules for a person's own devices", () => {
     expect(keyFor({ type: "devicePairConfirm", pairing: offer.pairing, accept: false })).toBe("device.pair.confirm:pai_7");
     expect(answeringOffer(view({ inFlight: ["device.pair.confirm:pai_7"] }), "pai_7")).toBe(true);
     expect(answeringOffer(view({ inFlight: ["device.pair.confirm:pai_7"] }), "pai_8")).toBe(false);
+  });
+
+  it("draws every marker standing as its own line, and none of them as a verdict", () => {
+    const post = "https://post.example";
+    const standings: MarkerStanding["kind"][] = [
+      "answering", "neverAsked", "couldNotAsk", "answeredAsAnother",
+      "answeredOlder", "unproven", "contradicted", "unreadable",
+    ];
+    const labels = standings.map((kind) => markerStanding(marker(post, { kind })).label);
+    expect(new Set(labels).size).toBe(standings.length);
+    // The two that are not answers are never warnings: a marker nobody has
+    // asked, and one that could not be reached, say nothing about a person's
+    // devices, and drawing either as a finding turns an outage into a verdict.
+    expect(markerStanding(marker(post, { kind: "neverAsked" })).tone).toBe("neutral");
+    expect(markerStanding(marker(post, { kind: "couldNotAsk" })).tone).toBe("neutral");
+    expect(markerStanding(marker(post, { kind: "answering" })).tone).toBe("good");
+    // A marker caught contradicting itself is a finding — about the marker.
+    expect(markerStanding(marker(post, { kind: "contradicted" })).tone).toBe("warn");
+    // The name is where it answers, with nothing invented on top of it.
+    expect(markerName("https://post.foundation.pub/")).toBe("post.foundation.pub");
+    expect(markerName("http://127.0.0.1:8080")).toBe("127.0.0.1:8080");
+  });
+
+  it("hangs certification on a device as a tier, keeping four answers apart", () => {
+    const post = "https://post.example";
+    const listed = device({ device: "dev_pi", certifiedBy: [post] });
+    const unlisted = device({ device: "dev_pi" });
+
+    // Listed is the only line that adds anything.
+    expect(certification(listed, [marker(post, { kind: "answering" })]))
+      .toEqual([{ marker: post, label: "Listed by post.example", tone: "good" }]);
+    // A marker that answered and did not name this device is the only case in
+    // which "not listed" is true — and even then it is not a warning.
+    expect(certification(unlisted, [marker(post, { kind: "answering" })]))
+      .toEqual([{ marker: post, label: "Not listed by post.example", tone: "neutral" }]);
+    // The two absences are each their own line, and neither is "not listed":
+    // a marker that could not be reached said nothing about anybody.
+    expect(certification(unlisted, [marker(post, { kind: "couldNotAsk" })]))
+      .toEqual([{ marker: post, label: "post.example could not be checked", tone: "neutral" }]);
+    expect(certification(unlisted, [marker(post, { kind: "neverAsked" })]))
+      .toEqual([{ marker: post, label: "post.example not checked yet", tone: "neutral" }]);
+    // What a marker proved before an unusable answer still stands, so a
+    // device it already named keeps the listing rather than losing it to the
+    // marker's bad day.
+    expect(certification(listed, [marker(post, { kind: "unproven" })])[0]?.label)
+      .toBe("Listed by post.example");
+    // And a device no marker has recorded is drawn as a device, not as a
+    // problem: nothing about it is missing, hidden or disabled.
+    expect(certification(unlisted, [])).toEqual([]);
+    expect(devicesAbsence(profile({ devices: [unlisted] }))).toBeNull();
+    expect(deviceStanding(unlisted).tone).not.toBe("warn");
   });
 
   it("counts a code's remaining life down, and says plainly when it is over", () => {
