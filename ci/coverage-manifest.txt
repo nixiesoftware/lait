@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2928
-pr-platform    2395
-nightly        2957
+pr             2929
+pr-platform    2396
+nightly        2958
 mutants        106
 
 [gates]
@@ -943,6 +943,7 @@ lait serve::tests::an_unqualified_invite_is_stamped_with_the_served_world
 lait serve::tests::bearer_outranks_everything_and_cookie_is_the_fallback
 lait serve::tests::cookie_name_is_per_port_so_two_runs_do_not_share_a_jar_entry
 lait serve::tests::declaring_presence_on_a_hosted_identitys_station_is_refused
+lait serve::tests::editor_mutations_use_the_mount_this_head_serves
 lait serve::tests::minted_tokens_are_64_hex_chars_and_not_repeated
 lait serve::tests::query_param_finds_only_an_exact_key
 lait serve::tests::the_gate_refuses_and_admits_over_real_http
