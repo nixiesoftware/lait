@@ -101,7 +101,8 @@ let asking: Promise<string> | null = null;
  * The fallback is the published name rather than a refusal: a head that does not
  * carry the field is one that serves exactly what the World declares.
  */
-async function mount(): Promise<string> {
+async function mount(refresh = false): Promise<string> {
+  if (refresh) served = null;
   if (served !== null) return served;
   asking ??= spaces()
     .then((reply) => reply.world ?? DECLARED_MOUNT)
@@ -155,16 +156,39 @@ export async function rpc<R extends Response = Response>(
   request: WorldRequest,
   opts: { confirm?: boolean; signal?: AbortSignal } = {},
 ): Promise<R> {
-  const response = await send<IssuesWireResponse>(
-    `/api/spaces/${encodeURIComponent(space)}/worlds/${encodeURIComponent(await mount())}/rpc`,
+  const sendTo = (world: string) => send<IssuesWireResponse>(
+    `/api/spaces/${encodeURIComponent(space)}/worlds/${encodeURIComponent(world)}/rpc`,
     request,
     opts,
   );
+  const addressed = await mount();
+  let response: IssuesWireResponse;
+  try {
+    response = await sendTo(addressed);
+  } catch (error) {
+    if (!isWrongHead(error)) throw error;
+    // A desktop window can outlive the head process behind it. If that head is
+    // replaced by another mount, the module-level answer above is now stale.
+    // The server refuses a wrong mount before parsing or invoking the request,
+    // so refreshing the one head fact and replaying once is safe for writes as
+    // well as reads. One retry also prevents a broken registry from looping.
+    const current = await mount(true);
+    if (current === addressed) throw error;
+    response = await sendTo(current);
+  }
   if (response.kind !== "operation") return response as R;
   // Keep existing product result narrowing ergonomic while retaining the
   // durable operation receipt. MCP and other direct package consumers see the
   // same envelope on the wire; this is presentation, not a second protocol.
   return { ...response.response, receipt: response.receipt } as R;
+}
+
+/** A refusal made at the head boundary, before a World sees the request. */
+function isWrongHead(error: unknown): error is LaitError {
+  return error instanceof LaitError
+    && error.status === 404
+    && error.errorKind === "not_found"
+    && error.message.startsWith("this head serves '");
 }
 
 /**

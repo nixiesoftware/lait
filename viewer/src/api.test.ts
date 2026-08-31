@@ -69,4 +69,55 @@ describe("the mount a request is addressed to", () => {
     const asked = calls.filter((url) => url === "/api/spaces").length;
     expect(asked).toBe(1);
   });
+
+  it("refreshes a stale mount and safely retries a request once", async () => {
+    let lookups = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === "/api/spaces") {
+        lookups += 1;
+        return Response.json({ spaces: [], world: lookups === 1 ? "issues" : "local_issues" });
+      }
+      if (url.endsWith("/worlds/issues/rpc")) {
+        return Response.json({
+          kind: "error",
+          error_kind: "not_found",
+          message: "this head serves 'local_issues' and not 'issues'; open that World's own head",
+        }, { status: 404 });
+      }
+      return Response.json({ kind: "ok" });
+    }));
+
+    const api = await import("./api");
+    await api.rpc("orb_x", { cmd: "change_set" } as never);
+
+    expect(calls).toEqual([
+      "/api/spaces",
+      "/api/spaces/orb_x/worlds/issues/rpc",
+      "/api/spaces",
+      "/api/spaces/orb_x/worlds/local_issues/rpc",
+    ]);
+  });
+
+  it("does not replay an ordinary not-found response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === "/api/spaces") return Response.json({ spaces: [], world: "local_issues" });
+      return Response.json({
+        kind: "error",
+        error_kind: "not_found",
+        message: "issue does not exist",
+      }, { status: 404 });
+    }));
+
+    const api = await import("./api");
+    await expect(api.rpc("orb_x", { cmd: "issue_detail" } as never))
+      .rejects.toThrow("issue does not exist");
+    expect(calls).toEqual([
+      "/api/spaces",
+      "/api/spaces/orb_x/worlds/local_issues/rpc",
+    ]);
+  });
 });
