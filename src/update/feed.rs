@@ -87,12 +87,15 @@ pub const FEED_BASE_URL: &str = "https://storage.googleapis.com/the-foundation-d
 /// *in* the feed and changed only by a quorum, which is deliberately not this
 /// change.
 pub const FEED_PUBKEYS_HEX: &[&str] = &[
-    // Minted 2026-08, the key every published release is signed with today.
+    // Minted 2026-08. It signed every release up to and including 0.9.8, and
+    // stays pinned so those releases keep verifying — a machine that has not
+    // updated yet is still following a pointer this key signed.
     "227e448a16c19623707a3da8b8af6e1f70afcf18fb4e509e82115ef797666ba9",
-    // Successor, minted 2026-08-15 into separate custody and not yet used to
-    // sign anything. It is here first on purpose: a machine can only accept a
-    // key it already carries, so the successor must reach the fleet before it
-    // signs, never alongside. Step 3 of the rotation waits for this build.
+    // Minted 2026-08-15 into separate custody, carried by every build since
+    // 0.9.2, and signing from 0.9.9 onward — step 3 of the rotation, done on
+    // 2026-08-30. It could only take over because it had already reached the
+    // fleet: a machine accepts a key it carries, never one a release brings
+    // with it. Retiring the key above is a later step and a separate decision.
     "6397aa15cd939de1109abf2c265147201eb7d189029c2d0137d917292d689e50",
 ];
 
