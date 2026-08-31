@@ -343,14 +343,28 @@ export function IssueDetail({
   const submitComment = async () => {
     const body = comment.trim();
     if (!body || commentPending) return;
+    const me = members.find((member) => member.me);
     setCommentPending(true);
     setCommentError(null);
+    // Clear on dispatch, not on acknowledgement. The store paints the same
+    // comment into its optimistic projection synchronously, so the composer
+    // and thread move as one local act while durability resolves underneath.
+    const pending = projectStore.commentIssue(
+      spaceId,
+      reff,
+      body,
+      null,
+      me ? { key: me.key, nick: null } : undefined,
+    );
+    setComment("");
+    clearDraft(canonicalSpaceId, reff, "comment");
+    commentRef.current?.focus();
     try {
-      await projectStore.commentIssue(spaceId, reff, body);
-      setComment("");
-      clearDraft(canonicalSpaceId, reff, "comment");
-      commentRef.current?.focus();
+      await pending;
     } catch (error) {
+      // Do not overwrite words the user began typing after dispatch. If the
+      // composer is still empty, restore the refused comment as their draft.
+      setComment((current) => current.trim() ? current : body);
       setCommentError(error instanceof Error ? error.message : String(error));
     } finally {
       setCommentPending(false);
@@ -1073,7 +1087,16 @@ export function IssueDetail({
             void send(() => projectStore.reactIssue(spaceId, reff, comment, emoji, on))
           }
           onReply={(replyTo, body) =>
-            void send(() => projectStore.commentIssue(spaceId, reff, body, replyTo))
+            void send(() => {
+              const me = members.find((member) => member.me);
+              return projectStore.commentIssue(
+                spaceId,
+                reff,
+                body,
+                replyTo,
+                me ? { key: me.key, nick: null } : undefined,
+              );
+            })
           }
           onCopyLink={(commentId) => {
             const url = new URL(window.location.href);
@@ -1147,8 +1170,7 @@ export function IssueDetail({
               />
               <IconButton
                 label={commentError ? "Retry comment" : "Comment"}
-                isDisabled={!comment.trim()}
-                isLoading={commentPending}
+                isDisabled={!comment.trim() || commentPending}
                 onClick={() => void submitComment()}
                 variant="ghost"
                 size="sm"

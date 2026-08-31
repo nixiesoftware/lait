@@ -891,6 +891,251 @@ describe("ProjectViewerStore", () => {
     expect(store.resources.read(projectKeys.issue("local", "iss_other")).state).toBe("ready");
   });
 
+  it("refreshes the open issue when an immutable comment rings the docs plane", async () => {
+    let comments: import("./types").CommentDto[] = [];
+    const exact = <T,>(items: T[]): Page<T> => ({ publication, items });
+    const issue = {
+      schema_version: 3,
+      reff: row.reff,
+      doc_id: row.doc_id,
+      space_id: "local",
+      project_id: row.project_id,
+      project_key: "ONE",
+      key_alias: row.key_alias,
+      title: row.title,
+      description: "",
+      status: row.status,
+      priority: row.priority,
+      assignees: [],
+      labels: [],
+      label_names: [],
+      comments: [],
+      created_by: "actor",
+      created_at: 1,
+      provisional: false,
+    };
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd !== "issue_detail") throw new Error("unexpected request");
+      return {
+        kind: "issue_detail",
+        publication,
+        issue,
+        comments: exact(comments),
+        reactions: exact([]),
+        attachments: exact([]),
+        checks: exact([]),
+        outgoing_relations: exact([]),
+        incoming_relations: exact([]),
+      };
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureIssue("local", row.reff);
+    const key = projectKeys.issue("local", row.reff);
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+
+    comments = [{
+      id: "cmt_1",
+      author: "actor",
+      author_nick: "Actor",
+      body: "Visible without reloading",
+      ts: 2,
+      parent: null,
+      reactions: [],
+    }];
+    await store.handleDoorbell({
+      space: "local",
+      epoch: 1,
+      seq: 1,
+      reset: false,
+      invalidations: [{
+        world: "com.lait.issues",
+        dirty: [],
+        planes: [{ plane: "docs", scope: null }],
+      }],
+      authority_advanced: false,
+      activity_advanced: true,
+      presence_advanced: false,
+    });
+
+    expect(store.resources.read<import("./types").IssueView>(key).data?.comments)
+      .toMatchObject([{ id: "cmt_1", body: "Visible without reloading" }]);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
+
+  it("projects a local comment before its ChangeSet leaves and reconciles its durable id", async () => {
+    const operation = "aa".repeat(16);
+    const commentId = "cmt_instant";
+    let authoritative = false;
+    let timestamp = 0;
+    let finish!: (response: Response) => void;
+    const mutation = new Promise<Response>((resolve) => { finish = resolve; });
+    const issue = {
+      schema_version: 3,
+      reff: row.reff,
+      doc_id: row.doc_id,
+      space_id: "local",
+      project_id: row.project_id,
+      project_key: "ONE",
+      key_alias: row.key_alias,
+      title: row.title,
+      description: "",
+      status: row.status,
+      priority: row.priority,
+      assignees: [],
+      labels: [],
+      label_names: [],
+      comments: [],
+      created_by: "actor",
+      created_at: 1,
+      provisional: false,
+    };
+    const exact = <T,>(items: T[], source = publication): Page<T> => ({
+      publication: source,
+      items,
+    });
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd === "change_set") {
+        timestamp = request.timestamp ?? 0;
+        return mutation;
+      }
+      if (request.cmd !== "issue_detail") throw new Error("unexpected request");
+      const source = authoritative ? acceptedPublication : publication;
+      const comments = authoritative ? [{
+        id: commentId,
+        author: "act_me",
+        author_nick: "Me",
+        body: "Instant",
+        ts: timestamp,
+        parent: null,
+        reactions: [],
+      }] : [];
+      return {
+        kind: "issue_detail",
+        publication: source,
+        issue,
+        comments: exact(comments, source),
+        reactions: exact([], source),
+        attachments: exact([], source),
+        checks: exact([], source),
+        outgoing_relations: exact([], source),
+        incoming_relations: exact([], source),
+      };
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    await store.ensureIssue("local", row.reff);
+    const unsubscribe = store.resources.subscribe(
+      projectKeys.issue("local", row.reff),
+      () => undefined,
+    );
+
+    const pending = store.commentIssue(
+      "local",
+      row.reff,
+      "Instant",
+      null,
+      { key: "act_me" },
+    );
+    expect(store.selectIssueDetail("local", row.reff).issue?.comments).toMatchObject([{
+      id: null,
+      author: "act_me",
+      body: "Instant",
+    }]);
+
+    finish({
+      kind: "change_set",
+      results: [{ operation: 0, kind: "comment", id: commentId }],
+      receipt: { operation, phase: "accepted", publication: acceptedPublication },
+    });
+    await pending;
+    expect(store.selectIssueDetail("local", row.reff).issue?.comments)
+      .toMatchObject([{ id: commentId, body: "Instant" }]);
+
+    authoritative = true;
+    await store.handleDoorbell({
+      space: "local",
+      epoch: 1,
+      seq: 1,
+      reset: false,
+      invalidations: [{
+        world: "com.lait.issues",
+        dirty: [],
+        planes: [{ plane: "docs", scope: null }],
+      }],
+      publications: [{ world: "com.lait.issues", publication: acceptedPublication }],
+      change: {
+        attribution: { operation: Array(16).fill(0xaa), actor: "act_me", device: "device" },
+        bodies: [],
+      },
+      authority_advanced: false,
+      activity_advanced: true,
+      presence_advanced: false,
+    });
+    expect(store.selectIssueDetail("local", row.reff).issue?.comments)
+      .toMatchObject([{ id: commentId, body: "Instant" }]);
+    expect(store.selectIssueDetail("local", row.reff).issue?.comments).toHaveLength(1);
+    expect(store.operation("local", operation)?.phase).toBe("committed");
+    unsubscribe();
+  });
+
+  it("removes an optimistic comment when its write is refused", async () => {
+    const operation = "ab".repeat(16);
+    let refuse!: (error: unknown) => void;
+    const mutation = new Promise<Response>((_resolve, reject) => { refuse = reject; });
+    const issue = {
+      schema_version: 3,
+      reff: row.reff,
+      doc_id: row.doc_id,
+      space_id: "local",
+      project_id: row.project_id,
+      project_key: "ONE",
+      key_alias: row.key_alias,
+      title: row.title,
+      description: "",
+      status: row.status,
+      priority: row.priority,
+      assignees: [],
+      labels: [],
+      label_names: [],
+      comments: [],
+      created_by: "actor",
+      created_at: 1,
+      provisional: false,
+    };
+    const exact = <T,>(items: T[]): Page<T> => ({ publication, items });
+    const rpc = vi.fn(async (_space: string, request: WorldRequest): Promise<Response> => {
+      if (request.cmd === "change_set") return mutation;
+      if (request.cmd !== "issue_detail") throw new Error("unexpected request");
+      return {
+        kind: "issue_detail",
+        publication,
+        issue,
+        comments: exact([]),
+        reactions: exact([]),
+        attachments: exact([]),
+        checks: exact([]),
+        outgoing_relations: exact([]),
+        incoming_relations: exact([]),
+      };
+    });
+    const store = new ProjectViewerStore(rpc, undefined, undefined, () => operation);
+    await store.ensureIssue("local", row.reff);
+
+    const pending = store.commentIssue(
+      "local",
+      row.reff,
+      "Nope",
+      null,
+      { key: "act_me" },
+    );
+    expect(store.selectIssueDetail("local", row.reff).issue?.comments)
+      .toMatchObject([{ body: "Nope" }]);
+    const rejected = expect(pending).rejects.toThrow("comment denied");
+    refuse(new LaitError("comment denied", 403, "denied"));
+    await rejected;
+    expect(store.selectIssueDetail("local", row.reff).issue?.comments).toEqual([]);
+  });
+
   it("predicts an assignee toggle and stacks a second on the first", async () => {
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
       if (request.cmd === "board") return boardResponse(board);

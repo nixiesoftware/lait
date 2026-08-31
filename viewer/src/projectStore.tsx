@@ -119,6 +119,21 @@ export interface PendingOperation {
   readonly completion: Promise<OperationFeedback>;
 }
 
+/** The authenticated local actor used to paint a comment before its receipt arrives. */
+export interface OptimisticCommentAuthor {
+  readonly key: string;
+  readonly nick?: string | null;
+}
+
+interface OptimisticComment {
+  readonly operation: string;
+  readonly ordinal: number;
+  readonly space: string;
+  readonly doc: string;
+  readonly reff: string;
+  readonly comment: CommentDto;
+}
+
 type IssuePatch = Omit<
   Extract<IssuesChangeOperation, { op: "issue_patch" }>,
   "op" | "issue"
@@ -499,6 +514,7 @@ export class ProjectViewerStore {
   private operationRollbacks = new Map<string, () => void>();
   private operationPolls = new Map<string, ReturnType<typeof setTimeout>>();
   private observedOperations = new Map<string, WorldPublicationId>();
+  private optimisticComments = new Map<string, OptimisticComment>();
 
   constructor(
     private readonly rpc: Rpc = defaultRpc,
@@ -521,6 +537,81 @@ export class ProjectViewerStore {
     this.operations.set(`${value.space}/${value.operation}`, value);
     this.resources.set(projectKeys.operation(value.space, value.operation), value);
     this.resources.set(projectKeys.latestOperation(value.space), value);
+  }
+
+  private optimisticCommentKey(space: string, operation: string, ordinal: number): string {
+    return `${space}/${operation}/${ordinal}`;
+  }
+
+  private commentsFor(space: string, doc: string): OptimisticComment[] {
+    return [...this.optimisticComments.values()]
+      .filter((prediction) => prediction.space === space && prediction.doc === doc)
+      .sort((left, right) => left.comment.ts - right.comment.ts || left.ordinal - right.ordinal);
+  }
+
+  private addOptimisticComments(
+    space: string,
+    doc: string,
+    reff: string,
+    operation: string,
+    timestamp: number,
+    operations: readonly IssuesChangeOperation[],
+    author: OptimisticCommentAuthor,
+  ): void {
+    operations.forEach((change, ordinal) => {
+      if (change.op !== "issue_comment" && change.op !== "issue_comment_at") return;
+      this.optimisticComments.set(
+        this.optimisticCommentKey(space, operation, ordinal),
+        {
+          operation,
+          ordinal,
+          space,
+          doc,
+          reff,
+          comment: {
+            id: null,
+            author: author.key,
+            author_nick: author.nick ?? null,
+            ts: timestamp,
+            body: change.body,
+            parent: change.parent ?? null,
+            reactions: [],
+          },
+        },
+      );
+    });
+    this.resources.notify(projectKeys.issue(space, reff));
+  }
+
+  /** Give accepted predictions their durable ids so an arriving projection deduplicates them. */
+  private acceptOptimisticComments(operation: OperationFeedback): void {
+    let changed = false;
+    for (const effect of operation.results ?? []) {
+      if (effect.kind !== "comment") continue;
+      const key = this.optimisticCommentKey(operation.space, operation.operation, effect.operation);
+      const prediction = this.optimisticComments.get(key);
+      if (!prediction) continue;
+      this.optimisticComments.set(key, {
+        ...prediction,
+        comment: { ...prediction.comment, id: effect.id },
+      });
+      changed = true;
+    }
+    if (changed) {
+      const prediction = [...this.optimisticComments.values()].find((held) =>
+        held.space === operation.space && held.operation === operation.operation);
+      if (prediction) this.resources.notify(projectKeys.issue(prediction.space, prediction.reff));
+    }
+  }
+
+  private clearOptimisticComments(space: string, operation: string): void {
+    const affected = new Set<string>();
+    for (const [key, prediction] of this.optimisticComments) {
+      if (prediction.space !== space || prediction.operation !== operation) continue;
+      this.optimisticComments.delete(key);
+      affected.add(prediction.reff);
+    }
+    for (const reff of affected) this.resources.notify(projectKeys.issue(space, reff));
   }
 
   private pageItems<T>(key: string, page: Page<T>): T[] {
@@ -607,13 +698,17 @@ export class ProjectViewerStore {
     const milestones = projectId
       ? this.resources.read<MilestoneDto[]>(projectKeys.milestones(space, projectId))
       : this.resources.read<MilestoneDto[]>(projectKeys.milestones(space, "_unknown"));
+    const base = body.data ?? (row ? issueFromRow(space, row) : null);
+    const optimisticComments = base ? this.commentsFor(space, base.doc_id) : [];
+    const optimisticSignature = optimisticComments
+      .map((prediction) => `${prediction.operation}:${prediction.ordinal}:${prediction.comment.id ?? "pending"}`)
+      .join("|");
     const selectorKey = `${space}/${reff}`;
-    const dependencies = [row, body, graph, history, milestones] as const;
+    const dependencies = [row, body, graph, history, milestones, optimisticSignature] as const;
     const cached = this.detailSelectors.get(selectorKey);
     if (cached && cached.dependencies.every((value, index) => value === dependencies[index])) {
       return cached.value;
     }
-    const base = body.data ?? (row ? issueFromRow(space, row) : null);
     // Every predictable field reads through the overlaid row, so an optimistic
     // write shows in the detail rail exactly as it does on the row — the body
     // keeps what only it carries (description, comments, label ids, …).
@@ -629,8 +724,11 @@ export class ProjectViewerStore {
           // body's stale value, and a spread that skips the key cannot.
           due_date: row.due_date ?? null,
           estimate: row.estimate ?? null,
+          comments: this.mergeOptimisticComments(base.comments, optimisticComments),
         }
-      : base;
+      : base
+        ? { ...base, comments: this.mergeOptimisticComments(base.comments, optimisticComments) }
+        : null;
     const value = {
       issue,
       row,
@@ -643,6 +741,29 @@ export class ProjectViewerStore {
     };
     this.detailSelectors.set(selectorKey, { dependencies, value });
     return value;
+  }
+
+  private mergeOptimisticComments(
+    canonical: readonly CommentDto[],
+    predictions: readonly OptimisticComment[],
+  ): CommentDto[] {
+    const ids = new Set(canonical.flatMap((comment) => comment.id ? [comment.id] : []));
+    return [
+      ...canonical,
+      ...predictions
+        .map((prediction) => prediction.comment)
+        .filter((comment) => {
+          if (comment.id && ids.has(comment.id)) return false;
+          // A doorbell can beat the ChangeSet response that supplies the stable
+          // id. In that narrow ordering, match the immutable payload so the
+          // authoritative row and its pending twin never flash together.
+          return !canonical.some((held) =>
+            held.author === comment.author
+            && held.ts === comment.ts
+            && held.body === comment.body
+            && (held.parent ?? null) === (comment.parent ?? null));
+        }),
+    ];
   }
 
   ensureBoard(space: string, project: string | null, force = false): Promise<BoardView> {
@@ -751,6 +872,7 @@ export class ProjectViewerStore {
 
   private commitOperation(operation: OperationFeedback, publication: WorldPublicationId): void {
     this.publishOperation({ ...operation, phase: "committed", publication });
+    this.clearOptimisticComments(operation.space, operation.operation);
     this.overlay.clearOperation(operation.doc, operation.operation);
     if (this.boardMoves.get(operation.doc)?.operation === operation.operation) {
       this.boardMoves.delete(operation.doc);
@@ -831,7 +953,18 @@ export class ProjectViewerStore {
       // answer rather than a dependency that silently matches nothing.
     }, () => {
       const doc = this.resources.read<Row>(projectKeys.row(space, reff)).data?.doc_id;
-      return { issues: doc ? { docs: [doc] } : "any" };
+      return {
+        // Issue-core writes name the changed `iss_` directly. Immutable
+        // discussion records (comments and reactions) live in their own
+        // Bodies, so the World cannot put their owning Issue in `dirty`
+        // without a second lookup; it rings the product's `docs` plane
+        // instead. The detail is the projection that joins those records, and
+        // must therefore listen to both halves. Only active resources are
+        // refreshed, so the Space-wide plane still costs at most the open
+        // details rather than every cached Issue.
+        catalog: ["docs"],
+        issues: doc ? { docs: [doc] } : "any",
+      };
     }, force);
     this.resources.evict(`${prefix(space)}issue:`, 200, new Set([key]));
     return promise;
@@ -1948,13 +2081,14 @@ export class ProjectViewerStore {
     reff: string,
     body: string,
     parent: string | null = null,
+    author?: OptimisticCommentAuthor,
   ): Promise<boolean> {
     return this.changeIssueRecord(space, reff, [{
       op: "issue_comment",
       issue: reff,
       body,
       ...(parent !== null ? { parent } : {}),
-    }]);
+    }], author);
   }
 
   async commentAtIssue(
@@ -1966,6 +2100,7 @@ export class ProjectViewerStore {
     end: number | null,
     source: WorldPublicationId,
     parent: string | null = null,
+    author?: OptimisticCommentAuthor,
   ): Promise<boolean> {
     return this.changeIssueRecord(space, reff, [{
       op: "issue_comment_at",
@@ -1976,7 +2111,7 @@ export class ProjectViewerStore {
       ...(end !== null ? { end } : {}),
       ...(parent !== null ? { parent } : {}),
       source,
-    }]);
+    }], author);
   }
 
   async reactIssue(
@@ -2244,6 +2379,7 @@ export class ProjectViewerStore {
     space: string,
     reff: string,
     operations: IssuesChangeOperation[],
+    optimisticCommentAuthor?: OptimisticCommentAuthor,
   ): Promise<boolean> {
     let row = this.selectRow(space, reff);
     if (!row) {
@@ -2256,7 +2392,21 @@ export class ProjectViewerStore {
       row.doc_id,
       projectKeys.issue(space, reff),
       operations,
-      () => this.resources.notify(projectKeys.issue(space, reff)),
+      (operation, timestamp) => {
+        if (optimisticCommentAuthor) {
+          this.addOptimisticComments(
+            space,
+            row!.doc_id,
+            reff,
+            operation,
+            timestamp,
+            operations,
+            optimisticCommentAuthor,
+          );
+        } else {
+          this.resources.notify(projectKeys.issue(space, reff));
+        }
+      },
     );
     const feedback = await pending.completion;
     if (feedback.phase === "rolled_back") {
@@ -2346,7 +2496,7 @@ export class ProjectViewerStore {
     doc: string,
     resource: string,
     operations: IssuesChangeOperation[],
-    apply: (operation: string) => void,
+    apply: (operation: string, timestamp: number) => void,
     resolveTarget?: (
       response: Extract<Response, { kind: "change_set" }>,
     ) => { doc: string; resource: string } | null,
@@ -2365,7 +2515,7 @@ export class ProjectViewerStore {
     };
     this.publishOperation(sending);
     if (rollback) this.operationRollbacks.set(operation, rollback);
-    apply(operation);
+    apply(operation, timestamp);
     const completion = this.rpc(space, {
       cmd: "change_set",
       operation,
@@ -2397,6 +2547,7 @@ export class ProjectViewerStore {
         publication: receipt.publication,
         results: response.results,
       };
+      this.acceptOptimisticComments(accepted);
       this.publishOperation(accepted);
       // A doorbell may arrive before the RPC continuation publishes Accepted.
       // Re-enter exact target hydration here as well as from handleDoorbell so
@@ -2431,6 +2582,7 @@ export class ProjectViewerStore {
   }
 
   private rollbackOperation(operation: OperationFeedback): void {
+    this.clearOptimisticComments(operation.space, operation.operation);
     this.overlay.clearOperation(operation.doc, operation.operation);
     if (this.boardMoves.get(operation.doc)?.operation === operation.operation) {
       this.boardMoves.delete(operation.doc);
@@ -2508,6 +2660,7 @@ export class ProjectViewerStore {
       publication: response.publication,
       results: response.results,
     };
+    this.acceptOptimisticComments(accepted);
     this.publishOperation(accepted);
     this.observedOperations.set(accepted.operation, response.publication);
     await this.hydrateOperationTarget(accepted);

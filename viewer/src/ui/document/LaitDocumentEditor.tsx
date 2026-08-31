@@ -53,6 +53,16 @@ import {
   type DocumentProjection,
 } from "./projection";
 import { laitDocumentSchema, safeDocumentHref } from "./schema";
+import {
+  markdownBlockEnter,
+  markdownBlockInput,
+  markdownInlineInput,
+  matchingSlashCommands,
+  runSlashCommand,
+  slashQuery,
+  type DocumentBlockCommand,
+  type SlashCommand,
+} from "./input";
 
 const EXTERNAL = "lait:external-document";
 const TYPING_IDLE_MS = 1_200;
@@ -308,6 +318,14 @@ type ToolbarState = {
   link: boolean;
 };
 
+type SlashMenuState = {
+  readonly query: string;
+  readonly commands: readonly SlashCommand[];
+  readonly selected: number;
+  readonly top: number;
+  readonly left: number;
+};
+
 function markHeld(view: EditorView, name: string): boolean {
   const mark = view.state.schema.marks[name];
   if (!mark) return false;
@@ -412,6 +430,11 @@ export default function LaitDocumentEditor({
   const typing = useRef(false);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
+  const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
+  // ProseMirror callbacks are created once. The ref gives their key handler the
+  // menu React most recently drew, including on the same keypress that opened
+  // it, before a render has had a chance to close over new state.
+  const slashMenuRef = useRef<SlashMenuState | null>(null);
   // The appearance gate (see `BAR_AFTER_POINTER_MS`). `dragging` is true for the
   // span of a selection drag; `barTimer` is the pending appearance; `barShown`
   // mirrors the `toolbar` state for the view's callbacks, which are built once
@@ -426,6 +449,10 @@ export default function LaitDocumentEditor({
     barTimer.current = null;
     barShown.current = false;
     setToolbar(null);
+  };
+  const hideSlashMenu = () => {
+    slashMenuRef.current = null;
+    setSlashMenu(null);
   };
   useEffect(() => {
     if (!readOnly && !initialProjection.canonical) {
@@ -484,6 +511,38 @@ export default function LaitDocumentEditor({
         barShown.current = true;
         setToolbar(next);
       }, after);
+    };
+
+    const updateSlashMenu = (view: EditorView) => {
+      const slash = writable.current ? slashQuery(view.state) : null;
+      if (!slash || !host.current) return hideSlashMenu();
+      const commands = matchingSlashCommands(slash.query);
+      const previous = slashMenuRef.current;
+      const selectedId = previous?.commands[previous.selected]?.id;
+      const selected = Math.max(
+        0,
+        selectedId ? commands.findIndex((command) => command.id === selectedId) : 0,
+      );
+      const caret = view.coordsAtPos(view.state.selection.from);
+      const box = host.current.getBoundingClientRect();
+      const next: SlashMenuState = {
+        query: slash.query,
+        commands,
+        selected: Math.min(selected, Math.max(0, commands.length - 1)),
+        top: caret.bottom - box.top + 6,
+        left: Math.max(0, caret.left - box.left),
+      };
+      slashMenuRef.current = next;
+      setSlashMenu(next);
+    };
+
+    const chooseSlashCommand = (view: EditorView, command: DocumentBlockCommand) => {
+      const transaction = runSlashCommand(view.state, command);
+      if (!transaction) return false;
+      hideSlashMenu();
+      view.dispatch(transaction);
+      view.focus();
+      return true;
     };
 
     const state = EditorState.create({
@@ -562,6 +621,48 @@ export default function LaitDocumentEditor({
         cursors.current,
         previews.current,
       ),
+      handleTextInput(view, from, to, text) {
+        const transaction = markdownBlockInput(view.state, from, to, text)
+          ?? markdownInlineInput(view.state, from, to, text);
+        if (!transaction) return false;
+        view.dispatch(transaction);
+        return true;
+      },
+      handleKeyDown(view, event) {
+        const menu = slashMenuRef.current;
+        if (menu) {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (menu.commands.length === 0) return true;
+            const delta = event.key === "ArrowDown" ? 1 : -1;
+            const next = {
+              ...menu,
+              selected: (menu.selected + delta + menu.commands.length) % menu.commands.length,
+            };
+            slashMenuRef.current = next;
+            setSlashMenu(next);
+            return true;
+          }
+          if (event.key === "Enter" && menu.commands[menu.selected]) {
+            event.preventDefault();
+            return chooseSlashCommand(view, menu.commands[menu.selected]!.id);
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            hideSlashMenu();
+            return true;
+          }
+        }
+        if (event.key === "Enter") {
+          const transaction = markdownBlockEnter(view.state);
+          if (transaction) {
+            event.preventDefault();
+            view.dispatch(transaction);
+            return true;
+          }
+        }
+        return false;
+      },
       dispatchTransaction(transaction) {
         const previous = projection.current;
         const applied = view.state.applyTransaction(transaction);
@@ -597,12 +698,14 @@ export default function LaitDocumentEditor({
         }
         publish(view);
         updateToolbar(view);
+        updateSlashMenu(view);
       },
       handleDOMEvents: {
         blur(_view) {
           typing.current = false;
           awareness.current?.(null, null, false, projection.current.source);
           hideToolbar();
+          hideSlashMenu();
           commit.current();
           return false;
         },
@@ -635,6 +738,7 @@ export default function LaitDocumentEditor({
       },
     });
     editor.current = view;
+    updateSlashMenu(view);
 
     // The gesture, watched from outside ProseMirror. `pointerdown` has to be a
     // capture listener on the mount: a node view that swallows the event (a code
@@ -743,6 +847,16 @@ export default function LaitDocumentEditor({
     view.focus();
   };
 
+  const selectSlashCommand = (command: DocumentBlockCommand) => {
+    const view = editor.current;
+    if (!view) return;
+    const transaction = runSlashCommand(view.state, command);
+    if (!transaction) return;
+    hideSlashMenu();
+    view.dispatch(transaction);
+    view.focus();
+  };
+
   return (
     <div ref={host} className={`lait-document-editor-host ${className ?? ""}`}>
       {toolbar && (
@@ -775,6 +889,33 @@ export default function LaitDocumentEditor({
           >
             <Link2 className="size-icon-sm" aria-hidden="true" />
           </BarButton>
+        </div>
+      )}
+      {slashMenu && (
+        <div
+          className="lait-document-slash-menu"
+          style={{ top: slashMenu.top, left: slashMenu.left }}
+          role="listbox"
+          aria-label="Document blocks"
+        >
+          {slashMenu.commands.length > 0 ? slashMenu.commands.map((command, index) => (
+            <button
+              key={command.id}
+              type="button"
+              role="option"
+              aria-selected={index === slashMenu.selected}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                selectSlashCommand(command.id);
+              }}
+            >
+              <span>{command.label}</span>
+              <small>{command.hint}</small>
+            </button>
+          )) : (
+            <p>No matching blocks</p>
+          )}
         </div>
       )}
       {remoteContexts.length > 0 && (

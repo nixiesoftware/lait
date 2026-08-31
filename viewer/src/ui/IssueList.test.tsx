@@ -60,9 +60,13 @@ describe("IssueList semantics", () => {
     render(row("LIST-2"), () => undefined);
 
     const header = host!.querySelector("section > header") as HTMLElement;
+    const collection = host!.querySelector("[data-issue-collection]") as HTMLElement;
     const item = host!.querySelector("li[data-issue-ref]") as HTMLElement;
     expect(header.classList).toContain("mt-1");
+    expect(header.classList).toContain("mx-2");
     expect(header.classList).toContain("px-4");
+    expect(collection.classList).not.toContain("mx-2");
+    expect(item.classList).toContain("mx-2");
     expect(item.classList).toContain("px-4");
     expect(header.classList).toContain("gap-2");
     expect(item.classList).toContain("gap-2");

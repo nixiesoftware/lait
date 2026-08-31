@@ -1189,6 +1189,53 @@
   color: var(--color-accent);
 }
 
+.lait-document-slash-menu {
+  position: absolute;
+  z-index: 13;
+  width: min(280px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-8);
+  background: var(--color-raised);
+  box-shadow: var(--shadow-overlay);
+  padding: 4px;
+}
+
+.lait-document-slash-menu button {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 1px;
+  border: 0;
+  border-radius: var(--radius-4);
+  background: transparent;
+  padding: 7px 9px;
+  color: var(--color-fg);
+  text-align: left;
+}
+
+.lait-document-slash-menu button[aria-selected="true"],
+.lait-document-slash-menu button:hover {
+  background: var(--color-hover);
+}
+
+.lait-document-slash-menu button span {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.lait-document-slash-menu button small,
+.lait-document-slash-menu p {
+  color: var(--color-mute);
+  font-size: 0.75rem;
+}
+
+.lait-document-slash-menu p {
+  margin: 0;
+  padding: 8px 9px;
+}
+
 .lait-document-toolbar-rule {
   width: 1px;
   height: 16px;

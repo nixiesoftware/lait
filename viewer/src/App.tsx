@@ -108,7 +108,6 @@ import {
   useSpaceBoards,
   useProjectRegistry,
   useProjectViewerStore,
-  useLatestOperation,
   useSpec,
   useTeams,
 } from "./projectStore";
@@ -363,7 +362,6 @@ export function App() {
     if (isIssueMode(view)) setIssueLayout(view);
   }, [view]);
   const projectStore = useProjectViewerStore();
-  const latestOperation = useLatestOperation(current).data ?? null;
   // Not while a team is in scope: `project` is null there, and a null project
   // is the request the daemon answers with a teaching error on any space with
   // more than one project. The team's rows come from the fan-out below.
@@ -1660,18 +1658,6 @@ export function App() {
     },
     [project, projectStore],
   );
-
-  const operationNotice = latestOperation
-    ? latestOperation.phase === "sending"
-      ? `Sending board change… · ${latestOperation.operation.slice(0, 8)}`
-      : latestOperation.phase === "accepted"
-        ? `Accepted · refreshing exact publication… · ${latestOperation.operation.slice(0, 8)}`
-        : latestOperation.phase === "committed"
-          ? `Committed · ${latestOperation.operation.slice(0, 8)}`
-          : latestOperation.phase === "indeterminate"
-            ? `Outcome indeterminate; your pending view is preserved · ${latestOperation.error?.message ?? latestOperation.operation.slice(0, 8)}`
-            : `Rolled back (${latestOperation.error?.kind ?? "error"}) · ${latestOperation.error?.message ?? "the change was refused"}`
-    : "";
 
   const pending = useKeys(ctx);
   const detailVisible = Boolean(
@@ -3142,15 +3128,6 @@ export function App() {
       {pending.length > 0 && (
         <div className="border-line-strong bg-raised text-dim shadow-overlay fixed bottom-4 left-4 rounded-surface border px-2 py-1 font-mono text-sm">
           {pending.join(" ")} …
-        </div>
-      )}
-      {(operationNotice || mutationNotice) && (
-        <div
-          className="ui-surface border-line-strong bg-raised text-dim shadow-overlay fixed right-4 bottom-4 z-40 rounded-surface border px-3 py-1.5 text-sm"
-          role="status"
-          aria-live="polite"
-        >
-          {operationNotice || mutationNotice}
         </div>
       )}
       {toast && (

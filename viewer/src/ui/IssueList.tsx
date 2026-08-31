@@ -229,7 +229,7 @@ export function IssueList({
               title="Deleted"
               count={deleted.length}
             />
-            <ul className="mx-2 mt-0.5" data-issue-collection>
+            <ul className="mt-0.5" data-issue-collection>
               {deleted.map((row) => (
                 <IssueRow
                   key={row.reff}
@@ -408,7 +408,7 @@ function Group({
           ) : undefined
         }
       />
-      {!collapsed && <ul className="mx-2 mt-0.5" aria-label={`${title} issues`} data-issue-collection>
+      {!collapsed && <ul className="mt-0.5" aria-label={`${title} issues`} data-issue-collection>
         {rows.map((row) => (
           <IssueRow
             key={row.reff}
