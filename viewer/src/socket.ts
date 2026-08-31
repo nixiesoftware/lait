@@ -294,6 +294,18 @@ export interface Socket {
   close(): void;
 }
 
+/** A World request the session socket reached and the head refused. */
+export class SocketMutationError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly errorKind: string | null,
+  ) {
+    super(message);
+    this.name = "SocketMutationError";
+  }
+}
+
 /**
  * Open the socket and keep it open.
  *
@@ -369,8 +381,12 @@ export function openSocket(onEvent: (event: SocketEvent) => void): Socket {
             : response);
         }
         else {
-          const response = event.response as { message?: unknown };
-          request.reject(new Error(String(response.message ?? `editor request failed (${event.status})`)));
+          const response = event.response as { message?: unknown; error_kind?: unknown };
+          request.reject(new SocketMutationError(
+            String(response.message ?? `editor request failed (${event.status})`),
+            event.status,
+            typeof response.error_kind === "string" ? response.error_kind : null,
+          ));
         }
         return;
       }

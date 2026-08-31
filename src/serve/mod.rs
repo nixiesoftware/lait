@@ -1168,9 +1168,15 @@ async fn socket_editor_rpc(
             .0,
         );
     }
+    // The session belongs to this head, so its editor mutations belong to the
+    // exact mount the head serves. A local World is deliberately mounted as
+    // `local_issues`; spelling the published `issues` mount here made every
+    // body keystroke cross the wrong-head fence even though ordinary HTTP RPCs
+    // had already learned the assigned mount from `/api/spaces`.
+    let world = app.world.clone();
     let response = world_rpc(
         State(app),
-        Path((space, "issues".to_owned())),
+        Path((space, world)),
         Query(RpcQuery { confirm: false }),
         Json(input),
     )
@@ -1879,6 +1885,74 @@ mod tests {
             socket: socket::Hub::new(),
         }));
         (router, orbit)
+    }
+
+    /// A head serving the local copy of Issues, with a resolvable Orbit but no
+    /// daemon behind it. Reaching that absent daemon proves routing passed the
+    /// mount fence; addressing the published `issues` mount instead is refused
+    /// earlier with 404.
+    fn local_issues_app() -> (Arc<App>, String) {
+        let identity = std::path::PathBuf::from("/identity-for-local-world-tests");
+        let store = identity.join("space");
+        let entry = crate::orbits::Entry {
+            space: mechanics::ids::SpaceId::from_digest([8; 16]).to_string(),
+            name: "Local".into(),
+            path: store.display().to_string(),
+            origin: crate::orbits::Origin::Founded,
+            host_nick: String::new(),
+            last_opened: 0,
+        };
+        let directory = Catalog::with_entries(
+            identity,
+            std::path::PathBuf::from("/agents-for-local-world-tests"),
+            false,
+            vec![entry],
+        );
+        let resolved = directory
+            .resolve(crate::daemon::LocalOrbitId::for_store(&store).as_str())
+            .expect("the test Orbit resolves");
+        let orbit = resolved.address.orbit.as_str().to_string();
+        let registry = world_interface::WorldClientRegistry::new()
+            .with_package(
+                issues_app::package()
+                    .expect("Issues client package")
+                    .mounted_at("local_issues"),
+            )
+            .expect("the local mount registers");
+        let nowhere = std::path::PathBuf::from("/nonexistent-for-local-world-tests");
+        let app = Arc::new(App {
+            world: "local_issues".into(),
+            registry: Arc::new(registry),
+            head: head::Source::unavailable(),
+            guard: Guard::new("local-world-token".into(), 7717),
+            directory,
+            daemon: Client::at(nowhere),
+            selection: crate::config::Selection::default(),
+            doorbells: tokio::sync::broadcast::channel(1).0,
+            cookie: cookie_name(7717),
+            launch_tickets: auth::LaunchTickets::new(),
+            stop: tokio::sync::watch::channel(false).0,
+            content_permits: content::ContentStreamPermits::new(),
+            socket: socket::Hub::new(),
+        });
+        (app, orbit)
+    }
+
+    #[tokio::test]
+    async fn editor_mutations_use_the_mount_this_head_serves() {
+        let (app, orbit) = local_issues_app();
+        let (status, body) = socket_editor_rpc(
+            app,
+            orbit,
+            serde_json::json!({ "cmd": "issue_view", "reff": "TES-1" }),
+        )
+        .await;
+
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "the local mount must reach its package before the absent daemon: {body}",
+        );
     }
 
     /// A credentialled POST, so each fence case below is refused by the fence and

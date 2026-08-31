@@ -43,7 +43,9 @@ import {
   type Socket,
   type SocketEvent,
   type Question,
+  SocketMutationError,
 } from "./socket";
+import { rpc as httpRpc } from "./api";
 import { useWorldResource, useWorldViewStore } from "./core/worldViewReact";
 import type { ResourceKey, WorldViewStore } from "./core/worldViewStore";
 import type {
@@ -484,6 +486,10 @@ export class LiveSlots {
 /** How a plane gets its socket. Injected so the slot store can be exercised
  *  without one. */
 export type SocketOpener = (onEvent: (event: SocketEvent) => void) => Socket;
+export type WorldMutator = <R extends Response = Response>(
+  space: string,
+  request: WorldRequest,
+) => Promise<R>;
 
 /**
  * The socket, and the slots it feeds.
@@ -515,11 +521,16 @@ export class LivePlane {
   private question: Question = null;
   private awareness: EditorAwareness = { cursor: null, typing: false, preview: null };
   private awarenessTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Compatibility with heads whose socket adapter still addressed the
+   * published mount. Presence stays on the socket; ordered document writes use
+   * HTTP after the first boundary refusal. */
+  private editorOverHttp = false;
 
   constructor(
     store: WorldViewStore,
     private readonly open: SocketOpener = openSocket,
     clock: () => number = () => Date.now(),
+    private readonly fallback: WorldMutator = httpRpc,
   ) {
     this.slots = new LiveSlots(store, clock);
   }
@@ -592,11 +603,22 @@ export class LivePlane {
   }
 
   /** Use the ordered control lane for editor durability as well as presence. */
-  mutate<R extends Response = Response>(space: string, request: WorldRequest): Promise<R> {
+  async mutate<R extends Response = Response>(space: string, request: WorldRequest): Promise<R> {
     this.attach(space);
     this.declare();
-    if (this.socket === null) return Promise.reject(new Error("the editor connection is unavailable"));
-    return this.socket.mutate<R>(space, request);
+    if (this.editorOverHttp) return this.fallback<R>(space, request);
+    if (this.socket === null) throw new Error("the editor connection is unavailable");
+    try {
+      return await this.socket.mutate<R>(space, request);
+    } catch (error) {
+      if (!isWrongHead(error)) throw error;
+      // Older hosts sent editor socket calls through the published `issues`
+      // mount even while serving `local_issues`. The refusal happens before
+      // the World sees the write, so one HTTP replay is safe; remembering the
+      // answer avoids paying for a known-broken socket on every keystroke.
+      this.editorOverHttp = true;
+      return this.fallback<R>(space, request);
+    }
   }
 
   private declare(): void {
@@ -632,6 +654,13 @@ export class LivePlane {
     // including the one that is about to work.
     if (event.liveness === "retrying" || event.liveness === "stale") this.slots.silence();
   }
+}
+
+function isWrongHead(error: unknown): error is SocketMutationError {
+  return error instanceof SocketMutationError
+    && error.status === 404
+    && error.errorKind === "not_found"
+    && error.message.startsWith("this head serves '");
 }
 
 function samePreview(a: BrowserTextPreview | null, b: BrowserTextPreview | null): boolean {

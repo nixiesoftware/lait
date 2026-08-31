@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { Socket, SocketEvent, Question } from "./socket";
+import { SocketMutationError, type Socket, type SocketEvent, type Question } from "./socket";
 import { WorldViewStore } from "./core/worldViewStore";
 import {
   applyLive,
@@ -506,6 +506,48 @@ describe("LivePlane", () => {
     const held = store.read<SignalDrain>(signalsKey("orb_a")).data;
     expect(held?.signals).toHaveLength(1);
     expect(held?.dropped).toBe(1);
+  });
+
+  it("falls back once when an older socket addresses the wrong World mount", async () => {
+    const store = new WorldViewStore();
+    const socketMutate = vi.fn().mockRejectedValue(new SocketMutationError(
+      "this head serves 'local_issues' and not 'issues'; open that World's own head",
+      404,
+      "not_found",
+    ));
+    const fallback = vi.fn().mockResolvedValue({ kind: "issue_text_spliced", reff: "TES-1" });
+    const plane = new LivePlane(
+      store,
+      () => ({ watch: () => undefined, mutate: socketMutate, close: () => undefined }),
+      () => 0,
+      fallback,
+    );
+
+    await plane.mutate("orb_a", { cmd: "issue_view", reff: "TES-1" });
+    await plane.mutate("orb_a", { cmd: "issue_view", reff: "TES-1" });
+
+    expect(socketMutate).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not replay an ordinary editor refusal over HTTP", async () => {
+    const store = new WorldViewStore();
+    const socketMutate = vi.fn().mockRejectedValue(new SocketMutationError(
+      "issue does not exist",
+      404,
+      "not_found",
+    ));
+    const fallback = vi.fn();
+    const plane = new LivePlane(
+      store,
+      () => ({ watch: () => undefined, mutate: socketMutate, close: () => undefined }),
+      () => 0,
+      fallback,
+    );
+
+    await expect(plane.mutate("orb_a", { cmd: "issue_view", reff: "TES-1" }))
+      .rejects.toThrow("issue does not exist");
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   it("stays in the room when the question goes", () => {
