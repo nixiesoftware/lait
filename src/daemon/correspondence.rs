@@ -66,6 +66,52 @@ pub fn configured_carrier(identity: &std::path::Path) -> Option<Box<dyn Contract
     Some(Box::new(correspondence::post::PostContractor::new(&base)))
 }
 
+/// The carrier's base URL, when one is configured — for the wake listener,
+/// which speaks to the same service the carrier does but is not a carrier.
+pub fn configured_post_url(identity: &std::path::Path) -> Option<String> {
+    crate::config::Settings::load(Some(identity)).post_url()
+}
+
+/// Hold one standing SSE subscription to the carrier's wake doorbell, and
+/// touch `woken` whenever it rings — the same doorbell shape the update feed
+/// uses (`update::notify`): a frame only *wakes* the collector, which then
+/// collects over the signed path exactly as it does on its period. Losing the
+/// stream costs the period, never a letter.
+///
+/// A thread rather than a task because the read is a blocking body stream
+/// (`ureq`), reconnecting forever with a capped backoff. It holds nothing but
+/// a URL and a device id, and it writes nothing.
+pub fn serve_wake(base: String, device: String, woken: std::sync::Arc<tokio::sync::Notify>) {
+    std::thread::Builder::new()
+        .name("post-wake".into())
+        .spawn(move || {
+            let url = format!("{}/wake?device={}", base.trim_end_matches('/'), device);
+            let agent = ureq::AgentBuilder::new().build();
+            let mut backoff = std::time::Duration::from_secs(1);
+            loop {
+                match agent.get(&url).set("Accept", "text/event-stream").call() {
+                    Ok(response) => {
+                        let reader = std::io::BufReader::new(response.into_reader());
+                        use std::io::BufRead;
+                        for line in reader.lines() {
+                            let Ok(line) = line else { break };
+                            if line.trim() == "event: mail" {
+                                woken.notify_one();
+                            }
+                            // A connected stream is a healthy one, whatever
+                            // it says: the next drop starts polite again.
+                            backoff = std::time::Duration::from_secs(1);
+                        }
+                    }
+                    Err(_) => {}
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
+            }
+        })
+        .ok();
+}
+
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -108,6 +154,7 @@ pub fn is_correspondence_request(request: &Request) -> bool {
             | Request::ReachView
             | Request::CorrespondSend { .. }
             | Request::CorrespondCollect
+            | Request::CorrespondBlock { .. }
             | Request::CorrespondInvite { .. }
     )
 }
@@ -562,6 +609,13 @@ impl CorrespondenceService {
         let Some(name) = plane.reach.declared_name(profile, &reader) else {
             return;
         };
+        // The presented self-description, when the profile avowed one: the
+        // bio half of the portrait, carried onto the card beside the name.
+        let note = plane
+            .reach
+            .portrait(profile, &reader)
+            .map(|portrait| portrait.detail)
+            .unwrap_or_default();
         let Some(devices) = plane.reach.resolve(profile) else {
             return;
         };
@@ -569,7 +623,7 @@ impl CorrespondenceService {
             .into_iter()
             .map(addressbook::Handle::Device)
             .collect();
-        match book.install_introduced(profile, &name, &handles) {
+        match book.install_introduced(profile, &name, &note, &handles) {
             Ok(true) => tracing::info!(name, "an introduced correspondent joined the book"),
             Ok(false) => {}
             Err(error) => {
@@ -709,6 +763,7 @@ impl CorrespondenceService {
             profile: mine,
             address: plane.reach.address().map(ToOwned::to_owned),
             correspondents: held,
+            resolved: None,
             conversations,
             me: Some(my_device),
             origin: Some(origin),
@@ -728,6 +783,57 @@ impl CorrespondenceService {
                 .as_ref()
                 .is_some_and(|plane| plane.contractor.is_some())
         })
+    }
+
+    /// The whole view, naming the profile a learn or resolve just took in —
+    /// so a caller that resolved an address knows *who* without diffing the
+    /// roster.
+    fn reach_view_resolved(
+        &self,
+        plane: &Plane,
+        profile: &mechanics::kinship::ProfileId,
+    ) -> Response {
+        let mut response = self.reach_view(plane);
+        if let Response::Reach(view) = &mut response {
+            view.resolved = Some(profile.as_str().to_owned());
+        }
+        response
+    }
+
+    /// This machine's device id on the wire, for the wake subscription.
+    /// `None` when the plane never stood.
+    #[must_use]
+    pub fn my_wire_device(&self) -> Option<String> {
+        let held = self.plane.lock().ok()?;
+        held.as_ref()
+            .map(|plane| plane.reach.canonical_device().as_str().to_owned())
+    }
+
+    /// One standing collect, for the daemon's own background collector: ask
+    /// the carrier, file what waited, and persist only when something arrived.
+    ///
+    /// `Ok(filed)`. A daemon with no carrier or an unrestored plane answers
+    /// `Err`, and the collector's cadence counts that as unreachable — the
+    /// same distinction the request path keeps between an empty mailbox and a
+    /// carrier that could not be asked.
+    pub fn collect_standing(&self, now: u64) -> Result<usize, String> {
+        let Ok(mut held) = self.plane.lock() else {
+            return Err("the correspondence plane is poisoned".into());
+        };
+        let Some(plane) = held.as_mut() else {
+            return Err("the reach plane is not restored".into());
+        };
+        let Some(contractor) = plane.contractor.as_deref() else {
+            return Err("no carrier is configured for correspondence".into());
+        };
+        let collected = plane.reach.collect_via(contractor, now);
+        if collected.filed > 0 {
+            self.keep(plane)?;
+        }
+        match collected.unasked {
+            Some(why) => Err(format!("the carrier could not be asked: {why}")),
+            None => Ok(collected.filed),
+        }
     }
 
     /// Answer one control-plane request.
@@ -798,7 +904,7 @@ impl CorrespondenceService {
                     Ok(profile) => {
                         self.adopt_into_book(plane, &profile);
                         match self.keep(plane) {
-                            Ok(()) => self.reach_view(plane),
+                            Ok(()) => self.reach_view_resolved(plane, &profile),
                             Err(error) => Response::err(error),
                         }
                     }
@@ -815,7 +921,7 @@ impl CorrespondenceService {
                     Ok(profile) => {
                         self.adopt_into_book(plane, &profile);
                         match self.keep(plane) {
-                            Ok(()) => self.reach_view(plane),
+                            Ok(()) => self.reach_view_resolved(plane, &profile),
                             Err(error) => Response::err(error),
                         }
                     }
@@ -885,14 +991,32 @@ impl CorrespondenceService {
                     return Response::err(NO_CARRIER);
                 };
                 let collected = plane.reach.collect_via(contractor, now);
-                if let Err(error) = self.keep(plane) {
-                    return Response::err(error);
+                // Persist only what changed: a collect that filed nothing has
+                // nothing to keep, and a client polling for freshness must
+                // not turn into a disk write per poll.
+                if collected.filed > 0 {
+                    if let Err(error) = self.keep(plane) {
+                        return Response::err(error);
+                    }
                 }
                 match collected.unasked {
                     // A carrier that could not be asked is reported, never
                     // folded into "nothing was waiting".
                     Some(why) => Response::err(format!("the carrier could not be asked: {why}")),
                     None => self.reach_view(plane),
+                }
+            }
+
+            Request::CorrespondBlock { device, blocked } => {
+                let Some(device) = DeviceId::parse(&device) else {
+                    return Response::err("that is not a device");
+                };
+                let Some(contractor) = plane.contractor.as_deref() else {
+                    return Response::err(NO_CARRIER);
+                };
+                match plane.reach.block_via(contractor, &device, blocked, now) {
+                    Ok(()) => self.reach_view(plane),
+                    Err(error) => Response::err(format!("{error}")),
                 }
             }
 
@@ -950,6 +1074,10 @@ mod tests {
             to: "prf_x".into(),
             link: "lait://join/aa".into()
         }));
+        assert!(is_correspondence_request(&Request::CorrespondBlock {
+            device: "dev_x".into(),
+            blocked: true,
+        }));
         assert!(!is_correspondence_request(&Request::BookList));
     }
 
@@ -967,6 +1095,105 @@ mod tests {
     /// plane can be exercised where it now lives without standing anything up —
     /// and a test that needed a hosted Post to prove the daemon holds a mailbox
     /// would be proving the Post instead.
+    /// The whole block journey over the daemon's own verbs: a letter lands,
+    /// the proven writer is refused at the carrier, the next letter never
+    /// lands, and lifting the block lets one land again. Also holds the
+    /// learn reply naming *who* was learned — the fact a caller that
+    /// resolved a friend code sends an invitation to.
+    #[tokio::test]
+    async fn a_blocked_sender_stops_landing_at_the_carrier() {
+        let root = std::env::temp_dir().join(format!("corr-block-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (ada_home, grace_home) = (root.join("ada"), root.join("grace"));
+        let shared = correspondence::SharedMem::new();
+        let ada = restored(&ada_home);
+        let grace = restored(&grace_home);
+        let now = now_secs();
+        ada.carry_over_with(Box::new(shared.clone()), None, now)
+            .expect("ada");
+        grace
+            .carry_over_with(Box::new(shared.clone()), None, now)
+            .expect("grace");
+
+        let ada_card = reach(&ada.handle(Request::ReachShare).await)
+            .announcement
+            .clone()
+            .expect("ada publishes");
+        let grace_view = reach(&grace.handle(Request::ReachShare).await).clone();
+        let grace_card = grace_view.announcement.clone().expect("grace publishes");
+        let learned = reach(
+            &grace
+                .handle(Request::ReachLearn {
+                    announcement: ada_card,
+                })
+                .await,
+        )
+        .clone();
+        assert_eq!(
+            learned.resolved.as_deref(),
+            Some(learned.correspondents[0].as_str()),
+            "the learn reply names who was learned"
+        );
+        ada.handle(Request::ReachLearn {
+            announcement: grace_card,
+        })
+        .await;
+
+        ada.handle(Request::CorrespondSend {
+            to: grace_view.profile.clone(),
+            body: "first".into(),
+        })
+        .await;
+        let view = reach(&grace.handle(Request::CorrespondCollect).await).clone();
+        let writer = view
+            .conversations
+            .iter()
+            .flat_map(|conversation| conversation.letters.iter())
+            .find(|letter| !letter.mine)
+            .expect("the first letter landed")
+            .from_device
+            .clone();
+
+        let blocked = grace
+            .handle(Request::CorrespondBlock {
+                device: writer.clone(),
+                blocked: true,
+            })
+            .await;
+        assert!(
+            matches!(blocked, Response::Reach(_)),
+            "blocking answers with the view, got {blocked:?}"
+        );
+        ada.handle(Request::CorrespondSend {
+            to: grace_view.profile.clone(),
+            body: "second".into(),
+        })
+        .await;
+        let after = reach(&grace.handle(Request::CorrespondCollect).await).clone();
+        let landed = |view: &crate::control::ReachView| -> usize {
+            view.conversations
+                .iter()
+                .flat_map(|conversation| conversation.letters.iter())
+                .filter(|letter| !letter.mine)
+                .count()
+        };
+        assert_eq!(landed(&after), 1, "the blocked sender's letter never lands");
+
+        grace
+            .handle(Request::CorrespondBlock {
+                device: writer,
+                blocked: false,
+            })
+            .await;
+        ada.handle(Request::CorrespondSend {
+            to: grace_view.profile.clone(),
+            body: "third".into(),
+        })
+        .await;
+        let lifted = reach(&grace.handle(Request::CorrespondCollect).await).clone();
+        assert_eq!(landed(&lifted), 2, "lifting the block lets mail land again");
+    }
+
     #[tokio::test]
     async fn the_daemon_carries_a_letter_between_two_identities_with_no_service() {
         let root = std::env::temp_dir().join(format!("corr-mem-{}", std::process::id()));

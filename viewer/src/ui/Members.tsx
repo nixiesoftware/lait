@@ -631,12 +631,71 @@ function Invite({
                     size="sm"
                   />
                 </div>
+                <SendToFriend link={link} onError={onError} />
               </div>
             </div>
           </>
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * Carry the minted invite to a friend code, through the person's own
+ * Astrolabe: the identity's directory resolves the code, and the invitation
+ * lands in the recipient's chat as a card they open.
+ *
+ * Two host-plane acts, deliberately in this order: `reach_resolve` verifies
+ * the announcement the directory answered against its own genesis and says
+ * *who* it resolved to, and `correspond_invite` seals the link to that
+ * profile. The World only ever handles the code and the link — delivery was
+ * never admission, so nothing here approves anybody.
+ */
+function SendToFriend({ link, onError }: { link: string; onError: (m: string) => void }) {
+  const [code, setCode] = useState("");
+  const [state, setState] = useState<"idle" | "sending" | "sent">("idle");
+  const send = async () => {
+    const typed = code.trim().toLowerCase();
+    if (typed === "" || state === "sending") return;
+    setState("sending");
+    try {
+      const resolved = (await hostRpc({
+        cmd: "reach_resolve",
+        address: typed,
+      } as never)) as unknown as { resolved?: string | null };
+      const to = resolved.resolved;
+      if (!to) throw new Error("that code did not resolve to a person");
+      await hostRpc({ cmd: "correspond_invite", to, link } as never);
+      setState("sent");
+      setCode("");
+      window.setTimeout(() => setState("idle"), 2500);
+    } catch (e) {
+      setState("idle");
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <TextInput
+        value={code}
+        onChange={setCode}
+        label="Friend code"
+        placeholder="Their friend code — tin-harbor-quiet-4417"
+        className="min-w-0 flex-1"
+        onKeyDown={(e: React.KeyboardEvent) => {
+          if (e.key === "Enter") void send();
+        }}
+      />
+      <Button
+        onClick={() => void send()}
+        isDisabled={code.trim() === "" || state === "sending"}
+        icon={state === "sent" ? <Check className="size-icon-sm" /> : <UserPlus className="size-icon-sm" />}
+        label={state === "sending" ? "Sending…" : state === "sent" ? "Sent" : "Send to a friend"}
+        variant="secondary"
+        size="sm"
+      />
+    </div>
   );
 }
 

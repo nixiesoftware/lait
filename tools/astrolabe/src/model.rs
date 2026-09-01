@@ -34,11 +34,17 @@ use crate::client::book::BookSnapshot;
 /// people one can reach, the transcript of each conversation, and which
 /// conversations are open as tabs — all whole values the core replaces, because
 /// Dart holds no correspondence state of its own.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Correspondence {
     /// This identity's own device on the plane — the address a correspondent
     /// writes to.
     pub my_device: Option<String>,
+    /// The short spoken address a directory issued for this identity —
+    /// `tin-harbor-quiet-4417` — the friend code a person actually says out
+    /// loud. `None` until this identity has published to a directory, which
+    /// is optional: the plane works on profile ids alone and a directory only
+    /// makes them sayable.
+    pub my_address: Option<String>,
     /// What this identity hands somebody so they can reach it — an
     /// [`Announcement`](addressbook::Announcement), rendered. `None` when this
     /// backend has none to give: the fixture, or a plane that has never

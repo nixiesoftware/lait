@@ -163,6 +163,11 @@ pub enum Action {
     AddCorrespondent {
         announcement: String,
     },
+    /// Learn a correspondent by the short address a directory issued — the
+    /// friend code a person says out loud.
+    AddByAddress {
+        address: String,
+    },
     /// Add a device to this profile: the code the new device is showing,
     /// typed on a device that already holds it.
     DevicePairEnter {
@@ -327,6 +332,7 @@ impl Action {
             Self::CollectMail => "correspondence.collect".into(),
             Self::ShareReach => "reach.share".into(),
             Self::AddCorrespondent { .. } => "reach.add".into(),
+            Self::AddByAddress { .. } => "reach.resolve".into(),
             Self::DevicePairEnter { .. } => "device.pair.enter".into(),
             // Keyed on the offer, not on the answer: Confirm and Reject are
             // two answers to one question, and a key per answer would leave
@@ -406,6 +412,7 @@ impl Action {
             Self::Refresh => "re-read this machine".into(),
             Self::ShareReach => "publish how to reach you".into(),
             Self::AddCorrespondent { .. } => "add a correspondent".into(),
+            Self::AddByAddress { .. } => "reach somebody by their code".into(),
             Self::DevicePairEnter { .. } => "add a device to your profile".into(),
             Self::DevicePairConfirm { accept: true, .. } => "add the waiting device".into(),
             Self::DevicePairConfirm { accept: false, .. } => "turn the waiting device away".into(),
@@ -713,13 +720,64 @@ struct Worker {
     /// Where the screen preference lives, so a machine that was a screen comes
     /// back as one.
     state_root: std::path::PathBuf,
-    /// This identity's correspondence backend — a real hosted-Post plane under
-    /// `LAIT_POST_URL`, else the opt-in front-end fixture under
-    /// `LAIT_CORRESPONDENCE_DEMO`. When neither is set, correspondence is not
-    /// connected to any carrier and every correspondence action refuses
-    /// honestly. Behind a `Mutex` because the `Worker` is shared across the
-    /// tasks that answer actions.
+    /// The opt-in front-end fixture under `LAIT_CORRESPONDENCE_DEMO`. When
+    /// absent — the default — correspondence is the daemon's real mailbox,
+    /// reached like everything else the identity owns. Behind a `Mutex`
+    /// because the `Worker` is shared across the tasks that answer actions.
     correspondence: Option<std::sync::Mutex<DemoCarrier>>,
+    /// The chat surface's own state — which tabs are open, what has been
+    /// read, which strangers were taken in — layered over the daemon's
+    /// mailbox view before it is presented. Client state, deliberately:
+    /// which tab a window has open was never the mailbox's fact, and the
+    /// daemon must not be asked to hold it.
+    chat: std::sync::Mutex<ChatOverlay>,
+    /// The last raw mailbox view the daemon answered, so a tab action can
+    /// re-present without a round trip. Never handed to a surface as-is —
+    /// every presentation goes through the overlay.
+    reach: std::sync::Mutex<Option<crate::model::Correspondence>>,
+    /// Backoff for the quiet mail poll: after a refusal (no carrier, plane
+    /// not restored) the poll waits this long before asking again, so an
+    /// identity with no Post is not asked five times a minute forever.
+    mail_quiet_until: std::sync::Mutex<std::time::Instant>,
+}
+
+/// What the chat surface remembers between renders and restarts: tabs, read
+/// watermarks, and accepted strangers. Persisted beside the screen preference
+/// because both are this machine's presentation state, not the identity's.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ChatOverlay {
+    /// Open conversation tabs, in tab order.
+    open: Vec<String>,
+    /// The focused tab.
+    active: Option<String>,
+    /// Per-person read watermark, unix seconds: a received letter written at
+    /// or before it has been seen.
+    read: std::collections::HashMap<String, u64>,
+    /// Strangers a person took in. The engine has no added flag — learning
+    /// somebody is what puts them in the roster — so acceptance here is the
+    /// surface's own memory of the choice until the stranger is learned.
+    accepted: std::collections::HashSet<String>,
+}
+
+impl ChatOverlay {
+    fn path(state_root: &std::path::Path) -> std::path::PathBuf {
+        state_root.join("chat-state.json")
+    }
+
+    fn load(state_root: &std::path::Path) -> Self {
+        std::fs::read(Self::path(state_root))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn keep(&self, state_root: &std::path::Path) {
+        // Presentation state: losing it costs a tab, never a letter. A write
+        // that failed is not worth failing an action over.
+        if let Ok(bytes) = serde_json::to_vec(self) {
+            let _ = std::fs::write(Self::path(state_root), bytes);
+        }
+    }
 }
 
 /// Resolve a Library mount to the World id and installations root that the
@@ -781,21 +839,6 @@ pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
-}
-
-/// What the daemon's mailbox does not carry yet, said rather than pretended.
-///
-/// The fixture models a chat surface — added flags, open tabs — and the mailbox
-/// does not: learning somebody is what puts them in the roster, and which tab a
-/// window has open is that window's business. A caller gets a refusal it can
-/// read instead of a success that the next view contradicts.
-async fn not_carried_yet(what: &str) -> ClientResult<crate::model::Correspondence> {
-    Err(ClientError::refused(format!("{what} is not carried yet")))
-}
-
-/// Blocking has a route at the Post and no request on the daemon's plane yet.
-async fn blocking_is_not_carried_yet() -> ClientResult<crate::model::Correspondence> {
-    Err(ClientError::refused("blocking is not carried yet"))
 }
 
 /// The opt-in front-end fixture, when one is asked for.
@@ -887,6 +930,9 @@ async fn serve(
                 .and_then(|held| held.selection.clone())
                 .map(Into::into),
         ),
+        chat: std::sync::Mutex::new(ChatOverlay::load(&state_root)),
+        reach: std::sync::Mutex::new(None),
+        mail_quiet_until: std::sync::Mutex::new(std::time::Instant::now()),
         state_root,
         correspondence: build_fixture(correspondence_demo),
     });
@@ -912,6 +958,11 @@ async fn serve(
 /// host-plane state and would otherwise wait for F5 or an action.
 const HOST_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often the carrier is asked for waiting mail while this client runs.
+/// Short enough that a conversation feels immediate; the poll backs itself
+/// off when there is no carrier to ask.
+const MAIL_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Consume the stream forever, re-reading whenever it says to, and carry out
 /// whatever a surface asks for while it does.
 async fn drain(worker: Arc<Worker>, mut signals: Signals, mut actions: UnboundedReceiver<Action>) {
@@ -919,8 +970,19 @@ async fn drain(worker: Arc<Worker>, mut signals: Signals, mut actions: Unbounded
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The first tick is immediate; refresh() already read the host plane.
     ticks.tick().await;
+    // Mail on its own, shorter-than-the-carrier cadence: the daemon's
+    // standing collector keeps the mailbox current on the watch module's
+    // period, and this is the surface asking "now, though" while a person is
+    // actually looking. `collect_quietly` owns its own backoff.
+    let mut mail = tokio::time::interval(MAIL_POLL_INTERVAL);
+    mail.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    mail.tick().await;
     loop {
         tokio::select! {
+            _ = mail.tick() => {
+                let worker = Arc::clone(&worker);
+                tokio::spawn(async move { worker.collect_quietly().await });
+            }
             signal = signals.recv() => {
                 let Some(signal) = signal else { return };
                 let rebaseline = matches!(signal, ClientSignal::SnapshotRequired(_));
@@ -974,20 +1036,141 @@ impl Worker {
         act: impl FnOnce(&mut DemoCarrier) -> ClientResult<()>,
         hosted: impl std::future::Future<Output = ClientResult<crate::model::Correspondence>>,
     ) -> ClientResult<()> {
-        if let Some(fixture) = self.correspondence.as_ref() {
-            let snapshot = {
-                let mut fixture = fixture
-                    .lock()
-                    .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?;
-                act(&mut fixture)?;
-                fixture.snapshot()
-            };
-            self.send(Update::Correspondence(snapshot));
-            return Ok(());
+        if let Some(result) = self.with_fixture(act) {
+            return result;
         }
         let view = hosted.await?;
-        self.send(Update::Correspondence(view));
+        self.present_correspondence(view);
         Ok(())
+    }
+
+    /// Run one act against the fixture and push its snapshot, when the
+    /// fixture is on. `None` means there is no fixture and the real path
+    /// owns the action.
+    fn with_fixture(
+        &self,
+        act: impl FnOnce(&mut DemoCarrier) -> ClientResult<()>,
+    ) -> Option<ClientResult<()>> {
+        let fixture = self.correspondence.as_ref()?;
+        let snapshot = (|| {
+            let mut fixture = fixture
+                .lock()
+                .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?;
+            act(&mut fixture)?;
+            Ok(fixture.snapshot())
+        })();
+        Some(match snapshot {
+            Ok(snapshot) => {
+                self.send(Update::Correspondence(snapshot));
+                Ok(())
+            }
+            Err(error) => Err(error),
+        })
+    }
+
+    /// Cache one raw mailbox view, layer the chat surface's own state over
+    /// it, and hand the result to the model. Every hosted presentation goes
+    /// through here, so tabs, read watermarks and accepted strangers survive
+    /// a view that was re-read whole.
+    fn present_correspondence(&self, view: crate::model::Correspondence) {
+        if let Ok(mut held) = self.reach.lock() {
+            *held = Some(view.clone());
+        }
+        let presented = self.overlaid(view);
+        self.send(Update::Correspondence(presented));
+    }
+
+    /// The chat overlay, applied: added strangers, unread counts against the
+    /// read watermarks, and the tabs this machine actually has open.
+    fn overlaid(&self, mut view: crate::model::Correspondence) -> crate::model::Correspondence {
+        let Ok(chat) = self.chat.lock() else {
+            return view;
+        };
+        let unread: std::collections::HashMap<String, u32> = view
+            .conversations
+            .iter()
+            .map(|conversation| {
+                let watermark = chat.read.get(&conversation.peer_id).copied().unwrap_or(0);
+                let count = conversation
+                    .messages
+                    .iter()
+                    .filter(|message| !message.mine && message.sent_at > watermark)
+                    .count();
+                (
+                    conversation.peer_id.clone(),
+                    u32::try_from(count).unwrap_or(u32::MAX),
+                )
+            })
+            .collect();
+        for contact in &mut view.contacts {
+            if chat.accepted.contains(&contact.id) {
+                contact.added = true;
+            }
+            contact.unread = unread.get(&contact.id).copied().unwrap_or(0);
+        }
+        view.open_tabs = chat
+            .open
+            .iter()
+            .filter(|person| view.contacts.iter().any(|contact| &contact.id == *person))
+            .cloned()
+            .collect();
+        view.active_tab = chat
+            .active
+            .clone()
+            .filter(|person| view.open_tabs.contains(person));
+        view
+    }
+
+    /// Apply one mutation to the chat overlay, persist it, and re-present —
+    /// from the cached raw view when one is held, else after one read.
+    async fn chat_overlay(&self, mutate: impl FnOnce(&mut ChatOverlay)) -> ClientResult<()> {
+        {
+            let mut chat = self
+                .chat
+                .lock()
+                .map_err(|_| ClientError::internal("the chat state lock is poisoned"))?;
+            mutate(&mut chat);
+            chat.keep(&self.state_root);
+        }
+        let cached = self.reach.lock().ok().and_then(|held| held.clone());
+        let view = match cached {
+            Some(view) => view,
+            None => self.client.reach_view().await?,
+        };
+        self.present_correspondence(view);
+        Ok(())
+    }
+
+    /// The quiet mail poll: collect on a short cadence so a letter lands on
+    /// the surface within seconds of being deposited, presenting only what
+    /// changed. A refusal — no carrier, no plane — backs the poll off a
+    /// minute at a time instead of failing the surface: mail that cannot
+    /// arrive is a machine with no Post, not an error worth repeating.
+    async fn collect_quietly(&self) {
+        if self.correspondence.is_some() {
+            return;
+        }
+        if let Ok(quiet) = self.mail_quiet_until.lock() {
+            if std::time::Instant::now() < *quiet {
+                return;
+            }
+        }
+        match self.client.correspond_collect().await {
+            Ok(view) => {
+                let changed = self
+                    .reach
+                    .lock()
+                    .map_or(true, |held| held.as_ref() != Some(&view));
+                if changed {
+                    self.present_correspondence(view);
+                }
+            }
+            Err(_) => {
+                if let Ok(mut quiet) = self.mail_quiet_until.lock() {
+                    *quiet = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                }
+            }
+        }
     }
 
     /// Re-read everything that is not delivered by the stream.
@@ -1036,6 +1219,15 @@ impl Worker {
         match self.client.profile().await {
             Ok(profile) => self.send(Update::Profile(Box::new(profile))),
             Err(error) => self.fail(None, "read your devices", error),
+        }
+        if self.correspondence.is_none() {
+            // The real mailbox, presented at rest: a restart shows what was
+            // already said without waiting for an action. An error stays
+            // silent — an identity whose plane never stood has nothing to
+            // show, and that absence is not a failure of this read.
+            if let Ok(view) = self.client.reach_view().await {
+                self.present_correspondence(view);
+            }
         }
     }
 
@@ -1539,6 +1731,18 @@ impl Worker {
                 .await?;
                 Ok(Outcome::Said("added".into()))
             }
+            Action::AddByAddress { address } => {
+                self.corresponding(
+                    |_| {
+                        Err(ClientError::refused(
+                            "the fixture cannot resolve an address",
+                        ))
+                    },
+                    client.reach_resolve(address.clone(), false),
+                )
+                .await?;
+                Ok(Outcome::Said("added".into()))
+            }
             Action::CollectMail => {
                 let now = now_secs();
                 // A carrier that could not be asked answers as a retryable
@@ -1635,60 +1839,117 @@ impl Worker {
             }
             Action::BlockSender(person) => {
                 let now = now_secs();
-                self.corresponding(
-                    |fixture| fixture.block(person, now),
-                    blocking_is_not_carried_yet(),
-                )
-                .await?;
+                match self.with_fixture(|fixture| fixture.block(person, now)) {
+                    Some(result) => result?,
+                    None => {
+                        // The carrier blocks a *device* — the proven writer of
+                        // a received letter. A person nothing has arrived from
+                        // has no proven device, so there is nothing at the
+                        // carrier to refuse yet, and saying so beats a block
+                        // that silently held nothing.
+                        let devices: Vec<String> = self
+                            .reach
+                            .lock()
+                            .ok()
+                            .and_then(|held| {
+                                held.as_ref().map(|view| {
+                                    view.contacts
+                                        .iter()
+                                        .find(|contact| contact.id == *person)
+                                        .map(|contact| contact.devices.clone())
+                                        .unwrap_or_default()
+                                })
+                            })
+                            .unwrap_or_default();
+                        if devices.is_empty() {
+                            return Err(ClientError::refused(
+                                "no letter from them has arrived, so there is no sending device to block",
+                            ));
+                        }
+                        let mut last = None;
+                        for device in devices {
+                            last = Some(self.client.correspond_block(device, true).await?);
+                        }
+                        if let Some(view) = last {
+                            self.present_correspondence(view);
+                        }
+                    }
+                }
                 Ok(Outcome::Said(format!("blocked {person}")))
             }
-            // Accepting, opening, focusing and closing are the fixture's own
-            // model of a chat surface. The daemon's mailbox has no separate
-            // "added" flag and no tab state — learning somebody is what puts
-            // them in the roster — so these refuse rather than pretend, which is
-            // the shape `BlockSender` always had.
+            // Accepting, opening, focusing and closing are the *surface's*
+            // model of a chat — the daemon's mailbox has no added flag and no
+            // tab state, deliberately. They land on the chat overlay this
+            // client persists beside its screen preference, and the fixture
+            // keeps its own copies of the same acts.
             Action::AcceptContact(person) => {
-                self.corresponding(
-                    |fixture| {
-                        fixture.accept(person);
-                        Ok(())
-                    },
-                    not_carried_yet("adding a contact"),
-                )
-                .await?;
+                match self.with_fixture(|fixture| {
+                    fixture.accept(person);
+                    Ok(())
+                }) {
+                    Some(result) => result?,
+                    None => {
+                        self.chat_overlay(|chat| {
+                            chat.accepted.insert(person.clone());
+                        })
+                        .await?;
+                    }
+                }
                 Ok(Outcome::Said(format!("added {person} to contacts")))
             }
             Action::OpenConversation(person) => {
-                self.corresponding(
-                    |fixture| {
-                        fixture.open(person);
-                        Ok(())
-                    },
-                    not_carried_yet("arranging conversations"),
-                )
-                .await?;
+                match self.with_fixture(|fixture| {
+                    fixture.open(person);
+                    Ok(())
+                }) {
+                    Some(result) => result?,
+                    None => {
+                        let now = now_secs();
+                        self.chat_overlay(|chat| {
+                            if !chat.open.contains(person) {
+                                chat.open.push(person.clone());
+                            }
+                            chat.active = Some(person.clone());
+                            chat.read.insert(person.clone(), now);
+                        })
+                        .await?;
+                    }
+                }
                 Ok(Outcome::Silent)
             }
             Action::FocusConversation(person) => {
-                self.corresponding(
-                    |fixture| {
-                        fixture.focus(person);
-                        Ok(())
-                    },
-                    not_carried_yet("arranging conversations"),
-                )
-                .await?;
+                match self.with_fixture(|fixture| {
+                    fixture.focus(person);
+                    Ok(())
+                }) {
+                    Some(result) => result?,
+                    None => {
+                        let now = now_secs();
+                        self.chat_overlay(|chat| {
+                            chat.active = Some(person.clone());
+                            chat.read.insert(person.clone(), now);
+                        })
+                        .await?;
+                    }
+                }
                 Ok(Outcome::Silent)
             }
             Action::CloseConversation(person) => {
-                self.corresponding(
-                    |fixture| {
-                        fixture.close(person);
-                        Ok(())
-                    },
-                    not_carried_yet("arranging conversations"),
-                )
-                .await?;
+                match self.with_fixture(|fixture| {
+                    fixture.close(person);
+                    Ok(())
+                }) {
+                    Some(result) => result?,
+                    None => {
+                        self.chat_overlay(|chat| {
+                            chat.open.retain(|open| open != person);
+                            if chat.active.as_deref() == Some(person.as_str()) {
+                                chat.active = chat.open.last().cloned();
+                            }
+                        })
+                        .await?;
+                    }
+                }
                 Ok(Outcome::Silent)
             }
             Action::SpaceFound { home, name, nick } => {

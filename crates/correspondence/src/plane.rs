@@ -832,6 +832,29 @@ impl ReachPlane {
         self.send_content(&mut *carrier, recipient, content, now)
     }
 
+    /// Refuse further letters from one sending device at the carrier, or lift
+    /// that refusal.
+    ///
+    /// The block lives at the carrier because that is where unsolicited
+    /// material is cheapest to stop — before it is fetched at all. Nothing
+    /// here forgets a transcript already filed: blocking is about the next
+    /// letter, never the last one.
+    pub fn block_via(
+        &self,
+        contractor: &dyn crate::Contractor,
+        sender: &DeviceId,
+        blocked: bool,
+        now: u64,
+    ) -> Result<(), Failure> {
+        let mut carrier = contractor.carrier_for(&self.seed);
+        let plane = actor::replay(&self.egress_space, &self.egress_events);
+        let witness = egress::authorize(&plane, &self.egress_actor, &self.canonical_device())
+            .map_err(|refused| Failure::Egress(refused.to_string()))?;
+        carrier
+            .block(&witness, sender, blocked, now)
+            .map_err(Failure::Carrier)
+    }
+
     /// Collect through a contractor, asking as the device this machine holds.
     ///
     /// One device, because a carrier may only fetch its own signer's mailbox and

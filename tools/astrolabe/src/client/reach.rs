@@ -86,6 +86,34 @@ impl Client {
             .await
     }
 
+    /// Learn a correspondent by the short address a directory issued — the
+    /// friend code. The daemon resolves, verifies against the announcement's
+    /// own genesis, and refuses a changed device set unless `accept_change`
+    /// says a person looked at it.
+    pub async fn reach_resolve(
+        &self,
+        address: String,
+        accept_change: bool,
+    ) -> ClientResult<Correspondence> {
+        self.reach_request(Request::ReachResolve {
+            address,
+            accept_change,
+        })
+        .await
+    }
+
+    /// Refuse further letters from one sending device at the carrier, or lift
+    /// that refusal. The device is the proven writer of a received letter,
+    /// because a stranger has no learned profile to name.
+    pub async fn correspond_block(
+        &self,
+        device: String,
+        blocked: bool,
+    ) -> ClientResult<Correspondence> {
+        self.reach_request(Request::CorrespondBlock { device, blocked })
+            .await
+    }
+
     /// Seal a message to a learned correspondent and deposit it.
     pub async fn correspond_send(&self, to: String, body: String) -> ClientResult<Correspondence> {
         self.reach_request(Request::CorrespondSend { to, body })
@@ -133,23 +161,56 @@ impl Client {
 /// truthful placeholder rather than an invented one.
 fn from_view(view: ReachView) -> Correspondence {
     let me = view.profile.clone();
-    let contact = |id: String, name: String| Contact {
-        id,
-        name,
-        devices: Vec::new(),
-        added: true,
-        is_agent: false,
-        parent_id: None,
-        parent_name: None,
-        unread: 0,
+    // A contact's devices are the *proven writers* of the letters in their
+    // transcript — what a block acts on. The daemon does not list a learned
+    // correspondent's device set here, so a contact nobody has heard from has
+    // none, and that is a fact rather than a gap: there is nothing to block.
+    let proven_devices = |peer: &str| -> Vec<String> {
+        let mut devices: Vec<String> = view
+            .conversations
+            .iter()
+            .filter(|conversation| conversation.peer == peer)
+            .flat_map(|conversation| conversation.letters.iter())
+            .filter(|letter| !letter.mine)
+            .map(|letter| letter.from_device.clone())
+            .collect();
+        devices.sort();
+        devices.dedup();
+        devices
+    };
+    let contact = |id: String, name: String, added: bool| {
+        let devices = proven_devices(&id);
+        Contact {
+            id,
+            name,
+            devices,
+            added,
+            is_agent: false,
+            parent_id: None,
+            parent_name: None,
+            unread: 0,
+        }
     };
 
-    let mut contacts = vec![contact(me.clone(), "You".to_owned())];
-    contacts.extend(
-        view.correspondents
-            .iter()
-            .map(|address| contact(address.clone(), address.clone())),
-    );
+    // You are not a contact of yourself: the roster is who can be written
+    // to, and your own row belongs to the profile surface, not a chat tab —
+    // a conversation with yourself drew Block and Accept on your own name.
+    // `me` on the view is how a surface still knows which id is you.
+    let mut contacts: Vec<Contact> = view
+        .correspondents
+        .iter()
+        .map(|address| contact(address.clone(), address.clone(), true))
+        .collect();
+    // A stranger who wrote first: their letters opened and filed, but this
+    // identity never learned them, so nothing can be sealed back until it
+    // does. Listed unadded — the way Steam parts requests from friends —
+    // never silently folded into the roster.
+    for conversation in &view.conversations {
+        let peer = conversation.peer.clone();
+        if peer != me && !view.correspondents.iter().any(|held| *held == peer) {
+            contacts.push(contact(peer.clone(), peer, false));
+        }
+    }
 
     let open_tabs: Vec<String> = view
         .conversations
@@ -158,8 +219,9 @@ fn from_view(view: ReachView) -> Correspondence {
         .collect();
 
     Correspondence {
-        my_device: None,
+        my_device: view.me.clone(),
         my_reach: view.announcement,
+        my_address: view.address,
         me: Some(me),
         contacts,
         conversations: view

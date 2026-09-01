@@ -780,6 +780,9 @@ pub struct CorrespondenceFacts {
     /// the address book's, and asserts nothing) and not an address (that is the
     /// directory's, and is short and spoken).
     pub my_reach: Option<String>,
+    /// The short spoken address a directory issued — the friend code a person
+    /// says out loud. `None` until published to a directory.
+    pub my_address: Option<String>,
     /// Which conversation is this identity's own, when the backend has one.
     pub me: Option<String>,
     /// The people this identity can reach. A person folds all their devices into
@@ -1245,6 +1248,12 @@ pub enum ActionRequest {
     AddCorrespondent {
         announcement: String,
     },
+    /// Take a correspondent in by the short address a directory issued — the
+    /// friend code. The daemon resolves and verifies; a changed device set is
+    /// refused rather than badged.
+    AddByAddress {
+        address: String,
+    },
     /// Enter the Space an arriving invitation names.
     ///
     /// `message` is the invitation's deposit id in the transcript. Its
@@ -1492,6 +1501,7 @@ impl ActionRequest {
             Self::SendMessage { to, body } => Action::SendMessage { to, body },
             Self::ShareReach => Action::ShareReach,
             Self::AddCorrespondent { announcement } => Action::AddCorrespondent { announcement },
+            Self::AddByAddress { address } => Action::AddByAddress { address },
             Self::OpenInvitation { message } => Action::OpenInvitation { message },
             Self::SendInvitation { to, link } => Action::SendInvitation { to, link },
             Self::CollectMail => Action::CollectMail,
@@ -2594,6 +2604,7 @@ fn project(app: &App) -> ClientView {
         correspondence: app.correspondence().map(|corr| CorrespondenceFacts {
             my_device: corr.my_device.clone(),
             my_reach: corr.my_reach.clone(),
+            my_address: corr.my_address.clone(),
             me: corr.me.clone(),
             contacts: corr
                 .contacts

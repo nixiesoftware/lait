@@ -970,6 +970,15 @@ pub enum Request {
     },
     /// Ask the carrier for anything waiting and file it.
     CorrespondCollect,
+    /// Refuse further letters from one sending device at the carrier, or lift
+    /// that refusal. `device` is the writing device a received letter proved
+    /// (`ChatMessage.from_device`), because the carrier keys deposits by
+    /// device and a stranger has no learned profile to name. Blocking forgets
+    /// nothing already filed.
+    CorrespondBlock {
+        device: String,
+        blocked: bool,
+    },
     /// Carry an invitation this identity already holds to a correspondent.
     /// Minting one is the Space's authority and stays there.
     CorrespondInvite {
@@ -2040,6 +2049,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
+        | Request::CorrespondBlock { .. }
         | Request::CorrespondInvite { .. }
         | Request::DevicePairEnter { .. }
         | Request::DevicePairConfirm { .. }
@@ -2490,6 +2500,13 @@ pub struct ReachView {
     pub address: Option<String>,
     /// The correspondents it holds, as address spellings.
     pub correspondents: Vec<String>,
+    /// The profile the request that produced this view just learned — set
+    /// only on the reply to [`Request::ReachLearn`] and
+    /// [`Request::ReachResolve`], so a caller that resolved an address knows
+    /// *who* it resolved to without diffing the roster. Absent everywhere
+    /// else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
     /// One transcript per correspondent, in send order.
     pub conversations: Vec<ConversationView>,
     /// This machine's device in the profile — the join key every other slice

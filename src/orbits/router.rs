@@ -662,6 +662,49 @@ impl Router {
             }
             Err(error) => tracing::warn!(%error, "the reach plane could not be restored"),
         }
+        // The standing collector: mail is fetched on the daemon's own cadence,
+        // so a letter lands while no window is open and an invitation is
+        // waiting before anybody asks. Cadence and backoff are the watch
+        // module's — jittered, so a fleet restarted together does not arrive
+        // at the carrier together. A client wanting the letter *now* still
+        // collects explicitly; this floor is for the machine nobody is
+        // looking at, and a daemon with no carrier backs off to the cap
+        // without ever leaving the process. Guarded on a live runtime because
+        // tests construct a Router from synchronous contexts; a daemon always
+        // has one.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let collector = correspondence.clone();
+            let woken = Arc::new(tokio::sync::Notify::new());
+            // The wake listener: one SSE subscription to the carrier's
+            // doorbell, so a deposit is heard within the round trip rather
+            // than on the period — the same posture the update feed takes.
+            // Absent a carrier there is no doorbell to hold.
+            if let Some(base) = crate::daemon::correspondence::configured_post_url(&identity) {
+                if let Some(device) = correspondence.my_wire_device() {
+                    crate::daemon::correspondence::serve_wake(base, device, Arc::clone(&woken));
+                }
+            }
+            runtime.spawn(async move {
+                let mut failures: u32 = 0;
+                loop {
+                    let delay = ::correspondence::watch::next_delay(
+                        failures,
+                        ::correspondence::watch::draw(),
+                    );
+                    // The period is the floor for a machine that cannot hear
+                    // the doorbell, not the latency: a ring collects now.
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        () = woken.notified() => {}
+                    }
+                    let now = crate::daemon::correspondence::now_secs();
+                    failures = match collector.collect_standing(now) {
+                        Ok(_) => 0,
+                        Err(_) => failures.saturating_add(1),
+                    };
+                }
+            });
+        }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
         // The hub admits own devices on the set correspondence publishes, so
         // the service stands first and the hub takes its watch — `None` until

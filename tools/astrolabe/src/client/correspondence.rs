@@ -472,6 +472,7 @@ impl DemoCarrier {
         Correspondence {
             my_device: Some(self.me.device.as_str().to_owned()),
             my_reach: None,
+            my_address: None,
             me: None,
             contacts,
             conversations,

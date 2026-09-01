@@ -178,6 +178,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
+        | Request::CorrespondBlock { .. }
         | Request::CorrespondInvite { .. }
         // Pairing signs a link as this identity and adopts a device into it.
         | Request::DevicePairEnter { .. }
@@ -277,6 +278,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
+        | Request::CorrespondBlock { .. }
         | Request::CorrespondInvite { .. }
         // Pairing is the profile's, not a Space's: the code names a device,
         // and no Space exists yet on the device being paired.

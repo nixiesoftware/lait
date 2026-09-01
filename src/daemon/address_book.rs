@@ -859,7 +859,10 @@ impl AddressBookService {
         Some(addressbook::Portrait {
             name: (!name.is_empty()).then_some(name),
             picture,
-            detail: String::new(),
+            // My Card's note is the profile's self-description — the bio a
+            // resolved friend code answers with, avowed and signed like the
+            // name beside it.
+            detail: card.note.value.clone(),
         })
     }
 
@@ -886,6 +889,7 @@ impl AddressBookService {
         &self,
         profile: &mechanics::kinship::ProfileId,
         name: &str,
+        note: &str,
         handles: &[Handle],
     ) -> Result<bool, String> {
         if name.is_empty() || handles.is_empty() {
@@ -915,6 +919,14 @@ impl AddressBookService {
             id: id.clone(),
             name: name.to_string(),
         }];
+        // The presented self-description lands as the card's note — the same
+        // field a person authors by hand, worth the same Declared evidence.
+        if !note.is_empty() {
+            actions.push(Action::SetNote {
+                id: id.clone(),
+                note: note.to_string(),
+            });
+        }
         for handle in handles {
             actions.push(Action::AddHandle {
                 id: id.clone(),
