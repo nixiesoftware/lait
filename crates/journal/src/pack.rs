@@ -873,6 +873,18 @@ fn slot_family(medium: &dyn Medium, prefix: &str) -> Result<Vec<String>, Failure
         .collect())
 }
 
+/// Remove every slot of one family — the recovery a stillborn pack gets when
+/// its migration source is still authoritative. Never called while a store
+/// serves the family.
+pub(crate) fn remove_family(medium: &dyn Medium, prefix: &str) -> Result<(), Failure> {
+    for name in slot_family(medium, prefix)? {
+        medium
+            .remove_slot(&name)
+            .map_err(|e| io_err(Operation::Remove, &e))?;
+    }
+    Ok(())
+}
+
 fn entries(table: &Table) -> Vec<TableEntry> {
     table
         .iter()

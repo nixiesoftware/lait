@@ -218,3 +218,28 @@ fn the_tombstone_reads_as_unsupported_and_refuses_the_old_rebuild() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_stillborn_migration_pack_is_cleared_and_the_source_migrates_again() {
+    let root = temp_root("stillborn");
+    let refs = install_v1_store(&root, &[b"kept"], b"m", 2);
+    assert_migrated(&root, b"m", &refs);
+
+    // Reconstruct the worst mid-migration crash: the migration seal's record
+    // persisted, its object bytes did not, and retirement never began — the
+    // source is intact and authoritative. Without recovery this store would
+    // fail-stop on every open despite holding all of its data.
+    let kept = crate::object_content_hash(b"kept");
+    assert!(crate::corrupt_object_for_test(&root, &kept));
+    let retired = root.join("retired-v1");
+    std::fs::rename(retired.join("objects"), root.join("objects")).unwrap();
+    std::fs::rename(retired.join("counter"), root.join("counter")).unwrap();
+    std::fs::copy(
+        retired.join("current-manifest"),
+        root.join("current-manifest"),
+    )
+    .unwrap();
+
+    assert_migrated(&root, b"m", &refs);
+    let _ = std::fs::remove_dir_all(&root);
+}

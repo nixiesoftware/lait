@@ -797,7 +797,26 @@ impl Store {
         lock: Option<StoreLock>,
         injector: Option<FaultInjector>,
     ) -> Result<Self, Failure> {
-        let mut pack = pack::PackStore::open(medium, HOT_PREFIX)?;
+        let mut pack = match pack::PackStore::open(medium.clone(), HOT_PREFIX) {
+            Ok(pack) => pack,
+            // A pack that cannot open beside an authoritative, untombstoned
+            // prior-layout source is a stillborn migration — a crash tore
+            // the seal before retirement ever began. The source still rules:
+            // prove it stands on its own, clear the stillborn slots, and let
+            // the ordinary flow migrate again. Refusing here would brick a
+            // store whose data is entirely intact.
+            Err(Failure::Integrity(defect)) if v1::present(&root) && !v1::tombstoned(&root) => {
+                tracing::warn!(
+                    ?root,
+                    ?defect,
+                    "unusable pack beside an authoritative prior-layout source; re-migrating"
+                );
+                v1::Source::open(&root).map(drop)?;
+                pack::remove_family(medium.as_ref(), HOT_PREFIX)?;
+                pack::PackStore::open(medium.clone(), HOT_PREFIX)?
+            }
+            Err(failure) => return Err(failure),
+        };
         #[cfg(any(test, feature = "fault-injection"))]
         if let Some(injector) = injector {
             pack.set_fault_injector(injector);
@@ -1269,9 +1288,8 @@ impl Store {
     }
 
     /// Execute one journaled commit with a separately authenticated
-    /// lazy-required payload delta. Bytes in both classes pass through the
-    /// identical temp-write/fsync/rename sequence before the manifest switch;
-    /// only recovery verification policy differs.
+    /// lazy-required payload delta. Bytes in both classes ride the identical
+    /// append/seal/flush path; only recovery verification policy differs.
     pub fn commit_classified(
         &mut self,
         eager_added: &[Vec<u8>],
