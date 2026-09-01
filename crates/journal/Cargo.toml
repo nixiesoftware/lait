@@ -15,6 +15,9 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 blake3 = "1"
 data-encoding = "2.6"
+# Pack-slot salts: 16 random bytes per slot creation, so a stale seal from a
+# prior slot life can never verify against the new one.
+getrandom = "0.3"
 tracing = "0.1"
 
 [lints]

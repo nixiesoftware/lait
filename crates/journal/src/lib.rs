@@ -71,8 +71,14 @@
 //! the crash matrix is testable; see [`Store::with_fault_injector`].
 
 mod index;
+mod medium;
+mod pack;
+#[cfg(test)]
+mod pack_tests;
 mod prior;
 
+pub use medium::{DirMedium, Medium, MemMedium, Slot};
+pub use pack::{PackStore, PACK_FAULT_POINTS};
 pub use prior::Store as GenerationSource;
 
 #[cfg(test)]

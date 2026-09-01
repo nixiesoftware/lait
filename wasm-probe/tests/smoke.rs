@@ -6,7 +6,8 @@
 #![cfg(all(
     target_arch = "wasm32",
     feature = "probe-fabric",
-    feature = "probe-mechanics"
+    feature = "probe-mechanics",
+    feature = "probe-journal"
 ))]
 
 use fabric::{Engine, Key, Op, Transaction};
@@ -24,6 +25,32 @@ fn entropy_reaches_the_wasm_build() {
         secret.iter().any(|b| *b != 0),
         "a minted key must not be the zero key"
     );
+}
+
+/// The pack log — the storage format the browser port rides on — commits,
+/// reads back, survives a reopen, and compacts, all inside a JS host on the
+/// memory medium. The OPFS medium swaps in beneath this same seam.
+#[wasm_bindgen_test]
+fn the_pack_log_runs_in_a_js_host() {
+    use journal::{MemMedium, PackStore};
+    use std::sync::Arc;
+
+    let medium = Arc::new(MemMedium::new());
+    let mut pack = PackStore::open(medium.clone(), "hot").expect("pack opens");
+    let alpha = b"alpha".to_vec();
+    let beta = b"beta".to_vec();
+    let alpha_hash = journal::object_content_hash(&alpha);
+    let beta_hash = journal::object_content_hash(&beta);
+    pack.commit(&[alpha.clone(), beta], b"m1".to_vec())
+        .expect("commit lands");
+    drop(pack);
+
+    let mut pack = PackStore::open(medium, "hot").expect("pack reopens");
+    assert_eq!(pack.sequence(), 1);
+    assert_eq!(pack.manifest(), Some(b"m1".as_slice()));
+    pack.compact(&|hash| *hash == alpha_hash).expect("compacts");
+    assert_eq!(pack.read(&alpha_hash).expect("alpha survives"), alpha);
+    assert!(!pack.contains(&beta_hash), "the dead object is gone");
 }
 
 #[wasm_bindgen_test]
