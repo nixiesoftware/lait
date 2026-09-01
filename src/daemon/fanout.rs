@@ -1840,7 +1840,10 @@ mod tests {
             std::fs::create_dir_all(&dir).expect("root");
             // Registered store paths are resolved through the filesystem;
             // the roots the catalogs filter on must be spelled the same way.
-            let dir = dir.canonicalize().expect("canonical root");
+            // That spelling is `config::canonical`'s, not `Path::canonicalize`'s:
+            // on Windows the latter keeps the `\\?\` prefix the registry strips,
+            // and a verbatim root prefix-matches no registered path at all.
+            let dir = crate::config::canonical(&dir);
             std::env::set_var("LAIT_CONFIG_ROOT", &dir);
             Self { dir, _guard: guard }
         }
