@@ -45,7 +45,9 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+#[cfg(any(unix, windows))]
+use anyhow::Context;
+use anyhow::Result;
 
 /// Prefix marking a DPAPI-wrapped payload. Absent ⇒ the bytes are verbatim, so
 /// plaintext files written by earlier versions still read back.

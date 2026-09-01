@@ -19,8 +19,10 @@ if ! rustup target list --installed | grep -q '^wasm32-unknown-unknown$'; then
     rustup target add wasm32-unknown-unknown
 fi
 
-echo "== claim 1: the store stack compiles for wasm32-unknown-unknown"
-cargo check --target wasm32-unknown-unknown
+echo "== claim 1: the store stack compiles (and lints) for wasm32-unknown-unknown"
+# clippy, not check: the OPFS medium exists only on this target, and a lint
+# wall that never compiles a module is not covering it.
+cargo clippy --target wasm32-unknown-unknown
 
 echo "== claim 2: the transport compiles for wasm32-unknown-unknown"
 wasm_cc=""
@@ -45,9 +47,19 @@ fi
 
 echo "== claim 3: the CRDT core runs in a JS host"
 if command -v wasm-pack >/dev/null 2>&1; then
-    wasm-pack test --node
+    wasm-pack test --node --test smoke
 else
     echo "wasm-probe: SKIPPED — wasm-pack is not installed, so the runtime" >&2
     echo "wasm-probe: claim was not checked. cargo install wasm-pack, or" >&2
     echo "wasm-probe: https://rustwasm.github.io/wasm-pack/installer/" >&2
+fi
+
+echo "== claim 4: the OPFS medium carries the store in a real browser worker"
+if ! command -v wasm-pack >/dev/null 2>&1; then
+    echo "wasm-probe: SKIPPED — wasm-pack is not installed (see claim 3)." >&2
+elif [ -z "${CHROME:-}" ]     && ! command -v google-chrome >/dev/null 2>&1     && ! command -v chromium >/dev/null 2>&1     && [ ! -e "/Applications/Google Chrome.app" ]; then
+    echo "wasm-probe: SKIPPED — no Chrome found, so the OPFS claim was not" >&2
+    echo "wasm-probe: checked. A skip is 'could not be asked', never a pass." >&2
+else
+    wasm-pack test --headless --chrome --test opfs
 fi

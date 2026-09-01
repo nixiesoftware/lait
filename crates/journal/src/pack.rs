@@ -32,8 +32,12 @@
 //!   predecessor down with it. (The price: the first open after a compaction
 //!   or migration re-hashes the live set once, until the next commit gives
 //!   the slot a delta seal.) Slot names are **monotonic**
-//!   (`<prefix>-<generation>`), never reused: a deleted name with lingering
-//!   readers must not be recreated under them.
+//!   (`<prefix>-<generation>`) and never reused while any reader could hold
+//!   them; the two reuse sites that exist — a compaction retry recreating
+//!   its failed successor, and a stillborn migration recreating generation
+//!   zero — both run with provably no reader alive. The header names its
+//!   slot, so a medium that recycles physical files cannot pass one slot's
+//!   history off as another's.
 //! - **A failed flush poisons the writer.** After fsyncgate, a retried flush
 //!   that "succeeds" proves nothing. The commit is [`Failure::OutcomeUnknown`]
 //!   and so is every call after it; reopening — a fresh handle and a full
@@ -70,9 +74,15 @@ use serde::{Deserialize, Serialize};
 use crate::medium::{Medium, ReadAt, SlotWriter};
 use crate::{object_content_hash, Defect, Failure, IoKind, Operation};
 
-const SLOT_MAGIC: &[u8; 8] = b"laitpak1";
+const SLOT_MAGIC: &[u8; 8] = b"laitpak2";
 const SALT_LEN: usize = 16;
-const HEADER_LEN: u64 = 24;
+/// magic 8 | salt 16 | name_len u16 | name bytes, zero-padded to 64. The
+/// header names its own slot so bytes that reappear under the wrong name — a
+/// recycled physical file on a medium that pools them — are rejected
+/// structurally, not probabilistically: a resurrected slot is self-consistent
+/// under its own salt, and only the recorded name says it is history.
+const HEADER_LEN: u64 = 64;
+const HEADER_NAME_CAPACITY: usize = 38;
 const OBJECT_MAGIC: [u8; 4] = *b"lpo1";
 const SEAL_MAGIC: [u8; 4] = *b"lps1";
 const CHECK_LEN: usize = 16;
@@ -907,14 +917,25 @@ fn init_slot(medium: &dyn Medium, name: &str) -> Result<OpenedSlot, Failure> {
             .truncate(0)
             .map_err(|e| io_err(Operation::Open, &e))?;
     }
+    let name_bytes = name.as_bytes();
+    if name_bytes.len() > HEADER_NAME_CAPACITY {
+        return Err(corrupt());
+    }
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| Failure::Operation {
         operation: Operation::Write,
         kind: IoKind::Other,
     })?;
-    let mut header = Vec::new();
-    header.extend_from_slice(SLOT_MAGIC);
-    header.extend_from_slice(&salt);
+    let mut header = vec![0u8; usize::try_from(HEADER_LEN).unwrap_or(64)];
+    let (magic_part, rest) = header.split_at_mut(SLOT_MAGIC.len());
+    magic_part.copy_from_slice(SLOT_MAGIC);
+    let (salt_part, rest) = rest.split_at_mut(SALT_LEN);
+    salt_part.copy_from_slice(&salt);
+    let (len_part, name_part) = rest.split_at_mut(2);
+    len_part.copy_from_slice(&u16::try_from(name_bytes.len()).unwrap_or(0).to_le_bytes());
+    if let Some(target) = name_part.get_mut(..name_bytes.len()) {
+        target.copy_from_slice(name_bytes);
+    }
     writer
         .append(&header)
         .map_err(|e| io_err(Operation::Write, &e))?;
@@ -1002,14 +1023,34 @@ fn recover_slot(
             torn_birth: false,
         });
     }
-    let mut header = [0u8; 24];
+    let mut header = [0u8; 64];
     read.read_at(0, &mut header)
         .map_err(|e| io_err(Operation::Read, &e))?;
-    let (magic, salt) = header.split_at(SLOT_MAGIC.len());
+    let (magic, rest) = header.split_at(SLOT_MAGIC.len());
+    let (salt, rest) = rest.split_at(SALT_LEN);
     if magic != SLOT_MAGIC {
         // Not "never initialized" — that is the short-slot case above. Bytes
         // are here and they are not ours; say so before they are reset.
         tracing::warn!(slot = %name, "pack slot header unrecognized; resetting");
+        return Ok(RecoveredSlot {
+            name,
+            writer,
+            read,
+            key: [0u8; 32],
+            state: None,
+            torn_birth: false,
+        });
+    }
+    let named = rest
+        .split_first_chunk::<2>()
+        .and_then(|(len_bytes, name_part)| {
+            let name_len = usize::from(u16::from_le_bytes(*len_bytes));
+            name_part.get(..name_len)
+        });
+    if named != Some(name.as_bytes()) {
+        // Bytes wearing another slot's name — a recycled physical file whose
+        // truncation never became durable. History, not a slot.
+        tracing::warn!(slot = %name, "pack slot header names a different slot; resetting");
         return Ok(RecoveredSlot {
             name,
             writer,

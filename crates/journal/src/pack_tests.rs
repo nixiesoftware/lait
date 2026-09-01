@@ -503,9 +503,11 @@ fn a_torn_birth_seal_loses_the_election_to_its_predecessor() {
     // persisted whole, one of its copied objects did not. The seal has no
     // delta — only birth-seal checkpoint verification can reject it, and it
     // must, or the intact hot-0 would be deleted as the election's loser.
+    // (72.. is the first object's payload: past the 64-byte slot header and
+    // the record's 8-byte magic+length.)
     let mut torn = slot_bytes(&medium, "hot-1");
     let sealed = torn.len();
-    for byte in torn.get_mut(30..40).unwrap() {
+    for byte in torn.get_mut(72..80).unwrap() {
         *byte ^= 0xFF;
     }
     assert!(torn.len() == sealed);
@@ -532,11 +534,12 @@ fn a_sole_torn_birth_seal_fails_the_open_rather_than_founding_fresh() {
     drop(pack);
     assert_eq!(medium.slot_names().unwrap(), vec!["hot-1".to_owned()]);
 
-    // Rot inside the sole slot's birth checkpoint: with no sibling to elect,
-    // recovery must refuse — resetting would erase acknowledged history, and
-    // the damaged slot must survive for whatever restores it.
+    // Rot inside the sole slot's birth checkpoint (72.. = first object
+    // payload): with no sibling to elect, recovery must refuse — resetting
+    // would erase acknowledged history, and the damaged slot must survive
+    // for whatever restores it.
     let mut torn = slot_bytes(&medium, "hot-1");
-    for byte in torn.get_mut(32..40).unwrap() {
+    for byte in torn.get_mut(72..80).unwrap() {
         *byte ^= 0xFF;
     }
     write_slot_bytes(&medium, "hot-1", &torn);
@@ -549,5 +552,29 @@ fn a_sole_torn_birth_seal_fails_the_open_rather_than_founding_fresh() {
         medium.slot_names().unwrap(),
         vec!["hot-1".to_owned()],
         "the damaged slot is preserved, never reset"
+    );
+}
+
+#[test]
+fn bytes_wearing_another_slots_name_are_history_not_a_slot() {
+    let medium = medium();
+    let mut pack = open(&medium);
+    pack.commit(&[obj(1)], b"m1".to_vec()).unwrap();
+    drop(pack);
+
+    // A recycled physical file resurrecting a whole old slot is
+    // self-consistent under its own salt; only the header's recorded name
+    // can reject it. Simulate: hot-0's bytes appear under the name hot-1.
+    let stolen = slot_bytes(&medium, "hot-0");
+    let (mut writer, _) = medium.open_slot("hot-1").unwrap();
+    writer.append(&stolen).unwrap();
+    drop(writer);
+
+    let pack = open(&medium);
+    assert_eq!(pack.sequence(), 1, "hot-0 is elected on its own merits");
+    assert_eq!(
+        medium.slot_names().unwrap(),
+        vec!["hot-0".to_owned()],
+        "the misnamed copy is reset, never elected"
     );
 }

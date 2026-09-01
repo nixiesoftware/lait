@@ -9,6 +9,16 @@ publish = false
 
 [features]
 fault-injection = []
+# The browser medium: OPFS sync access handles in a dedicated worker, behind
+# a sahpool-style physical-file pool. wasm32-only by construction — the deps
+# it turns on are target-gated below and never reach a native build.
+opfs = [
+    "dep:js-sys",
+    "dep:send_wrapper",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +37,27 @@ tracing = "0.1"
 # flock/statvfs on unix, LockFileEx/GetDiskFreeSpaceExW on Windows.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The OPFS medium's bindings, behind the `opfs` feature. `send_wrapper` is
+# how the JS handle types satisfy the seam's Send + Sync bounds honestly: a
+# panic on cross-thread use instead of an unsafe claim — the pattern iroh's
+# own wasm support uses via n0-future.
+[target.'cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))'.dependencies]
+js-sys = { version = "0.3", optional = true }
+send_wrapper = { version = "0.6", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3.77", optional = true, features = [
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemReadWriteOptions",
+    "FileSystemSyncAccessHandle",
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

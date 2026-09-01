@@ -64,13 +64,33 @@ mod index;
 mod medium;
 #[cfg(test)]
 mod migration_tests;
+#[cfg(all(
+    target_arch = "wasm32",
+    not(target_feature = "atomics"),
+    feature = "opfs"
+))]
+// The JS boundary is all f64: every cast here crosses it deliberately, and
+// the remaining truncation lints stay visible as the workspace intends.
+#[allow(clippy::as_conversions)]
+mod opfs;
 mod pack;
 #[cfg(test)]
 mod pack_tests;
+#[allow(
+    dead_code,
+    reason = "the OPFS medium is this codec's only production caller"
+)]
+mod pool_header;
 mod prior;
 mod v1;
 
 pub use medium::{DirMedium, Medium, MemMedium, ReadAt, SlotWriter};
+#[cfg(all(
+    target_arch = "wasm32",
+    not(target_feature = "atomics"),
+    feature = "opfs"
+))]
+pub use opfs::OpfsMedium;
 pub use pack::{PackStore, PackView, Provenance, PACK_FAULT_POINTS};
 pub use prior::Store as GenerationSource;
 
