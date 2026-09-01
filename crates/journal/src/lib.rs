@@ -765,8 +765,10 @@ pub(crate) fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), Failure> {
 /// can be opened at all the platform does not expose directory sync to us and
 /// NTFS's metadata journaling is the documented durability contract — but a
 /// handle that opens and then fails to flush is a real error and fails the
-/// phase.
-#[cfg(unix)]
+/// phase. Every other target gets the open-and-sync body too: where the
+/// filesystem itself is absent (wasm32-unknown-unknown) the open fails, and
+/// failing is right — a no-op arm would claim a durability nothing provided.
+#[cfg(not(windows))]
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), Failure> {
     File::open(dir)
         .and_then(|d| d.sync_all())

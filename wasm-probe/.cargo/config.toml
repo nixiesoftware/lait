@@ -1,0 +1,7 @@
+# getrandom 0.3/0.4 refuse wasm32-unknown-unknown unless told which backend
+# stands in for the missing OS: this cfg names the JS host (crypto.getRandomValues,
+# via wasm-bindgen). It is target-scoped, so a native `cargo check` of this
+# package stays an ordinary build — and like `sim/.cargo/config.toml`, it is
+# invisible to any build at the repo root.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

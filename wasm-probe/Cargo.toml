@@ -1,0 +1,74 @@
+# The engine, aimed at the browser target.
+#
+# Its own package, outside the workspace, for the same reason `sim/` is: it
+# needs build settings the rest of the workspace must never see — getrandom's
+# JS backend, enabled per-generation below and armed by the rustc cfg in
+# `.cargo/config.toml`. `cargo build`, `cargo test` and the MSRV job at the
+# repo root do not know this exists.
+#
+# What it claims, and how to check it:
+#
+#   cargo check --target wasm32-unknown-unknown            # the store stack compiles
+#   cargo check --target wasm32-unknown-unknown --features probe-comms
+#                                                          # …and so does the transport
+#   wasm-pack test --node                                  # …and the CRDT core RUNS in a JS host
+#
+# `ci/wasm-probe.sh` runs all three. The comms probe needs a C compiler that
+# can emit wasm32 for `ring` (Apple clang cannot; the script finds one), which
+# is why it sits behind a feature instead of in the default set.
+#
+# Declared a workspace root, not merely excluded from one. Exclusion only makes
+# cargo keep walking upward, so a checkout nested inside another workspace (a
+# git worktree under the repo, say) gets adopted by the OUTER root and refuses
+# to build. An empty table stops the walk here, wherever this is checked out.
+[workspace]
+
+[package]
+name = "wasm-probe"
+version = "0.0.0"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.92"
+
+[lib]
+# `cdylib` is what wasm-bindgen's test runner links; `rlib` keeps the crate
+# usable as a plain dependency if a real browser engine crate grows out of it.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The store stack is the default claim: identity, journal, the CRDT fabric,
+# and Replica semantics all reach the browser target.
+default = ["probe-mechanics", "probe-journal", "probe-fabric", "probe-replica"]
+probe-mechanics = ["dep:mechanics"]
+probe-journal = ["dep:journal"]
+probe-fabric = ["dep:fabric"]
+probe-replica = ["dep:replica"]
+# The transport is a separate claim because compiling `ring` for wasm32 needs
+# a real clang; see the header note.
+probe-comms = ["dep:comms"]
+
+[dependencies]
+mechanics = { path = "../crates/mechanics", optional = true }
+journal = { path = "../crates/journal", optional = true }
+fabric = { path = "../crates/fabric", optional = true }
+replica = { path = "../crates/replica", optional = true }
+comms = { path = "../crates/comms", optional = true, default-features = false }
+
+# The entropy door, opened toward JS.
+#
+# Three getrandom generations live in the engine's graph, and each has its own
+# wasm switch: 0.2 takes the `js` feature; 0.3 and 0.4 take the `wasm_js`
+# feature plus the `getrandom_backend="wasm_js"` cfg set in
+# `.cargo/config.toml`. Listing them here turns the switches for the WHOLE
+# graph through feature unification — this package never calls getrandom
+# itself. The cfg lives beside this package for the same reason `sim/`'s
+# custom-backend cfg lives beside it: cargo reads config upward, never
+# downward, so a root build cannot see it.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

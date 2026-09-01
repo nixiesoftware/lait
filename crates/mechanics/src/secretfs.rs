@@ -157,7 +157,7 @@ pub fn read_private(path: &Path) -> std::result::Result<Option<Vec<u8>>, Failure
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod imp {
     use super::*;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -198,6 +198,42 @@ mod imp {
     pub(super) fn wrap(bytes: &[u8]) -> Result<Vec<u8>> {
         Ok(bytes.to_vec())
     }
+    pub(super) fn unwrap(_blob: &[u8]) -> std::result::Result<Vec<u8>, Failure> {
+        Err(Failure::Undecryptable(
+            "this secret is DPAPI-wrapped and can only be read on the Windows account that wrote it"
+                .into(),
+        ))
+    }
+}
+
+/// A target with neither unix modes nor DPAPI (wasm32-unknown-unknown) has no
+/// private filesystem to offer, and every operation says so rather than
+/// writing a secret nothing protects. Browser custody is a storage decision —
+/// an OPFS/IndexedDB backend behind this same seam — not a permissions arm.
+#[cfg(not(any(unix, windows)))]
+mod imp {
+    use super::*;
+
+    fn unsupported(what: &str) -> anyhow::Error {
+        anyhow::anyhow!("{what}: no private storage exists on this target")
+    }
+
+    pub(super) fn create_private_dir(_path: &Path) -> Result<()> {
+        Err(unsupported("create secret dir"))
+    }
+
+    pub(super) fn write_private(_path: &Path, _bytes: &[u8], _create: Create) -> Result<()> {
+        Err(unsupported("write secret file"))
+    }
+
+    pub(super) fn harden_in_place(_path: &Path) -> Result<()> {
+        Err(unsupported("tighten secret file"))
+    }
+
+    pub(super) fn wrap(_bytes: &[u8]) -> Result<Vec<u8>> {
+        Err(unsupported("wrap secret"))
+    }
+
     pub(super) fn unwrap(_blob: &[u8]) -> std::result::Result<Vec<u8>, Failure> {
         Err(Failure::Undecryptable(
             "this secret is DPAPI-wrapped and can only be read on the Windows account that wrote it"

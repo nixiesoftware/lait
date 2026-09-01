@@ -39,11 +39,16 @@ members = [
     "tools/world-stage",
     "tools/world-semantic-fixture",
 ]
-# Two packages live in this repository but are NOT members, each because it
+# Three packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
 #
 # `fuzz/` needs a nightly toolchain for cargo-fuzz's `-Z` sanitizer flags, and
 # this workspace pins `channel = "stable"` with an MSRV floor CI checks.
+#
+# `wasm-probe/` needs getrandom's JS backend — a per-generation feature plus a
+# `--cfg getrandom_backend="wasm_js"` rustflag in its own `.cargo/config.toml` —
+# to aim the engine crates at wasm32-unknown-unknown. `ci/wasm-probe.sh` is
+# the check it exists for.
 #
 # `sim/` needs `--cfg getrandom_backend="custom"`, which replaces the operating
 # system's entropy with a seeded generator across the whole dependency graph.
@@ -54,7 +59,7 @@ members = [
 #
 # Excluding both means `cargo build`, `cargo test`, `cargo clippy` and the MSRV
 # job never encounter either.
-exclude = ["fuzz", "sim"]
+exclude = ["fuzz", "sim", "wasm-probe"]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
 # depends on it, and must not silently regress to v1 if this ever becomes a

@@ -35,7 +35,7 @@
 //! anything is pinned.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(unix)]
+#[cfg(not(windows))]
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -92,7 +92,10 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalFailur
     }
 }
 
-#[cfg(unix)]
+// Open-and-sync is portable std; on a target with no filesystem at all
+// (wasm32-unknown-unknown) the open fails, which is the honest answer —
+// see `journal::sync_dir`, whose windows arm this one also mirrors.
+#[cfg(not(windows))]
 fn sync_dir(path: &Path) -> Result<(), JournalFailure> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
