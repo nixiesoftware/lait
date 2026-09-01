@@ -32,6 +32,7 @@ import {
   ChoiceMenu,
   CommitSelect,
   CommitText,
+  Console,
   DayTrack,
   Footprint,
   Inspector,
@@ -264,7 +265,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
 
       {/* ── The horizon: the screen, and what is true of it ─────────────── */}
       <section className="ds-horizon">
-        <div className="ds-console">
+        <Console>
           <Bezel
             size="lg"
             screen={screen}
@@ -336,7 +337,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
               </div>
             }
           />
-        </div>
+        </Console>
         <div className="ds-horizon-copy">
           <div className="ds-row-between" style={{ justifyContent: "flex-start" }}>
             {interrupted && <OnAir label="Interrupted" tone="alarm" />}

@@ -72,6 +72,7 @@ other, and the dependence is shown by five rules rather than told by a label.
 
 | Primitive | Draws | Placed on |
 | --- | --- | --- |
+| `Console` | the screen and its chin, one body: the card wrapping the glass and the key row beneath it, from whose chin a pressed key's panel blooms upward over the glass | the horizon's hero |
 | `Bezel` | a screen at four sizes, showing what it shows: the frame on it now, the Athan card with live times, dark on purpose, or the empty horizon. On air is a rim of alarm; never heard from is a rim of ochre. | Screens rows · the horizon's hero · a channel's attached screens · a program's showing-on |
 | `DayTrack` | one day: the ground, the dayparts, the bands laid over, the playhead | a channel card · a screen's today · a broadcast's transit · a program's carried-by |
 | `Footprint` | the fleet as tiny bezels: reached lit, missed outlined ochre, or neutral when no rule is asked | the composer · a transit · the audiences that include a screen · Broadcasts when nothing is on air |
