@@ -1429,8 +1429,9 @@ fn advance_cursor(
     let Some(_) = durations.get(usize::from(index)) else {
         return (0, 0);
     };
-    let before: u64 = durations[..usize::from(index)]
+    let before: u64 = durations
         .iter()
+        .take(usize::from(index))
         .map(|duration| u64::from(duration.unwrap_or(0)))
         .sum();
     let mut offset = before
@@ -1442,18 +1443,24 @@ fn advance_cursor(
         .sum();
     let open_ended_last = durations.last().is_some_and(Option::is_none);
     if cycle == ProgramCycle::Loop && closed > 0 && !open_ended_last {
-        offset %= closed;
+        offset = offset.checked_rem(closed).unwrap_or(offset);
     }
     let mut at = 0u64;
     for (position, duration) in durations.iter().enumerate() {
         let position = u16::try_from(position).unwrap_or(u16::MAX);
         let Some(duration) = duration else {
             // Open-ended: the cursor lands here and keeps counting.
-            return (position, u32::try_from(offset - at).unwrap_or(u32::MAX));
+            return (
+                position,
+                u32::try_from(offset.saturating_sub(at)).unwrap_or(u32::MAX),
+            );
         };
         let end = at.saturating_add(u64::from(*duration));
         if offset < end {
-            return (position, u32::try_from(offset - at).unwrap_or(u32::MAX));
+            return (
+                position,
+                u32::try_from(offset.saturating_sub(at)).unwrap_or(u32::MAX),
+            );
         }
         at = end;
     }

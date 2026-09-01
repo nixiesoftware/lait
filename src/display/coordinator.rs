@@ -1214,7 +1214,7 @@ fn sniff_still(bytes: &[u8]) -> Option<FrameMediaType> {
         Some(FrameMediaType::Png)
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(FrameMediaType::Jpeg)
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP".as_slice()) {
         Some(FrameMediaType::WebP)
     } else {
         None

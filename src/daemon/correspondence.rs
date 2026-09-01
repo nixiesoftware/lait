@@ -106,7 +106,9 @@ pub fn serve_wake(base: String, device: String, woken: std::sync::Arc<tokio::syn
                     Err(_) => {}
                 }
                 std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
+                backoff = backoff
+                    .saturating_mul(2)
+                    .min(std::time::Duration::from_secs(300));
             }
         })
         .ok();
