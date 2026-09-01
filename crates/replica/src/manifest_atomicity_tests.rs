@@ -271,14 +271,13 @@ fn kill_and_reopen_at_every_journal_boundary_shows_old_or_complete_new_root() {
                     p == target_point && flag.load(Ordering::SeqCst)
                 }));
             b.set_supported(supported());
-            // Post-authoritative cleanup points absorb the crash (the commit
-            // stands); earlier points fail with nothing durable.
+            // Every named point precedes the pack's flush, so every injected
+            // crash fails the call with nothing durable; there is no
+            // post-authoritative phase to absorb any more.
             let result = incorporate_all(&mut b, &staged);
-            let post_authoritative = matches!(point, "journal-committed" | "journal-remove");
-            assert_eq!(
-                result.is_ok(),
-                post_authoritative,
-                "{point}: pre-switch crashes fail, post-switch crashes absorb"
+            assert!(
+                result.is_err(),
+                "{point}: a pre-flush crash fails the incorporation"
             );
         }
         // Reopen: the complete old root (no bodies) or the complete new root

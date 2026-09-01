@@ -18,7 +18,22 @@ data-encoding = "2.6"
 # Pack-slot salts: 16 random bytes per slot creation, so a stale seal from a
 # prior slot life can never verify against the new one.
 getrandom = "0.3"
+# The pack table published to readers: every commit snapshots it, so clones
+# must share structure rather than copy the map.
+imbl = "7.0.1"
 tracing = "0.1"
+
+# The store-owner lock and the migration space preflight are native facts:
+# flock/statvfs on unix, LockFileEx/GetDiskFreeSpaceExW on Windows.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 
 [lints]
 workspace = true

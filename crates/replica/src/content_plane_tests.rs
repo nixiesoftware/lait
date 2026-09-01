@@ -292,9 +292,16 @@ fn a_corrupt_chunk_is_dropped_and_the_store_is_untouched() {
         open_resident_chunk(&out.descriptor, &key(), &fx.cache, &out.leases[0].entry),
         Err(Invalid::ChunkMismatch | Invalid::NotResident)
     ));
-    // Reopening the store proves the authoritative side never noticed.
-    Replica::open(fx.dir.join("store"), keys())
-        .expect("a bad cache line is not an integrity failure");
+    // Reopening the store proves the authoritative side never noticed. One
+    // store, one process: the fixture's replica releases the root first.
+    let Fixture {
+        replica,
+        cache,
+        dir,
+    } = fx;
+    drop(replica);
+    drop(cache);
+    Replica::open(dir.join("store"), keys()).expect("a bad cache line is not an integrity failure");
 }
 
 #[test]

@@ -27,6 +27,35 @@ fn entropy_reaches_the_wasm_build() {
     );
 }
 
+/// The whole store — authenticated requirement indexes, manifest, GC — over
+/// the pack in a JS host: `journal::Store::open_on` is the browser door, and
+/// the semantic layer above the pack runs here unchanged.
+#[wasm_bindgen_test]
+fn the_store_runs_in_a_js_host() {
+    use journal::{Index, MemMedium, Store};
+    use std::sync::Arc;
+
+    let medium = Arc::new(MemMedium::new());
+    let mut store = Store::open_on(medium.clone()).expect("store opens");
+    let sequence = store
+        .commit(
+            &[b"issue-one".to_vec()],
+            &[],
+            Index::NONE,
+            b"meta".to_vec(),
+        )
+        .expect("commit lands");
+
+    drop(store);
+    let store = Store::open_on(medium).expect("store reopens");
+    assert_eq!(store.manifest().map(|m| m.sequence), Some(sequence));
+    assert_eq!(store.caller_meta().expect("meta reads"), Some(b"meta".to_vec()));
+    let required = store.required_objects().expect("required lists");
+    assert_eq!(store.read_object(&required[0]).expect("object reads"), b"issue-one");
+    store.collect_unreachable().expect("compaction runs");
+    assert_eq!(store.read_object(&required[0]).expect("live data survives GC"), b"issue-one");
+}
+
 /// The pack log — the storage format the browser port rides on — commits,
 /// reads back, survives a reopen, and compacts, all inside a JS host on the
 /// memory medium. The OPFS medium swaps in beneath this same seam.

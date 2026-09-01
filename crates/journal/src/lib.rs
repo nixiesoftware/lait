@@ -17,47 +17,37 @@
     )
 )]
 
-//! The journaled durable store — the semantics-free on-disk commit protocol.
+//! The journaled durable store — the semantics-free commit protocol, served
+//! by the pack log.
 //!
 //! This crate knows only immutable content-addressed objects, object
-//! references, an atomically swapped manifest with opaque caller metadata,
-//! fsync/directory-sync discipline, fault injection, and recovery. It knows
-//! nothing about Bodies, authority, Worlds, or any product — both the Engine
-//! Body store and the mechanics authority ledger commit through it.
+//! references, a manifest with opaque caller metadata sealed into every
+//! commit, fault injection, and recovery. It knows nothing about Bodies,
+//! authority, Worlds, or any product — both the Engine Body store and the
+//! mechanics authority ledger commit through it.
 //!
-//! Layout, under one store root (which may also hold caller-owned lifecycle
-//! files — this crate touches only its own names):
-//!
-//! ```text
-//! counter            // the local transaction counter (reserved + fsynced first)
-//! current-manifest   // postcard Manifest, atomically replaced
-//! objects/<hex64>    // immutable content-addressed objects
-//! journal/active     // the active journal record, atomically replaced
-//! ```
-//!
-//! A commit executes the normative sequence:
-//!
-//! 1. reserve the local transaction counter and fsync it (gaps after failure
-//!    are allowed; **reuse is forbidden**);
-//! 2. write/fsync journal `Prepared { new objects, new manifest hash }`;
-//! 3. write/fsync all temporary objects;
-//! 4. write/fsync `MaterialReady`, rename the immutable objects to their final
-//!    paths, and fsync their directory;
-//! 5. write/fsync the new manifest temp, rename it over `current-manifest`
-//!    **last**, and fsync the store directory;
-//! 6. write/fsync journal `Committed`, return, then remove the journal and
-//!    fsync its directory.
+//! Physically, a store is a **pack**: an append-only slot family under the
+//! store root (`hot-<generation>` files over a [`Medium`]), where a commit
+//! appends its objects and one seal and flushes **once** — see [`pack`] for
+//! the format and its crash discipline. There is no rename, no directory
+//! sync, and no counter file on the commit path; the seal *is* the sequence
+//! reservation, so a gap cannot exist and a reuse cannot be constructed. A
+//! root still carrying the retired file-per-object layout is migrated at
+//! open, once, verified end to end — see [`v1`] for the rules and the
+//! tombstone an old binary meets afterwards.
 //!
 //! Recovery on open exposes **the complete old or the complete new** state:
-//! `Prepared`/`MaterialReady` found with the old manifest removes the safe
-//! orphan temps/objects and exposes the old state; `MaterialReady` found with
-//! the new manifest verifies its control/index plane and finalizes it as
-//! committed. Missing/corrupt eager objects fail placement. Large protected
-//! payloads live in a separately authenticated lazy-required index: open never
-//! reads them, and an exact Reader reports missing/corrupt material when it is
-//! requested. Unreferenced objects are collected only by detached maintenance,
-//! never on the user/open path, and Reader leases pin exact publication
-//! closures across a collection.
+//! the pack elects its newest fully-verified seal (a torn tail simply falls
+//! off), and the semantic pass then re-validates both requirement indexes and
+//! re-hashes every eager control object and the caller meta. Large protected
+//! payloads live in a separately authenticated lazy-required index: open
+//! never reads them — except inside the newest seal's delta, which recovery
+//! crash-verifies whole because the physical layer cannot know classes — and
+//! an exact Reader reports missing/corrupt material when it is requested.
+//! Unreferenced objects are collected only by detached maintenance
+//! (compaction into the next generation), never on the user/open path, and
+//! Reader leases pin exact publication closures across a collection while
+//! Readers themselves pin the generation they opened.
 //!
 //! **Required sets are indexes, not vectors.** A manifest used to carry
 //! every required `Object` inline, so a commit re-encoded and fsynced the
@@ -67,18 +57,21 @@
 //! its changed objects touch. The index's own nodes are objects too, kept alive
 //! by reachability from the root rather than by being entries in it.
 //!
-//! Every write/fsync/rename boundary carries a named fault-injection point so
-//! the crash matrix is testable; see [`Store::with_fault_injector`].
+//! Every commit boundary carries a named fault-injection point so the crash
+//! matrix is testable; see [`Store::with_fault_injector`] and [`FAULT_POINTS`].
 
 mod index;
 mod medium;
+#[cfg(test)]
+mod migration_tests;
 mod pack;
 #[cfg(test)]
 mod pack_tests;
 mod prior;
+mod v1;
 
-pub use medium::{DirMedium, Medium, MemMedium, Slot};
-pub use pack::{PackStore, PACK_FAULT_POINTS};
+pub use medium::{DirMedium, Medium, MemMedium, ReadAt, SlotWriter};
+pub use pack::{PackStore, PackView, Provenance, PACK_FAULT_POINTS};
 pub use prior::Store as GenerationSource;
 
 #[cfg(test)]
@@ -93,9 +86,7 @@ mod index_tests;
 mod reconciliation_tests;
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +96,8 @@ const MANIFEST_FILE: &str = "current-manifest";
 const OBJECTS_DIR: &str = "objects";
 const JOURNAL_DIR: &str = "journal";
 const JOURNAL_FILE: &str = "active";
+/// The slot family [`Store`] keeps its pack under.
+const HOT_PREFIX: &str = "hot";
 
 /// Domain for an object's content address.
 const OBJECT_DOMAIN: &[u8] = b"lait/store-object/1";
@@ -212,6 +205,11 @@ pub enum Defect {
     CorruptIndex,
     UnsupportedFormat,
     CounterOverflow,
+    /// Two store generations disagree about history — a migrated source was
+    /// mutated after its pack was sealed, or a sealed pack's source outlived
+    /// it unexplained. Never resolved silently: only a person can say which
+    /// side to keep.
+    Diverged,
 }
 
 impl std::fmt::Display for Failure {
@@ -338,60 +336,43 @@ fn deferred_root(manifest: &Manifest) -> Option<index::ChildRef> {
     manifest.deferred_object_index_root.map(child)
 }
 
-/// The journal phases. Each replaces `journal/active` atomically.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum JournalRecord {
-    Prepared {
-        sequence: u64,
-        new_objects: Vec<Object>,
-        new_manifest_hash: [u8; 32],
-    },
-    MaterialReady {
-        sequence: u64,
-        new_objects: Vec<Object>,
-        new_manifest_hash: [u8; 32],
-    },
-    Committed {
-        sequence: u64,
-        new_manifest_hash: [u8; 32],
-    },
-}
-
 type FaultInjector = Box<dyn Fn(&str) -> bool + Send>;
 
-/// The named fault points, in commit order (each fires before its operation).
+/// The named fault points, in commit order (each fires before its
+/// operation). Every commit failure before the flush leaves the old state
+/// exposed and retryable; the flush is the authoritative switch, and nothing
+/// follows it that can fail a commit.
 #[cfg(any(test, feature = "fault-injection"))]
-pub const FAULT_POINTS: [&str; 9] = [
-    "counter",
-    "journal-prepared",
-    "objects",
-    "journal-material-ready",
-    "rename-objects",
-    "manifest-temp",
-    "manifest-rename",
-    "journal-committed",
-    "journal-remove",
-];
+pub const FAULT_POINTS: [&str; 3] = ["pack-objects", "pack-seal", "pack-flush"];
 
-/// The journaled store engine.
+/// The store engine: the semantic layer — authenticated requirement indexes,
+/// caller roots, leases, reachability — served by the pack log.
+///
+/// The pack sits behind a mutex so detached maintenance can borrow the
+/// writer from `&self`; reads never take it — they go through [`PackView`]
+/// snapshots, which stay valid across commits and compactions.
 pub struct Store {
     root: PathBuf,
+    pack: Mutex<pack::PackStore>,
     manifest: Option<Manifest>,
-    injector: Option<FaultInjector>,
     pins: Arc<Mutex<BTreeMap<[u8; 32], u64>>>,
     root_pins: Arc<Mutex<BTreeMap<([u8; 32], u64), u64>>>,
+    /// Held for the store's whole life; the OS releases it when the process
+    /// ends, however it ends.
+    _lock: Option<StoreLock>,
 }
 
 /// Cloneable, immutable access to content-addressed journal objects.
 ///
-/// A Reader captures only the object directory, never the mutable Manifest or
-/// recovery journal. Callers use it after pinning their own semantic index
-/// roots under the owning writer lock, then perform potentially deep reads
-/// without holding that writer. Objects are verified by content address on
-/// every read.
+/// A Reader captures a [`PackView`] — one generation and its table at one
+/// seal — never the mutable Manifest. Callers take it after pinning their own
+/// semantic index roots under the owning writer lock, then perform
+/// potentially deep reads without holding that writer, across later commits
+/// and compactions alike. Objects are verified by content address on every
+/// read.
 #[derive(Debug, Clone)]
 pub struct Reader {
-    root: PathBuf,
+    view: pack::PackView,
     pins: Arc<Mutex<BTreeMap<[u8; 32], u64>>>,
     eager_root: Option<index::ChildRef>,
     deferred_root: Option<index::ChildRef>,
@@ -459,13 +440,77 @@ impl Drop for PinnedObjects {
     }
 }
 
-// The injector closure is not `Debug`; show the root + current manifest.
+// The pack's injector closure is not `Debug`; show the root + manifest.
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("root", &self.root)
             .field("manifest", &self.manifest)
             .finish_non_exhaustive()
+    }
+}
+
+/// One process per store. An OS advisory lock on a file beside the pack:
+/// taken non-blocking at open, released by the kernel when the process ends
+/// — crash included — so it can never go stale the way a pid file does.
+#[derive(Debug)]
+struct StoreLock {
+    _file: std::fs::File,
+}
+
+impl StoreLock {
+    const NAME: &'static str = "owner-lock";
+
+    #[cfg(any(unix, windows))]
+    fn acquire(root: &std::path::Path) -> Result<Self, Failure> {
+        let refused = || Failure::Operation {
+            operation: Operation::Open,
+            kind: IoKind::PermissionDenied,
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join(Self::NAME))
+            .map_err(|e| io_err(Operation::Open, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: the descriptor is valid for the life of `file`.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                tracing::warn!(?root, "another process holds this store");
+                return Err(refused());
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            };
+            let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED =
+                // SAFETY: OVERLAPPED is a plain C struct; zeroed is its
+                // documented "no offset, no event" state.
+                unsafe { std::mem::zeroed() };
+            // SAFETY: the handle is valid for the life of `file` and the
+            // OVERLAPPED outlives the call.
+            let ok = unsafe {
+                LockFileEx(
+                    file.as_raw_handle() as _,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    1,
+                    0,
+                    &mut overlapped,
+                )
+            };
+            if ok == 0 {
+                tracing::warn!(?root, "another process holds this store");
+                return Err(refused());
+            }
+        }
+        Ok(Self { _file: file })
     }
 }
 
@@ -647,8 +692,12 @@ fn deferred_requirement_length(
     .transpose()
 }
 
-fn read_file_bounded(
-    path: &Path,
+/// Read one object out of a pack view under the caller's admitted bound,
+/// keeping the old file-read error vocabulary exactly: absent is
+/// [`Defect::MissingObject`], a length that disagrees with the expectation or
+/// bytes that disagree with the address are [`Defect::CorruptObject`].
+fn read_view_bounded(
+    view: &pack::PackView,
     hash: &[u8; 32],
     expected_len: u64,
     max_len: u64,
@@ -656,59 +705,33 @@ fn read_file_bounded(
     if expected_len > max_len {
         return Err(Failure::Integrity(Defect::CorruptObject));
     }
-    let mut file = File::open(path).map_err(|error| {
-        tracing::warn!(%error, object = %hex(hash), "journal object is absent");
-        if error.kind() == std::io::ErrorKind::NotFound {
-            Failure::Integrity(Defect::MissingObject)
-        } else {
-            io_err(Operation::Read, error)
+    match view.object_len(hash) {
+        None => {
+            tracing::warn!(object = %hex(hash), "journal object is absent");
+            Err(Failure::Integrity(Defect::MissingObject))
         }
-    })?;
-    let stored_len = file
-        .metadata()
-        .map_err(|error| io_err(Operation::Read, error))?
-        .len();
-    if stored_len != expected_len {
-        return Err(Failure::Integrity(Defect::CorruptObject));
+        Some(stored_len) if stored_len != expected_len => {
+            Err(Failure::Integrity(Defect::CorruptObject))
+        }
+        Some(_) => view.read_bounded(hash, max_len),
     }
-    let capacity =
-        usize::try_from(expected_len).map_err(|_| Failure::Integrity(Defect::CorruptObject))?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(capacity)
-        .map_err(|_| Failure::Operation {
-            operation: Operation::Read,
-            kind: IoKind::Other,
-        })?;
-    bytes.resize(capacity, 0);
-    file.read_exact(&mut bytes)
-        .map_err(|_| Failure::Integrity(Defect::CorruptObject))?;
-    let mut trailing = [0u8; 1];
-    match file.read(&mut trailing) {
-        Ok(0) => {}
-        Ok(_) => return Err(Failure::Integrity(Defect::CorruptObject)),
-        Err(error) => return Err(io_err(Operation::Read, error)),
-    }
-    if object_hash(&bytes) != *hash {
-        return Err(Failure::Integrity(Defect::CorruptObject));
-    }
-    Ok(bytes)
 }
 
-/// Reads index nodes out of the object directory. Index nodes are ordinary
-/// content-addressed objects; what makes them nodes is that a root reaches them.
-struct ObjectNodes<'a> {
-    root: &'a Path,
+/// Reads index nodes out of a pack view. Index nodes are ordinary
+/// content-addressed objects; what makes them nodes is that a root reaches
+/// them.
+struct PackNodes<'a> {
+    view: &'a pack::PackView,
 }
 
-impl index::NodeSource for ObjectNodes<'_> {
+impl index::NodeSource for PackNodes<'_> {
     fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
-        let bytes = std::fs::read(self.root.join(OBJECTS_DIR).join(hex(hash))).ok()?;
-        (object_hash(&bytes) == *hash).then_some(bytes)
+        // The view verifies the content address on every read.
+        self.view.read(hash).ok()
     }
 }
 
-struct RecoveryNodes<'a>(ObjectNodes<'a>);
+struct RecoveryNodes<'a>(PackNodes<'a>);
 
 impl index::NodeSource for RecoveryNodes<'_> {
     fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
@@ -729,113 +752,128 @@ pub(crate) fn io_err(operation: Operation, error: std::io::Error) -> Failure {
     Failure::Operation { operation, kind }
 }
 
-pub(crate) fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    let mut f = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|e| io_err(Operation::Open, e))?;
-    f.write_all(bytes)
-        .map_err(|e| io_err(Operation::Write, e))?;
-    f.sync_all().map_err(|e| io_err(Operation::Sync, e))?;
-    Ok(())
-}
-
-/// Atomic replace with a brief retry for Windows sharing violations.
-pub(crate) fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), Failure> {
-    let mut last = None;
-    for attempt in 0..5 {
-        match std::fs::rename(tmp, dst) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last = Some(e);
-                if attempt < 4 {
-                    std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
-                }
-            }
-        }
-    }
-    match last {
-        Some(error) => Err(io_err(Operation::Rename, error)),
-        None => Err(Failure::Operation {
-            operation: Operation::Rename,
-            kind: IoKind::Other,
-        }),
-    }
-}
-
-/// Directory durability after a rename/create. On unix this is a real fsync of
-/// the directory, and a failure fails the calling phase. On Windows, a
-/// directory handle needs `FILE_FLAG_BACKUP_SEMANTICS` to open; if no handle
-/// can be opened at all the platform does not expose directory sync to us and
-/// NTFS's metadata journaling is the documented durability contract — but a
-/// handle that opens and then fails to flush is a real error and fails the
-/// phase. Every other target gets the open-and-sync body too: where the
-/// filesystem itself is absent (wasm32-unknown-unknown) the open fails, and
-/// failing is right — a no-op arm would claim a durability nothing provided.
-#[cfg(not(windows))]
-pub(crate) fn sync_dir(dir: &Path) -> Result<(), Failure> {
-    File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| io_err(Operation::Sync, e))
-}
-
-#[cfg(windows)]
-fn sync_dir(dir: &Path) -> Result<(), Failure> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    let handle = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(dir)
-        .or_else(|_| {
-            OpenOptions::new()
-                .read(true)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-                .open(dir)
-        });
-    match handle {
-        // No directory handle at all: sync is unsupported here; NTFS metadata
-        // journaling is the stated contract (documented, not silent).
-        Err(_) => Ok(()),
-        Ok(d) => d.sync_all().map_err(|e| io_err(Operation::Sync, e)),
-    }
-}
-
 impl Store {
-    /// Open a store root, running crash recovery, and return the store plus its
-    /// current manifest (`None` for a fresh store). The exposed state is always
-    /// the complete old or complete new one.
+    /// Open a store root, running crash recovery, and return the store plus
+    /// its current manifest (`None` for a fresh store). The exposed state is
+    /// always the complete old or complete new one. A root still carrying
+    /// the retired file-per-object layout is migrated here, once, verified
+    /// end to end — see [`v1`] for the rules — and a root another process
+    /// already holds is refused.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Failure> {
-        let root = root.into();
-        std::fs::create_dir_all(root.join(OBJECTS_DIR)).map_err(|e| io_err(Operation::Open, e))?;
-        std::fs::create_dir_all(root.join(JOURNAL_DIR)).map_err(|e| io_err(Operation::Open, e))?;
-        let mut store = Self {
+        Self::open_root(root.into(), None)
+    }
+
+    /// Open with the injector armed before anything runs — the only way a
+    /// test can crash a migration, which happens inside open.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn open_with_fault_injector(
+        root: impl Into<PathBuf>,
+        injector: Box<dyn Fn(&str) -> bool + Send>,
+    ) -> Result<Self, Failure> {
+        Self::open_root(root.into(), Some(injector))
+    }
+
+    fn open_root(root: PathBuf, injector: Option<FaultInjector>) -> Result<Self, Failure> {
+        let medium = medium::DirMedium::open(&root).map_err(|e| io_err(Operation::Open, e))?;
+        #[cfg(any(unix, windows))]
+        let lock = Some(StoreLock::acquire(&root)?);
+        #[cfg(not(any(unix, windows)))]
+        let lock = None;
+        Self::open_native(Arc::new(medium), root, lock, injector)
+    }
+
+    /// Open over any medium — the browser path, where the medium is OPFS or
+    /// memory. No owner lock (the platform's exclusive handle is the lock)
+    /// and no migration: no prior-layout store can exist where the prior
+    /// layout never ran.
+    pub fn open_on(medium: Arc<dyn Medium>) -> Result<Self, Failure> {
+        let pack = pack::PackStore::open(medium, HOT_PREFIX)?;
+        Self::assemble(PathBuf::new(), pack, None)
+    }
+
+    fn open_native(
+        medium: Arc<dyn Medium>,
+        root: PathBuf,
+        lock: Option<StoreLock>,
+        injector: Option<FaultInjector>,
+    ) -> Result<Self, Failure> {
+        let mut pack = pack::PackStore::open(medium, HOT_PREFIX)?;
+        #[cfg(any(test, feature = "fault-injection"))]
+        if let Some(injector) = injector {
+            pack.set_fault_injector(injector);
+        }
+        #[cfg(not(any(test, feature = "fault-injection")))]
+        let _ = injector;
+        if pack.manifest().is_none() {
+            if v1::tombstoned(&root) {
+                // The tombstone promises a pack that is not here: somebody
+                // removed the slots, or restored half a backup. Only a person
+                // can say which side of history to keep.
+                return Err(Failure::Integrity(Defect::Diverged));
+            }
+            if v1::present(&root) {
+                migrate_v1(&root, &mut pack)?;
+            }
+        } else if v1::present(&root) {
+            // A sealed pack beside prior-layout remnants: a crash between
+            // the migration seal and the end of retirement. Only a source
+            // that still matches the seal's provenance may be retired.
+            resume_retirement(&root, &pack)?;
+        }
+        Self::assemble(root, pack, lock)
+    }
+
+    fn assemble(
+        root: PathBuf,
+        pack: pack::PackStore,
+        lock: Option<StoreLock>,
+    ) -> Result<Self, Failure> {
+        let manifest = verify_semantics(&pack)?;
+        Ok(Self {
             root,
-            manifest: None,
-            injector: None,
+            pack: Mutex::new(pack),
+            manifest,
             pins: Arc::new(Mutex::new(BTreeMap::new())),
             root_pins: Arc::new(Mutex::new(BTreeMap::new())),
-        };
-        store.recover()?;
-        Ok(store)
+            _lock: lock,
+        })
+    }
+
+    fn pack(&self) -> Result<std::sync::MutexGuard<'_, pack::PackStore>, Failure> {
+        self.pack.lock().map_err(|_| Failure::Operation {
+            operation: Operation::Open,
+            kind: IoKind::Other,
+        })
+    }
+
+    fn view(&self) -> Result<pack::PackView, Failure> {
+        Ok(self.pack()?.view())
+    }
+
+    /// Where one object's payload lives — slot name, offset, length — so a
+    /// corruption test can reach bytes while the store is closed, and restore
+    /// them even after the damage makes the pack refuse to open.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[must_use]
+    pub fn object_location(&self, hash: &[u8; 32]) -> Option<(String, u64, u64)> {
+        self.pack.lock().ok()?.object_location(hash)
     }
 
     /// Attach a fault injector (test seam; see [`FAULT_POINTS`]).
     #[must_use]
     #[cfg(any(test, feature = "fault-injection"))]
-    pub fn with_fault_injector(mut self, injector: Box<dyn Fn(&str) -> bool + Send>) -> Self {
-        self.injector = Some(injector);
+    pub fn with_fault_injector(self, injector: Box<dyn Fn(&str) -> bool + Send>) -> Self {
+        self.set_fault_injector(injector);
         self
     }
 
     /// Attach a fault injector by reference (test seam for callers embedding
     /// the store; see [`FAULT_POINTS`]).
     #[cfg(any(test, feature = "fault-injection"))]
-    pub fn set_fault_injector(&mut self, injector: Box<dyn Fn(&str) -> bool + Send>) {
-        self.injector = Some(injector);
+    pub fn set_fault_injector(&self, injector: Box<dyn Fn(&str) -> bool + Send>) {
+        if let Ok(mut pack) = self.pack.lock() {
+            pack.set_fault_injector(injector);
+        }
     }
 
     /// Pin a read-only object handle. Semantic roots must be captured by the
@@ -857,7 +895,13 @@ impl Store {
             }
         });
         Reader {
-            root: self.root.clone(),
+            // A poisoned pack lock surfaces on the writer's path; a reader
+            // minted after that still deserves a coherent snapshot, so fall
+            // back to the poisoned guard's view rather than panic.
+            view: match self.pack.lock() {
+                Ok(pack) => pack.view(),
+                Err(held) => held.into_inner().view(),
+            },
             pins: self.pins.clone(),
             eager_root: self.manifest.as_ref().and_then(eager_root),
             deferred_root,
@@ -871,6 +915,13 @@ impl Store {
         self.manifest.as_ref()
     }
 
+    /// How many objects the pack physically holds — required or not, index
+    /// nodes included. The growth diagnostic: after a sweep this is the live
+    /// population, between sweeps it includes what commits superseded.
+    pub fn stored_objects(&self) -> Result<usize, Failure> {
+        Ok(self.view()?.object_count())
+    }
+
     /// Every currently required object, in key order.
     ///
     /// O(total required) by construction, so it is a diagnostic and a test
@@ -880,7 +931,8 @@ impl Store {
         let Some(manifest) = &self.manifest else {
             return Ok(Vec::new());
         };
-        let source = ObjectNodes { root: &self.root };
+        let view = self.view()?;
+        let source = PackNodes { view: &view };
         let mut out = Vec::new();
         for (root, class) in [
             (eager_root(manifest), RequirementClass::Eager),
@@ -906,7 +958,8 @@ impl Store {
         let Some(manifest) = &self.manifest else {
             return Ok(false);
         };
-        let source = ObjectNodes { root: &self.root };
+        let view = self.view()?;
+        let source = PackNodes { view: &view };
         requirement_length(&source, eager_root(manifest), deferred_root(manifest), hash)
             .map(|length| length.is_some())
     }
@@ -923,9 +976,10 @@ impl Store {
 
     /// Read an immutable object, verifying its content address.
     pub fn read_object(&self, obj: &Object) -> Result<Vec<u8>, Failure> {
+        let view = self.view()?;
         if let Some(manifest) = &self.manifest {
             if let Some(committed_len) = requirement_length(
-                &ObjectNodes { root: &self.root },
+                &PackNodes { view: &view },
                 eager_root(manifest),
                 deferred_root(manifest),
                 &obj.hash,
@@ -935,14 +989,14 @@ impl Store {
                 }
             }
         }
-        self.read_object_bounded(obj, obj.len)
+        read_view_bounded(&view, &obj.hash, obj.len, obj.len)
     }
 
     /// Read an immutable object without allocating above the caller's already
-    /// admitted bound. File metadata is checked before allocation and exact
-    /// length/trailing EOF are checked on the opened handle before hashing.
+    /// admitted bound. The pack table is checked before allocation; length
+    /// and content address are checked before the bytes are believed.
     pub fn read_object_bounded(&self, obj: &Object, max_len: u64) -> Result<Vec<u8>, Failure> {
-        read_file_bounded(&self.object_path(&obj.hash), &obj.hash, obj.len, max_len)
+        read_view_bounded(&self.view()?, &obj.hash, obj.len, max_len)
     }
 
     /// Read an object that must be present in the authenticated eager/deferred
@@ -955,8 +1009,9 @@ impl Store {
         let Some(manifest) = &self.manifest else {
             return Err(Failure::Integrity(Defect::MissingObject));
         };
+        let view = self.view()?;
         match requirement_length(
-            &ObjectNodes { root: &self.root },
+            &PackNodes { view: &view },
             eager_root(manifest),
             deferred_root(manifest),
             &obj.hash,
@@ -965,7 +1020,7 @@ impl Store {
             Some(_) => return Err(Failure::Integrity(Defect::CorruptObject)),
             None => return Err(Failure::Integrity(Defect::MissingObject)),
         }
-        self.read_object_bounded(obj, max_len)
+        read_view_bounded(&view, &obj.hash, obj.len, max_len)
     }
 
     /// Read a payload committed specifically to the deferred requirement
@@ -979,8 +1034,9 @@ impl Store {
         let Some(manifest) = &self.manifest else {
             return Err(Failure::Integrity(Defect::MissingObject));
         };
+        let view = self.view()?;
         match deferred_requirement_length(
-            &ObjectNodes { root: &self.root },
+            &PackNodes { view: &view },
             deferred_root(manifest),
             &obj.hash,
         )? {
@@ -988,268 +1044,50 @@ impl Store {
             Some(_) => return Err(Failure::Integrity(Defect::CorruptObject)),
             None => return Err(Failure::Integrity(Defect::MissingObject)),
         }
-        self.read_object_bounded(obj, max_len)
+        read_view_bounded(&view, &obj.hash, obj.len, max_len)
     }
 
     /// Read one immutable object by its content address.
     pub fn read(&self, hash: &[u8; 32]) -> Result<Vec<u8>, Failure> {
-        let path = self.object_path(hash);
-        let len = File::open(&path)
-            .and_then(|file| file.metadata())
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Failure::Integrity(Defect::MissingObject)
-                } else {
-                    io_err(Operation::Read, error)
-                }
-            })?
-            .len();
-        read_file_bounded(
-            &path,
+        self.view()?.read_bounded(
             hash,
-            len,
             u64::try_from(index::MAX_NODE_BYTES).unwrap_or(u64::MAX),
         )
-    }
-
-    fn object_path(&self, hash: &[u8; 32]) -> PathBuf {
-        self.root.join(OBJECTS_DIR).join(hex(hash))
-    }
-
-    fn journal_path(&self) -> PathBuf {
-        self.root.join(JOURNAL_DIR).join(JOURNAL_FILE)
-    }
-
-    fn point(&self, name: &str) -> Result<(), Failure> {
-        if let Some(injector) = &self.injector {
-            if injector(name) {
-                tracing::warn!(point = name, "journal fault injected");
-                return Err(Failure::Operation {
-                    operation: Operation::Write,
-                    kind: IoKind::Interrupted,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn write_journal(&self, record: &JournalRecord) -> Result<(), Failure> {
-        let bytes = postcard::to_stdvec(record).map_err(|_| Failure::Operation {
-            operation: Operation::Encode,
-            kind: IoKind::InvalidData,
-        })?;
-        let dir = self.root.join(JOURNAL_DIR);
-        let tmp = dir.join("active.tmp");
-        write_sync(&tmp, &bytes)?;
-        atomic_replace(&tmp, &self.journal_path())?;
-        sync_dir(&dir)?;
-        Ok(())
-    }
-
-    fn read_journal(&self) -> Result<Option<JournalRecord>, Failure> {
-        match std::fs::read(self.journal_path()) {
-            Ok(bytes) => postcard::from_bytes(&bytes)
-                .map(Some)
-                // An unreadable journal record is corruption we do not repair
-                // heuristically.
-                .map_err(|_| Failure::Integrity(Defect::CorruptJournal)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(io_err(Operation::Read, e)),
-        }
-    }
-
-    fn remove_journal(&self) -> Result<(), Failure> {
-        match std::fs::remove_file(self.journal_path()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err(Operation::Remove, e)),
-        }
-        // Cleanup only: a lost removal is re-resolved by recovery.
-        let _ = sync_dir(&self.root.join(JOURNAL_DIR));
-        Ok(())
-    }
-
-    fn read_manifest_file(&self) -> Result<Option<(Manifest, [u8; 32])>, Failure> {
-        match std::fs::read(self.root.join(MANIFEST_FILE)) {
-            // The hash is of the bytes on disk either way: it answers "did the
-            // commit I journalled land", not "what shape did I read".
-            Ok(bytes) => {
-                decode_manifest(&bytes).map(|manifest| Some((manifest, manifest_hash(&bytes))))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(io_err(Operation::Read, e)),
-        }
-    }
-
-    fn read_counter(&self) -> Result<u64, Failure> {
-        match File::open(self.root.join(COUNTER_FILE)) {
-            Ok(mut f) => {
-                let mut buf = [0u8; 8];
-                f.read_exact(&mut buf)
-                    .map_err(|_| Failure::Integrity(Defect::MissingCounter))?;
-                Ok(u64::from_le_bytes(buf))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // A fresh store has no counter — but a store with a manifest
-                // and no counter could reuse sequences: fail closed.
-                if self.root.join(MANIFEST_FILE).exists() {
-                    return Err(Failure::Integrity(Defect::MissingCounter));
-                }
-                Ok(0)
-            }
-            Err(e) => Err(io_err(Operation::Read, e)),
-        }
-    }
-
-    fn reserve_sequence(&self) -> Result<u64, Failure> {
-        let next = self
-            .read_counter()?
-            .checked_add(1)
-            .ok_or(Failure::Integrity(Defect::CounterOverflow))?;
-        let tmp = self.root.join(format!("{COUNTER_FILE}.tmp"));
-        write_sync(&tmp, &next.to_le_bytes())?;
-        atomic_replace(&tmp, &self.root.join(COUNTER_FILE))?;
-        sync_dir(&self.root)?;
-        Ok(next)
-    }
-
-    /// Crash recovery and control/index integrity verification. Payload GC is
-    /// detached and never runs during open.
-    fn recover(&mut self) -> Result<(), Failure> {
-        match self.read_journal()? {
-            None => {}
-            Some(JournalRecord::Committed { .. }) => {
-                // The commit fully landed; only the journal removal was lost.
-                self.remove_journal()?;
-            }
-            Some(JournalRecord::Prepared { .. }) => {
-                // Nothing was renamed yet: the old manifest is authoritative.
-                // Orphan temps/objects are collected below.
-                self.remove_journal()?;
-            }
-            Some(JournalRecord::MaterialReady {
-                new_manifest_hash, ..
-            }) => {
-                let current = self.read_manifest_file()?;
-                match current {
-                    Some((_, hash)) if hash == new_manifest_hash => {
-                        // The manifest swap completed: the new state must
-                        // verify completely, then it is finalized as committed.
-                        // (Verification happens below; a failure is an
-                        // integrity error, not a heuristic repair.)
-                        self.remove_journal()?;
-                    }
-                    _ => {
-                        // The old manifest is still current: expose the old
-                        // state; renamed-but-unreferenced objects are orphans.
-                        self.remove_journal()?;
-                    }
-                }
-            }
-        }
-
-        // Verify the exposed manifest, including the counter: a committed store
-        // whose counter is missing or behind its manifest sequence could reuse
-        // a sequence — fail closed.
-        //
-        // Verification proves both index structures whole — canonical
-        // encoding, counts, prefix placement, shape, and leaf class/length.
-        // Eager control objects are then read and re-hashed. Deferred payload
-        // objects are deliberately not touched: exact Readers verify them on
-        // demand and surface typed missing/corrupt material without turning a
-        // million-record Station open into a full payload scan.
-        if let Some((manifest, _)) = self.read_manifest_file()? {
-            reset_recovery_index_node_reads();
-            let source = RecoveryNodes(ObjectNodes { root: &self.root });
-            index::validate(&source, eager_root(&manifest))
-                .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            index::validate_root(&source, deferred_root(&manifest))
-                .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            for caller_root in &manifest.caller_index_roots {
-                index::validate(&source, Some(child(*caller_root)))
-                    .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            }
-            for caller_root in &manifest.lazy_caller_index_roots {
-                index::validate_root(&source, Some(child(*caller_root)))
-                    .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            }
-            let mut bad: Option<Defect> = None;
-            index::stream(&source, eager_root(&manifest), &mut |entry| {
-                if bad.is_some() {
-                    return;
-                }
-                let Some(len) = decode_requirement(&entry.value, RequirementClass::Eager) else {
-                    bad = Some(Defect::CorruptIndex);
-                    return;
-                };
-                record_recovery_object_read(entry.key);
-                match std::fs::read(self.root.join(OBJECTS_DIR).join(hex(&entry.key))) {
-                    Ok(bytes)
-                        if u64::try_from(bytes.len()).ok() == Some(len)
-                            && object_hash(&bytes) == entry.key => {}
-                    Ok(_) => {
-                        bad = Some(Defect::CorruptObject);
-                    }
-                    Err(_) => bad = Some(Defect::MissingObject),
-                }
-            })
-            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            if let Some(defect) = bad {
-                return Err(Failure::Integrity(defect));
-            }
-            if let Some(meta) = &manifest.caller_meta {
-                self.read_object(meta)?;
-            }
-            let counter = self.read_counter()?;
-            if counter < manifest.sequence {
-                return Err(Failure::Integrity(Defect::MissingCounter));
-            }
-            self.manifest = Some(manifest);
-        }
-
-        // Payload-directory mark/sweep is detached maintenance. Open touches
-        // no deferred payload path and therefore cannot inherit O(payloads)
-        // latency from orphan collection.
-        let _ = std::fs::remove_file(self.root.join(format!("{COUNTER_FILE}.tmp")));
-        let _ = std::fs::remove_file(self.root.join(format!("{MANIFEST_FILE}.tmp")));
-        Ok(())
     }
 
     /// Collect every object no root reaches, without stopping the world.
     ///
     /// Runtime calls this as detached, governor-admitted maintenance.
-    /// Collection is safe because an object is removed only when no caller
-    /// index, eager/deferred requirement, or live Reader lease names it.
+    /// Collection is safe because an object survives whenever a caller index,
+    /// eager/deferred requirement, or live Reader lease names it — and
+    /// because collection is a **compaction**: the live set is copied,
+    /// re-verified, into the next pack generation, and the old generation
+    /// stays readable for every Reader that predates the copy.
     ///
-    /// It costs one directory walk plus one lookup per candidate, so a caller
-    /// runs it on an idle beat rather than inside a commit.
+    /// The cost moved with the format: this rewrites the live bytes rather
+    /// than probing and unlinking, so a caller runs it when garbage has
+    /// accumulated, not on every idle beat.
     pub fn collect_unreachable(&self) -> Result<(), Failure> {
         self.sweep()
     }
 
-    /// Collect every object no root reaches. Streaming by construction: the
-    /// index spine is held (one node per ~256 entries) and each candidate file
-    /// is probed by lookup, so the complete required set is never rendered.
+    /// Compact to the live set. The reachability question is answered above
+    /// the physical layer, exactly as it always was: validated indexes,
+    /// spines, pins, leased deferred roots, caller meta.
     fn sweep(&self) -> Result<(), Failure> {
+        let view = self.view()?;
         let Some(manifest) = self.manifest.clone() else {
-            // No manifest: nothing is required, so everything is an orphan.
+            // No manifest: nothing is required, so only pins keep anything.
             let pinned = self
                 .pins
                 .lock()
                 .map(|pins| pins.clone())
                 .unwrap_or_default();
-            if let Ok(entries) = std::fs::read_dir(self.root.join(OBJECTS_DIR)) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if unhex(&name).is_some_and(|hash| pinned.contains_key(&hash)) {
-                        continue;
-                    }
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+            let mut pack = self.pack()?;
+            pack.compact(&|hash| pinned.contains_key(hash))?;
             return Ok(());
         };
-        let source = ObjectNodes { root: &self.root };
+        let source = PackNodes { view: &view };
         let eager = eager_root(&manifest);
         let deferred = deferred_root(&manifest);
         let leased_deferred: Vec<index::ChildRef> = self
@@ -1310,48 +1148,27 @@ impl Store {
             .lock()
             .map(|pins| pins.clone())
             .unwrap_or_default();
-        let Ok(entries) = std::fs::read_dir(self.root.join(OBJECTS_DIR)) else {
-            return Ok(());
+        // The closure reads through the snapshot taken above, never through
+        // the pack writer it is deciding for; an index failure mid-decision
+        // keeps the object, because a collector may only delete what a
+        // complete authenticated lookup released.
+        let live = |hash: &[u8; 32]| -> bool {
+            if pinned.contains_key(hash)
+                || spine.contains(hash)
+                || manifest.caller_meta.is_some_and(|m| m.hash == *hash)
+            {
+                return true;
+            }
+            let required = index::lookup(&source, eager, hash).unwrap_or(Some(Vec::new()));
+            let lazy_required = index::lookup(&source, deferred, hash).unwrap_or(Some(Vec::new()));
+            let leased_required = leased_deferred.iter().any(|root| {
+                index::lookup(&source, Some(*root), hash)
+                    .unwrap_or(Some(Vec::new()))
+                    .is_some()
+            });
+            required.is_some() || lazy_required.is_some() || leased_required
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".tmp") {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            }
-            let Some(hash) = unhex(&name) else {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            };
-            if pinned.contains_key(&hash) {
-                continue;
-            }
-            if spine.contains(&hash) || manifest.caller_meta.is_some_and(|m| m.hash == hash) {
-                continue;
-            }
-            let required = index::lookup(&source, eager, &hash)
-                .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            let lazy_required = index::lookup(&source, deferred, &hash)
-                .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
-            let leased_required = leased_deferred.iter().try_fold(false, |found, root| {
-                if found {
-                    return Ok(true);
-                }
-                index::lookup(&source, Some(*root), &hash)
-                    .map(|value| value.is_some())
-                    .map_err(|_| Failure::Integrity(Defect::CorruptIndex))
-            })?;
-            if required.is_none() && lazy_required.is_none() && !leased_required {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether the injector requests a crash at a **post-authoritative** point
-    /// (where a crash may only lose cleanup, never the acknowledgment).
-    fn crash_requested(&self, name: &str) -> bool {
-        self.injector.as_ref().is_some_and(|i| i(name))
+        self.pack()?.compact(&live)
     }
 
     /// Commit against a caller's **complete** desired required set, computing
@@ -1388,7 +1205,8 @@ impl Store {
             .collect();
         let mut removed = Vec::new();
         if let Some(manifest) = &self.manifest {
-            let source = ObjectNodes { root: &self.root };
+            let view = self.view()?;
+            let source = PackNodes { view: &view };
             index::stream(&source, eager_root(manifest), &mut |entry| {
                 if !desired.contains(&entry.key) {
                     removed.push(entry.key);
@@ -1430,18 +1248,16 @@ impl Store {
     /// and the index nodes on the paths those changes touch. Nothing
     /// proportional to the store's size is encoded, cloned, or fsynced.
     ///
-    /// **Acknowledgment discipline.** The manifest rename is the authoritative
-    /// switch. Every failure *before* it leaves the old state exposed and
-    /// returns an error; once the rename (and the store-directory sync that
-    /// makes it power-loss durable) has succeeded, the commit **is** committed
-    /// and this method returns `Ok` — journal cleanup failures after that point
-    /// are absorbed, because recovery finalizes a `MaterialReady` journal with
-    /// the new manifest as committed. A failure raised *by the directory sync
-    /// itself* after the rename is the one genuinely ambiguous case and is
-    /// reported as [`Failure::OutcomeUnknown`]: the caller must fail stop
-    /// and reopen — recovery then resolves the outcome deterministically (the
-    /// manifest on disk decides). A durably committed operation is therefore
-    /// never reported as a plain retryable failure.
+    /// **Acknowledgment discipline.** The pack's single flush is the
+    /// authoritative switch. Every failure *before* it leaves the old state
+    /// exposed, returns a retryable error, and discards the partial tail;
+    /// nothing follows the flush that can fail a commit. A failure raised
+    /// *by the flush itself* is the one genuinely ambiguous case and is
+    /// reported as [`Failure::OutcomeUnknown`]: the writer is poisoned and
+    /// answers the same until the caller fail-stops and reopens — recovery
+    /// then resolves the outcome deterministically (the newest seal that
+    /// verifies decides). A durably committed operation is therefore never
+    /// reported as a plain retryable failure.
     pub fn commit(
         &mut self,
         added: &[Vec<u8>],
@@ -1466,9 +1282,14 @@ impl Store {
     ) -> Result<u64, Failure> {
         let caller_index_roots = caller_index.roots;
         let lazy_caller_index_roots = caller_index.lazy_roots;
-        // 1. Reserve the transaction counter (gaps allowed, reuse forbidden).
-        self.point("counter")?;
-        let sequence = self.reserve_sequence()?;
+        // 1. The next sequence is the pack's last sealed one plus one: the
+        //    seal is the reservation, so a failed commit leaves no gap and a
+        //    reuse is structurally impossible.
+        let sequence = self
+            .pack()?
+            .sequence()
+            .checked_add(1)
+            .ok_or(Failure::Integrity(Defect::CounterOverflow))?;
 
         let eager_refs: Vec<Object> = eager_added
             .iter()
@@ -1499,10 +1320,11 @@ impl Store {
             })
             .collect::<Result<_, Failure>>()?;
 
-        // Only nodes already on disk are read: `index::apply` decides whether a
+        // Only sealed nodes are read: `index::apply` decides whether a
         // subtree merges before it descends, so it never needs a node written
-        // by this same commit.
-        let source = ObjectNodes { root: &self.root };
+        // by this same commit — which is exactly what a view can never see.
+        let view = self.view()?;
+        let source = PackNodes { view: &view };
 
         let mut eager_changes: Vec<index::IndexChange> = eager_refs
             .iter()
@@ -1594,19 +1416,6 @@ impl Store {
         let mut seen = std::collections::BTreeSet::new();
         write_set.retain(|bytes| seen.insert(object_hash(bytes)));
 
-        let new_refs: Vec<Object> = write_set
-            .iter()
-            .map(|bytes| {
-                Ok(Object {
-                    hash: object_hash(bytes),
-                    len: u64::try_from(bytes.len()).map_err(|_| Failure::Operation {
-                        operation: Operation::Encode,
-                        kind: IoKind::InvalidData,
-                    })?,
-                })
-            })
-            .collect::<Result<_, Failure>>()?;
-
         let manifest = Manifest {
             format_version: STORE_FORMAT_VERSION,
             sequence,
@@ -1620,73 +1429,20 @@ impl Store {
             operation: Operation::Encode,
             kind: IoKind::InvalidData,
         })?;
-        let new_manifest_hash = manifest_hash(&manifest_bytes);
-        let new_objects: &[Vec<u8>] = &write_set;
 
-        // 2. Journal Prepared.
-        self.point("journal-prepared")?;
-        self.write_journal(&JournalRecord::Prepared {
-            sequence,
-            new_objects: new_refs.clone(),
-            new_manifest_hash,
-        })?;
-
-        // 3. Write all temporary objects.
-        self.point("objects")?;
-        for (obj, bytes) in new_refs.iter().zip(new_objects) {
-            let tmp = self.object_path(&obj.hash).with_extension("tmp");
-            write_sync(&tmp, bytes)?;
-        }
-
-        // 4. Journal MaterialReady, rename objects final, fsync their dir.
-        self.point("journal-material-ready")?;
-        self.write_journal(&JournalRecord::MaterialReady {
-            sequence,
-            new_objects: new_refs.clone(),
-            new_manifest_hash,
-        })?;
-        self.point("rename-objects")?;
-        for obj in &new_refs {
-            let final_path = self.object_path(&obj.hash);
-            if !final_path.exists() {
-                atomic_replace(&final_path.with_extension("tmp"), &final_path)?;
-            }
-        }
-        sync_dir(&self.root.join(OBJECTS_DIR))?;
-
-        // 5. Manifest temp, then rename over current-manifest LAST.
-        self.point("manifest-temp")?;
-        let manifest_tmp = self.root.join(format!("{MANIFEST_FILE}.tmp"));
-        write_sync(&manifest_tmp, &manifest_bytes)?;
-        self.point("manifest-rename")?;
-        atomic_replace(&manifest_tmp, &self.root.join(MANIFEST_FILE))?;
-        if sync_dir(&self.root).is_err() {
-            // The rename happened but its directory-entry durability is
-            // unconfirmed: the one ambiguous outcome. Fail stop; reopening
-            // resolves it (the on-disk manifest decides).
-            return Err(Failure::OutcomeUnknown);
-        }
+        // 2. One pack commit: objects, seal, one flush. The flush is the
+        //    authoritative switch; every failure before it leaves the old
+        //    state exposed and retryable, and a flush failure is
+        //    OutcomeUnknown — the pack poisons its writer, and reopening
+        //    resolves the outcome deterministically from what verifies.
+        let committed = self.pack()?.commit(&write_set, manifest_bytes)?;
+        debug_assert_eq!(
+            committed, sequence,
+            "the manifest's sequence and the seal's must be one number"
+        );
 
         // --- The commit is now authoritative: nothing below may fail it. ---
         self.manifest = Some(manifest);
-
-        // 6. Journal Committed + removal are pure cleanup: recovery finalizes a
-        //    MaterialReady journal with the new manifest as committed, so a
-        //    crash or error here loses nothing and MUST NOT fail the call.
-        if !self.crash_requested("journal-committed") {
-            let wrote = self
-                .write_journal(&JournalRecord::Committed {
-                    sequence,
-                    new_manifest_hash,
-                })
-                .is_ok();
-            if wrote && !self.crash_requested("journal-remove") {
-                let _ = self.remove_journal();
-            }
-        }
-
-        // Collection is detached maintenance. A user commit never inherits an
-        // object-directory walk or payload read after its authoritative switch.
         Ok(sequence)
     }
 }
@@ -1715,21 +1471,8 @@ impl Reader {
 
     /// Read one immutable object by content address.
     pub fn read(&self, hash: &[u8; 32]) -> Result<Vec<u8>, Failure> {
-        let path = self.root.join(OBJECTS_DIR).join(hex(hash));
-        let len = File::open(&path)
-            .and_then(|file| file.metadata())
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Failure::Integrity(Defect::MissingObject)
-                } else {
-                    io_err(Operation::Read, error)
-                }
-            })?
-            .len();
-        read_file_bounded(
-            &path,
+        self.view.read_bounded(
             hash,
-            len,
             u64::try_from(index::MAX_NODE_BYTES).unwrap_or(u64::MAX),
         )
     }
@@ -1737,7 +1480,7 @@ impl Reader {
     /// Read and length-check an immutable object.
     pub fn read_object(&self, object: &Object) -> Result<Vec<u8>, Failure> {
         if let Some(committed_len) = requirement_length(
-            &ObjectNodes { root: &self.root },
+            &PackNodes { view: &self.view },
             self.eager_root,
             self.deferred_root,
             &object.hash,
@@ -1751,23 +1494,18 @@ impl Reader {
 
     /// Read and verify one object without allocating above `max_len`.
     pub fn read_object_bounded(&self, object: &Object, max_len: u64) -> Result<Vec<u8>, Failure> {
-        read_file_bounded(
-            &self.root.join(OBJECTS_DIR).join(hex(&object.hash)),
-            &object.hash,
-            object.len,
-            max_len,
-        )
+        read_view_bounded(&self.view, &object.hash, object.len, max_len)
     }
 
     /// Read a required object, validating authenticated class/length before
-    /// the bounded file allocation.
+    /// the bounded allocation.
     pub fn read_required_object_bounded(
         &self,
         object: &Object,
         max_len: u64,
     ) -> Result<Vec<u8>, Failure> {
         match requirement_length(
-            &ObjectNodes { root: &self.root },
+            &PackNodes { view: &self.view },
             self.eager_root,
             self.deferred_root,
             &object.hash,
@@ -1786,7 +1524,7 @@ impl Reader {
         max_len: u64,
     ) -> Result<Vec<u8>, Failure> {
         match deferred_requirement_length(
-            &ObjectNodes { root: &self.root },
+            &PackNodes { view: &self.view },
             self.deferred_root,
             &object.hash,
         )? {
@@ -1796,4 +1534,192 @@ impl Reader {
         }
         self.read_object_bounded(object, max_len)
     }
+}
+
+/// Decode and verify everything the pack's sealed manifest claims — the
+/// semantic half of recovery, run at every open. Verification proves both
+/// requirement indexes whole, re-reads and re-hashes every eager control
+/// object and the caller meta, and refuses a manifest whose sequence has
+/// outrun the seal that carries it. Deferred payloads are deliberately not
+/// touched: exact Readers verify them on demand, so a million-record Station
+/// open never becomes a full payload scan.
+fn verify_semantics(pack: &pack::PackStore) -> Result<Option<Manifest>, Failure> {
+    let Some(bytes) = pack.manifest() else {
+        return Ok(None);
+    };
+    let manifest = decode_manifest(bytes)?;
+    reset_recovery_index_node_reads();
+    let view = pack.view();
+    let source = RecoveryNodes(PackNodes { view: &view });
+    index::validate(&source, eager_root(&manifest))
+        .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
+    index::validate_root(&source, deferred_root(&manifest))
+        .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
+    for caller_root in &manifest.caller_index_roots {
+        index::validate(&source, Some(child(*caller_root)))
+            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
+    }
+    for caller_root in &manifest.lazy_caller_index_roots {
+        index::validate_root(&source, Some(child(*caller_root)))
+            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
+    }
+    let mut bad: Option<Defect> = None;
+    index::stream(&source, eager_root(&manifest), &mut |entry| {
+        if bad.is_some() {
+            return;
+        }
+        let Some(len) = decode_requirement(&entry.value, RequirementClass::Eager) else {
+            bad = Some(Defect::CorruptIndex);
+            return;
+        };
+        record_recovery_object_read(entry.key);
+        match read_view_bounded(&view, &entry.key, len, len) {
+            Ok(_) => {}
+            Err(Failure::Integrity(defect)) => bad = Some(defect),
+            Err(_) => bad = Some(Defect::MissingObject),
+        }
+    })
+    .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
+    if let Some(defect) = bad {
+        return Err(Failure::Integrity(defect));
+    }
+    if let Some(meta) = &manifest.caller_meta {
+        read_view_bounded(&view, &meta.hash, meta.len, meta.len)?;
+    }
+    if manifest.sequence > pack.sequence() {
+        return Err(Failure::Integrity(Defect::MissingCounter));
+    }
+    Ok(Some(manifest))
+}
+
+/// Carry an old-layout store into the pack: verify the source whole, stream
+/// every object through a re-hashing read into one migration seal, make the
+/// slot's existence durable with the one directory fsync the pack medium
+/// never performs, then retire the source. Every step before the seal leaves
+/// the source authoritative; every step after is resumable cleanup.
+fn migrate_v1(root: &std::path::Path, pack: &mut pack::PackStore) -> Result<(), Failure> {
+    let source = v1::Source::open(root)?;
+    if source.manifest_bytes.is_empty() {
+        // The old layout was opened but never committed: nothing to carry,
+        // and nothing whose sequence anyone could have observed.
+        tracing::info!(?root, "retiring a never-committed prior-layout store");
+        v1::retire(root)?;
+        return Ok(());
+    }
+    let needed = source.total_bytes();
+    if let Some(available) = v1::available_bytes(root) {
+        let margin = (needed / 10).saturating_add(64 * 1024 * 1024);
+        if available < needed.saturating_add(margin) {
+            tracing::warn!(
+                ?root,
+                needed,
+                available,
+                "migration refused: not enough space to copy the store; the \
+                 old layout remains authoritative"
+            );
+            return Err(Failure::Operation {
+                operation: Operation::Write,
+                kind: IoKind::Other,
+            });
+        }
+    }
+    let provenance = pack::Provenance {
+        source_manifest: source.manifest_hash(),
+        source_counter: source.counter,
+    };
+    tracing::info!(
+        ?root,
+        objects = source.objects.len(),
+        counter = source.counter,
+        "migrating the prior-layout store into the pack"
+    );
+    // Rot in an orphan the exposed state never promised — leftovers of some
+    // crashed old commit — is skippable history; rot in anything required
+    // fail-stops, exactly as validation already enforces for the eager set.
+    let mut stream = source
+        .objects
+        .iter()
+        .filter_map(|hash| match source.read_object(hash) {
+            Ok(bytes) => Some(Ok(bytes)),
+            Err(Failure::Integrity(Defect::CorruptObject)) => match source.is_required(hash) {
+                Ok(false) => {
+                    tracing::warn!(object = %hex(hash), "skipping a rotted unrequired object");
+                    None
+                }
+                _ => Some(Err(Failure::Integrity(Defect::CorruptObject))),
+            },
+            Err(failure) => Some(Err(failure)),
+        });
+    pack.migrate_commit(&mut stream, source.manifest_bytes.clone(), provenance)?;
+    // The pack medium never syncs directories; the migration driver must,
+    // or a crash could lose the slot file after the source is retired.
+    v1::sync_dir(root)?;
+    v1::retire(root)
+}
+
+/// Finish a retirement a crash interrupted — but only for a source the
+/// pack's own seal vouches for. A source manifest that no longer matches the
+/// recorded provenance was written to *after* migration; deciding which
+/// history wins is not this code's call.
+fn resume_retirement(root: &std::path::Path, pack: &pack::PackStore) -> Result<(), Failure> {
+    let Some(provenance) = pack.provenance() else {
+        tracing::warn!(
+            ?root,
+            "prior-layout remnants beside a pack with no provenance"
+        );
+        return Err(Failure::Integrity(Defect::Diverged));
+    };
+    // The crash may have landed before migration's own directory sync: the
+    // slot's existence must be durable before the source starts moving, on
+    // this path exactly as on the first attempt.
+    v1::sync_dir(root)?;
+    match std::fs::read(root.join(MANIFEST_FILE)) {
+        Ok(bytes) if !v1::is_tombstone(&bytes) => {
+            if manifest_hash(&bytes) != provenance.source_manifest {
+                tracing::warn!(
+                    ?root,
+                    "the migrated source changed after its pack was sealed"
+                );
+                return Err(Failure::Integrity(Defect::Diverged));
+            }
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(Operation::Read, e)),
+    }
+    v1::retire(root)
+}
+
+/// Flip bytes of one stored object in place — the corruption a rot test
+/// needs, aimed through the pack's own table because objects no longer have
+/// a file of their own to tamper with. Answers whether anything was flipped.
+#[cfg(any(test, feature = "fault-injection"))]
+pub fn corrupt_object_for_test(root: &std::path::Path, hash: &[u8; 32]) -> bool {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let Ok(medium) = medium::DirMedium::open(root) else {
+        return false;
+    };
+    let Ok(pack) = pack::PackStore::open(Arc::new(medium), HOT_PREFIX) else {
+        return false;
+    };
+    let Some((slot, offset, len)) = pack.object_location(hash) else {
+        return false;
+    };
+    drop(pack);
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(slot))
+    else {
+        return false;
+    };
+    let take = usize::try_from(len.min(8)).unwrap_or(8);
+    let mut bytes = vec![0u8; take];
+    if file.seek(SeekFrom::Start(offset)).is_err() || file.read_exact(&mut bytes).is_err() {
+        return false;
+    }
+    for byte in &mut bytes {
+        *byte ^= 0xFF;
+    }
+    file.seek(SeekFrom::Start(offset)).is_ok() && file.write_all(&bytes).is_ok()
 }

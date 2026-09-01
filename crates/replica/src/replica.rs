@@ -9517,6 +9517,13 @@ impl Replica {
         Some(self.durable.as_ref()?.required_objects().ok()?.len())
     }
 
+    /// How many objects the store physically holds — the growth observation
+    /// beside the promise above: after a sweep it is the live population,
+    /// between sweeps it includes what commits superseded.
+    pub fn stored_object_count(&self) -> Option<usize> {
+        self.durable.as_ref()?.stored_objects().ok()
+    }
+
     /// Collect objects no root reaches. A maintenance beat, safe at any quiet
     /// moment — the store sweeps periodically on its own, and this lets a
     /// caller that knows it is idle pre-empt that.

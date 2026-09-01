@@ -2657,6 +2657,9 @@ mod tests {
         let snapshot = rebuilt.read_snapshot();
         assert_eq!(snapshot.read(&key).unwrap(), value);
         assert_eq!(rebuilt.declared_content(&key).len(), 1);
+        // One store, one process: the replay's own open needs the root back.
+        drop(snapshot);
+        drop(rebuilt);
 
         let replay = run().unwrap();
         assert_eq!(replay.evidence(), first.evidence());

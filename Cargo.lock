@@ -3668,9 +3668,12 @@ dependencies = [
  "blake3",
  "data-encoding",
  "getrandom 0.3.4",
+ "imbl",
+ "libc",
  "postcard",
  "serde",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

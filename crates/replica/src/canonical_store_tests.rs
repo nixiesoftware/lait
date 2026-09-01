@@ -360,12 +360,12 @@ fn open(dir: &PathBuf) -> Replica {
     r
 }
 
-fn journal_object_path(dir: &PathBuf, hash: &[u8; 32]) -> PathBuf {
-    let name = hash
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    dir.join("objects").join(name)
+/// Flip stored bytes of one object in place — the tamper/removal analog now
+/// that objects live inside the pack rather than in files of their own. For
+/// the claims here, corrupt and absent are one fate: a read that must not
+/// happen fails loudly either way.
+fn corrupt_journal_object(dir: &PathBuf, hash: &[u8; 32]) -> bool {
+    journal::corrupt_object_for_test(dir, hash)
 }
 
 #[test]
@@ -496,12 +496,9 @@ fn generation_footprint_is_exact_historical_and_dominates_reconstruction() {
         .expect("generation delta object");
     let artifacts = historical.body_image_artifacts_for_test(historical_body);
     drop(historical);
-    std::fs::remove_file(journal_object_path(&dir, &delta.0)).unwrap();
+    assert!(corrupt_journal_object(&dir, &delta.0));
     for artifact in artifacts {
-        let path = journal_object_path(&dir, &artifact);
-        if path.exists() {
-            std::fs::remove_file(path).unwrap();
-        }
+        let _ = corrupt_journal_object(&dir, &artifact);
     }
     assert_eq!(
         reader.generation_footprint(&first_root).unwrap(),
@@ -540,7 +537,7 @@ fn generation_footprint_rejects_an_authenticated_index_tamper() {
     let index_root = reader
         .generation_index_root_for_test()
         .expect("generation index root");
-    std::fs::write(journal_object_path(&dir, &index_root), b"tampered").unwrap();
+    assert!(corrupt_journal_object(&dir, &index_root));
     let failure = reader
         .generation_footprint(&root)
         .expect_err("tampered authenticated index must fail closed");
@@ -646,7 +643,7 @@ fn a_durable_commit_survives_cold_reopen_with_receipts_and_replay() {
     assert_eq!(footprint.material_bytes, receipt.encode().len() as u64);
     assert!(footprint.cache_upper_bound <= 16 * 1024 * 1024);
     assert!(footprint.cold_lookup_transient_upper_bound >= 4 * 1024 * 1024);
-    std::fs::remove_file(journal_object_path(&dir, &receipt_hash)).unwrap();
+    assert!(corrupt_journal_object(&dir, &receipt_hash));
     assert_eq!(
         r.receipt_reader()
             .unwrap()
@@ -706,12 +703,23 @@ fn corrupt_deferred_receipt_does_not_block_open_but_cold_lookup_fails_closed() {
         panic!("fresh request");
     };
     let receipt_hash = journal::object_content_hash(&receipt.encode());
+    // A later commit, so the rotted receipt sits in settled history: the
+    // newest seal's delta is crash-verified whole at open (deferred bytes
+    // included — the physical layer cannot know classes), so laziness is the
+    // guarantee for everything before it.
+    let ActionOutcome::Committed(_) = commit(
+        &mut replica,
+        [25u8; 16],
+        "bump",
+        &counter_ops(&body(3), 1),
+        &[(body(3), collab_binding())],
+    )
+    .unwrap() else {
+        panic!("fresh bump request");
+    };
     drop(replica);
 
-    let path = journal_object_path(&dir, &receipt_hash);
-    let mut corrupt = std::fs::read(&path).unwrap();
-    corrupt[0] ^= 0x80;
-    std::fs::write(&path, corrupt).unwrap();
+    assert!(corrupt_journal_object(&dir, &receipt_hash));
 
     // Receipt payloads are deferred: unrelated state opens normally. The
     // authenticated index/object check fails exactly when this scope is read.
@@ -1863,13 +1871,19 @@ fn cold_atomic_presence_and_resolution_fail_closed() {
         .into_iter()
         .next()
         .expect("protected closure");
-    let object_name = artifact
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    std::fs::write(dir.join("objects").join(object_name), b"tampered").unwrap();
     drop(snapshot);
+    // A later commit, so the rot sits in settled history rather than the
+    // newest seal's crash-verified delta.
+    commit(
+        &mut replica,
+        [84u8; 16],
+        "bump",
+        &counter_ops(&body(9), 1),
+        &[(body(9), collab_binding())],
+    )
+    .unwrap();
     drop(replica);
+    assert!(corrupt_journal_object(&dir, &artifact));
     let replica = open(&dir);
     let snapshot = replica.read_snapshot();
     let BodyImagePresence::Readable { body: body_ix, .. } = snapshot.body_presence(&key) else {

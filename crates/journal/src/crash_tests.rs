@@ -54,14 +54,11 @@ fn crash_child() {
     std::process::exit(0);
 }
 
-/// Representative boundaries: before material lands, at object renames, at the
-/// authoritative manifest switch, and in post-authoritative cleanup.
-const POINTS: [&str; 4] = [
-    "objects",
-    "rename-objects",
-    "manifest-rename",
-    "journal-committed",
-];
+/// Every commit boundary: before the objects land, before the seal, and
+/// before the flush. An abort is not a power loss — the bytes a dead process
+/// appended are still in the file — so a crash at the flush point leaves a
+/// complete, verifiable commit for recovery to elect.
+const POINTS: [&str; 3] = ["pack-objects", "pack-seal", "pack-flush"];
 
 #[test]
 fn a_killed_process_recovers_to_exactly_one_complete_state() {
@@ -94,8 +91,8 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
             .status()
             .unwrap();
         assert!(
-            !status.success() || point == "journal-committed",
-            "{point}: pre-authoritative aborts must kill the child"
+            !status.success(),
+            "{point}: every fault point aborts the child mid-commit"
         );
 
         // Reopen: recovery must expose the complete old or the complete new
@@ -110,13 +107,15 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
                 .expect("every object named by the exposed manifest is intact");
         }
         match point {
-            // Before the manifest rename the old state is authoritative.
-            "objects" | "rename-objects" | "manifest-rename" => {
+            // Before the seal lands the old state is authoritative.
+            "pack-objects" | "pack-seal" => {
                 assert_eq!(meta, b"old-meta", "{point}: old state exposed");
                 assert_eq!(manifest.sequence, old_seq);
             }
-            // After the rename the commit IS committed; only cleanup was lost.
-            "journal-committed" => {
+            // The seal was appended and the process died before asking for
+            // durability. The bytes survive a process death (unlike a power
+            // loss), so recovery verifies and elects the complete new state.
+            "pack-flush" => {
                 assert_eq!(meta, b"new-meta", "{point}: new state exposed");
                 assert!(manifest.sequence > old_seq);
             }

@@ -1,57 +1,57 @@
-//! The physical seam under the pack log: a handful of slots that only ever
-//! append, read at an offset, flush, and truncate.
+//! The physical seam under the pack log: named slots that append, read at an
+//! offset, flush, and truncate — and nothing else.
 //!
-//! This is deliberately smaller than a filesystem. The five verbs here are the
-//! ones every target provides with honest semantics — a native file, an OPFS
+//! This is deliberately smaller than a filesystem. These are the verbs every
+//! target provides with honest semantics — a native file, an OPFS
 //! `FileSystemSyncAccessHandle` in a worker, a buffer in memory. What is
 //! *missing* is the point: no rename, no directory sync, no per-object file
-//! creation. Those are the three operations the measured platforms punish —
-//! rename has no portable atomicity story in a browser, directory sync already
-//! needed a Windows apology arm in this crate, and object-per-file creation is
-//! the exact anti-pattern SQLite's OPFS pool VFS exists to avoid. The pack
-//! log's crash safety comes from ordered appends and checksummed seals
-//! instead, so the seam never has to promise what a platform cannot keep.
+//! creation. Those are the operations the measured platforms punish, so the
+//! pack log's crash safety comes from ordered appends and checksummed seals
+//! instead, and this seam never has to promise what a platform cannot keep.
 //!
-//! A **slot** is one named append-only byte sequence. A store uses O(1) of
-//! them — the live pack generation, and its successor during compaction — so
-//! opening a slot is a cold-path operation. On a target where obtaining a
-//! handle is asynchronous (OPFS), a medium is constructed over a pool of
-//! pre-opened handles and `open_slot` only assigns one.
+//! A slot opens as **two halves**: an exclusive [`SlotWriter`] and a shared
+//! [`ReadAt`]. Readers on other threads read while the writer appends, so
+//! **no operation ever reads a cursor** — every read and write names its
+//! absolute offset, and the writer's tracked length is the sole append
+//! authority. (Unix gets pread/pwrite; Windows `seek_read`/`seek_write` move
+//! the shared cursor, which is harmless exactly because nothing reads it;
+//! OPFS always passes `{at}`.) The layer above keeps reader ranges and
+//! writer-mutated ranges disjoint — see the invariants on
+//! [`crate::PackStore`] — which is why positional non-atomicity never
+//! matters.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// One named append-only byte sequence.
-///
-/// Offsets are stable forever: an append returns the offset the bytes landed
-/// at, and `read_at` answers for any offset below `len`. `truncate` discards
-/// the tail — recovery's one mutation — and never grows.
-pub trait Slot: Send {
-    /// Total bytes currently in the slot.
-    fn len(&self) -> Result<u64, std::io::Error>;
-    /// Whether the slot holds no bytes.
-    fn is_empty(&self) -> Result<bool, std::io::Error> {
-        Ok(self.len()? == 0)
-    }
-    /// Read exactly `buf.len()` bytes starting at `offset`. Reading past the
-    /// end is an error, never a short read.
+/// The shared read half of a slot. Reading past the end is an error, never a
+/// short read. Offsets are stable for the life of the slot's bytes.
+pub trait ReadAt: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), std::io::Error>;
-    /// Append `bytes`, returning the offset they begin at. Durability is
-    /// claimed by [`Slot::flush`], not here.
+}
+
+/// The exclusive write half of a slot.
+///
+/// `len` is tracked, not asked: it is established when the slot opens and
+/// only this writer moves it. `truncate` discards the tail — recovery's one
+/// mutation — and never grows. Durability is claimed by `flush` alone.
+pub trait SlotWriter: Send {
+    fn len(&self) -> u64;
+    /// Append `bytes` at the tracked length, returning the offset they begin
+    /// at.
     fn append(&mut self, bytes: &[u8]) -> Result<u64, std::io::Error>;
-    /// Make everything appended so far durable. The pack log calls this once
-    /// per commit, which is the entire fsync budget of the design.
     fn flush(&mut self) -> Result<(), std::io::Error>;
-    /// Discard every byte at and after `new_len`. Growing is refused.
     fn truncate(&mut self, new_len: u64) -> Result<(), std::io::Error>;
 }
 
-/// A namespace of slots. `open_slot` creates on first open; a slot, once
-/// opened, is exclusively held by its caller.
-pub trait Medium: Send {
-    fn open_slot(&self, name: &str) -> Result<Box<dyn Slot>, std::io::Error>;
+/// A namespace of slots. `open_slot` creates on first open; a slot's write
+/// half, once opened, is exclusively held by its caller.
+pub trait Medium: Send + Sync {
+    fn open_slot(
+        &self,
+        name: &str,
+    ) -> Result<(Box<dyn SlotWriter>, Arc<dyn ReadAt>), std::io::Error>;
     /// Remove a slot's bytes and its name. Absence is success: removal is
     /// cleanup, and cleanup that already happened is not a failure.
     fn remove_slot(&self, name: &str) -> Result<(), std::io::Error>;
@@ -90,28 +90,88 @@ fn checked_name(name: &str) -> Result<&str, std::io::Error> {
     Ok(name)
 }
 
-struct FileSlot {
-    file: std::fs::File,
+struct FileReadAt {
+    file: Arc<File>,
 }
 
-impl Slot for FileSlot {
-    fn len(&self) -> Result<u64, std::io::Error> {
-        Ok(self.file.metadata()?.len())
+impl ReadAt for FileReadAt {
+    #[cfg(unix)]
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), std::io::Error> {
+        std::os::unix::fs::FileExt::read_exact_at(self.file.as_ref(), buf, offset)
     }
 
+    #[cfg(windows)]
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), std::io::Error> {
-        // Positional reads exist on unix (`FileExt::read_exact_at`) but not
-        // portably; a seeking read on a `&File` clone of the descriptor is the
-        // portable spelling. The pack log is single-owner, so the shared
-        // cursor races with nobody.
-        let mut handle = &self.file;
-        handle.seek(SeekFrom::Start(offset))?;
-        handle.read_exact(buf)
+        // `seek_read` moves the shared cursor; that is benign because no
+        // operation on either half ever reads it.
+        let mut at = offset;
+        let mut rest = buf;
+        while !rest.is_empty() {
+            let n = std::os::windows::fs::FileExt::seek_read(self.file.as_ref(), rest, at)?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            at = at
+                .checked_add(u64::try_from(n).unwrap_or(u64::MAX))
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))?;
+            rest = rest.get_mut(n..).unwrap_or(&mut []);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), std::io::Error> {
+        // A target with no positional file API has no filesystem here at all;
+        // the browser medium is OPFS, not this one.
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
+struct FileWriter {
+    file: Arc<File>,
+    len: u64,
+}
+
+impl FileWriter {
+    #[cfg(unix)]
+    fn write_all_at(&self, bytes: &[u8], offset: u64) -> Result<(), std::io::Error> {
+        std::os::unix::fs::FileExt::write_all_at(self.file.as_ref(), bytes, offset)
+    }
+
+    #[cfg(windows)]
+    fn write_all_at(&self, bytes: &[u8], offset: u64) -> Result<(), std::io::Error> {
+        let mut at = offset;
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let n = std::os::windows::fs::FileExt::seek_write(self.file.as_ref(), rest, at)?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+            }
+            at = at
+                .checked_add(u64::try_from(n).unwrap_or(u64::MAX))
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::WriteZero))?;
+            rest = rest.get(n..).unwrap_or(&[]);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn write_all_at(&self, _bytes: &[u8], _offset: u64) -> Result<(), std::io::Error> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
+impl SlotWriter for FileWriter {
+    fn len(&self) -> u64 {
+        self.len
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<u64, std::io::Error> {
-        let offset = self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(bytes)?;
+        let offset = self.len;
+        self.write_all_at(bytes, offset)?;
+        self.len = offset
+            .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| std::io::Error::other("slot beyond addressable length"))?;
         Ok(offset)
     }
 
@@ -120,26 +180,42 @@ impl Slot for FileSlot {
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), std::io::Error> {
-        if new_len > self.file.metadata()?.len() {
+        if new_len > self.len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "truncate never grows a slot",
             ));
         }
-        self.file.set_len(new_len)
+        self.file.set_len(new_len)?;
+        self.len = new_len;
+        Ok(())
     }
 }
 
 impl Medium for DirMedium {
-    fn open_slot(&self, name: &str) -> Result<Box<dyn Slot>, std::io::Error> {
+    fn open_slot(
+        &self,
+        name: &str,
+    ) -> Result<(Box<dyn SlotWriter>, Arc<dyn ReadAt>), std::io::Error> {
         let path = self.root.join(checked_name(name)?);
+        // Never `append(true)`: on Linux, pwrite on an O_APPEND descriptor
+        // ignores its offset (documented), which would break the positional
+        // discipline silently.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(path)?;
-        Ok(Box::new(FileSlot { file }))
+        let len = file.metadata()?.len();
+        let file = Arc::new(file);
+        Ok((
+            Box::new(FileWriter {
+                file: file.clone(),
+                len,
+            }),
+            Arc::new(FileReadAt { file }),
+        ))
     }
 
     fn remove_slot(&self, name: &str) -> Result<(), std::io::Error> {
@@ -182,16 +258,11 @@ fn poisoned() -> std::io::Error {
     std::io::Error::other("medium lock poisoned")
 }
 
-struct MemSlot {
+struct MemReadAt {
     bytes: SlotBytes,
 }
 
-impl Slot for MemSlot {
-    fn len(&self) -> Result<u64, std::io::Error> {
-        let len = self.bytes.lock().map_err(|_| poisoned())?.len();
-        Ok(u64::try_from(len).unwrap_or(u64::MAX))
-    }
-
+impl ReadAt for MemReadAt {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), std::io::Error> {
         let out_of_range = || std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
         let start = usize::try_from(offset).map_err(|_| out_of_range())?;
@@ -200,13 +271,30 @@ impl Slot for MemSlot {
         buf.copy_from_slice(bytes.get(start..end).ok_or_else(out_of_range)?);
         Ok(())
     }
+}
+
+struct MemWriter {
+    bytes: SlotBytes,
+    len: u64,
+}
+
+impl SlotWriter for MemWriter {
+    fn len(&self) -> u64 {
+        self.len
+    }
 
     fn append(&mut self, appended: &[u8]) -> Result<u64, std::io::Error> {
         let mut bytes = self.bytes.lock().map_err(|_| poisoned())?;
-        let offset = u64::try_from(bytes.len())
-            .map_err(|_| std::io::Error::other("slot beyond addressable length"))?;
+        let offset = self.len;
+        // The map may hold more than the tracked length (a test constructed
+        // a torn tail); the append lands at the tracked length regardless.
+        let at = usize::try_from(offset).map_err(|_| poisoned())?;
+        bytes.truncate(at);
         bytes.extend_from_slice(appended);
         drop(bytes);
+        self.len = offset
+            .checked_add(u64::try_from(appended.len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| std::io::Error::other("slot beyond addressable length"))?;
         Ok(offset)
     }
 
@@ -215,28 +303,44 @@ impl Slot for MemSlot {
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), std::io::Error> {
-        let new_len = usize::try_from(new_len)
-            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        let mut bytes = self.bytes.lock().map_err(|_| poisoned())?;
-        if new_len > bytes.len() {
+        if new_len > self.len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "truncate never grows a slot",
             ));
         }
-        bytes.truncate(new_len);
+        let at = usize::try_from(new_len)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let mut bytes = self.bytes.lock().map_err(|_| poisoned())?;
+        bytes.truncate(at);
+        drop(bytes);
+        self.len = new_len;
         Ok(())
     }
 }
 
 impl Medium for MemMedium {
-    fn open_slot(&self, name: &str) -> Result<Box<dyn Slot>, std::io::Error> {
+    fn open_slot(
+        &self,
+        name: &str,
+    ) -> Result<(Box<dyn SlotWriter>, Arc<dyn ReadAt>), std::io::Error> {
         let mut slots = self.slots.lock().map_err(|_| poisoned())?;
         let bytes = slots
             .entry(checked_name(name)?.to_owned())
             .or_default()
             .clone();
-        Ok(Box::new(MemSlot { bytes }))
+        drop(slots);
+        let len = {
+            let held = bytes.lock().map_err(|_| poisoned())?;
+            u64::try_from(held.len()).unwrap_or(u64::MAX)
+        };
+        Ok((
+            Box::new(MemWriter {
+                bytes: bytes.clone(),
+                len,
+            }),
+            Arc::new(MemReadAt { bytes }),
+        ))
     }
 
     fn remove_slot(&self, name: &str) -> Result<(), std::io::Error> {
@@ -270,45 +374,69 @@ mod tests {
     }
 
     #[test]
-    fn every_medium_agrees_on_the_five_verbs() {
+    fn every_medium_agrees_on_the_verbs() {
         for (name, medium) in media() {
-            let mut slot = medium.open_slot("pack-a").unwrap();
-            assert!(slot.is_empty().unwrap(), "{name}: fresh slot is empty");
-            let first = slot.append(b"alpha").unwrap();
-            let second = slot.append(b"beta").unwrap();
+            let (mut writer, read) = medium.open_slot("pack-0").unwrap();
+            assert_eq!(writer.len(), 0, "{name}: fresh slot is empty");
+            let first = writer.append(b"alpha").unwrap();
+            let second = writer.append(b"beta").unwrap();
             assert_eq!((first, second), (0, 5), "{name}: appends report offsets");
-            slot.flush().unwrap();
+            writer.flush().unwrap();
 
             let mut buf = [0u8; 4];
-            slot.read_at(5, &mut buf).unwrap();
+            read.read_at(5, &mut buf).unwrap();
             assert_eq!(&buf, b"beta", "{name}: read_at answers at offset");
             assert!(
-                slot.read_at(6, &mut buf).is_err(),
+                read.read_at(6, &mut buf).is_err(),
                 "{name}: a read past the end is an error, never short"
             );
 
-            slot.truncate(5).unwrap();
-            assert_eq!(slot.len().unwrap(), 5, "{name}: truncate discards the tail");
+            writer.truncate(5).unwrap();
+            assert_eq!(writer.len(), 5, "{name}: truncate discards the tail");
             assert!(
-                slot.truncate(9).is_err(),
+                writer.truncate(9).is_err(),
                 "{name}: truncate never grows a slot"
             );
+            // The read half sees the writer's mutations at once.
+            assert!(read.read_at(5, &mut buf[..1]).is_err(), "{name}");
 
             // Reopening the same name resumes the same bytes.
-            drop(slot);
-            let slot = medium.open_slot("pack-a").unwrap();
-            assert_eq!(slot.len().unwrap(), 5, "{name}: a slot survives reopen");
+            drop(writer);
+            drop(read);
+            let (writer, _) = medium.open_slot("pack-0").unwrap();
+            assert_eq!(writer.len(), 5, "{name}: a slot survives reopen");
+            drop(writer);
 
             assert_eq!(
                 medium.slot_names().unwrap(),
-                vec!["pack-a".to_owned()],
+                vec!["pack-0".to_owned()],
                 "{name}: names list what exists"
             );
-            medium.remove_slot("pack-a").unwrap();
+            medium.remove_slot("pack-0").unwrap();
             medium
-                .remove_slot("pack-a")
+                .remove_slot("pack-0")
                 .expect("removing an absent slot is cleanup, not failure");
             assert!(medium.slot_names().unwrap().is_empty(), "{name}: removed");
+        }
+    }
+
+    #[test]
+    fn readers_and_writer_share_one_slot_without_a_cursor() {
+        for (name, medium) in media() {
+            let (mut writer, read) = medium.open_slot("pack-0").unwrap();
+            writer.append(b"0123456789").unwrap();
+            let read_two = read.clone();
+            let mut a = [0u8; 2];
+            let mut b = [0u8; 2];
+            // Interleaved positional reads and appends: nothing here depends
+            // on a cursor, so every answer is by offset alone.
+            read.read_at(0, &mut a).unwrap();
+            writer.append(b"AB").unwrap();
+            read_two.read_at(8, &mut b).unwrap();
+            writer.append(b"CD").unwrap();
+            read.read_at(10, &mut a).unwrap();
+            assert_eq!((&b, &a), (b"89", b"AB"), "{name}");
+            assert_eq!(writer.len(), 14, "{name}");
         }
     }
 

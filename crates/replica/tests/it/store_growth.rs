@@ -123,8 +123,8 @@ fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
     .expect("commit");
 }
 
-fn object_count(dir: &Path) -> usize {
-    std::fs::read_dir(dir.join("objects")).unwrap().count()
+fn object_count(r: &Replica) -> usize {
+    r.stored_object_count().expect("durable")
 }
 
 #[test]
@@ -178,13 +178,13 @@ fn collecting_returns_the_store_to_live_state() {
         edit(&mut r, n, &body(1));
     }
     r.collect_unreachable_objects().expect("collect");
-    let after_twenty = object_count(&dir);
+    let after_twenty = object_count(&r);
 
     for n in 20..80u16 {
         edit(&mut r, n, &body(1));
     }
     r.collect_unreachable_objects().expect("collect");
-    let after_eighty = object_count(&dir);
+    let after_eighty = object_count(&r);
 
     // The immutable generation delta and its independently addressable causal
     // artifact are retained history; a checkpoint bounds the current
@@ -199,7 +199,7 @@ fn collecting_returns_the_store_to_live_state() {
     drop(r);
     let reopened = Replica::open(&dir, keys()).unwrap();
     assert_eq!(
-        object_count(&dir),
+        object_count(&reopened),
         after_eighty,
         "an in-session collect leaves nothing for the restart to find"
     );

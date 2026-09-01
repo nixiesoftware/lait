@@ -332,27 +332,58 @@ fn corrupt_objects_fail_open_as_integrity() {
     ledger.collect_unreachable_for_test().unwrap();
     drop(ledger);
 
-    // Corrupt every stored object in turn; each corruption must fail open.
-    let objects: Vec<PathBuf> = std::fs::read_dir(dir.join("objects"))
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    assert!(!objects.is_empty());
-    for path in &objects {
-        let original = std::fs::read(path).unwrap();
-        let mut corrupted = original.clone();
-        corrupted[0] ^= 0xFF;
-        std::fs::write(path, &corrupted).unwrap();
+    // Corrupt every object the exposed state names, in turn; each corruption
+    // must fail open. (The eager index nodes are covered transitively: open
+    // validates the whole eager tree, and a required object is reached only
+    // through it.) Locations are captured up front and the flip is XOR, so a
+    // second flip restores the store even while the damage keeps it from
+    // opening.
+    let locations: Vec<(String, u64)> = {
+        let store = journal::Store::open(&dir).unwrap();
+        let mut hashes: Vec<[u8; 32]> = store
+            .required_objects()
+            .unwrap()
+            .iter()
+            .map(|o| o.hash)
+            .collect();
+        if let Some(meta) = store.manifest().and_then(|m| m.caller_meta) {
+            hashes.push(meta.hash);
+        }
+        hashes
+            .iter()
+            .map(|hash| {
+                let (slot, offset, _) = store.object_location(hash).expect("stored");
+                (slot, offset)
+            })
+            .collect()
+    };
+    let flip = |slot: &str, offset: u64| {
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join(slot))
+            .unwrap();
+        let mut bytes = [0u8; 8];
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.read_exact(&mut bytes).unwrap();
+        for byte in &mut bytes {
+            *byte ^= 0xFF;
+        }
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&bytes).unwrap();
+    };
+    assert!(!locations.is_empty());
+    for (slot, offset) in &locations {
+        flip(slot, *offset);
         match Authority::open(&dir) {
             Err(Failure::Journal(journal::Failure::Integrity(_))) | Err(Failure::Corrupt) => {}
             other => panic!(
-                "corrupting {} must fail integrity, got {:?}",
-                path.display(),
+                "corrupting {slot}@{offset} must fail integrity, got {:?}",
                 other.map(|_| "Ok")
             ),
         }
-        std::fs::write(path, &original).unwrap();
+        flip(slot, *offset);
     }
     // Restored: opens clean.
     Authority::open(&dir).unwrap();

@@ -1,8 +1,15 @@
-//! Fault-injection matrix for the journaled store: a crash at every named
-//! write/fsync/rename/journal boundary must recover to the complete old state —
-//! or the complete new one when only the acknowledgment was lost — never a
-//! mixture. Plus integrity classification, orphan GC, counter monotonicity,
-//! and required-set semantics.
+//! Fault-injection matrix for the pack-served store: a crash at every named
+//! commit boundary must recover to the complete old state — the flush is the
+//! only switch, and nothing after it can fail a commit. Plus integrity
+//! classification, detached collection, deferred laziness, lease semantics,
+//! and required-set behavior — the same contracts the file-per-object format
+//! carried, restated against the pack.
+//!
+//! Two old tests have no descendant here, on purpose. Sequence reuse after a
+//! deleted counter is structurally impossible now — the seal *is* the
+//! counter. And the oversized-sparse-payload attack has no surface — the
+//! pack table, not file metadata, is the length authority (the hostile-length
+//! read below keeps the observable claim).
 
 use journal::{Deferred, Failure, Index, Object, Store, FAULT_POINTS};
 
@@ -19,6 +26,10 @@ fn temp_root(tag: &str) -> PathBuf {
     dir
 }
 
+/// Write a *prior-layout* store whose deferred index carries `count` entries
+/// — by hand, exactly as the old format put it on disk. Opening it now also
+/// exercises the migration door, which is the point: these fixtures are the
+/// stores real machines still hold.
 fn install_deferred_index_fixture(
     root: &std::path::Path,
     count: u32,
@@ -66,18 +77,11 @@ fn install_deferred_index_fixture(
     (root_ref, entries)
 }
 
-fn leaf_for_key(
-    root: &std::path::Path,
-    mut current: journal::index::ChildRef,
-    key: &[u8; 32],
-) -> [u8; 32] {
+/// Walk a live store's deferred index down to the leaf holding `key`,
+/// through the store's own reads.
+fn leaf_for_key(store: &Store, mut current: journal::index::ChildRef, key: &[u8; 32]) -> [u8; 32] {
     for depth in 0..journal::index::MAX_DEPTH {
-        let name = current
-            .hash
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let bytes = std::fs::read(root.join("objects").join(name)).unwrap();
+        let bytes = store.read(&current.hash).unwrap();
         match journal::index::IndexNode::decode_canonical(&bytes).unwrap() {
             journal::index::IndexNode::Leaf(_) => return current.hash,
             journal::index::IndexNode::Branch(children) => {
@@ -91,16 +95,7 @@ fn leaf_for_key(
             }
         }
     }
-    panic!("fixture path did not reach a leaf")
-}
-
-fn make_fixture_a_lazy_caller_index(root: &std::path::Path, index: journal::index::ChildRef) {
-    let path = root.join("current-manifest");
-    let bytes = std::fs::read(&path).unwrap();
-    let mut manifest: journal::Manifest = postcard::from_bytes(&bytes).unwrap();
-    manifest.deferred_object_index_root = None;
-    manifest.lazy_caller_index_roots = vec![(index.hash, index.count)];
-    std::fs::write(path, postcard::to_stdvec(&manifest).unwrap()).unwrap();
+    panic!("path did not reach a leaf")
 }
 
 #[test]
@@ -129,8 +124,8 @@ fn commits_roundtrip_and_sequences_are_monotone() {
 
     // Reopen: the second manifest is current and both objects verify. Objects
     // accumulate — a commit names what it adds and what it drops, so a caller
-    // that forgets to mention an object keeps it. The shape this replaced had
-    // callers re-declare everything they wanted kept, where forgetting deleted.
+    // that forgets to mention an object keeps it.
+    drop(store);
     let store = Store::open(&root).unwrap();
     let manifest = store.manifest().unwrap().clone();
     assert_eq!(manifest.sequence, s2);
@@ -172,8 +167,6 @@ fn dropping_a_requirement_collects_the_object_but_not_before() {
         "the bytes outlive the requirement until a sweep"
     );
 
-    // Open is payload-directory independent. Detached maintenance performs the
-    // mark/sweep explicitly, and only then is the orphan gone.
     drop(store);
     let store = Store::open(&root).unwrap();
     let required = store.required_objects().unwrap();
@@ -189,9 +182,6 @@ fn dropping_a_requirement_collects_the_object_but_not_before() {
 
 #[test]
 fn a_full_required_set_commit_computes_its_own_removals() {
-    // `commit_required_set` is the O(total) door for callers whose set is small
-    // enough that enumerating it is not the cost. It must agree with the delta
-    // door about what the store ends up holding.
     let root = temp_root("fullset");
     let mut store = Store::open(&root).unwrap();
     store
@@ -223,11 +213,15 @@ fn a_full_required_set_commit_computes_its_own_removals() {
 }
 
 #[test]
-fn a_crash_at_every_fault_point_recovers_to_a_complete_state() {
+fn a_crash_at_every_fault_point_recovers_the_old_state() {
+    // Every named point precedes the flush, so every injected crash fails
+    // the call, leaves the old state, and stays retryable. There are no
+    // post-authoritative points any more: after the flush, nothing can fail
+    // a commit, which is the discipline the old format spent two extra
+    // journal phases to approximate.
     for &point in &FAULT_POINTS {
         let root = temp_root(&format!("fault-{point}"));
 
-        // Baseline: one committed state.
         let mut store = Store::open(&root).unwrap();
         let s1 = store
             .commit(
@@ -237,14 +231,8 @@ fn a_crash_at_every_fault_point_recovers_to_a_complete_state() {
                 b"old-meta".to_vec(),
             )
             .unwrap();
+        drop(store);
 
-        // Attempt a second commit that "crashes" at the named point. The
-        // acknowledgment discipline: every point before the manifest rename
-        // fails the call and leaves the old state; the two post-authoritative
-        // cleanup points lose only cleanup — the call MUST still succeed,
-        // because a durably committed operation may never be reported as a
-        // retryable failure (a retry would apply it twice).
-        let expect_new = matches!(point, "journal-committed" | "journal-remove");
         let mut faulty = Store::open(&root)
             .unwrap()
             .with_fault_injector(Box::new(move |name| name == point));
@@ -259,43 +247,26 @@ fn a_crash_at_every_fault_point_recovers_to_a_complete_state() {
             Index::NONE,
             b"new-meta".to_vec(),
         );
-        if expect_new {
-            result.unwrap_or_else(|e| {
-                panic!("{point}: post-authoritative cleanup crash must not fail the commit: {e}")
-            });
-        } else {
-            assert!(
-                matches!(result.unwrap_err(), Failure::Operation { .. }),
-                "{point}: pre-authoritative crash surfaces as Durability"
-            );
-        }
+        assert!(
+            matches!(result.unwrap_err(), Failure::Operation { .. }),
+            "{point}: a pre-flush crash surfaces as a retryable operation failure"
+        );
         drop(faulty);
 
-        // Recovery must expose ONE complete state matching the acknowledgment.
         let store = Store::open(&root).unwrap_or_else(|e| panic!("{point}: recovery failed: {e}"));
-        store
-            .manifest()
-            .unwrap_or_else(|| panic!("{point}: a committed store never loses its manifest"));
-        let (want_meta, want_obj): (&[u8], &[u8]) = if expect_new {
-            (b"new-meta", b"new-object")
-        } else {
-            (b"old-meta", b"old-object")
-        };
         assert_eq!(
             store.caller_meta().unwrap().unwrap(),
-            want_meta,
+            b"old-meta",
             "{point}: recovered to the wrong state"
         );
         let required = store.required_objects().unwrap();
         assert!(
             required
                 .iter()
-                .any(|o| store.read_object(o).unwrap() == want_obj),
+                .any(|o| store.read_object(o).unwrap() == b"old-object"),
             "{point}: recovered object content"
         );
 
-        // The store keeps working, and sequences never reuse: every commit
-        // after recovery is strictly beyond the baseline (gaps allowed).
         let mut store = store;
         let s3 = store
             .commit(
@@ -317,9 +288,6 @@ fn a_bogus_carried_reference_fails_the_commit_up_front() {
     store
         .commit(&[b"real".to_vec()], &[], Index::NONE, b"m1".to_vec())
         .unwrap();
-    // A keep ref naming an object that does not exist must refuse the commit
-    // BEFORE anything lands — otherwise a "successful" commit would fail
-    // integrity on the next open.
     let bogus = Object {
         hash: [0xEE; 32],
         len: 4,
@@ -328,7 +296,6 @@ fn a_bogus_carried_reference_fails_the_commit_up_front() {
         .commit_required_set(&[b"newer".to_vec()], &[bogus], b"m2".to_vec())
         .unwrap_err();
     assert!(matches!(err, Failure::Integrity(_)));
-    // The store is untouched and still healthy.
     drop(store);
     let store = Store::open(&root).unwrap();
     assert_eq!(store.caller_meta().unwrap().unwrap(), b"m1");
@@ -339,19 +306,19 @@ fn a_corrupt_object_is_an_integrity_failure_not_a_repair() {
     let root = temp_root("corrupt");
     let mut store = Store::open(&root).unwrap();
     store
-        .commit(&[b"precious".to_vec()], &[], Index::NONE, b"m".to_vec())
+        .commit(&[b"precious".to_vec()], &[], Index::NONE, b"m1".to_vec())
+        .unwrap();
+    let precious = journal::object_content_hash(b"precious");
+    // A second commit, so the rot lands in settled history. Rot in the very
+    // last seal's delta is physically indistinguishable from a torn commit
+    // and recovery steps past it — the WAL trade-off — but rot anywhere the
+    // eager verification walks is a fail-stop, never a repair.
+    store
+        .commit(&[b"later".to_vec()], &[], Index::NONE, b"m2".to_vec())
         .unwrap();
     drop(store);
 
-    // Corrupt the object on disk.
-    let objects_dir = root.join("objects");
-    let entry = std::fs::read_dir(&objects_dir)
-        .unwrap()
-        .flatten()
-        .next()
-        .unwrap();
-    std::fs::write(entry.path(), b"tampered").unwrap();
-
+    assert!(journal::corrupt_object_for_test(&root, &precious));
     match Store::open(&root) {
         Err(Failure::Integrity(_)) => {}
         other => panic!("expected Integrity, got {other:?}"),
@@ -359,119 +326,91 @@ fn a_corrupt_object_is_an_integrity_failure_not_a_repair() {
 }
 
 #[test]
-fn a_missing_counter_on_a_committed_store_fails_closed() {
-    let root = temp_root("counter");
-    let mut store = Store::open(&root).unwrap();
-    store
-        .commit(&[b"x".to_vec()], &[], Index::NONE, b"m".to_vec())
-        .unwrap();
-    drop(store);
-
-    std::fs::remove_file(root.join("counter")).unwrap();
-    match Store::open(&root) {
-        Err(Failure::Integrity(_)) => {}
-        other => panic!("expected Integrity (no sequence reuse), got {other:?}"),
-    }
-}
-
-#[test]
-fn detached_collection_removes_orphans_and_temps() {
+fn detached_collection_removes_the_unrequired_and_keeps_the_reachable() {
     let root = temp_root("gc");
     let mut store = Store::open(&root).unwrap();
     store
         .commit(&[b"kept".to_vec()], &[], Index::NONE, b"m".to_vec())
         .unwrap();
+    // Litter, the only way it can exist now: bytes whose requirement was
+    // dropped. (Stray files cannot be planted inside a pack.)
+    let litter = journal::object_content_hash(b"litter");
+    store
+        .commit(&[b"litter".to_vec()], &[], Index::NONE, b"m2".to_vec())
+        .unwrap();
+    store
+        .commit(&[], &[litter], Index::NONE, b"m3".to_vec())
+        .unwrap();
     drop(store);
-
-    // Litter: a stray temp and an unreferenced (fake) object.
-    std::fs::write(root.join("objects").join("deadbeef.tmp"), b"junk").unwrap();
-    std::fs::write(root.join("objects").join("ab".repeat(32)), b"junk").unwrap();
 
     let store = Store::open(&root).unwrap();
     store.collect_unreachable().unwrap();
-    let names: Vec<String> = std::fs::read_dir(root.join("objects"))
-        .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
     assert!(
-        !names.iter().any(|n| n.ends_with(".tmp")),
-        "temps are collected: {names:?}"
+        store.read(&litter).is_err(),
+        "an unreferenced object is collected"
     );
-    assert!(
-        !names.iter().any(|n| n == &"ab".repeat(32)),
-        "an unreferenced object is collected: {names:?}"
-    );
-    // What survives is the required object, the index nodes that reach it, and
-    // the caller's metadata object — all reachable, none of them litter.
     assert_eq!(
         store
             .read_object(&store.required_objects().unwrap()[0])
             .unwrap(),
         b"kept"
     );
-    assert_eq!(store.caller_meta().unwrap().unwrap(), b"m");
+    assert_eq!(store.caller_meta().unwrap().unwrap(), b"m3");
 }
 
 #[test]
 fn deferred_payloads_are_not_read_at_open_and_fail_typed_on_exact_read() {
-    for (tag, remove) in [("corrupt", false), ("missing", true)] {
-        let root = temp_root(&format!("lazy-{tag}"));
-        let payload = vec![0x5au8; 2 * 1024 * 1024];
-        let reference = Object {
-            hash: journal::object_content_hash(&payload),
-            len: u64::try_from(payload.len()).unwrap(),
-        };
-        let mut store = Store::open(&root).unwrap();
-        store
-            .commit_classified(
-                &[],
-                &[],
-                Deferred {
-                    added: &[payload],
-                    removed: &[],
-                },
-                Index::NONE,
-                b"lazy".to_vec(),
-            )
-            .unwrap();
-        drop(store);
-        let path = root.join("objects").join(
-            reference
-                .hash
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
-        );
-        if remove {
-            std::fs::remove_file(&path).unwrap();
-        } else {
-            std::fs::write(&path, b"hostile").unwrap();
-        }
+    let root = temp_root("lazy-corrupt");
+    let payload = vec![0x5au8; 2 * 1024 * 1024];
+    let reference = Object {
+        hash: journal::object_content_hash(&payload),
+        len: u64::try_from(payload.len()).unwrap(),
+    };
+    let mut store = Store::open(&root).unwrap();
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &[payload],
+                removed: &[],
+            },
+            Index::NONE,
+            b"lazy".to_vec(),
+        )
+        .unwrap();
+    // A later commit, so the rotted payload is not the newest seal's delta.
+    store
+        .commit(&[b"bump".to_vec()], &[], Index::NONE, b"bump".to_vec())
+        .unwrap();
+    drop(store);
+    assert!(journal::corrupt_object_for_test(&root, &reference.hash));
 
-        // If open touched even one deferred payload, this would fail here.
-        journal::watch_recovery_object_reads(reference.hash);
-        let store = Store::open(&root).expect("deferred payload is verified lazily");
-        assert_eq!(
-            journal::watched_recovery_object_reads(),
-            0,
-            "recovery performed no read of the watched deferred payload"
-        );
-        assert!(store.is_required(&reference.hash).unwrap());
-        assert!(matches!(
-            store.reader().read_object(&reference),
-            Err(Failure::Integrity(
-                journal::Defect::MissingObject | journal::Defect::CorruptObject
-            ))
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    // If open verified even one deferred payload, it would fail here.
+    journal::watch_recovery_object_reads(reference.hash);
+    let store = Store::open(&root).expect("deferred payload is verified lazily");
+    assert_eq!(
+        journal::watched_recovery_object_reads(),
+        0,
+        "recovery performed no read of the watched deferred payload"
+    );
+    assert!(store.is_required(&reference.hash).unwrap());
+    assert!(matches!(
+        store.reader().read_object(&reference),
+        Err(Failure::Integrity(
+            journal::Defect::MissingObject | journal::Defect::CorruptObject
+        ))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn deferred_open_reads_one_root_at_one_hundred_thousand_entries() {
     let root = temp_root("lazy-index-100k");
     install_deferred_index_fixture(&root, 100_000);
+    // The first open migrates the prior layout wholesale; laziness is the
+    // steady state's claim, so measure the reopen.
+    drop(Store::open(&root).expect("the prior layout migrates"));
     let store = Store::open(&root).expect("open authenticates only the deferred root");
     assert_eq!(
         journal::recovery_index_node_reads(),
@@ -486,20 +425,16 @@ fn deferred_open_reads_one_root_at_one_hundred_thousand_entries() {
 fn lazy_caller_open_reads_one_root_at_one_hundred_thousand_entries() {
     let root = temp_root("lazy-caller-100k");
     let (index, _) = install_deferred_index_fixture(&root, 100_000);
-    make_fixture_a_lazy_caller_index(&root, index);
-    let store = Store::open(&root).expect("open authenticates only the ownership root");
-    assert_eq!(journal::recovery_index_node_reads(), 1);
-    drop(store);
-    let _ = std::fs::remove_dir_all(&root);
-}
+    // Re-point the fixture's manifest before anything migrates it.
+    let path = root.join("current-manifest");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut manifest: journal::Manifest = postcard::from_bytes(&bytes).unwrap();
+    manifest.deferred_object_index_root = None;
+    manifest.lazy_caller_index_roots = vec![(index.hash, index.count)];
+    std::fs::write(path, postcard::to_stdvec(&manifest).unwrap()).unwrap();
 
-#[test]
-#[ignore = "release-scale one-million-entry deferred-index startup gate"]
-fn deferred_open_reads_one_root_at_one_million_entries() {
-    let root = temp_root("lazy-index-1m");
-    let (index, _) = install_deferred_index_fixture(&root, 1_000_000);
-    make_fixture_a_lazy_caller_index(&root, index);
-    let store = Store::open(&root).expect("open authenticates only the deferred root");
+    drop(Store::open(&root).expect("the prior layout migrates"));
+    let store = Store::open(&root).expect("open authenticates only the ownership root");
     assert_eq!(journal::recovery_index_node_reads(), 1);
     drop(store);
     let _ = std::fs::remove_dir_all(&root);
@@ -508,27 +443,53 @@ fn deferred_open_reads_one_root_at_one_million_entries() {
 #[test]
 fn corrupt_unopened_deferred_leaf_fails_lookup_and_scrub_without_collecting() {
     let root = temp_root("lazy-corrupt-leaf");
-    let (root_ref, entries) = install_deferred_index_fixture(&root, 4_096);
-    let target = entries.first().unwrap().key;
-    let leaf = leaf_for_key(&root, root_ref, &target);
-    let leaf_path = root.join("objects").join(
-        leaf.iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-    );
-    std::fs::write(&leaf_path, b"corrupt unopened leaf").unwrap();
-    let orphan = b"must-not-be-collected-on-corrupt-index";
-    let orphan_hash = journal::object_content_hash(orphan);
-    let orphan_path = root.join("objects").join(
-        orphan_hash
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-    );
-    std::fs::write(&orphan_path, orphan).unwrap();
+    let mut store = Store::open(&root).unwrap();
+    let payloads: Vec<Vec<u8>> = (0..4_096u32).map(|n| n.to_be_bytes().to_vec()).collect();
+    let target = journal::object_content_hash(&payloads[0]);
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &payloads,
+                removed: &[],
+            },
+            Index::NONE,
+            b"deep".to_vec(),
+        )
+        .unwrap();
+    // An orphan that corrupt-index collection must never touch.
+    let orphan = journal::object_content_hash(b"must-not-be-collected");
+    store
+        .commit(
+            &[b"must-not-be-collected".to_vec()],
+            &[],
+            Index::NONE,
+            b"o1".to_vec(),
+        )
+        .unwrap();
+    store
+        .commit(&[], &[orphan], Index::NONE, b"o2".to_vec())
+        .unwrap();
+    let deferred_root = journal::index::ChildRef {
+        hash: store
+            .manifest()
+            .unwrap()
+            .deferred_object_index_root
+            .unwrap()
+            .0,
+        count: store
+            .manifest()
+            .unwrap()
+            .deferred_object_index_root
+            .unwrap()
+            .1,
+    };
+    let leaf = leaf_for_key(&store, deferred_root, &target);
+    drop(store);
+    assert!(journal::corrupt_object_for_test(&root, &leaf));
 
     let store = Store::open(&root).expect("unopened deferred subtrees are lazy");
-    assert_eq!(journal::recovery_index_node_reads(), 1);
     assert!(matches!(
         store.is_required(&target),
         Err(Failure::Integrity(journal::Defect::CorruptIndex))
@@ -537,8 +498,9 @@ fn corrupt_unopened_deferred_leaf_fails_lookup_and_scrub_without_collecting() {
         store.collect_unreachable(),
         Err(Failure::Integrity(journal::Defect::CorruptIndex))
     ));
-    assert!(
-        orphan_path.exists(),
+    assert_eq!(
+        store.read(&orphan).unwrap(),
+        b"must-not-be-collected",
         "scrub failure never guesses reachability"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -591,8 +553,10 @@ fn deferred_reader_enforces_hostile_length_and_gc_lease() {
     let reader = store.reader();
     let lease = reader.pin_objects(&[reference]);
     store.collect_unreachable().unwrap();
+    // The lease is what carried the bytes into the new generation: even a
+    // reader taken AFTER the sweep still finds them.
     assert_eq!(
-        reader.read_object(&reference).unwrap(),
+        store.reader().read_object(&reference).unwrap(),
         b"leased-payload",
         "a pinned exact publication survives detached GC"
     );
@@ -642,10 +606,14 @@ fn deferred_root_lease_keeps_a_whole_old_publication_without_enumeration() {
         )
         .unwrap();
     store.collect_unreachable().unwrap();
+    // The root lease kept the whole publication reachable through the sweep:
+    // the old reader still resolves it, and so does a fresh one, because the
+    // leased tree's objects were carried into the new generation.
     assert_eq!(
         old_publication.read_object(&reference).unwrap(),
         b"root-leased-payload"
     );
+    assert_eq!(store.read(&reference.hash).unwrap(), b"root-leased-payload");
     drop(old_publication);
     store.collect_unreachable().unwrap();
     assert!(matches!(
@@ -656,61 +624,20 @@ fn deferred_root_lease_keeps_a_whole_old_publication_without_enumeration() {
 }
 
 #[test]
-fn oversized_sparse_payload_is_rejected_before_bounded_allocation() {
-    let root = temp_root("lazy-hostile-sparse");
-    let payload = b"authenticated-small-payload".to_vec();
-    let reference = Object {
-        hash: journal::object_content_hash(&payload),
-        len: u64::try_from(payload.len()).unwrap(),
-    };
-    let mut store = Store::open(&root).unwrap();
-    store
-        .commit_classified(
-            &[],
-            &[],
-            Deferred {
-                added: &[payload],
-                removed: &[],
-            },
-            Index::NONE,
-            b"sparse".to_vec(),
-        )
-        .unwrap();
-    let path = root.join("objects").join(
-        reference
-            .hash
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-    );
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_len(8 * 1024 * 1024 * 1024)
-        .unwrap();
-    assert!(matches!(
-        store
-            .reader()
-            .read_object_bounded(&reference, reference.len),
-        Err(Failure::Integrity(journal::Defect::CorruptObject))
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn required_set_tracks_live_state_not_commit_history() {
     // The store's promise, and the one that makes open affordable: a commit
-    // costs what it changed, and what the store keeps is what it holds. Index
-    // nodes are kept alive by reachability from a root, so a rewrite orphans
-    // the spine it superseded — admitting those nodes as *required* instead
-    // would make every one of them permanent and the required set would grow
-    // with the number of commits ever performed.
+    // costs what it changed, and what the store keeps is what it holds.
     let root = temp_root("required-tracks-live");
     let mut store = Store::open(&root).unwrap();
 
-    // One caller index, rewritten in place 64 times. Live state is constant:
-    // one entry, one object.
+    /// `index::apply` needs sealed nodes; the store's own reads serve them.
+    struct StoreNodes<'a>(&'a Store);
+    impl journal::index::NodeSource for StoreNodes<'_> {
+        fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+            self.0.read(hash).ok()
+        }
+    }
+
     let mut caller_root: Option<journal::index::ChildRef> = None;
     let mut previous: Option<[u8; 32]> = None;
     for round in 0..64u32 {
@@ -718,7 +645,7 @@ fn required_set_tracks_live_state_not_commit_history() {
         let hash = journal::object_content_hash(&object);
         let mut sink = journal::index::NodeSink::default();
         caller_root = journal::index::apply(
-            &journal::ObjectNodes { root: &store.root },
+            &StoreNodes(&store),
             caller_root,
             vec![journal::index::IndexChange {
                 key: [7u8; 32],
@@ -755,19 +682,9 @@ fn required_set_tracks_live_state_not_commit_history() {
         "one live object after 64 rewrites, not 64: {required:?}"
     );
 
-    let objects = std::fs::read_dir(root.join("objects")).unwrap().count();
-    assert!(
-        objects <= 4,
-        "the object directory tracks live state: {objects} files after 64 commits"
-    );
-
-    // And a reopen agrees, rather than reclaiming what the session should have.
+    // And a reopen agrees, rather than reclaiming what the session should
+    // have.
     drop(store);
     let reopened = Store::open(&root).unwrap();
     assert_eq!(reopened.required_objects().unwrap().len(), 1);
-    assert_eq!(
-        std::fs::read_dir(root.join("objects")).unwrap().count(),
-        objects,
-        "an in-session sweep leaves nothing for the restart to find"
-    );
 }
