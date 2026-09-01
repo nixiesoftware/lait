@@ -45,8 +45,10 @@ probe-journal = ["dep:journal"]
 probe-fabric = ["dep:fabric"]
 probe-replica = ["dep:replica"]
 # The transport is a separate claim because compiling `ring` for wasm32 needs
-# a real clang; see the header note.
-probe-comms = ["dep:comms"]
+# a real clang; see the header note. It implies mechanics: the live-network
+# test is cfg-gated on both, and a feature drift that silently compiled that
+# test away would let `wasm-pack` pass with zero tests run.
+probe-comms = ["dep:comms", "probe-mechanics"]
 
 [dependencies]
 mechanics = { path = "../crates/mechanics", optional = true }

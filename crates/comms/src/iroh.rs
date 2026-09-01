@@ -163,7 +163,7 @@ impl IrohTransport {
         // one. Bounded so a valid-URL-but-unreachable relay can't hang startup
         // forever (iroh's `online()` never times out on its own).
         if network.uses_relay()
-            && tokio::time::timeout(Duration::from_secs(30), endpoint.online())
+            && n0_future::time::timeout(Duration::from_secs(30), endpoint.online())
                 .await
                 .is_err()
         {

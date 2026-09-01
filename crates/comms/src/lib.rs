@@ -357,7 +357,9 @@ pub trait Transport: Send + Sync {
         &self,
         deadline: std::time::Duration,
     ) -> Result<Vec<std::net::SocketAddr>> {
-        let start = std::time::Instant::now();
+        // n0-future's Instant is web-time-backed: one clock that exists on
+        // every target, where std's panics in a browser.
+        let start = n0_future::time::Instant::now();
         loop {
             let addrs = self.advertised_addrs();
             if !addrs.is_empty() || !self.is_isolated() {
