@@ -89,6 +89,9 @@ struct WebCorrespondenceFacts {
     /// the address book's and asserts nothing — and not an address, which is
     /// the directory's and is short and spoken.
     my_reach: Option<String>,
+    /// The short spoken address a directory issued — the friend code. `None`
+    /// until this identity has published to a directory.
+    my_address: Option<String>,
     /// Which conversation is this identity's own, when the backend has one.
     me: Option<String>,
     contacts: Vec<WebContact>,
@@ -1129,6 +1132,7 @@ impl From<ClientView> for WebClientView {
             }),
             correspondence: correspondence.map(|corr| WebCorrespondenceFacts {
                 my_reach: corr.my_reach.clone(),
+                my_address: corr.my_address.clone(),
                 me: corr.me.clone(),
                 my_device: corr.my_device,
                 contacts: corr
@@ -1651,6 +1655,10 @@ enum WebAction {
     AddCorrespondent {
         announcement: String,
     },
+    /// Take a correspondent in by the friend code a directory issued.
+    AddByAddress {
+        address: String,
+    },
     /// Enter the Space an arriving invitation names. `message` is its deposit
     /// id; the coordinates verify against their own Space, so accepting is the
     /// same act as following an invite link — delivery was never admission.
@@ -1691,7 +1699,6 @@ enum WebAction {
 #[serde(rename_all = "camelCase")]
 enum OwnedWindowSurface {
     Book,
-    Displays,
     Chat,
     Devices,
 }
@@ -1700,7 +1707,6 @@ impl OwnedWindowSurface {
     fn label(&self) -> &'static str {
         match self {
             Self::Book => "address-book",
-            Self::Displays => "displays",
             // Flutter's window key for the chat is `correspondence`.
             Self::Chat => "correspondence",
             Self::Devices => "devices",
@@ -1710,7 +1716,6 @@ impl OwnedWindowSurface {
     fn query(&self) -> &'static str {
         match self {
             Self::Book => "book",
-            Self::Displays => "displays",
             Self::Chat => "chat",
             Self::Devices => "devices",
         }
@@ -1719,9 +1724,8 @@ impl OwnedWindowSurface {
     fn title(&self) -> &'static str {
         match self {
             Self::Book => "Address book — Astrolabe",
-            Self::Displays => "Displays — Astrolabe",
             Self::Chat => "Chat — Astrolabe",
-            Self::Devices => "Your devices — Astrolabe",
+            Self::Devices => "Devices — Astrolabe",
         }
     }
 }
@@ -1913,6 +1917,7 @@ impl From<WebAction> for ActionRequest {
             WebAction::AcceptContact { person } => Self::AcceptContact { person },
             WebAction::ShareReach => Self::ShareReach,
             WebAction::AddCorrespondent { announcement } => Self::AddCorrespondent { announcement },
+            WebAction::AddByAddress { address } => Self::AddByAddress { address },
             WebAction::OpenInvitation { message } => Self::OpenInvitation { message },
             WebAction::SendInvitation { to, link } => Self::SendInvitation { to, link },
             WebAction::OpenConversation { person } => Self::OpenConversation { person },
@@ -2041,16 +2046,7 @@ async fn summon_world_settings(
 
     // The snapshot is base64url and needs no further escaping in a query.
     let query = format!("surface=world-settings&snapshot={snapshot}");
-    let url = if let Some(mut dev_url) = app.config().build.dev_url.clone() {
-        dev_url.set_query(Some(&query));
-        WebviewUrl::External(dev_url)
-    } else {
-        WebviewUrl::CustomProtocol(
-            format!("tauri://localhost/index.html?{query}")
-                .parse()
-                .map_err(|error| format!("invalid settings-window URL: {error}"))?,
-        )
-    };
+    let url = secondary_document_url(&app, &query)?;
 
     // Flutter's settings window opens 560×680 and narrows to 440×520.
     let mut builder = WebviewWindowBuilder::new(&app, &label, url)
@@ -2192,6 +2188,29 @@ fn owned_by_main<'a>(
     }
 }
 
+/// The shell document a secondary Astrolabe window loads.
+///
+/// `build.dev_url` remains present in Tauri's packaged configuration; its
+/// presence does not mean this process is a development build. Consulting it
+/// in release builds sends every secondary window to a Vite port that is not
+/// running and leaves an otherwise healthy native window white. Only debug
+/// builds may use that address. Packaged builds always use the bundled app
+/// protocol, just like the primary window.
+fn secondary_document_url(app: &tauri::AppHandle, query: &str) -> Result<WebviewUrl, String> {
+    #[cfg(debug_assertions)]
+    if let Some(mut dev_url) = app.config().build.dev_url.clone() {
+        dev_url.set_query(Some(query));
+        return Ok(WebviewUrl::External(dev_url));
+    }
+
+    let _ = app;
+    Ok(WebviewUrl::CustomProtocol(
+        format!("tauri://localhost/index.html?{query}")
+            .parse()
+            .map_err(|error| format!("invalid secondary-window URL: {error}"))?,
+    ))
+}
+
 #[tauri::command]
 async fn summon_owned_window(
     app: tauri::AppHandle,
@@ -2211,18 +2230,8 @@ fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result
         return Ok(());
     }
 
-    // `dev_url` keeps child windows on Vite's live document; packaged builds
-    // use the app protocol and retain the same explicit route identity.
-    let url = if let Some(mut dev_url) = app.config().build.dev_url.clone() {
-        dev_url.set_query(Some(&format!("surface={}", surface.query())));
-        WebviewUrl::External(dev_url)
-    } else {
-        WebviewUrl::CustomProtocol(
-            format!("tauri://localhost/index.html?surface={}", surface.query())
-                .parse()
-                .map_err(|error| format!("invalid owned-window URL: {error}"))?,
-        )
-    };
+    let query = format!("surface={}", surface.query());
+    let url = secondary_document_url(app, &query)?;
 
     let builder = owned_by_main(
         app,
@@ -2245,9 +2254,9 @@ fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result
                 .build()
                 .map_err(|error| error.to_string())?;
         }
-        // Displays is a resizable coordination workspace, matching Flutter's
-        // 860×720 opening shape and 700×600 lower bound.
-        OwnedWindowSurface::Displays => {
+        // Devices is a resizable coordination workspace — your machines and
+        // the TVs linked to this computer, behind one rail.
+        OwnedWindowSurface::Devices => {
             builder
                 .inner_size(860.0, 720.0)
                 .min_inner_size(700.0, 600.0)
@@ -2259,16 +2268,6 @@ fn summon_surface(app: &tauri::AppHandle, surface: OwnedWindowSurface) -> Result
         OwnedWindowSurface::Chat => {
             builder
                 .inner_size(760.0, 660.0)
-                .min_inner_size(520.0, 480.0)
-                .maximizable(true)
-                .build()
-                .map_err(|error| error.to_string())?;
-        }
-        // A list and one form: the same reading width as the chat, and a
-        // floor that still fits a code and six words on one line.
-        OwnedWindowSurface::Devices => {
-            builder
-                .inner_size(720.0, 640.0)
                 .min_inner_size(520.0, 480.0)
                 .maximizable(true)
                 .build()
@@ -2384,7 +2383,7 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         .item(&theme)
         .build()?;
 
-    let displays = MenuItemBuilder::with_id("displays", "Displays")
+    let devices = MenuItemBuilder::with_id("devices", "Devices")
         .accelerator("Cmd+Shift+D")
         .build(app)?;
     let book = MenuItemBuilder::with_id("book", "Address book")
@@ -2393,14 +2392,10 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let chat = MenuItemBuilder::with_id("chat", "Chat")
         .accelerator("Cmd+Shift+M")
         .build(app)?;
-    let devices = MenuItemBuilder::with_id("devices", "Your devices")
-        .accelerator("Cmd+Shift+Y")
-        .build(app)?;
     let window = SubmenuBuilder::new(app, "Window")
-        .item(&displays)
+        .item(&devices)
         .item(&book)
         .item(&chat)
-        .item(&devices)
         .separator()
         .minimize()
         .fullscreen()
@@ -2418,9 +2413,6 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // window's page: forwarded as an event rather than re-implemented.
         "refresh" | "theme" => {
             let _ = app.emit(MENU_EVENT, event.id.as_ref().to_string());
-        }
-        "displays" => {
-            let _ = summon_surface(app, OwnedWindowSurface::Displays);
         }
         "book" => {
             let _ = summon_surface(app, OwnedWindowSurface::Book);

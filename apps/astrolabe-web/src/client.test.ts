@@ -91,7 +91,7 @@ describe("client transport", () => {
 
   it("only routes Flutter-owned top-level surfaces into secondary windows", () => {
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=book") as unknown as Location)).toBe("book");
-    expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=displays") as unknown as Location)).toBe("displays");
+    expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=displays") as unknown as Location)).toBe("devices");
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=devices") as unknown as Location)).toBe("devices");
     expect(currentOwnedWindowSurface(new URL("https://astrolabe.test/?surface=record") as unknown as Location)).toBeNull();
   });

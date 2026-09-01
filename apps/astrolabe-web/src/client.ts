@@ -167,6 +167,12 @@ export interface CorrespondenceFacts {
    * address (that is the directory's, and is short and spoken).
    */
   myReach: string | null;
+  /**
+   * The short spoken address a directory issued — the friend code a person
+   * says out loud (`tin-harbor-quiet-4417`). `null` until this identity has
+   * published to a directory.
+   */
+  myAddress: string | null;
   /** Which conversation is this identity's own, when the backend has one. */
   me: string | null;
   contacts: Contact[];
@@ -492,6 +498,7 @@ export type ClientAction =
   | { type: "deviceRetire"; device: string }
   | { type: "replicaExclude"; device: string; space: string; excluded: boolean }
   | { type: "shareReach" } | { type: "addCorrespondent"; announcement: string }
+  | { type: "addByAddress"; address: string }
   | { type: "openInvitation"; message: string }
   | { type: "sendInvitation"; to: string; link: string }
   | { type: "blockSender"; person: string } | { type: "acceptContact"; person: string }
@@ -557,6 +564,7 @@ export const actionKey = {
   // control stays live through its own action and can be pressed twice.
   shareReach: "reach.share",
   addCorrespondent: "reach.add",
+  addByAddress: "reach.resolve",
   openInvitation: (message: string) => `invitation.open:${message}`,
   sendInvitation: (to: string) => `invitation.send:${to}`,
   blockSender: (person: string) => `correspondence.block:${person}`,
@@ -616,6 +624,7 @@ export function keyFor(action: ClientAction): string {
     case "sendMessage": return actionKey.sendMessage(action.to);
     case "shareReach": return actionKey.shareReach;
     case "addCorrespondent": return actionKey.addCorrespondent;
+    case "addByAddress": return actionKey.addByAddress;
     case "openInvitation": return actionKey.openInvitation(action.message);
     case "sendInvitation": return actionKey.sendInvitation(action.to);
     case "collectMail": return actionKey.collectMail;
@@ -657,11 +666,14 @@ export interface ClientTransport extends AstrolabeClientBridge {
 }
 
 /** The client-owned top-level surfaces. They are singleton OS windows. */
-export type OwnedWindowSurface = "book" | "displays" | "chat" | "devices";
+export type OwnedWindowSurface = "book" | "chat" | "devices";
 
 export function currentOwnedWindowSurface(location = window.location): OwnedWindowSurface | null {
   const surface = new URLSearchParams(location.search).get("surface");
-  return surface === "book" || surface === "displays" || surface === "chat" || surface === "devices" ? surface : null;
+  // `displays` was its own window before it became the Devices window's
+  // Linked TVs section; the old spelling still lands in the right place.
+  if (surface === "displays") return "devices";
+  return surface === "book" || surface === "chat" || surface === "devices" ? surface : null;
 }
 
 /**
@@ -746,7 +758,6 @@ export async function summonOwnedWindow(surface: OwnedWindowSurface): Promise<vo
     url.searchParams.set("surface", surface);
     const shape = surface === "book" ? "width=370,height=760"
       : surface === "chat" ? "width=760,height=660"
-      : surface === "devices" ? "width=720,height=640"
       : "width=860,height=720";
     window.open(url, `astrolabe-${surface}`, shape);
   }
@@ -1251,6 +1262,7 @@ export const fixtureClientView: ClientView = {
   correspondence: {
     myDevice: "dev_this",
     myReach: null,
+    myAddress: "tin-harbor-quiet-4417",
     me: null,
     contacts: [
       { id: "peer_ada", name: "Ada", devices: ["dev_ada"], added: true, isAgent: false, parentId: null, parentName: null, unread: 1 },

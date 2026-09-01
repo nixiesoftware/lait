@@ -8,7 +8,7 @@
  * and every message are `ClientView.correspondence` — the same view the
  * address book reads. The one draft it owns is the line being typed.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   actionKey,
@@ -136,6 +136,15 @@ function ChatBody({ view, facts, active, dispatch }: {
   const invites = useRef(new Map<string, string>());
   const [carrying, setCarrying] = useState<string | null>(null);
   const [showReach, setShowReach] = useState(false);
+  // Reading is what clears a badge: while a conversation is focused in this
+  // window, arrivals are marked read as they land, so the book never badges
+  // the thread a person is literally looking at.
+  const activeUnread = facts?.contacts.find((contact) => contact.id === active)?.unread ?? 0;
+  useEffect(() => {
+    if (active !== null && activeUnread > 0) {
+      void dispatch({ type: "focusConversation", person: active });
+    }
+  }, [active, activeUnread, dispatch]);
 
   if (facts === null || active === null) {
     // Nothing open is the moment reach is worth offering: a person with no
@@ -350,53 +359,86 @@ function InvitationComposer({ to, link, sending, onChange, onSend, onCancel }: {
 }
 
 /**
- * Swap once, over any channel already shared. Yours names your devices; theirs
- * names theirs.
+ * A friend code is the short spoken address the directory issued —
+ * `tin-harbor-quiet-4417`. An announcement is the long base32 card a person
+ * hands over when no directory is in play. The shape of what was typed
+ * decides which act adding is, so one field serves both.
+ */
+export function looksLikeFriendCode(pasted: string): boolean {
+  return /^[a-z]+(-[a-z]+)*-\d+$/i.test(pasted);
+}
+
+/**
+ * The friend-code panel: your code to say out loud, and a field for theirs.
  *
- * Sharing acts on nobody — showing a friend code is not befriending anyone — so
- * it is `myReach` being absent that makes this a control rather than a render.
- * Adding is the half that creates a relationship, which is why it is named for
- * the person and not for the artifact.
+ * Sharing acts on nobody — showing a friend code is not befriending anyone.
+ * Publishing is what mints the code at the directory, which is why an absent
+ * code is a control rather than a render. The long-form announcement stays
+ * available behind a disclosure for the two machines with no directory
+ * between them.
  */
 export function ReachPanel({ view, dispatch }: {
   view: ClientView;
   dispatch: Dispatch;
 }) {
   const [draft, setDraft] = useState("");
-  const card = view.correspondence?.myReach ?? null;
+  const [copied, setCopied] = useState(false);
+  const [longForm, setLongForm] = useState(false);
+  const facts = view.correspondence;
+  const code = facts?.myAddress ?? null;
+  const card = facts?.myReach ?? null;
   const sharing = view.inFlight.includes(actionKey.shareReach);
-  const adding = view.inFlight.includes(actionKey.addCorrespondent);
+  const adding = view.inFlight.includes(actionKey.addCorrespondent)
+    || view.inFlight.includes(actionKey.addByAddress);
+  // Published, but no directory answered with a code: the long form is the
+  // only artifact there is, so it is shown rather than offered.
+  const showLong = longForm || (card !== null && code === null);
 
   const add = () => {
     const pasted = draft.trim();
     if (pasted === "") return;
-    dispatch({ type: "addCorrespondent", announcement: pasted });
+    void dispatch(looksLikeFriendCode(pasted)
+      ? { type: "addByAddress", address: pasted.toLowerCase() }
+      : { type: "addCorrespondent", announcement: pasted });
     setDraft("");
   };
 
   return <section className="reach-panel">
-    <h3>Reach someone new</h3>
-    <p>
-      Swap these once, over any channel you already share. Yours names your
-      devices; theirs names theirs.
-    </p>
-    {card === null
-      ? <button
-          className="quiet-button"
-          disabled={sharing}
-          onClick={() => dispatch({ type: "shareReach" })}
-        >{sharing ? "Publishing…" : "Show how to reach me"}</button>
-      : <textarea className="reach-card" readOnly rows={4} value={card} />}
-    <textarea
-      className="reach-paste"
-      rows={3}
-      placeholder="Paste theirs"
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-    />
-    <button className="primary-button" disabled={adding} onClick={add}>
-      {adding ? "Adding…" : "Add them"}
+    <h3>Add a friend</h3>
+    <div className="friend-code-band">
+      <span className="friend-code-label">Your code</span>
+      {code !== null
+        ? <>
+          <code className="friend-code">{code}</code>
+          <button className="quiet-button" onClick={() => {
+            void navigator.clipboard.writeText(code);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1600);
+          }}>{copied ? "Copied" : "Copy"}</button>
+        </>
+        : <button className="primary-button" disabled={sharing}
+            onClick={() => void dispatch({ type: "shareReach" })}>
+            {sharing ? "Getting your code…" : "Get your code"}</button>}
+    </div>
+    <p>Say it, text it, write it down. A friend enters it below and you can talk.</p>
+    <div className="friend-add-row">
+      <input className="friend-code-input" placeholder="Their code — like tin-harbor-quiet-4417"
+        value={draft} aria-label="Their friend code"
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => { if (event.key === "Enter") add(); }} />
+      <button className="primary-button" disabled={adding || draft.trim() === ""} onClick={add}>
+        {adding ? "Adding…" : "Add them"}
+      </button>
+    </div>
+    <button className="text-button reach-long-toggle" onClick={() => setLongForm(!longForm)}>
+      {showLong ? "Hide the long form" : "No directory between you? Use the long form"}
     </button>
+    {showLong && <>
+      {card !== null
+        ? <textarea className="reach-card" readOnly rows={4} value={card} />
+        : <p>Publish first — your long-form card names your devices.</p>}
+      <p>Theirs pastes into the same field above; a long card is recognized and added the same way.</p>
+    </>}
   </section>;
 }
 

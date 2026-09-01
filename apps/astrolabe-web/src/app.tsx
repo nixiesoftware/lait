@@ -19,6 +19,7 @@ import {
   updateInProgress,
   watchMenu,
   worldArtwork,
+  type Card,
   type ClientAction,
   type ClientTransport,
   type ClientView,
@@ -31,12 +32,12 @@ import {
 } from "./client";
 import { BookSurface } from "./book";
 import { ChatSurface } from "./chat";
-import { DevicesSurface } from "./devices";
-import { DisplaysSurface } from "./displays";
-import { AstrolabeTheme } from "./fluent";
+import { HubSurface } from "./profile";
+import { MachinesSurface } from "./machines";
 import { BigPictureSurface } from "./present";
 import { WorldSettingsSurface } from "./settings";
 import { FacePlate, PersonTile, presenceLabel } from "./kit";
+import { IconAttention, IconBook, IconDevices, IconHead, IconIdentity, IconRestart, IconRollForward, IconSpace } from "./icons";
 import { activityLine, glanceTiers, identityStatus } from "./record";
 import { resolvePlatform, type PlatformProfile } from "./platform";
 
@@ -54,9 +55,9 @@ export function App() {
   // the one model, never a second model. See `settings.tsx`.
   const settingsSnapshot = useMemo(() => currentWorldSettingsSnapshot(), []);
   if (settingsSnapshot !== null) {
-    return <AstrolabeTheme dark={settingsSnapshot.dark}><WorldSettingsWindow snapshot={settingsSnapshot} /></AstrolabeTheme>;
+    return <WorldSettingsWindow snapshot={settingsSnapshot} />;
   }
-  return <AstrolabeTheme dark={dark}><ClientApp platform={platform} dark={dark} setDark={setDark} /></AstrolabeTheme>;
+  return <ClientApp platform={platform} dark={dark} setDark={setDark} />;
 }
 
 /**
@@ -79,6 +80,9 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
   const transport = useMemo(() => createClientTransport(), []);
   const { view, dispatch } = useClient(transport);
   const [selected, setSelected] = useState<string | null>(null);
+  // The Hub replaces the Library in this window — managing yourself is a
+  // first-class view, not a popup over the catalog.
+  const [hub, setHub] = useState(false);
   const ownedSurface = currentOwnedWindowSurface();
   const refreshing = view.inFlight.includes(actionKey.refresh);
 
@@ -93,9 +97,8 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
         const target = event.key.toLowerCase() === "b" ? "book"
-          : event.key.toLowerCase() === "d" ? "displays"
+          : event.key.toLowerCase() === "d" ? "devices"
           : event.key.toLowerCase() === "m" ? "chat"
-          : event.key.toLowerCase() === "y" ? "devices"
           : null;
         if (target !== null) { event.preventDefault(); void summonOwnedWindow(target); }
       }
@@ -128,14 +131,18 @@ function ClientApp({ platform, dark, setDark }: { platform: PlatformProfile; dar
     </main>;
   }
 
+  const mine = view.book?.cards.find((card) => card.selfClaim) ?? null;
   return <main className="page" data-theme={dark ? "dark" : "light"}>
     <section className="astrolabe-window" aria-label="Astrolabe">
       <Caption platform={platform} dark={dark} setDark={setDark} onSummonWindow={summonOwnedWindow}
         version={view.host?.version ?? null} loading={view.loading}
         onPresent={() => void dispatch({ type: "enterPresentation" })}
-        refreshing={refreshing} onRefresh={() => void dispatch({ type: "refresh" })} />
+        refreshing={refreshing} onRefresh={() => void dispatch({ type: "refresh" })}
+        identity={mine} hub={hub} onHub={() => setHub(!hub)} />
       <div className="client-body">
-        <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} dark={dark} />
+        {hub
+          ? <HubSurface view={view} dispatch={dispatch} onBack={() => setHub(false)} />
+          : <Library view={view} showing={showing} onSelect={setSelected} dispatch={dispatch} dark={dark} />}
         <OperationalBar view={view} onSummonWindow={summonOwnedWindow} dispatch={dispatch} />
       </div>
     </section>
@@ -204,9 +211,8 @@ function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedW
   const close = () => { void closeOwnedWindow(); };
   return <main className="page owned-window" data-theme={dark ? "dark" : "light"}>
     {surface === "book" && <BookSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
-    {surface === "displays" && <DisplaysSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
     {surface === "chat" && <ChatSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
-    {surface === "devices" && <DevicesSurface view={view} dispatch={dispatch} onBack={close} ownedWindow />}
+    {surface === "devices" && <MachinesSurface view={view} dispatch={dispatch} />}
   </main>;
 }
 
@@ -216,10 +222,11 @@ function OwnedSurfaceWindow({ surface, view, dispatch, dark }: { surface: OwnedW
  * the application menu where the system does not carry one, and the rest of
  * it is a drag surface.
  */
-function Caption({ platform, dark, setDark, refreshing, version, loading, onRefresh, onPresent, onSummonWindow }: {
+function Caption({ platform, dark, setDark, refreshing, version, loading, onRefresh, onPresent, onSummonWindow, identity, hub, onHub }: {
   platform: PlatformProfile; dark: boolean; setDark(next: boolean): void; refreshing: boolean;
   version: string | null; loading: boolean; onRefresh(): void; onPresent(): void;
   onSummonWindow(surface: OwnedWindowSurface): void;
+  identity: Card | null; hub: boolean; onHub(): void;
 }) {
   const systemMenu = platform === "macos";
   return <header className="caption" data-tauri-drag-region style={{ height: utilityBarHeight }}>
@@ -228,13 +235,16 @@ function Caption({ platform, dark, setDark, refreshing, version, loading, onRefr
       <Popover className="settings-popover"><Menu className="settings-menu" aria-label="Astrolabe settings">
         <header className="settings-header"><strong>ASTROLABE</strong>{version !== null && <code>v{version}</code>}</header><Separator />
         <span className="settings-section">CLIENT SETTINGS</span>
-        <MenuItem id="displays" onAction={() => void onSummonWindow("displays")}>Displays <kbd>⌘⇧D</kbd></MenuItem>
-        <MenuItem id="devices" onAction={() => void onSummonWindow("devices")}>Your devices <kbd>⌘⇧Y</kbd></MenuItem>
+        <MenuItem id="devices" onAction={() => void onSummonWindow("devices")}>Devices <kbd>⌘⇧D</kbd></MenuItem>
         <MenuItem id="refresh" isDisabled={refreshing} onAction={onRefresh}>Refresh local state <kbd>F5</kbd></MenuItem>
         <MenuItem id="theme" onAction={() => setDark(!dark)}>{dark ? "Use light theme" : "Use dark theme"}</MenuItem>
       </Menu></Popover>
     </MenuTrigger>}
     <div className="caption-drag" />
+    <button className="caption-identity" aria-label="Your hub" aria-pressed={hub} onClick={onHub}>
+      <FacePlate picture={identity?.picture ?? null} name={identity?.name ?? ""} size={18} />
+      <span>{identity?.name ?? "You"}</span>
+    </button>
     <PresentHere loading={loading} onPresent={onPresent} />
   </header>;
 }
@@ -554,24 +564,22 @@ function OperationalBar({ view, onSummonWindow, dispatch }: { view: ClientView; 
   const rolling = view.inFlight.includes(actionKey.reload);
   return <footer className="operational-bar" aria-live={view.inFlight.length > 0 || view.failures.length > 0 ? "polite" : "off"}>
     <span className={`identity-status tone-${status.tone}`}>
-      {view.loading ? <span className="spinner tiny" /> : <span className="status-icon">⌁</span>}{status.label}
+      {view.loading ? <span className="spinner tiny" /> : <span className="status-icon"><IconIdentity size={14} /></span>}{status.label}
     </span><span className="bar-divider" />
     <span className="activity">{activity}</span>
     <UpdateAffordance update={view.update} />
     {rolling ? <span className="roll-forward rolling"><span className="spinner tiny" /> Rolling forward…</span>
       : view.image?.sourceChanged === true && <span className="tip" title="A newer build is on disk — restart everything onto it">
         <Button className="roll-forward" aria-label="Roll forward onto the new build"
-          onPress={() => void dispatch({ type: "reload" })}>⟳ Roll forward</Button></span>}
-    <span>{view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
-    <span className="bar-spaces">{spaces} {spaces === 1 ? "Space" : "Spaces"}</span>
+          onPress={() => void dispatch({ type: "reload" })}><IconRollForward size={14} /> Roll forward</Button></span>}
+    <span className="bar-count"><IconHead size={14} /> {view.heads.length} {view.heads.length === 1 ? "head" : "heads"}</span>
+    <span className="bar-count bar-spaces"><IconSpace size={14} /> {spaces} {spaces === 1 ? "Space" : "Spaces"}</span>
     {view.host !== null && <code className="bar-version">v{view.host.version}</code>}
     <span className="bar-divider" />
-    <span className="tip" title="Coordinate displays">
-      <Button className="bar-icon" aria-label="Displays" onPress={() => void onSummonWindow("displays")}>⌁</Button></span>
     <span className="tip" title="Open the address book">
-      <Button className="bar-icon" aria-label="Address book" onPress={() => void onSummonWindow("book")}>◉</Button></span>
-    <span className="tip" title="The devices that are you">
-      <Button className="bar-icon" aria-label="Your devices" onPress={() => void onSummonWindow("devices")}>▭</Button></span>
+      <Button className="bar-icon" aria-label="Address book" onPress={() => void onSummonWindow("book")}><IconBook size={16} /></Button></span>
+    <span className="tip" title="Your devices, and the TVs linked to this computer">
+      <Button className="bar-icon" aria-label="Devices" onPress={() => void onSummonWindow("devices")}><IconDevices size={16} /></Button></span>
   </footer>;
 }
 
@@ -591,7 +599,7 @@ function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
   if (update === null) return null;
   if (update.kind === "attention") {
     return <span className="tip" title={update.why}>
-      <span className="update-attention" role="status">⚠ Update needs attention</span></span>;
+      <span className="update-attention" role="status"><IconAttention size={14} /> Update needs attention</span></span>;
   }
   if (update.kind === "waiting") {
     return <span className="tip" title={`${update.version} is ready; waiting for ${update.holding.join(", ")}`}>
@@ -601,7 +609,7 @@ function UpdateAffordance({ update }: { update: UpdateIntent | null }) {
   }
   return <span className="tip" title={`${update.version} is staged and applies when this client restarts`}>
     <Button className={`update-restart urgency-${update.urgency}`} aria-label={`Restart to update to ${update.version}`}
-      onPress={() => void restartForUpdate(update.version)}>↻ Restart to update</Button></span>;
+      onPress={() => void restartForUpdate(update.version)}><IconRestart size={14} /> Restart to update</Button></span>;
 }
 
 /// A head with `world: null` predates the pin and deliberately matches no row.

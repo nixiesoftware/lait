@@ -1,32 +1,25 @@
 /**
- * The canonical presentation pieces every Astrolabe surface shares — the face
- * on a card, the person row, badges, fact rows, and the app dialog. These are
- * the web spellings of the Flutter client's `face.dart` / `person.dart`
- * anatomy: a tile draws facts and nothing else; a surface composes gestures
- * and controls around it.
- *
- * Drawn with Fluent. A surface that needs a button, a field or a card takes
- * it from `@fluentui/react-components` directly; what lives here is the
- * handful of compositions Astrolabe repeats.
+ * The canonical presentation pieces every Astrolabe surface shares — buttons,
+ * fields, cards, chips, the person row, fact rows, the disclosure, and the
+ * app dialog. One vocabulary, drawn once: react-aria carries the behavior
+ * (focus, keyboard, dismissal) and `styles.css` carries the whole look, so
+ * no surface styles a control of its own or imports a component library.
  */
 import {
-  Badge as FluentBadge,
-  Caption1,
-  Caption1Strong,
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogSurface,
-  DialogTitle,
-  MessageBar,
-  MessageBarBody,
-  Text,
-  makeStyles,
-  tokens,
-} from "@fluentui/react-components";
+  Button as AriaButton,
+  Dialog as AriaDialog,
+  Heading,
+  Menu,
+  MenuItem,
+  MenuTrigger,
+  Modal,
+  ModalOverlay,
+  Popover,
+} from "react-aria-components";
 import type { ReactNode } from "react";
 
-import type { Card } from "./client";
+import type { Card as BookCard } from "./client";
+import { IconMore, IconUser } from "./icons";
 
 export type Presence = "online" | "away" | "offline" | null;
 
@@ -54,7 +47,7 @@ const agentGroup = "Agents";
  * `agent:` spellings. Worn as the AI mark on a row — never as a section: what
  * an identity is and whether it is here are different axes.
  */
-export function isAgentCard(card: Pick<Card, "groups" | "agents" | "addresses" | "devices">): boolean {
+export function isAgentCard(card: Pick<BookCard, "groups" | "agents" | "addresses" | "devices">): boolean {
   return card.groups.includes(agentGroup)
     || (card.agents.length > 0 && card.addresses.length === 0 && card.devices.length === 0);
 }
@@ -69,10 +62,14 @@ export function pictureUri(stored: string | null): string | null {
  * The stored picture when one was authored, else the default — a monogram,
  * or the person mark when there is nothing to monogram.
  */
-export function FacePlate({ picture, name, size }: { picture: string | null; name: string; size: number }) {
+export function FacePlate({ picture, name, size, agent = false }: {
+  picture: string | null; name: string; size: number; agent?: boolean;
+}) {
   const uri = pictureUri(picture);
-  return <span className="face-plate" style={{ width: size, height: size, fontSize: size * 0.36 }} aria-hidden>
-    {uri !== null ? <img src={uri} alt="" /> : name === "" ? "◌" : name.slice(0, 1).toUpperCase()}
+  return <span className="face-plate" data-agent={agent || undefined}
+    style={{ width: size, height: size, fontSize: size * 0.36 }} aria-hidden>
+    {uri !== null ? <img src={uri} alt="" />
+      : name === "" ? <IconUser size={Math.round(size * 0.5)} /> : name.slice(0, 1).toUpperCase()}
   </span>;
 }
 
@@ -81,13 +78,72 @@ export function AiMark() {
   return <span className="ai-mark" title="An agent" aria-label="Agent">AI</span>;
 }
 
+/** A badge is one word or two and never breaks: a label folded onto two lines reads as two badges. */
 export function Badge({ label, solid = false }: { label: string; solid?: boolean }) {
-  // A badge is one word or two and never breaks: a card's action slot is
-  // narrow, and a label folded onto two lines reads as two badges.
-  return <FluentBadge appearance={solid ? "filled" : "outline"} color={solid ? "brand" : "informative"} size="medium" shape="rounded"
-    style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-    {label}
-  </FluentBadge>;
+  return <span className={solid ? "badge badge-solid" : "badge"}>{label}</span>;
+}
+
+/** A tinted standing chip. Neutral states nothing; the other tones grade it. */
+export function Chip({ label, tone = "neutral" }: { label: string; tone?: "good" | "neutral" | "warn" | "crit" }) {
+  return <span className="chip" data-tone={tone}>{label}</span>;
+}
+
+/**
+ * The one button. `primary` commits, `quiet` sits beside it, `danger` costs
+ * something, `text` reads as a link, `ghost` is chrome, `icon` is a glyph.
+ */
+export function Button({ variant = "quiet", onPress, disabled = false, label, children }: {
+  variant?: "primary" | "quiet" | "danger" | "text" | "ghost" | "icon";
+  onPress(): void; disabled?: boolean; label?: string; children: ReactNode;
+}) {
+  return <AriaButton className={`${variant}-button`} onPress={onPress} isDisabled={disabled} aria-label={label}>
+    {children}
+  </AriaButton>;
+}
+
+/**
+ * A labelled field. The input is the caller's — the label wraps it so the
+ * association is the markup, and an error is a line under it, never a color
+ * alone.
+ */
+export function Field({ label, error, children }: { label: string; error?: string; children: ReactNode }) {
+  return <label className="field">
+    <span>{label}</span>
+    {children}
+    {error !== undefined && <span className="field-error">{error}</span>}
+  </label>;
+}
+
+/** A bordered card of facts and controls — the row container of every list. */
+export function Card({ children }: { children: ReactNode }) {
+  return <div className="card">{children}</div>;
+}
+
+/**
+ * A quiet fold at the foot of a surface, for what the daemon knows that a
+ * person does not need. Native `details`, because that is exactly what it is.
+ */
+export function Disclosure({ summary, children }: { summary: ReactNode; children: ReactNode }) {
+  return <details className="disclosure">
+    <summary>{summary}</summary>
+    <div className="disclosure-panel">{children}</div>
+  </details>;
+}
+
+/** A row's overflow menu: a glyph, and the few acts that did not earn a button. */
+export function RowMenu({ label = "More", items }: {
+  label?: string;
+  items: { label: string; onAction(): void; disabled?: boolean; danger?: boolean }[];
+}) {
+  return <MenuTrigger>
+    <AriaButton className="icon-button" aria-label={label}><IconMore /></AriaButton>
+    <Popover className="menu-popover" placement="bottom end">
+      <Menu className="menu-list">
+        {items.map((item) => <MenuItem key={item.label} className={item.danger ? "danger-item" : ""}
+          isDisabled={item.disabled} onAction={item.onAction}>{item.label}</MenuItem>)}
+      </Menu>
+    </Popover>
+  </MenuTrigger>;
 }
 
 /**
@@ -103,7 +159,7 @@ export function PersonTile({ name, picture, presence, agent = false, note, size 
   const status = presenceLabel(presence) ?? (note !== undefined && note !== "" ? note : null);
   const dim = presence === "offline" ? 0.45 : presence === "away" ? 0.7 : 1;
   return <span className="person-tile">
-    <span style={{ opacity: dim, display: "inline-flex" }}><FacePlate picture={picture} name={name} size={size} /></span>
+    <span style={{ opacity: dim, display: "inline-flex" }}><FacePlate picture={picture} name={name} size={size} agent={agent} /></span>
     <span className="person-copy">
       <span className="person-name" data-offline={presence === "offline" || undefined}>
         <strong>{name}</strong>
@@ -115,109 +171,72 @@ export function PersonTile({ name, picture, presence, agent = false, note, size 
   </span>;
 }
 
-const useKitStyles = makeStyles({
-  fact: {
-    display: "grid",
-    gridTemplateColumns: "minmax(120px, 160px) minmax(0, 1fr)",
-    columnGap: tokens.spacingHorizontalM,
-    alignItems: "baseline",
-    paddingTop: tokens.spacingVerticalXXS,
-    paddingBottom: tokens.spacingVerticalXXS,
-  },
-  factLabel: { color: tokens.colorNeutralForeground3, textTransform: "uppercase", letterSpacing: "0.06em" },
-  factValue: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200, overflowWrap: "anywhere", userSelect: "all" },
-  section: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "baseline",
-    marginTop: tokens.spacingVerticalL,
-    marginBottom: tokens.spacingVerticalS,
-    color: tokens.colorNeutralForeground3,
-    textTransform: "uppercase",
-    letterSpacing: "0.08em",
-  },
-  empty: {
-    display: "grid",
-    gap: tokens.spacingVerticalXS,
-    alignContent: "center",
-    minHeight: "96px",
-    padding: tokens.spacingVerticalL,
-    textAlign: "center",
-    border: `1px dashed ${tokens.colorNeutralStroke2}`,
-    borderRadius: tokens.borderRadiusLarge,
-    color: tokens.colorNeutralForeground3,
-  },
-  dialogStack: { display: "grid", gap: tokens.spacingVerticalM, marginTop: tokens.spacingVerticalS },
-  dialogFooter: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: tokens.spacingHorizontalS,
-    marginTop: tokens.spacingVerticalM,
-  },
-});
+/**
+ * The head of a full-product pane: the name, and at most one act. The OS
+ * draws the window's title bar and the rail carries the navigation, so this
+ * is the only header the pane itself adds. No prose — orientation belongs to
+ * the list and its empty state.
+ */
+export function PaneHead({ title, action }: { title: string; action?: ReactNode }) {
+  return <div className="pane-head">
+    <h1>{title}</h1>
+    {action}
+  </div>;
+}
 
 /** A labelled fact row whose value is selectable, never truncated by hand. */
 export function Fact({ label, value }: { label: string; value: string }) {
-  const styles = useKitStyles();
-  return <div className={styles.fact}>
-    <Caption1 className={styles.factLabel}>{label}</Caption1>
-    <Text className={styles.factValue}>{value}</Text>
+  return <div className="fact-row">
+    <span className="fact-label">{label}</span>
+    <span className="fact-value">{value}</span>
   </div>;
 }
 
 /** A section marking: an emphatic label with the count dim beside it. */
 export function SectionTitle({ label, count }: { label: string; count?: number }) {
-  const styles = useKitStyles();
-  return <div className={styles.section}>
-    <Caption1Strong>{label}</Caption1Strong>
-    {count !== undefined && <Caption1>{count}</Caption1>}
+  return <div className="section-title">
+    <span>{label}</span>
+    {count !== undefined && <span>{count}</span>}
   </div>;
 }
 
-export function Empty({ said, next }: { said: string; next?: string }) {
-  const styles = useKitStyles();
-  return <div className={styles.empty}>
-    <Text weight="semibold">{said}</Text>
-    {next !== undefined && <Caption1>{next}</Caption1>}
+export function Empty({ said, next, icon, action }: { said: string; next?: string; icon?: ReactNode; action?: ReactNode }) {
+  return <div className="empty-state">
+    {icon !== undefined && <span className="empty-icon">{icon}</span>}
+    <strong>{said}</strong>
+    {next !== undefined && <p>{next}</p>}
+    {action !== undefined && <span className="empty-action">{action}</span>}
   </div>;
 }
 
 export function Notice({ tone, children }: { tone: "warn" | "danger" | "good"; children: ReactNode }) {
-  const intent = tone === "danger" ? "error" : tone === "warn" ? "warning" : "success";
-  return <MessageBar intent={intent} layout="multiline">
-    <MessageBarBody>{children}</MessageBarBody>
-  </MessageBar>;
+  return <div className={`notice notice-${tone}`} role={tone === "danger" ? "alert" : "status"}>{children}</div>;
 }
 
 /**
  * The app dialog. Rendered by the surface that owns the draft, dismissed by
  * Escape, the scrim, or its own controls; focus lands inside on mount. Kept
  * deliberately small — drafts live in the caller, facts stay in the view.
- *
- * The content carries the `dialog-fields` class so a surface not yet moved to
- * Fluent fields draws its plain labels and inputs the way it did — the field
- * rules only, never the old panel.
  */
 export function AppDialog({ title, description, onDismiss, children }: {
   title: string; description?: string; onDismiss(): void; children: ReactNode;
 }) {
-  const styles = useKitStyles();
-  return <Dialog open modalType="modal" onOpenChange={(_, data) => { if (!data.open) onDismiss(); }}>
-    <DialogSurface aria-label={title}>
-      <DialogBody>
-        <DialogTitle>{title}</DialogTitle>
-        <DialogContent>
-          {description !== undefined && <Text block>{description}</Text>}
-          <div className={`dialog-fields ${styles.dialogStack}`}>{children}</div>
-        </DialogContent>
-      </DialogBody>
-    </DialogSurface>
-  </Dialog>;
+  return <ModalOverlay className="dialog-overlay" isOpen isDismissable
+    onOpenChange={(open) => { if (!open) onDismiss(); }}>
+    <Modal className="dialog-modal">
+      <AriaDialog className="dialog-body">
+        <header>
+          <Heading level={2} slot="title">{title}</Heading>
+          {description !== undefined && <p>{description}</p>}
+        </header>
+        <div className="dialog-fields">{children}</div>
+      </AriaDialog>
+    </Modal>
+  </ModalOverlay>;
 }
 
 export function DialogFooter({ children }: { children: ReactNode }) {
-  const styles = useKitStyles();
-  return <footer className={styles.dialogFooter}>{children}</footer>;
+  return <footer className="dialog-footer">{children}</footer>;
 }
 
 export function shortId(value: string): string {

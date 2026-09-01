@@ -8,6 +8,8 @@ import { useEffect, useState } from "react";
 
 import { actionKey, summonOwnedWindow, type Book, type Card, type ClientAction, type ClientView, type Contact } from "./client";
 import { AiMark, AppDialog, Badge, DialogFooter, Empty, FacePlate, PersonTile, isAgentCard, presenceLabel } from "./kit";
+import { IconCheck, IconDismiss, IconIncoming, IconSearch, IconUserPlus } from "./icons";
+import { looksLikeFriendCode } from "./chat";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
@@ -48,6 +50,7 @@ export function partCards(cards: Card[]): { contacts: Card[]; offline: Card[] } 
 }
 
 type BookDialog =
+  | { kind: "add" }
   | { kind: "edit"; card: Card }
   | { kind: "link"; card: Card }
   | { kind: "picture"; card: Card }
@@ -104,9 +107,9 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
   const busy = (key: string) => view.inFlight.includes(key);
 
   return <section className="book-window" aria-label="Address book">
-    <header className="book-top">
-      <button className="back-button" onClick={onBack}>{ownedWindow ? "Close window" : "← Library"}</button>
-    </header>
+    {!ownedWindow && <header className="book-top">
+      <button className="back-button" onClick={onBack}>← Library</button>
+    </header>}
     {book === null && messageContacts.length === 0
       ? <div className="book-gutter"><Empty said="The book has not been read."
           next="Press F5 to ask the daemon. Nothing is created on your behalf." /></div>
@@ -138,7 +141,9 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
         : <>
           <div className="book-lead">
             <CanonicalCard mine={mine} hostAnswered={view.host !== null}
-              onOpen={mine === null ? undefined : () => setProfile(mine.card)} />
+              onOpen={mine === null ? undefined : () => setProfile(mine.card)}
+              onCreate={() => setDialog({ kind: "add" })} />
+            <AgentBand agents={book.cards.filter(isAgentCard)} onOpen={setProfile} />
             {book.migrationPending > 0 && <p className="migration-line">
               {book.migrationPending} alias selector(s) still pending. They were not turned into Cards.
             </p>}
@@ -150,12 +155,14 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
                 <input className="book-search" placeholder="Search cards" autoFocus value={query}
                   onChange={(event) => setQuery(event.target.value)} aria-label="Search cards" />
                 <button className="strip-icon" aria-label="Cancel search" title="Cancel search (Esc)"
-                  onClick={() => { setSearching(false); setQuery(""); }}>×</button>
+                  onClick={() => { setSearching(false); setQuery(""); }}><IconDismiss size={15} /></button>
               </>
               : <>
                 <span className="strip-title">CONTACTS</span>
+                <button className="strip-icon" aria-label="New card" title="New card"
+                  onClick={() => setDialog({ kind: "add" })}><IconUserPlus size={15} /></button>
                 <button className="strip-icon" aria-label="Search cards" title="Search cards (Ctrl+F)"
-                  onClick={() => setSearching(true)}>⌕</button>
+                  onClick={() => setSearching(true)}><IconSearch size={15} /></button>
                 {unknownContacts.length > 0 && <IncomingButton count={unknownContacts.length}
                   active={showingIncoming} onToggle={() => setIncoming(!showingIncoming)} />}
               </>}
@@ -167,11 +174,11 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
               ? unknownContacts.map((contact) => <MessageContactRow key={contact.id} contact={contact}
                   view={view} dispatch={dispatch} incoming />)
               : shown.length === 0 && knownContacts.length === 0
-              ? <div className="book-gutter"><Empty
-                  said={listed.length === 0 ? "No cards." : "No cards match that search."}
-                  next={listed.length === 0
-                    ? "The book is this identity's, even with no Space open."
-                    : "Clear the search to see every Card."} /></div>
+              ? <div className="book-gutter">{listed.length === 0
+                  ? <Empty said="Your book is empty." next="Add the people, devices, and agents you talk to."
+                      action={<button className="quiet-button"
+                        onClick={() => setDialog({ kind: "add" })}>New card</button>} />
+                  : <Empty said="No cards match that search." next="Clear the search to see every card." />}</div>
               : <>
                 {knownContacts.length > 0 && <>
                   <SectionHead label="Messages" />
@@ -202,18 +209,53 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
  * handles when a Space answered, else the local fact — this identity's daemon
  * answering this very read. When even that is absent, the line is absent too.
  */
-function CanonicalCard({ mine, hostAnswered, onOpen }: { mine: Card | null; hostAnswered: boolean; onOpen?: () => void }) {
-  const name = mine === null ? "No My Card." : mine.name;
-  const status = mine === null
-    ? "Claim one — nothing is implied from a name or a handle."
-    : presenceLabel(mine.presence) ?? (hostAnswered ? "Online" : null);
-  return <div className="canonical-card" onDoubleClick={onOpen} role={onOpen === undefined ? undefined : "button"}
-    aria-label={mine === null ? "No My Card" : `Open the profile of ${mine.name}`}>
-    <FacePlate picture={mine?.picture ?? null} name={mine?.name ?? ""} size={56} />
+function CanonicalCard({ mine, hostAnswered, onOpen, onCreate }: {
+  mine: Card | null; hostAnswered: boolean; onOpen?: () => void; onCreate(): void;
+}) {
+  // Not yet claimed: a quiet unfinished card, led by the act that finishes
+  // it — never a headline about the absence. The whole band is the control.
+  if (mine === null) {
+    return <div className="canonical-card" role="button" tabIndex={0} aria-label="Set up your card"
+      onClick={onCreate}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onCreate(); }}>
+      <FacePlate picture={null} name="" size={56} />
+      <span className="person-copy">
+        <span className="person-name"><strong className="canonical-name">Your card</strong></span>
+        <small>How you appear to others.</small>
+      </span>
+      <button className="quiet-button lead-action"
+        onClick={(event) => { event.stopPropagation(); onCreate(); }}>Set it up</button>
+    </div>;
+  }
+  const status = presenceLabel(mine.presence) ?? (hostAnswered ? "Online" : null);
+  return <div className="canonical-card" role="button" tabIndex={0}
+    aria-label={`Open the profile of ${mine.name}`} onClick={onOpen}
+    onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpen?.(); }}>
+    <FacePlate picture={mine.picture} name={mine.name} size={56} />
     <span className="person-copy">
-      <span className="person-name"><strong className="canonical-name">{name}</strong></span>
+      <span className="person-name"><strong className="canonical-name">{mine.name}</strong></span>
       {status !== null && <small>{status}</small>}
     </span>
+  </div>;
+}
+
+/**
+ * The agents this book holds, as chips under your own card: the social face
+ * of a sponsored agent, and the way into configuring it. A chip opens the
+ * agent's card — its name, picture, and handles are edited there like
+ * anybody else's, because an agent's presentation *is* a card.
+ */
+export function AgentBand({ agents, onOpen }: { agents: Card[]; onOpen(card: string): void }) {
+  if (agents.length === 0) return null;
+  return <div className="agent-band">
+    <span className="fact-label">AGENTS</span>
+    <div className="agent-chips">
+      {agents.map((agent) => <button key={agent.card} className="agent-chip"
+        aria-label={`Configure ${agent.name}`} onClick={() => onOpen(agent.card)}>
+        <FacePlate picture={agent.picture} name={agent.name} size={24} agent />
+        <span>{agent.name}</span>
+      </button>)}
+    </div>
   </div>;
 }
 
@@ -229,7 +271,7 @@ function IncomingButton({ count, active, onToggle }: { count: number; active: bo
   return <button className="strip-icon incoming-button" data-active={active || undefined}
     aria-label={`Incoming from unknown senders (${count})`} title={active ? "Back to contacts" : "Incoming"}
     onClick={onToggle}>
-    ⊕<span className="incoming-count">{count}</span>
+    <IconIncoming size={15} /><span className="incoming-count">{count}</span>
   </button>;
 }
 
@@ -266,10 +308,10 @@ function RequestActions({ person, name, view, dispatch }: {
   return <span className="button-row" onClick={stop}>
     <button className="strip-icon" aria-label={`Accept ${name}`} title="Accept"
       disabled={view.inFlight.includes(actionKey.acceptContact(person))}
-      onClick={() => void dispatch({ type: "acceptContact", person })}>✓</button>
+      onClick={() => void dispatch({ type: "acceptContact", person })}><IconCheck size={15} /></button>
     <button className="strip-icon danger-text" aria-label={`Dismiss ${name}`} title="Dismiss"
       disabled={view.inFlight.includes(actionKey.blockSender(person))}
-      onClick={() => void dispatch({ type: "blockSender", person })}>✗</button>
+      onClick={() => void dispatch({ type: "blockSender", person })}><IconDismiss size={15} /></button>
   </span>;
 }
 
@@ -302,6 +344,7 @@ function ProfilePage({ card, all, view, dispatch, onBack, openDialog }: {
       </span>
     </div>
     <div className="profile-scroll">
+      {card.selfClaim && <ReachSection view={view} dispatch={dispatch} />}
       <HandleSection label="ADDRESSES" handles={card.addresses} card={card.card} view={view} dispatch={dispatch} />
       <HandleSection label="DEVICES" handles={card.devices} card={card.card} view={view} dispatch={dispatch} />
       <HandleSection label="AGENTS" handles={card.agents} card={card.card} view={view} dispatch={dispatch} />
@@ -322,6 +365,34 @@ function ProfilePage({ card, all, view, dispatch, onBack, openDialog }: {
       </div>
     </div>
   </div>;
+}
+
+/**
+ * Your persona's reach, on My Card: the friend code the directory issued, or
+ * the act of publishing to get one. Copyable because it is made to be said,
+ * texted, or written down — sharing it acts on nobody.
+ */
+export function ReachSection({ view, dispatch }: { view: ClientView; dispatch: Dispatch }) {
+  const [copied, setCopied] = useState(false);
+  const code = view.correspondence?.myAddress ?? null;
+  const sharing = view.inFlight.includes(actionKey.shareReach);
+  return <section className="handle-section">
+    <span className="fact-label">FRIEND CODE</span>
+    {code !== null
+      ? <div className="handle-row">
+        <code>{code}</code>
+        <button className="text-button" onClick={() => {
+          void navigator.clipboard.writeText(code);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        }}>{copied ? "Copied" : "Copy"}</button>
+      </div>
+      : <div className="handle-row">
+        <span className="muted">Publishing makes you reachable by a short spoken code.</span>
+        <button className="text-button" disabled={sharing}
+          onClick={() => void dispatch({ type: "shareReach" })}>{sharing ? "Publishing…" : "Publish"}</button>
+      </div>}
+  </section>;
 }
 
 /**
@@ -371,6 +442,7 @@ function BookDialogs({ dialog, all, dispatch, onDismiss }: {
   dialog: BookDialog; all: Card[]; dispatch: Dispatch; onDismiss(): void;
 }) {
   switch (dialog.kind) {
+    case "add": return <AddDialog dispatch={dispatch} onDismiss={onDismiss} />;
     case "edit": return <EditDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
     case "link": return <LinkDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
     case "picture": return <PictureDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
@@ -379,7 +451,44 @@ function BookDialogs({ dialog, all, dispatch, onDismiss }: {
   }
 }
 
-function EditDialog({ card, dispatch, onDismiss }: { card: Card; dispatch: Dispatch; onDismiss(): void }) {
+export function AddDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismiss(): void }) {
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [note, setNote] = useState("");
+  // A friend code reaches a person: the directory resolves it, their card is
+  // installed, and a conversation can start. A card by hand is only your own
+  // note — it reaches nobody until a handle is learned onto it.
+  const add = () => {
+    const typedCode = code.trim();
+    const typedName = name.trim();
+    if (typedCode !== "") {
+      void dispatch(looksLikeFriendCode(typedCode)
+        ? { type: "addByAddress", address: typedCode.toLowerCase() }
+        : { type: "addCorrespondent", announcement: typedCode });
+    } else if (typedName !== "") {
+      void dispatch({ type: "bookPut", card: null, name: typedName, note: note.trim() || null });
+    } else {
+      return;
+    }
+    onDismiss();
+  };
+  return <AppDialog title="Add someone"
+    description="A friend code reaches them and starts a conversation. A card by hand is just your note about somebody."
+    onDismiss={onDismiss}>
+    <label>Friend code<input autoFocus placeholder="tin-harbor-quiet-4417" value={code}
+      onChange={(event) => setCode(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Enter") add(); }} /></label>
+    <hr className="book-rule" />
+    <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+    <label>Note<input value={note} onChange={(event) => setNote(event.target.value)} /></label>
+    <DialogFooter>
+      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
+      <button className="primary-button" disabled={code.trim() === "" && name.trim() === ""} onClick={add}>Add</button>
+    </DialogFooter>
+  </AppDialog>;
+}
+
+export function EditDialog({ card, dispatch, onDismiss }: { card: Card; dispatch: Dispatch; onDismiss(): void }) {
   const [name, setName] = useState(card.name);
   const [note, setNote] = useState(card.note);
   const save = () => {
@@ -414,7 +523,7 @@ function LinkDialog({ card, dispatch, onDismiss }: { card: Card; dispatch: Dispa
   </AppDialog>;
 }
 
-function PictureDialog({ card, dispatch, onDismiss }: { card: Card; dispatch: Dispatch; onDismiss(): void }) {
+export function PictureDialog({ card, dispatch, onDismiss }: { card: Card; dispatch: Dispatch; onDismiss(): void }) {
   const [path, setPath] = useState("");
   return <AppDialog title={`Set the picture on ${card.name}`}
     description="A PNG, JPEG, or WebP on this machine. The book stores the picture itself — keep it face-sized, not a photo."

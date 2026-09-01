@@ -11,25 +11,7 @@
  * comes back as the whole view, so this side never holds an answer it was
  * handed.
  */
-import {
-  Badge as FluentBadge,
-  Body1,
-  Button,
-  Caption1,
-  Card,
-  CardFooter,
-  CardHeader,
-  Field,
-  Input,
-  Text,
-  Title3,
-  makeStyles,
-  tokens,
-} from "@fluentui/react-components";
-import {
-  ArrowLeft20Regular, CheckmarkCircle20Regular, Dismiss20Regular, Laptop20Regular,
-} from "@fluentui/react-icons";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
 import {
   actionKey,
@@ -41,7 +23,8 @@ import {
   type ProfileFacts,
   type SpaceRow,
 } from "./client";
-import { Empty, SectionTitle, shortId } from "./kit";
+import { Button, Card, Chip, Empty, Field, PaneHead, SectionTitle, shortId } from "./kit";
+import { IconCheckCircle, IconLaptop } from "./icons";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
@@ -318,63 +301,6 @@ export function answeringOffer(view: ClientView, pairing: string): boolean {
   return view.inFlight.includes(actionKey.devicePairConfirm(pairing));
 }
 
-const useStyles = makeStyles({
-  surface: {
-    height: "100%",
-    minHeight: 0,
-    display: "grid",
-    gridTemplateRows: "auto minmax(0, 1fr)",
-    backgroundColor: tokens.colorNeutralBackground2,
-    color: tokens.colorNeutralForeground1,
-  },
-  header: {
-    display: "grid",
-    gridTemplateColumns: "auto minmax(0, 1fr)",
-    alignItems: "center",
-    columnGap: tokens.spacingHorizontalL,
-    padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalXL}`,
-    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-    backgroundColor: tokens.colorNeutralBackground1,
-  },
-  headerCopy: { display: "grid", gap: tokens.spacingVerticalXXS, minWidth: 0 },
-  scroll: { overflowY: "auto", padding: `${tokens.spacingVerticalL} ${tokens.spacingHorizontalXL} ${tokens.spacingVerticalXXL}` },
-  column: { maxWidth: "720px", margin: "0 auto", display: "grid", gap: tokens.spacingVerticalM },
-  cards: { display: "grid", gap: tokens.spacingVerticalS },
-  row: { display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: tokens.spacingHorizontalM, alignItems: "center" },
-  rowIcon: { color: tokens.colorNeutralForeground3, display: "grid", placeItems: "center", width: "28px" },
-  rowCopy: { display: "grid", gap: tokens.spacingVerticalXXS, minWidth: 0 },
-  rowTitle: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS, flexWrap: "wrap" },
-  muted: { color: tokens.colorNeutralForeground3 },
-  crit: { color: tokens.colorPaletteRedForeground1 },
-  chip: { whiteSpace: "nowrap", flexShrink: 0 },
-  phrase: {
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeBase400,
-    fontWeight: tokens.fontWeightSemibold,
-    color: tokens.colorBrandForeground1,
-    letterSpacing: "0.04em",
-  },
-  bigCode: {
-    textAlign: "center",
-    padding: `${tokens.spacingVerticalL} 0 ${tokens.spacingVerticalXS}`,
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeHero800,
-    fontWeight: tokens.fontWeightSemibold,
-    letterSpacing: "0.14em",
-    userSelect: "all",
-    wordBreak: "break-all",
-  },
-  waiting: { display: "grid", gap: tokens.spacingVerticalXS, textAlign: "center" },
-  add: { display: "grid", gap: tokens.spacingVerticalS },
-  addRow: { display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: tokens.spacingHorizontalS, alignItems: "end" },
-});
-
-function Chip({ label, tone }: { label: string; tone: DeviceTone }) {
-  const styles = useStyles();
-  const color = tone === "good" ? "success" : tone === "warn" ? "warning" : "informative";
-  return <FluentBadge appearance="tint" color={color} size="medium" shape="rounded" className={styles.chip}>{label}</FluentBadge>;
-}
-
 /** The clock, re-read every `everyMs`, so an expiry counts down without a view pump. */
 function useNow(everyMs: number): number {
   const [now, setNow] = useState(() => Date.now());
@@ -385,38 +311,31 @@ function useNow(everyMs: number): number {
   return now;
 }
 
-export function DevicesSurface({ view, dispatch, onBack, ownedWindow = false }: {
-  view: ClientView; dispatch: Dispatch; onBack(): void; ownedWindow?: boolean;
-}) {
-  const styles = useStyles();
+export function DevicesPane({ view, dispatch }: { view: ClientView; dispatch: Dispatch }) {
   const profile = view.profile;
   const absence = devicesAbsence(profile);
   const waiting = codeToEnter(profile);
-  return <section className={styles.surface} aria-label="Your devices">
-    <header className={styles.header}>
-      <Button appearance="subtle" icon={ownedWindow ? <Dismiss20Regular /> : <ArrowLeft20Regular />} onClick={onBack}>
-        {ownedWindow ? "Close window" : "Library"}
-      </Button>
-      <div className={styles.headerCopy}>
-        <Title3>Your devices</Title3>
-        <Caption1 className={styles.muted}>Every device here is you. Adding one is done once — your Spaces follow on their own.</Caption1>
-      </div>
-    </header>
-    <div className={styles.scroll}>
-      <div className={styles.column}>
+  const codeField = useRef<HTMLInputElement>(null);
+  return <div className="secondary-scroll" aria-label="Your devices">
+      <div className="content-column narrow">
+        <PaneHead title="Your devices"
+          action={<Button variant="primary" onPress={() => {
+            codeField.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+            codeField.current?.focus({ preventScroll: true });
+          }}>Add device</Button>} />
         {waiting !== null && profile?.pairing != null
           && <WaitingToBeAdded code={waiting} expiresAtMs={profile.pairing.expiresAtMs} />}
         {(profile?.offers ?? []).length > 0 && <section>
-          <SectionTitle label="WAITING FOR YOU" count={profile?.offers.length} />
-          <div className={styles.cards}>
+          <SectionTitle label="Waiting for you" count={profile?.offers.length} />
+          <div className="card-stack">
             {profile?.offers.map((offer) => <PairOfferCard key={offer.pairing} offer={offer} view={view} dispatch={dispatch} />)}
           </div>
         </section>}
         <section>
-          <SectionTitle label="YOUR DEVICES" count={profile?.devices.length} />
+          <SectionTitle label="Your devices" count={profile?.devices.length} />
           {absence !== null
             ? <Empty said={absence} />
-            : <div className={styles.cards}>
+            : <div className="card-stack">
               {profile?.devices.map((device) =>
                 <DeviceRow key={device.device} device={device} markers={profile.markers}
                   spaces={profile.spaces} view={view} dispatch={dispatch} />)}
@@ -426,18 +345,17 @@ export function DevicesSurface({ view, dispatch, onBack, ownedWindow = false }: 
             book has nothing to draw here, and an empty section would invite
             the reading that something is missing. */}
         {(profile?.markers ?? []).length > 0 && <section>
-          <SectionTitle label="WHO LISTS THEM" count={profile?.markers.length} />
-          <div className={styles.cards}>
+          <SectionTitle label="Who lists them" count={profile?.markers.length} />
+          <div className="card-stack">
             {profile?.markers.map((marker) => <MarkerRow key={marker.marker} marker={marker} />)}
           </div>
         </section>}
         {/* Offered even by a device that is itself waiting: two fresh
             machines both show a code, and whichever one a person is sitting
             at is the one that has to be able to type the other's. */}
-        <AddDevice view={view} dispatch={dispatch} />
+        <AddDevice view={view} dispatch={dispatch} codeField={codeField} />
       </div>
-    </div>
-  </section>;
+  </div>;
 }
 
 /**
@@ -445,22 +363,20 @@ export function DevicesSurface({ view, dispatch, onBack, ownedWindow = false }: 
  * offer — it has nothing to list and nobody to ask.
  */
 function WaitingToBeAdded({ code, expiresAtMs }: { code: string; expiresAtMs: number }) {
-  const styles = useStyles();
   const now = useNow(30_000);
   return <Card>
-    <CardHeader header={<Text weight="semibold">This device is waiting to be added</Text>}
-      description={<Caption1 className={styles.muted}>On a device you already use, open Your devices and type this code.</Caption1>} />
-    <div className={styles.waiting}>
-      <p className={styles.bigCode}>{code}</p>
-      <Caption1 className={styles.muted}>The code stops working {expiryLabel(expiresAtMs, now)}. A new one appears when it does.</Caption1>
+    <div className="item-copy">
+      <div className="item-title"><strong>This device is waiting to be added</strong></div>
+      <small className="dim-line">On a device you already use, open Your devices and type this code.</small>
     </div>
+    <p className="big-code">{code}</p>
+    <small className="dim-line centered">The code stops working {expiryLabel(expiresAtMs, now)}. A new one appears when it does.</small>
   </Card>;
 }
 
 function DeviceRow({ device, markers, spaces, view, dispatch }: {
   device: OwnDevice; markers: Marker[]; spaces: SpaceRow[]; view: ClientView; dispatch: Dispatch;
 }) {
-  const styles = useStyles();
   const [asking, setAsking] = useState(false);
   const standing = deviceStanding(device);
   // Drawn beside the device, never in front of it: this row is complete
@@ -468,29 +384,29 @@ function DeviceRow({ device, markers, spaces, view, dispatch }: {
   // it rather than qualify it.
   const listings = certification(device, markers);
   return <Card>
-    <div className={styles.row}>
-      <div className={styles.rowIcon}><Laptop20Regular /></div>
-      <div className={styles.rowCopy}>
-        <div className={styles.rowTitle}>
-          <Text weight="semibold">{device.me ? "This device" : shortId(device.device)}</Text>
-          <Chip {...standing} />
+    <div className="item-row">
+      <div className="item-icon"><IconLaptop /></div>
+      <div className="item-copy">
+        <div className="item-title">
+          <strong>{device.me ? "This device" : shortId(device.device)}</strong>
+          <Chip label={standing.label} tone={standing.tone} />
         </div>
-        <Caption1 className={styles.muted}>{spacesHeld(device)}</Caption1>
+        <small className="dim-line">{spacesHeld(device)}</small>
         {device.liveness.kind === "couldNotAsk"
-          && <Caption1 className={styles.muted}>It may be off or on another network — nothing it holds has been lost.</Caption1>}
-        {listings.length > 0 && <div className={styles.rowTitle}>
+          && <small className="dim-line">It may be off or on another network — nothing it holds has been lost.</small>}
+        {listings.length > 0 && <div className="item-title">
           {listings.map((listing) => <Chip key={listing.marker} label={listing.label} tone={listing.tone} />)}
         </div>}
-        {asking && <Caption1 className={styles.muted}>{retireWarning(device)}</Caption1>}
+        {asking && <small className="dim-line">{retireWarning(device)}</small>}
         {!device.me && spaces.map((space) => {
-          const standing = spaceStanding(space, device.device);
+          const spaceState = spaceStanding(space, device.device);
           const act = excludeAction(space, device);
-          return <div key={space.space} className={styles.rowTitle}>
-            <Caption1 className={styles.muted}>{shortId(space.space)}</Caption1>
-            <Chip {...standing} />
-            {act !== null && <Button appearance="subtle" size="small"
+          return <div key={space.space} className="item-title">
+            <small className="dim-line">{shortId(space.space)}</small>
+            <Chip label={spaceState.label} tone={spaceState.tone} />
+            {act !== null && <Button variant="ghost"
               disabled={excluding(view, space.space, device.device)}
-              onClick={() => void dispatch(act)}>
+              onPress={() => void dispatch(act)}>
               {act.excluded ? "Not on this device" : "Put back"}
             </Button>}
           </div>;
@@ -499,14 +415,14 @@ function DeviceRow({ device, markers, spaces, view, dispatch }: {
       {/* Asked twice on purpose. Retiring is reversible only by pairing the
           machine again, and the sentence it costs is worth reading. */}
       {!device.me && (asking
-        ? <div className={styles.rowTitle}>
-          <Button appearance="primary" disabled={!canRetire(view, device)}
-            onClick={() => { setAsking(false); void dispatch({ type: "deviceRetire", device: device.device }); }}>
+        ? <div className="button-row">
+          <Button variant="primary" disabled={!canRetire(view, device)}
+            onPress={() => { setAsking(false); void dispatch({ type: "deviceRetire", device: device.device }); }}>
             Retire it
           </Button>
-          <Button appearance="subtle" onClick={() => setAsking(false)}>Keep it</Button>
+          <Button variant="ghost" onPress={() => setAsking(false)}>Keep it</Button>
         </div>
-        : <Button appearance="subtle" onClick={() => setAsking(true)}>Retire</Button>)}
+        : <Button variant="ghost" onPress={() => setAsking(true)}>Retire</Button>)}
     </div>
   </Card>;
 }
@@ -520,17 +436,16 @@ function DeviceRow({ device, markers, spaces, view, dispatch }: {
  * as a finding about the devices.
  */
 function MarkerRow({ marker }: { marker: Marker }) {
-  const styles = useStyles();
   const standing = markerStanding(marker);
   return <Card>
-    <div className={styles.row}>
-      <div className={styles.rowIcon}><CheckmarkCircle20Regular /></div>
-      <div className={styles.rowCopy}>
-        <div className={styles.rowTitle}>
-          <Text weight="semibold">{markerName(marker.marker)}</Text>
+    <div className="item-row">
+      <div className="item-icon"><IconCheckCircle /></div>
+      <div className="item-copy">
+        <div className="item-title">
+          <strong>{markerName(marker.marker)}</strong>
           <Chip label={standing.label} tone={standing.tone} />
         </div>
-        <Caption1 className={styles.muted}>{standing.said}</Caption1>
+        <small className="dim-line">{standing.said}</small>
       </div>
     </div>
   </Card>;
@@ -545,22 +460,23 @@ function MarkerRow({ marker }: { marker: Marker }) {
  * somebody else already decided.
  */
 function PairOfferCard({ offer, view, dispatch }: { offer: PairOffer; view: ClientView; dispatch: Dispatch }) {
-  const styles = useStyles();
   const busy = answeringOffer(view, offer.pairing);
   return <Card>
-    <CardHeader header={<Text weight="semibold">{offer.name}</Text>}
-      description={<Caption1 className={styles.muted}>Confirm only if this device shows these same six words.</Caption1>} />
-    <p className={styles.phrase}>{offer.phrase.join("  ")}</p>
-    <CardFooter>
-      <Button appearance="primary" disabled={busy}
-        onClick={() => void dispatch({ type: "devicePairConfirm", pairing: offer.pairing, accept: true })}>
+    <div className="item-copy">
+      <div className="item-title"><strong>{offer.name}</strong></div>
+      <small className="dim-line">Confirm only if this device shows these same six words.</small>
+    </div>
+    <p className="phrase">{offer.phrase.join("  ")}</p>
+    <div className="button-row">
+      <Button variant="primary" disabled={busy}
+        onPress={() => void dispatch({ type: "devicePairConfirm", pairing: offer.pairing, accept: true })}>
         The words match
       </Button>
-      <Button appearance="subtle" disabled={busy}
-        onClick={() => void dispatch({ type: "devicePairConfirm", pairing: offer.pairing, accept: false })}>
+      <Button variant="ghost" disabled={busy}
+        onPress={() => void dispatch({ type: "devicePairConfirm", pairing: offer.pairing, accept: false })}>
         Not my device
       </Button>
-    </CardFooter>
+    </div>
   </Card>;
 }
 
@@ -569,8 +485,9 @@ function PairOfferCard({ offer, view, dispatch }: { offer: PairOffer; view: Clie
  * including the addresses it may carry — which spellings mean the same code
  * is the daemon's rule, and a second one here could disagree with it.
  */
-function AddDevice({ view, dispatch }: { view: ClientView; dispatch: Dispatch }) {
-  const styles = useStyles();
+function AddDevice({ view, dispatch, codeField }: {
+  view: ClientView; dispatch: Dispatch; codeField: RefObject<HTMLInputElement | null>;
+}) {
   const [typed, setTyped] = useState("");
   const ready = canAddDevice(view, typed);
   const refused = view.failures.find((failure) => failure.key === actionKey.devicePairEnter);
@@ -581,18 +498,18 @@ function AddDevice({ view, dispatch }: { view: ClientView; dispatch: Dispatch })
     void dispatch(action);
   };
   return <Card>
-    <CardHeader header={<Text weight="semibold">Add device</Text>}
-      description={<Caption1 className={styles.muted}>The new device shows a code while it waits. Type it here, then compare the six words.</Caption1>} />
-    <div className={styles.add}>
-      <div className={styles.addRow}>
-        <Field label="Code">
-          <Input value={typed} placeholder="XXXX-XXXX" spellCheck={false}
-            onChange={(_, data) => setTyped(data.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && ready) add(); }} />
-        </Field>
-        <Button appearance="primary" disabled={!ready} onClick={add}>Add device</Button>
-      </div>
-      {refused !== undefined && <Body1 className={styles.crit}>{refused.error}</Body1>}
+    <div className="item-copy">
+      <div className="item-title"><strong>Add device</strong></div>
+      <small className="dim-line">The new device shows a code while it waits. Type it here, then compare the six words.</small>
     </div>
+    <div className="field-row">
+      <Field label="Code">
+        <input ref={codeField} value={typed} placeholder="XXXX-XXXX" spellCheck={false}
+          onChange={(event) => setTyped(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter" && ready) add(); }} />
+      </Field>
+      <Button variant="primary" disabled={!ready} onPress={add}>Add device</Button>
+    </div>
+    {refused !== undefined && <p className="body-line danger-text">{refused.error}</p>}
   </Card>;
 }

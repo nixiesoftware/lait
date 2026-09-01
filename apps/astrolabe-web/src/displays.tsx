@@ -11,46 +11,7 @@
  * the words ceremony — survives as a disclosure at the foot, in the
  * daemon's own words, where it belongs.
  */
-import {
-  Accordion,
-  AccordionHeader,
-  AccordionItem,
-  AccordionPanel,
-  Badge as FluentBadge,
-  Body1,
-  Button,
-  Caption1,
-  Card,
-  CardFooter,
-  CardHeader,
-  Field,
-  Input,
-  Menu,
-  MenuItem,
-  MenuList,
-  MenuPopover,
-  MenuTrigger,
-  Radio,
-  RadioGroup,
-  Select,
-  Spinner,
-  Text,
-  Textarea,
-  Title3,
-  makeStyles,
-  mergeClasses,
-  shorthands,
-  tokens,
-} from "@fluentui/react-components";
-import {
-  Add20Regular,
-  ArrowLeft20Regular,
-  Copy20Regular,
-  Dismiss20Regular,
-  MoreHorizontal20Regular,
-  Tv20Regular,
-} from "@fluentui/react-icons";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   actionKey,
@@ -58,20 +19,14 @@ import {
   type ClientView,
   type Display,
   type DisplayAssignment,
-  type DisplayAssignmentRequest,
-  type DisplayChoices,
   type DisplayPairing,
   type DisplayReceiver,
-  type DisplayRendezvous,
-  type DisplayStaleAction,
   type DisplaySurface,
-  type DisplaySyncMode,
-  type DisplayTheme,
   type Failure,
   type LibraryWorld,
-  type Orbit,
 } from "./client";
-import { AppDialog, DialogFooter, Empty, Fact, Notice, SectionTitle, words } from "./kit";
+import { AppDialog, Button, Card, Chip, DialogFooter, Disclosure, Empty, Fact, Field, PaneHead, RowMenu, SectionTitle, words } from "./kit";
+import { IconCopy, IconTv } from "./icons";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
@@ -119,9 +74,6 @@ export function assignmentFor(display: Display, device: string): DisplayAssignme
   return undefined;
 }
 
-
-
-const surfaceKey = (surface: DisplaySurface) => `${surface.world} ${surface.surface}`;
 
 
 /**
@@ -250,203 +202,83 @@ export function failureOf(failures: Failure[], key: string): Failure | undefined
   return failures.find((failure) => failure.key === key);
 }
 
-const themeNames: Record<DisplayTheme, string> = { light: "Light", dark: "Dark", highContrast: "High contrast" };
-const staleActionNames: Record<DisplayStaleAction, string> = { keepWithNativeBanner: "Keep the last picture", blank: "Go blank" };
-const syncModeNames: Record<DisplaySyncMode, string> = { stayInSync: "Change items together", positional: "Match position within items" };
-
-const useStyles = makeStyles({
-  surface: {
-    height: "100%",
-    minHeight: 0,
-    display: "grid",
-    gridTemplateRows: "auto minmax(0, 1fr)",
-    backgroundColor: tokens.colorNeutralBackground2,
-    color: tokens.colorNeutralForeground1,
-  },
-  header: {
-    display: "grid",
-    gridTemplateColumns: "auto minmax(0, 1fr) auto",
-    alignItems: "center",
-    columnGap: tokens.spacingHorizontalL,
-    padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalXL}`,
-    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-    backgroundColor: tokens.colorNeutralBackground1,
-  },
-  headerCopy: { display: "grid", gap: tokens.spacingVerticalXXS, minWidth: 0 },
-  scroll: { overflowY: "auto", padding: `${tokens.spacingVerticalL} ${tokens.spacingHorizontalXL} ${tokens.spacingVerticalXXL}` },
-  column: { maxWidth: "880px", margin: "0 auto", display: "grid", gap: tokens.spacingVerticalM },
-  cards: { display: "grid", gap: tokens.spacingVerticalS },
-  row: { display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: tokens.spacingHorizontalM, alignItems: "center" },
-  rowIcon: { color: tokens.colorNeutralForeground3, display: "grid", placeItems: "center", width: "28px" },
-  rowCopy: { display: "grid", gap: tokens.spacingVerticalXXS, minWidth: 0 },
-  rowTitle: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS, flexWrap: "wrap" },
-  rowActions: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalXS, flexShrink: 0 },
-  hero: {
-    display: "grid",
-    justifyItems: "center",
-    gap: tokens.spacingVerticalS,
-    textAlign: "center",
-    padding: `${tokens.spacingVerticalXXXL} ${tokens.spacingHorizontalXL}`,
-    border: `1px dashed ${tokens.colorNeutralStroke2}`,
-    borderRadius: tokens.borderRadiusLarge,
-  },
-  heroIcon: { color: tokens.colorBrandForeground1, fontSize: "40px" },
-  stack: { display: "grid", gap: tokens.spacingVerticalXS },
-  muted: { color: tokens.colorNeutralForeground3 },
-  crit: { color: tokens.colorPaletteRedForeground1 },
-  chip: { whiteSpace: "nowrap", flexShrink: 0 },
-  codeInline: { fontFamily: tokens.fontFamilyMonospace, fontWeight: tokens.fontWeightSemibold, letterSpacing: "0.06em", userSelect: "all" },
-  phrase: {
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeBase400,
-    fontWeight: tokens.fontWeightSemibold,
-    color: tokens.colorBrandForeground1,
-    letterSpacing: "0.04em",
-  },
-  facts: { display: "grid", gap: tokens.spacingVerticalXXS },
-  foot: { marginTop: tokens.spacingVerticalM },
-  // The dialog's three states.
-  step: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase100, letterSpacing: "0.12em", color: tokens.colorBrandForeground1 },
-  choices: { display: "grid", gap: tokens.spacingVerticalXS },
-  choiceDetail: { paddingLeft: "28px" },
-  bigCode: {
-    textAlign: "center",
-    padding: `${tokens.spacingVerticalL} 0 ${tokens.spacingVerticalS}`,
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeHero800,
-    fontWeight: tokens.fontWeightSemibold,
-    letterSpacing: "0.14em",
-    userSelect: "all",
-  },
-  steps: { margin: 0, paddingLeft: "22px", color: tokens.colorNeutralForeground2, display: "grid", gap: tokens.spacingVerticalXXS },
-  wait: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS, color: tokens.colorNeutralForeground2 },
-  done: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorPaletteGreenBackground1,
-    color: tokens.colorPaletteGreenForeground1,
-    fontWeight: tokens.fontWeightSemibold,
-  },
-  grid2: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: tokens.spacingHorizontalM },
-  brandCard: { ...shorthands.borderColor(tokens.colorBrandStroke1) },
-});
-
-function Chip({ label, tone }: { label: string; tone: Tone }) {
-  const styles = useStyles();
-  const color = tone === "good" ? "success" : tone === "warn" ? "warning" : tone === "crit" ? "danger" : "informative";
-  return <FluentBadge appearance="tint" color={color} size="medium" shape="rounded" className={styles.chip}>{label}</FluentBadge>;
-}
-
 type DisplaysDialog =
   | { kind: "approve"; pairing: DisplayPairing }
   | { kind: "revoke"; receiver: DisplayReceiver }
   | { kind: "passphrase" };
 
-export function DisplaysSurface({ view, dispatch, onBack, ownedWindow = false }: {
-  view: ClientView; dispatch: Dispatch; onBack(): void; ownedWindow?: boolean;
-}) {
-  const styles = useStyles();
+export function DisplaysPane({ view, dispatch }: { view: ClientView; dispatch: Dispatch }) {
   const [dialog, setDialog] = useState<DisplaysDialog | null>(null);
   const display = view.display;
   const tvs = display?.devices.filter((receiver) => receiver.revokedAtUnixMs === null) ?? [];
   const removed = display?.devices.filter((receiver) => receiver.revokedAtUnixMs !== null) ?? [];
   const nothingYet = tvs.length === 0;
-  return <section className={styles.surface} aria-label="Linked TVs">
-    <header className={styles.header}>
-      <Button appearance="subtle" icon={ownedWindow ? <Dismiss20Regular /> : <ArrowLeft20Regular />} onClick={onBack}>
-        {ownedWindow ? "Close window" : "Library"}
-      </Button>
-      <div className={styles.headerCopy}>
-        <Title3>Linked TVs</Title3>
-        <Caption1 className={styles.muted}>The TVs linked to this computer, and which World each one belongs to. What a TV shows is decided in that World.</Caption1>
-      </div>
-    </header>
-    <div className={styles.scroll}>
+  return <>
+    <div className="secondary-scroll" aria-label="Linked TVs">
       {display === null
-        ? <div className={styles.column}><Empty said="Reading this computer's displays…" /></div>
-        : <div className={styles.column}>
-          {nothingYet && <div className={styles.hero}>
-            <Tv20Regular className={styles.heroIcon} />
-            <Text size={500} weight="semibold">No TV is linked yet</Text>
-            <Caption1 className={styles.muted}>Add a TV from the World that will show it — in Signage, open a screen and choose Add a TV. A TV that enters just this site's name appears below, to approve by words.</Caption1>
-          </div>}
+        ? <div className="content-column">
+          <PaneHead title="Linked TVs" />
+          <Empty said="Reading this computer's displays…" />
+        </div>
+        : <div className="content-column">
+          <PaneHead title="Linked TVs" />
+          {nothingYet && <Empty icon={<IconTv size={40} />} said="No TV is linked yet"
+            next="Add a TV from the World that will show it — in Signage, open a screen and choose Add a TV. A TV that enters just this site's name appears below, to approve by words." />}
           {tvs.length > 0 && <section>
             <SectionTitle label="Linked TVs" count={tvs.length} />
-            <div className={styles.cards}>
+            <div className="card-stack">
               {tvs.map((receiver) => <TvRow key={receiver.device} receiver={receiver}
                 assignment={assignmentFor(display, receiver.device)} display={display} view={view} openDialog={setDialog} />)}
             </div>
           </section>}
-          <Accordion collapsible multiple className={styles.foot}>
-            <AccordionItem value="words">
-              <AccordionHeader>A TV is asking to connect by words {display.pendingPairings.length > 0 ? `(${display.pendingPairings.length})` : ""}</AccordionHeader>
-              <AccordionPanel>
-                {display.pendingPairings.length === 0
-                  ? <Caption1 className={styles.muted}>None right now. A TV that enters just its site name shows six words instead of taking a code; when one does, it appears here for you to compare and approve.</Caption1>
-                  : <div className={styles.cards}>
-                    {display.pendingPairings.map((pairing) => <PairingCard key={pairing.pairing} pairing={pairing} view={view}
-                      dispatch={dispatch} onApprove={() => setDialog({ kind: "approve", pairing })} />)}
-                  </div>}
-              </AccordionPanel>
-            </AccordionItem>
-            {removed.length > 0 && <AccordionItem value="removed">
-              <AccordionHeader>Removed TVs ({removed.length})</AccordionHeader>
-              <AccordionPanel>
-                <div className={styles.cards}>
-                  {removed.map((receiver) => <TvRow key={receiver.device} receiver={receiver} assignment={undefined} display={display} view={view} openDialog={setDialog} />)}
-                </div>
-              </AccordionPanel>
-            </AccordionItem>}
-            <AccordionItem value="connection">
-              <AccordionHeader>Connection details</AccordionHeader>
-              <AccordionPanel><ConnectionDetails display={display} /></AccordionPanel>
-            </AccordionItem>
-            <AccordionItem value="recovery">
-              <AccordionHeader>Backup &amp; recovery</AccordionHeader>
-              <AccordionPanel><Recovery custody={display.identifierCustody} onAddPassphrase={() => setDialog({ kind: "passphrase" })} /></AccordionPanel>
-            </AccordionItem>
-          </Accordion>
+          <div>
+            <Disclosure summary={<>A TV is asking to connect by words {display.pendingPairings.length > 0 ? `(${display.pendingPairings.length})` : ""}</>}>
+              {display.pendingPairings.length === 0
+                ? <small className="dim-line">None right now. A TV that enters just its site name shows six words instead of taking a code; when one does, it appears here for you to compare and approve.</small>
+                : <div className="card-stack">
+                  {display.pendingPairings.map((pairing) => <PairingCard key={pairing.pairing} pairing={pairing} view={view}
+                    dispatch={dispatch} onApprove={() => setDialog({ kind: "approve", pairing })} />)}
+                </div>}
+            </Disclosure>
+            {removed.length > 0 && <Disclosure summary={`Removed TVs (${removed.length})`}>
+              <div className="card-stack">
+                {removed.map((receiver) => <TvRow key={receiver.device} receiver={receiver} assignment={undefined} display={display} view={view} openDialog={setDialog} />)}
+              </div>
+            </Disclosure>}
+            <Disclosure summary="Connection details"><ConnectionDetails display={display} /></Disclosure>
+            <Disclosure summary="Backup &amp; recovery">
+              <Recovery custody={display.identifierCustody} onAddPassphrase={() => setDialog({ kind: "passphrase" })} />
+            </Disclosure>
+          </div>
         </div>}
     </div>
     {dialog !== null && display !== null && <DisplaysDialogs dialog={dialog} display={display} view={view}
       dispatch={dispatch} onDismiss={() => setDialog(null)} />}
-  </section>;
+  </>;
 }
-
 
 function TvRow({ receiver, assignment, display, view, openDialog }: {
   receiver: DisplayReceiver; assignment: DisplayAssignment | undefined; display: Display; view: ClientView;
   openDialog(dialog: DisplaysDialog): void;
 }) {
-  const styles = useStyles();
   const revoked = receiver.revokedAtUnixMs !== null;
   const now = useNow(15_000);
   const status = tvStatus(receiver, now);
   const removing = view.inFlight.includes(actionKey.displayDeviceRevoke(receiver.device));
   const refused = failureOf(view.failures, actionKey.displayDeviceRevoke(receiver.device));
   return <Card>
-    <div className={styles.row}>
-      <div className={styles.rowIcon}><Tv20Regular /></div>
-      <div className={styles.rowCopy}>
-        <div className={styles.rowTitle}><Text weight="semibold">{receiver.label}</Text><Chip {...status} /></div>
-        <Caption1 className={styles.muted}>
+    <div className="item-row">
+      <div className="item-icon"><IconTv /></div>
+      <div className="item-copy">
+        <div className="item-title"><strong>{receiver.label}</strong><Chip label={status.label} tone={status.tone} /></div>
+        <small className="dim-line">
           {revoked ? `Removed · ${platformName(receiver.platform)}` : heldBy(assignment, display.surfaces, view.library ?? [])}
-          {!revoked && receiver.health !== null && receiver.health.lastError !== "none" && <span className={styles.crit}> · reports {words(receiver.health.lastError)}</span>}
-        </Caption1>
-        {refused !== undefined && <Caption1 className={styles.crit}>{refused.error}</Caption1>}
+          {!revoked && receiver.health !== null && receiver.health.lastError !== "none" && <span className="danger-text"> · reports {words(receiver.health.lastError)}</span>}
+        </small>
+        {refused !== undefined && <small className="dim-line danger-text">{refused.error}</small>}
       </div>
-      {!revoked && <div className={styles.rowActions}>
-        <Menu>
-          <MenuTrigger disableButtonEnhancement>
-            <Button appearance="subtle" icon={<MoreHorizontal20Regular />} aria-label="More" />
-          </MenuTrigger>
-          <MenuPopover><MenuList>
-            <MenuItem disabled={removing} onClick={() => openDialog({ kind: "revoke", receiver })}>Remove this TV…</MenuItem>
-          </MenuList></MenuPopover>
-        </Menu>
+      {!revoked && <div className="item-actions">
+        <RowMenu items={[{ label: "Remove this TV…", onAction: () => openDialog({ kind: "revoke", receiver }), disabled: removing, danger: true }]} />
       </div>}
     </div>
   </Card>;
@@ -455,33 +287,33 @@ function TvRow({ receiver, assignment, display, view, openDialog }: {
 function PairingCard({ pairing, view, dispatch, onApprove }: {
   pairing: DisplayPairing; view: ClientView; dispatch: Dispatch; onApprove(): void;
 }) {
-  const styles = useStyles();
   const busy = view.inFlight.includes(actionKey.displayPairingApprove(pairing.pairing))
     || view.inFlight.includes(actionKey.displayPairingReject(pairing.pairing));
   return <Card>
-    <CardHeader header={<Text weight="semibold">{platformName(pairing.platform)} · {pairing.build}</Text>}
-      description={<Caption1 className={styles.muted}>Approve only if the TV shows these same six words.</Caption1>} />
-    <p className={styles.phrase}>{pairing.confirmationPhrase.join("  ")}</p>
-    <CardFooter>
-      <Button appearance="primary" disabled={busy} onClick={onApprove}>The words match…</Button>
-      <Button appearance="subtle" disabled={busy}
-        onClick={() => void dispatch({ type: "displayPairingReject", pairing: pairing.pairing })}>Not this TV</Button>
-    </CardFooter>
+    <div className="item-copy">
+      <div className="item-title"><strong>{platformName(pairing.platform)} · {pairing.build}</strong></div>
+      <small className="dim-line">Approve only if the TV shows these same six words.</small>
+    </div>
+    <p className="phrase">{pairing.confirmationPhrase.join("  ")}</p>
+    <div className="button-row">
+      <Button variant="primary" disabled={busy} onPress={onApprove}>The words match…</Button>
+      <Button variant="ghost" disabled={busy}
+        onPress={() => void dispatch({ type: "displayPairingReject", pairing: pairing.pairing })}>Not this TV</Button>
+    </div>
   </Card>;
 }
 
 function ConnectionDetails({ display }: { display: Display }) {
-  const styles = useStyles();
-  return <div className={styles.stack}>
-    <Caption1 className={styles.muted}>What a TV app that takes a pairing file needs. A TV that enters a code never does.</Caption1>
-    <div className={styles.facts}>
+  return <>
+    <small className="dim-line">What a TV app that takes a pairing file needs. A TV that enters a code never does.</small>
+    <div>
       <Fact label="This computer" value={display.label} />
       <Fact label="LAN origin" value={display.origin} />
       <Fact label="Certificate SHA-256" value={display.certificateSha256} />
     </div>
-    <div><Button appearance="secondary" size="small" icon={<Copy20Regular />}
-      onClick={() => void navigator.clipboard.writeText(receiverBootstrap(display))}>Copy pairing file</Button></div>
-  </div>;
+    <div className="button-row"><Button variant="quiet"
+      onPress={() => void navigator.clipboard.writeText(receiverBootstrap(display))}><IconCopy size={16} /> Copy pairing file</Button></div>
+  </>;
 }
 
 const slotNames: Record<string, string> = {
@@ -491,17 +323,16 @@ const slotNames: Record<string, string> = {
 };
 
 function Recovery({ custody, onAddPassphrase }: { custody: Display["identifierCustody"]; onAddPassphrase(): void }) {
-  const styles = useStyles();
-  if (custody === null) return <Caption1 className={styles.muted}>This computer does not report how its TV keys are protected.</Caption1>;
+  if (custody === null) return <small className="dim-line">This computer does not report how its TV keys are protected.</small>;
   const hasPassphrase = custody.slots.includes("passphrase");
   const paths = custody.slots.length === 0 ? "nothing" : custody.slots.map((slot) => slotNames[slot] ?? slot).join(", ");
-  return <div className={styles.stack}>
-    <Body1>{custody.portable
+  return <>
+    <p className="body-line">{custody.portable
       ? "If this computer is lost, your TVs can be reconnected from another one."
-      : "If this computer is lost, every TV will need connecting again — unless you set a recovery passphrase."}</Body1>
-    <Caption1 className={styles.muted}>The key that names what your TVs show is unlocked by {paths}.</Caption1>
-    {!hasPassphrase && <div><Button appearance="secondary" size="small" onClick={onAddPassphrase}>Set a recovery passphrase</Button></div>}
-  </div>;
+      : "If this computer is lost, every TV will need connecting again — unless you set a recovery passphrase."}</p>
+    <small className="dim-line">The key that names what your TVs show is unlocked by {paths}.</small>
+    {!hasPassphrase && <div className="button-row"><Button variant="quiet" onPress={onAddPassphrase}>Set a recovery passphrase</Button></div>}
+  </>;
 }
 
 function DisplaysDialogs({ dialog, display, view, dispatch, onDismiss }: {
@@ -514,8 +345,8 @@ function DisplaysDialogs({ dialog, display, view, dispatch, onDismiss }: {
       description="The TV stops immediately and forgets this computer. Connecting it again means a new code."
       onDismiss={onDismiss}>
       <DialogFooter>
-        <Button appearance="secondary" onClick={onDismiss}>Keep it</Button>
-        <Button appearance="primary" onClick={() => {
+        <Button variant="quiet" onPress={onDismiss}>Keep it</Button>
+        <Button variant="danger" onPress={() => {
           void dispatch({ type: "displayDeviceRevoke", device: dialog.receiver.device });
           onDismiss();
         }}>Remove this TV</Button>
@@ -539,13 +370,13 @@ function PassphraseDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismi
   return <AppDialog title="Set a recovery passphrase"
     description="A way back in that does not depend on this computer. It is not stored anywhere — losing it costs only this way in."
     onDismiss={onDismiss}>
-    <Field label="Passphrase"><Input type="password" value={entered} onChange={(_, data) => setEntered(data.value)} /></Field>
-    <Field label="Again" validationMessage={problem} validationState={problem === undefined ? "none" : "warning"}>
-      <Input type="password" value={again} onChange={(_, data) => setAgain(data.value)} />
+    <Field label="Passphrase"><input type="password" value={entered} onChange={(event) => setEntered(event.target.value)} /></Field>
+    <Field label="Again" error={problem}>
+      <input type="password" value={again} onChange={(event) => setAgain(event.target.value)} />
     </Field>
     <DialogFooter>
-      <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
-      <Button appearance="primary" disabled={!long || !matches} onClick={() => {
+      <Button variant="quiet" onPress={onDismiss}>Cancel</Button>
+      <Button variant="primary" disabled={!long || !matches} onPress={() => {
         void dispatch({ type: "displayIdentifierAdmitPassphrase", passphrase: entered });
         onDismiss();
       }}>Set it</Button>
@@ -554,22 +385,18 @@ function PassphraseDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismi
 }
 
 function ApproveDialog({ pairing, dispatch, onDismiss }: { pairing: DisplayPairing; dispatch: Dispatch; onDismiss(): void }) {
-  const styles = useStyles();
   const [label, setLabel] = useState(platformName(pairing.platform));
   return <AppDialog title="Connect this TV?"
     description="Continue only if the TV shows exactly these six words."
     onDismiss={onDismiss}>
-    <p className={styles.phrase}>{pairing.confirmationPhrase.join("  ")}</p>
-    <Field label="Name"><Input value={label} onChange={(_, data) => setLabel(data.value)} /></Field>
+    <p className="phrase">{pairing.confirmationPhrase.join("  ")}</p>
+    <Field label="Name"><input value={label} onChange={(event) => setLabel(event.target.value)} /></Field>
     <DialogFooter>
-      <Button appearance="secondary" onClick={onDismiss}>Cancel</Button>
-      <Button appearance="primary" disabled={label.trim() === ""} onClick={() => {
+      <Button variant="quiet" onPress={onDismiss}>Cancel</Button>
+      <Button variant="primary" disabled={label.trim() === ""} onPress={() => {
         void dispatch({ type: "displayPairingApprove", pairing: pairing.pairing, label: label.trim() });
         onDismiss();
       }}>Connect</Button>
     </DialogFooter>
   </AppDialog>;
 }
-
-
-
