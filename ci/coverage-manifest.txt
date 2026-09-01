@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2929
-pr-platform    2396
-nightly        2958
+pr             2932
+pr-platform    2398
+nightly        2961
 mutants        106
 
 [gates]
@@ -589,6 +589,7 @@ lait daemon::address_book::tests::a_fully_imported_aliases_file_is_retired
 lait daemon::address_book::tests::a_short_prefix_alias_stays_pending
 lait daemon::address_book::tests::members_and_presence_are_decorated_from_the_book
 lait daemon::address_book::tests::migration_imports_full_ids_and_keeps_prefixes_pending
+lait daemon::correspondence::tests::a_blocked_sender_stops_landing_at_the_carrier
 lait daemon::correspondence::tests::a_carrier_that_cannot_be_asked_is_not_an_empty_mailbox
 lait daemon::correspondence::tests::a_daemon_with_no_post_still_answers_its_device_set
 lait daemon::correspondence::tests::a_retirement_narrows_the_set_this_daemon_publishes
@@ -1339,6 +1340,7 @@ lait-post tests::one_device_is_capped_and_does_not_crowd_the_map
 lait-post tests::one_persons_mailbox_is_not_anothers
 lait-post tests::the_challenge_map_is_bounded_without_becoming_a_wall
 lait-post tests::unblocking_a_sender_lets_their_next_letter_through
+lait-post::over_http a_deposit_rings_the_wake_doorbell_and_sweep_answers
 lait-post::over_http a_letter_crosses_the_wire_and_only_its_recipient_collects_it
 lait-reach::bin/lait-reach tests::a_receiver_reaches_its_coordinator_through_the_splice
 lait-reach::bin/lait-reach tests::an_unbound_label_is_refused_without_a_dial
@@ -2981,6 +2983,7 @@ world-interface tests::a_local_world_registers_beside_the_release_it_was_copied_
 world-interface tests::a_package_states_its_provenance_and_cannot_omit_it
 world-interface tests::a_package_without_a_decorator_keeps_decoded_json
 world-interface tests::a_re_keyed_package_executes_what_its_own_parser_produced
+world-interface tests::a_re_keyed_package_readdresses_what_it_parses
 world-interface tests::a_refused_package_leaves_the_registry_untouched
 world-interface tests::a_reserved_collision_is_scoped_to_the_package_being_mounted
 world-interface tests::a_second_world_mounts_without_host_specific_code
