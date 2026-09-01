@@ -58,9 +58,15 @@ select {
   border-radius: var(--ds-r-sm);
 }
 
+/* Keyboard focus is a rim, not a shout. The full accent is the one ring
+   `[data-lit]` draws for a held relation; focus wears the accent's rim light,
+   sitting tight on the control. A control with focus material of its own — a
+   field filling with light, a chip lifting — silences this in its own file,
+   and closing a popover restores focus to its trigger, so a loud ring here
+   would flash on every chip after every menu. */
 :is(button, a, input, textarea, select, [tabindex]):focus-visible {
-  outline: 2px solid var(--ds-focus);
-  outline-offset: 2px;
+  outline: 2px solid var(--ds-accent-rim);
+  outline-offset: 1px;
 }
 
 h1,

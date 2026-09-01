@@ -173,6 +173,14 @@
   box-shadow: var(--ds-material-control);
 }
 
+/* A chip's focus is its hover material, not a ring: closing the popover it
+   opened lands focus back here, and a ring there reads as a leftover. */
+.ds-tuned:focus-visible {
+  outline: none;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-control);
+}
+
 .ds-tuned svg {
   color: var(--ds-faint);
 }

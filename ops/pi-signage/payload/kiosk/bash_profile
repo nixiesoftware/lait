@@ -1,0 +1,4 @@
+if [ "$(tty)" = /dev/tty1 ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  export XCURSOR_SIZE=1
+  exec labwc >>/var/log/lait-kiosk.log 2>&1
+fi

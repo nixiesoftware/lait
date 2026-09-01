@@ -1,0 +1,8 @@
+#!/bin/bash
+swaybg -c '#000000' &
+for output in $(wlr-randr 2>/dev/null | awk '/^[A-Z]/{print $1}'); do
+  wlr-randr --output "$output" --mode 1920x1080@60 >/dev/null 2>&1 || \
+    wlr-randr --output "$output" --mode 1920x1080 >/dev/null 2>&1 || true
+done
+wayvnc 127.0.0.1 5900 >>/var/log/lait-wayvnc.log 2>&1 &
+exec /usr/local/bin/astrolabe-display-shell --output /var/lib/astrolabe-display/output

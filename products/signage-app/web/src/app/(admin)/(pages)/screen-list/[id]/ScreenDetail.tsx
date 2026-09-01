@@ -53,6 +53,10 @@ import {
   type Segment,
 } from "@/ds";
 import { fetchAsRun } from "@/utils/screens/api";
+import { useTvs } from "@/utils/tv/api";
+import { PlaceAdjust, placeWith } from "./PlaceAdjust";
+import { ScreenChin } from "./ScreenChin";
+import { ScreenStage } from "./ScreenStage";
 import { ScreenTv } from "./ScreenTv";
 import { putScreen, removeScreen, tune, useFleet } from "@/utils/screens/fleet";
 import { explain, reaches, type Context } from "@/utils/lait/resolve";
@@ -72,6 +76,7 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
   const orbit = useOrbit();
   const { now } = useLive();
   const fleet = useFleet();
+  const tvs = useTvs();
   const { held } = useFocus();
   const [inspecting, setInspecting] = useState<"place" | string | null>(null);
   const [asRun, setAsRun] = useState<SignageAsRun | null>(null);
@@ -222,6 +227,9 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
 
   const winner = playback?.source;
   const interrupted = winner?.via === "broadcast";
+  // The stage claims the glass only while nothing is addressed to the screen.
+  // `null` playback is unknown, and unknown draws nothing extra.
+  const staged = playback?.showing.showing === "unaddressed";
 
   const remove = () => {
     haptic("delete");
@@ -256,17 +264,79 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
 
       {/* ── The horizon: the screen, and what is true of it ─────────────── */}
       <section className="ds-horizon">
-        <Bezel
-          size="lg"
-          screen={screen}
-          playback={playback}
-          programs={fleet.programs}
-          media={fleet.media}
-          presets={fleet.presets}
-          orbit={orbit}
-          now={now}
-          heard={{ at: heard }}
-        />
+        <div className="ds-console">
+          <Bezel
+            size="lg"
+            screen={screen}
+            playback={playback}
+            programs={fleet.programs}
+            media={fleet.media}
+            presets={fleet.presets}
+            orbit={orbit}
+            now={now}
+            heard={{ at: heard }}
+          >
+            {staged && (
+              <ScreenStage
+                screen={screen}
+                fleet={tvs.fleet}
+                error={tvs.error}
+                refresh={tvs.refresh}
+                screenIds={fleet.screens.map((entry) => entry.id)}
+                now={now}
+              />
+            )}
+          </Bezel>
+          <ScreenChin
+            screen={screen}
+            put={put}
+            tuneItems={tuneItems}
+            onTune={retune}
+            broadcast={
+              <div className="ds-railpanel">
+                {claims.length === 0 ? (
+                  <p className="ds-hint">Nothing is addressed at this screen.</p>
+                ) : (
+                  claims.slice(0, 4).map((claim) => (
+                    <span className="ds-railpanel-row" key={claim.id}>
+                      <Megaphone size={13} aria-hidden />
+                      <span>
+                        {claim.name} <em>· {describeAction(claim, fleet)}</em>
+                      </span>
+                    </span>
+                  ))
+                )}
+                <button
+                  type="button"
+                  className="ds-pop-foot"
+                  onClick={() =>
+                    void navigate({ to: "/broadcast-hub", search: { screen: screen.id } })
+                  }
+                >
+                  Broadcast to this screen…
+                </button>
+              </div>
+            }
+            schedule={
+              <div className="ds-railpanel">
+                {day.length === 0 ? (
+                  <p className="ds-hint">
+                    Nothing is scheduled for it. Tune it to a channel with dayparts.
+                  </p>
+                ) : (
+                  <DayTrack segments={day} now={now} timezone={screen.place?.timezone} />
+                )}
+                <button
+                  type="button"
+                  className="ds-pop-foot"
+                  onClick={() => void navigate({ to: "/channel-list" })}
+                >
+                  Open Channels…
+                </button>
+              </div>
+            }
+          />
+        </div>
         <div className="ds-horizon-copy">
           <div className="ds-row-between" style={{ justifyContent: "flex-start" }}>
             {interrupted && <OnAir label="Interrupted" tone="alarm" />}
@@ -276,22 +346,16 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
           </div>
           <p className="ds-horizon-why">{playback ? explain(playback, showingName) : "Unknown"}</p>
           <div className="ds-horizon-facts">
-            <button type="button" className="ds-tuned" onClick={() => setInspecting("place")}>
-              <MapPin size={14} />
-              {screen.place
-                ? `${screen.place.region ? `${screen.place.region} · ` : ""}${screen.place.timezone}`
-                : "Not placed"}
-            </button>
-            <ChoiceMenu
-              label="Tune"
-              className={`ds-tuned${channel ? "" : " is-absent"}`}
-              items={tuneItems}
-              onPick={retune}
-            >
-              <Tv size={14} />
-              {channel ? channel.name : "Not tuned"}
-            </ChoiceMenu>
-            <ScreenTv screenId={screen.id} screenName={screen.name} />
+            {!staged && (
+              <ScreenTv
+                screenId={screen.id}
+                screenName={screen.name}
+                screenIds={fleet.screens.map((entry) => entry.id)}
+                fleet={tvs.fleet}
+                error={tvs.error}
+                refresh={tvs.refresh}
+              />
+            )}
             <span>
               <Clock size={14} />
               {heard == null ? (
@@ -370,16 +434,6 @@ export default function ScreenDetail({ screenId }: { screenId: string }) {
               </span>
             </div>
           )}
-        </div>
-        <div className="ds-page-actions">
-          <button
-            type="button"
-            className="ds-btn ds-btn-solid"
-            onClick={() => void navigate({ to: "/broadcast-hub", search: { screen: screen.id } })}
-          >
-            <Radio size={15} />
-            Broadcast to this screen
-          </button>
         </div>
       </section>
 
@@ -734,26 +788,15 @@ function PlaceFields({
   put: (next: SignageScreen) => Promise<void>;
 }) {
   const place = screen.place;
-  const writePlace = (patch: Partial<Place>) =>
-    put({
-      ...screen,
-      place: {
-        latitude: place?.latitude ?? 0,
-        longitude: place?.longitude ?? 0,
-        timezone: place?.timezone ?? "",
-        region: place?.region ?? null,
-        ...patch,
-      },
-    });
   const pick = (city: CitySelection) =>
-    void writePlace({
-      latitude: city.latitude,
-      longitude: city.longitude,
-      timezone: city.timezone,
-      region: city.admin1 ?? place?.region ?? null,
-    });
-  const zones =
-    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+    void put(
+      placeWith(screen, {
+        latitude: city.latitude,
+        longitude: city.longitude,
+        timezone: city.timezone,
+        region: city.admin1 ?? place?.region ?? null,
+      }),
+    );
   return (
     <div className="ds-stack">
       <CityPicker
@@ -762,36 +805,7 @@ function PlaceFields({
         initialLabel={place?.region ?? null}
         onSelect={pick}
       />
-      <div className="ds-pair">
-        <CommitText
-          label="Latitude"
-          value={place ? String(place.latitude) : ""}
-          placeholder="42.3314"
-          inputMode="decimal"
-          onWrite={(next) => writePlace({ latitude: Number(next) })}
-        />
-        <CommitText
-          label="Longitude"
-          value={place ? String(place.longitude) : ""}
-          placeholder="-83.0458"
-          inputMode="decimal"
-          onWrite={(next) => writePlace({ longitude: Number(next) })}
-        />
-      </div>
-      <CommitSelect
-        label="Time zone"
-        value={place?.timezone ?? ""}
-        options={[{ value: "", label: "Choose a zone" }, ...zones.map((zone) => ({ value: zone, label: zone }))]}
-        hint="Required. A coordinate without one computes a plausible timetable for the wrong offset, and nothing looks wrong."
-        onWrite={(next) => writePlace({ timezone: next })}
-      />
-      <CommitText
-        label="Region"
-        value={place?.region ?? ""}
-        placeholder="MI"
-        hint="So an audience can say “every screen in Michigan” without anybody maintaining a label."
-        onWrite={(next) => writePlace({ region: next || null })}
-      />
+      <PlaceAdjust screen={screen} put={put} />
     </div>
   );
 }

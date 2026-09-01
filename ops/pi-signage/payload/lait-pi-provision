@@ -1,0 +1,79 @@
+#!/bin/bash
+# Idempotently turn Raspberry Pi OS Lite into the Lait Signage canary.
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+export PATH="${PATH}:/usr/sbin:/sbin"
+payload=/boot/firmware/lait-pi
+state=/var/lib/astrolabe-display
+marker=/var/lib/lait-pi-image/provisioned
+log() { echo "$(date '+%F %T') lait-pi: $*"; }
+
+[ ! -e "$marker" ] || { log "already provisioned"; exit 0; }
+cd "$payload"
+sha256sum --check manifest.sha256
+
+for attempt in $(seq 1 60); do
+  ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1 && break
+  sleep 5
+done
+
+packages="avahi-daemon ca-certificates curl dbus-user-session labwc mpv pipewire pipewire-audio psmisc swaybg wayvnc wireplumber wlr-randr"
+missing=""
+for package in $packages; do
+  dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || missing="$missing $package"
+done
+if [ -n "$missing" ]; then
+  log "installing kiosk runtime:$missing"
+  apt-get update -q
+  apt-get install -y -q --no-install-recommends $missing
+fi
+
+id kiosk >/dev/null 2>&1 || useradd --create-home --shell /bin/bash kiosk
+usermod -aG audio,input,render,video kiosk
+install -d -m 0755 /etc/lait-pi /usr/local/lib/lait-pi /etc/ssh/sshd_config.d
+install -d -o kiosk -g kiosk -m 0700 "$state/state"
+install -d -o kiosk -g kiosk -m 0755 "$state/output" /home/kiosk/.config/labwc
+install -d -m 0755 /etc/systemd/system/getty@tty1.service.d
+install -o kiosk -g kiosk -m 0644 /dev/null /var/log/lait-kiosk.log
+install -o kiosk -g kiosk -m 0644 /dev/null /var/log/lait-wayvnc.log
+
+install -m 0755 "$payload/astrolabe-display-reference" /usr/local/bin/astrolabe-display-reference
+install -m 0755 "$payload/astrolabe-display-shell" /usr/local/bin/astrolabe-display-shell
+install -m 0755 "$payload/lait-bootstrap" /usr/local/lib/lait-pi/lait-bootstrap
+install -m 0755 "$payload/lait-receiver-run" /usr/local/sbin/lait-receiver-run
+install -m 0755 "$payload/lait-pi-health" /usr/local/bin/lait-pi-health
+install -m 0644 "$payload/systemd/lait-display-receiver.service" /etc/systemd/system/lait-display-receiver.service
+install -m 0644 "$payload/kiosk/bash_profile" /home/kiosk/.bash_profile
+install -m 0755 "$payload/kiosk/labwc-autostart" /home/kiosk/.config/labwc/autostart
+install -m 0644 "$payload/kiosk/getty-autologin.conf" /etc/systemd/system/getty@tty1.service.d/autologin.conf
+chown -R kiosk:kiosk /home/kiosk "$state"
+
+cat > /etc/ssh/sshd_config.d/70-lait-pi.conf <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+EOF
+
+serial=$(awk '/Serial/{print substr($3,length($3)-3)}' /proc/cpuinfo | tail -1)
+hostname="lait-signage-${serial:-pi}"
+hostnamectl set-hostname "$hostname"
+sed -i '/^127\.0\.1\.1/d' /etc/hosts
+printf '127.0.1.1 %s\n' "$hostname" >> /etc/hosts
+printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-lait-pi.cfg
+
+systemctl enable ssh.service avahi-daemon.service >/dev/null 2>&1 || true
+systemctl unmask getty@tty1.service >/dev/null 2>&1 || true
+systemctl enable getty@tty1.service lait-display-receiver.service >/dev/null
+systemctl daemon-reload
+
+if [ ! -x /var/lib/lait/bin/lait ]; then
+  log "installing the signed stable Lait host"
+  /usr/local/lib/lait-pi/lait-bootstrap install --displays
+fi
+
+install -d -m 0755 "$(dirname "$marker")"
+touch "$marker"
+systemctl restart ssh.service
+systemctl start --no-block avahi-daemon.service getty@tty1.service lait-display-receiver.service
+log "ready as $hostname; VNC is loopback-only on 5900; receiver awaits signage-bootstrap.json"

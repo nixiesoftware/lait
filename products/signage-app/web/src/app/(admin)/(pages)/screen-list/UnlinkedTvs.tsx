@@ -15,13 +15,27 @@ import type { SignageScreen } from "@/utils/lait/types";
 
 export function UnlinkedTvs({ screens }: { screens: SignageScreen[] }) {
   const toast = useToast();
-  const { fleet, refresh } = useTvs();
+  const { fleet, error, refresh } = useTvs();
   const known = new Set(screens.map((screen) => screen.id));
   const idle = (fleet?.receivers ?? []).filter((tv) => {
     const shown = screenOf(tv.assignment?.input);
     return shown === null || !known.has(shown);
   });
   const pairings = fleet?.pairings ?? [];
+
+  // A host that could not be asked is not a host with nothing to say.
+  if (fleet === null && error !== null) {
+    return (
+      <div className="ds-tvs" style={{ marginBottom: 16 }}>
+        <div className="ds-tv-row">
+          <span className="ds-tv-copy">
+            <strong>TVs could not be asked</strong>
+            <span>{error}</span>
+          </span>
+        </div>
+      </div>
+    );
+  }
   if (idle.length === 0 && pairings.length === 0) return null;
 
   const items = screens.map((screen) => ({ id: screen.id, label: screen.name }));

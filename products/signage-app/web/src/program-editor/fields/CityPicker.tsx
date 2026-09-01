@@ -30,7 +30,7 @@ interface CityPickerProps {
 // (name, country, admin1, latitude, longitude, timezone) is small.
 const GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search";
 
-interface OpenMeteoResult {
+export interface OpenMeteoResult {
   id: number;
   name: string;
   latitude: number;
@@ -42,8 +42,60 @@ interface OpenMeteoResult {
   population?: number;
 }
 
-function formatCity(r: OpenMeteoResult): string {
+export function formatCity(r: OpenMeteoResult): string {
   return [r.name, r.admin1, r.country].filter(Boolean).join(", ");
+}
+
+/**
+ * The city search on its own: a debounced, aborting geocode of `query`.
+ *
+ * Extracted so a surface that already owns an input — a combo popover's
+ * query — can ask the same question without inheriting this picker's field.
+ * `enabled: false` parks it (used while an input is showing a picked label
+ * rather than a query someone is typing).
+ */
+export function useCitySearch(
+  query: string,
+  enabled = true,
+): { results: OpenMeteoResult[]; loading: boolean; error: string | null } {
+  const [results, setResults] = useState<OpenMeteoResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
+      setResults([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    const t = setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const url = `${GEOCODE_URL}?name=${encodeURIComponent(trimmed)}&count=10&language=en&format=json`;
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`geocoding HTTP ${res.status}`);
+        const data = (await res.json()) as { results?: OpenMeteoResult[] };
+        setResults(data.results ?? []);
+      } catch (e) {
+        if ((e as { name?: string }).name === "AbortError") return;
+        setError(e instanceof Error ? e.message : "geocoding failed");
+        setResults([]);
+      } finally {
+        setLoading(false);
+      }
+    }, 300);
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+  }, [query, enabled]);
+
+  return { results, loading, error };
 }
 
 export const CityPicker: React.FC<CityPickerProps> = ({

@@ -362,6 +362,122 @@
    own inset hairline to the rung above, and rounds with the card at the
    ends. Hovering it is a whisper of ink, never a ring — the ring is what a
    held relation wears elsewhere, and a rung is never lit by itself. */
+/* ── Stage: the empty screen draws its own on-screen display ──────────────
+   Real televisions solved this layout decades ago: the channel badge in one
+   corner, the clock and city in another, the activation code dead center.
+   The stage digitizes that grammar onto the unaddressed hero — the facts sit
+   on the object where a TV draws them, as the system's own chips and its one
+   accent button. No material is invented here: a chip resting on the glass
+   wears the card recipe, and everything else is type on the horizon. */
+
+.ds-bezel:has(.ds-stage) .ds-glass.is-horizon::after {
+  content: none;
+}
+
+.ds-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+}
+
+.ds-stage-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 9% 12%;
+  text-align: center;
+}
+
+.ds-stage-center > span:last-child {
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+  max-width: 34em;
+}
+
+.ds-stage-center.is-warn strong {
+  color: var(--ds-miss);
+  font-weight: var(--ds-weight-medium);
+}
+
+.ds-stage-center.is-warn svg {
+  color: var(--ds-miss);
+}
+
+.ds-stage-eyebrow {
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+}
+
+/* The activation code, as the wall will show it. */
+.ds-stage-code {
+  font-family: var(--ds-mono);
+  font-size: clamp(1.6rem, 4.4vw, 3rem);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: 0.12em;
+  color: var(--ds-ink);
+  user-select: all;
+}
+
+.ds-stage-words {
+  font-style: normal;
+  font-weight: var(--ds-weight-medium);
+  font-size: clamp(1.05rem, 2.4vw, 1.5rem);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ds-stage-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--ds-fs-small);
+  color: var(--ds-muted);
+}
+
+/* A chip resting on the glass: the same pill, held a card's height above
+   the sunken panel so it reads at all. One size up from the fact row. The
+   double selector outranks `.ds-tuned`'s own surface, which would otherwise
+   leave it sunken-on-sunken and invisible until hover. */
+.ds-tuned.ds-stage-chip {
+  font-size: var(--ds-fs-body);
+  min-height: 38px;
+  padding: 0 16px 0 13px;
+  background: var(--ds-surface);
+  box-shadow: var(--ds-material-card);
+}
+
+.ds-stage-chip-sub {
+  color: var(--ds-muted);
+  font-weight: var(--ds-weight-regular);
+}
+
+.ds-stage-tune {
+  position: absolute;
+  top: 5.5%;
+  right: 4%;
+}
+
+.ds-stage-place {
+  position: absolute;
+  bottom: 7%;
+  left: 4%;
+}
+
+@media (max-width: 560px) {
+  .ds-stage-center {
+    padding: 6%;
+    gap: 8px;
+  }
+  .ds-stage-chip-sub {
+    display: none;
+  }
+}
+
 /* ── TVs that are a screen: chips on the horizon ──────────────────────── */
 
 .ds-tvchip {
@@ -641,6 +757,367 @@
   gap: clamp(18px, 3vw, 32px);
   align-items: start;
   margin-bottom: var(--ds-space-5);
+}
+
+/* ── Console: the screen and its chin, one body ──────────────────────────
+   A monitor is one object: the glass, and a chin along the bottom holding
+   its controls. The body's padding leaves room for the rim a never-heard
+   or on-air panel wears. One key per act, every key the same shape — an
+   icon in a circle, its word beneath — and every key answers the same way:
+   its panel blooms upward over the glass, Dynamic-Island fashion, from the
+   chin that owns it. The pressed key wears the accent while its panel is
+   up; leaving for a full page is a quiet trailing link inside the panel,
+   never the key's own act. */
+
+.ds-console {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--ds-surface);
+  border-radius: var(--ds-r-lg);
+  box-shadow: var(--ds-material-card);
+  padding: 10px 10px 0;
+}
+
+.ds-console > .ds-bezel {
+  width: 100%;
+}
+
+/* Inside the body, the never-heard ochre ring stands down: the console
+   frames the glass, and the fact still speaks from the clock beside it. */
+.ds-console > .ds-bezel[data-never][data-state="unaddressed"] {
+  box-shadow: inset 0 1px 2px rgb(var(--ds-ink-rgb) / 0.08);
+}
+
+.ds-console > .ds-bezel[data-never]:not([data-state="unaddressed"]) {
+  box-shadow:
+    inset 0 1px 0 rgb(var(--ds-panel-screen-ink) / 0.12),
+    var(--ds-material-lift);
+}
+
+.ds-chin {
+  position: relative;
+  height: 60px;
+}
+
+/* ── The morph: the chin itself, stretching ────────────────────────────────
+   The hill's height is a measured spring driven by the component (motion
+   writes it inline): it is always springing toward what the content asks
+   — opening, closing, the fold, a list growing — and keeps its velocity
+   when interrupted. Geometry here is the constant part; the resting height
+   is the truth the spring returns to. */
+
+.ds-chin-morph {
+  position: absolute;
+  bottom: 0;
+  /* Centered by auto margins, never by transform: motion owns transform
+     for the drag and would silently drop a translateX(-50%). */
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: min(560px, 100%);
+  height: 60px;
+  background: var(--ds-surface);
+  border-radius: 26px 26px 0 0;
+  /* Lateral only: vertical breathing lives in the view, so the measured
+     content already includes it and the closed box is truly 84px — a
+     padding taller than the height would floor the box at the padding and
+     stand the "closed" morph visibly proud of the glass. */
+  padding: 0 20px;
+  z-index: 2;
+  overflow: hidden;
+}
+
+/* The cast shadow, as its own quiet layer behind the hill — it fades in
+   a beat after the swell and is gone at the first frame of a dismissal. */
+.ds-chin-shade {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: min(560px, 100%);
+  /* The hill's own measured height, kept current by the chin. */
+  height: var(--chin-hill-h, 60px);
+  border-radius: 26px 26px 0 0;
+  box-shadow: 0 -14px 30px -12px rgb(var(--ds-ink-rgb) / 0.25);
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+  /* Asymmetric on purpose: a delay declared once would also hold the
+     shadow on screen through a dismissal — the lingering-frames bug. */
+  transition: opacity 120ms var(--ds-ease);
+}
+
+.ds-chin.is-open .ds-chin-shade {
+  opacity: 1;
+  transition: opacity 200ms var(--ds-ease) 260ms;
+}
+
+/* The fillets: the flat chin edge curving up into the hill's walls. They
+   belong to the chin, not the hill — the hill clips its overflow — and sit
+   just above the chin line, hugging where the walls land. They fade in a
+   beat behind the swell, once the walls are where they will stay. */
+.ds-chin::before,
+.ds-chin::after {
+  content: "";
+  position: absolute;
+  top: -18px;
+  width: 18px;
+  height: 18px;
+  z-index: 4;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms var(--ds-ease) 200ms;
+}
+
+.ds-chin::before {
+  left: calc(50% - min(280px, 50%) - 18px);
+  background: radial-gradient(circle at top left, transparent 17.5px, var(--ds-surface) 18px);
+}
+
+.ds-chin::after {
+  right: calc(50% - min(280px, 50%) - 18px);
+  background: radial-gradient(circle at top right, transparent 17.5px, var(--ds-surface) 18px);
+}
+
+.ds-chin.is-open::before,
+.ds-chin.is-open::after {
+  opacity: 1;
+}
+
+/* The band is the console's width; what it holds reads at a column's. */
+.ds-chin-view {
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 16px 0 70px;
+}
+
+.ds-chin-band {
+  position: absolute;
+  inset: 0;
+  background: var(--ds-surface);
+  z-index: 3;
+  display: grid;
+}
+
+/* Keys and anchor share the cell and trade by opacity, not by display —
+   a face mid-fade still needs its box. */
+.ds-chin-band > * {
+  grid-area: 1 / 1;
+}
+
+.ds-chin-keys {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 6px;
+}
+
+/* The hill holds a reading column, whatever the console's width. */
+.ds-chin-view {
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 16px 0 70px;
+}
+
+.ds-chin-keys[hidden],
+.ds-chin-anchor[hidden],
+.ds-chin-view[hidden],
+.ds-chin-view > [hidden] {
+  display: none;
+}
+
+/* The foundation bar: the panel's constant controls, anchored where the
+   keys were — title, the query's ground, the way out. The structure above
+   it comes and goes; this row holds still. */
+.ds-chin-anchor {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  width: min(520px, calc(100% - 40px));
+  margin: 0 auto;
+}
+
+.ds-chin-anchor > strong {
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
+  white-space: nowrap;
+}
+
+.ds-chin-anchor-slot {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.ds-chin-anchor-slot .ds-combo-find {
+  flex: 1;
+}
+
+.ds-chin-view {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+}
+
+.ds-chin-viewhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+}
+
+.ds-chin-viewhead strong {
+  font-size: var(--ds-fs-small);
+  font-weight: var(--ds-weight-medium);
+  letter-spacing: var(--ds-track-heading);
+}
+
+/* One key per act, every key the same shape: a pill holding its icon and
+   its word together — nothing dangles beneath. The pressed key wears the
+   accent while its panel is up. */
+
+.ds-railbtn {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 16px 0 13px;
+  border-radius: var(--ds-r-pill);
+  background: var(--ds-surface-sunken);
+  box-shadow: var(--ds-material-control);
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  letter-spacing: var(--ds-track-body);
+  color: var(--ds-ink);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--ds-dur-fast) var(--ds-ease),
+    box-shadow var(--ds-dur-fast) var(--ds-ease),
+    color var(--ds-dur-fast) var(--ds-ease);
+}
+
+/* The icon rides inside the pill; the span is only its seat. */
+.ds-railbtn-key {
+  display: grid;
+  place-items: center;
+  color: var(--ds-faint);
+}
+
+.ds-railbtn:hover {
+  background: color-mix(in srgb, var(--ds-surface-sunken) 92%, var(--ds-ink));
+}
+
+.ds-railbtn:active {
+  background: var(--ds-surface-sunken);
+  box-shadow: inset 0 2px 4px rgb(var(--ds-ink-rgb) / 0.12);
+}
+
+.ds-railbtn[data-popup-open] {
+  background: var(--ds-accent);
+  color: var(--ds-accent-ink);
+  box-shadow: var(--ds-material-accent);
+}
+
+.ds-railbtn[data-popup-open] .ds-railbtn-key {
+  color: var(--ds-accent-ink);
+}
+
+.ds-railbtn:focus-visible {
+  outline: none;
+  box-shadow:
+    var(--ds-material-control),
+    0 0 0 2px var(--ds-accent-rim);
+}
+
+/* The panels a key opens: the live fact drawn rich, and the quiet trailing
+   link out to the full page — never the other way around. */
+
+.ds-railpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ds-railpanel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  font-size: var(--ds-fs-small);
+  color: var(--ds-ink);
+  min-width: 0;
+}
+
+.ds-railpanel-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-railpanel-row em {
+  font-style: normal;
+  color: var(--ds-muted);
+}
+
+.ds-railpanel-row svg {
+  flex-shrink: 0;
+  color: var(--ds-faint);
+}
+
+.ds-railpanel .ds-hint {
+  margin: 0;
+  padding: 0 4px;
+}
+
+.ds-pop-foot {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-top: 1px solid var(--ds-rule);
+  margin-top: 4px;
+  padding: 10px 4px 8px;
+  text-align: left;
+  font: inherit;
+  font-size: var(--ds-fs-small);
+  color: var(--ds-accent);
+  cursor: pointer;
+}
+
+.ds-pop-foot:hover,
+.ds-pop-foot:focus-visible {
+  outline: none;
+  color: var(--ds-accent-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ds-chin-morph {
+    transition: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .ds-railbtn {
+    padding: 2px 6px;
+  }
+  .ds-railbtn-key {
+    width: 40px;
+    height: 40px;
+  }
 }
 
 .ds-horizon-copy {

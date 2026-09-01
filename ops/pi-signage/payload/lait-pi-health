@@ -1,0 +1,10 @@
+#!/bin/bash
+set -u
+printf 'host=%s uptime=%s\n' "$(hostname)" "$(cut -d. -f1 /proc/uptime 2>/dev/null || echo unknown)s"
+printf 'lait=%s receiver=%s bootstrap=%s handoff=%s wayvnc=%s\n' \
+  "$(systemctl is-active lait.service 2>/dev/null || true)" \
+  "$(systemctl is-active lait-display-receiver.service 2>/dev/null || true)" \
+  "$([ -s /boot/firmware/signage-bootstrap.json ] && echo present || echo waiting)" \
+  "$([ -s /var/lib/astrolabe-display/output/active.json ] && echo present || echo waiting)" \
+  "$(ss -ltn 2>/dev/null | grep -q '127.0.0.1:5900' && echo listening || echo waiting)"
+ip -brief address show 2>/dev/null || true

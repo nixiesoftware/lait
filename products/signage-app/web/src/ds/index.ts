@@ -15,6 +15,7 @@ export { haptic, type HapticKind } from "./haptic";
 export { Confirm } from "./confirm";
 export { Prompt } from "./prompt";
 export { ChoiceMenu, ItemMenu, MoreMenu, OverlayMenu, type ChoiceItem, type MenuItem } from "./menu";
+export { Combo, ComboSurface } from "./combo";
 export {
   Page,
   PageHeader,

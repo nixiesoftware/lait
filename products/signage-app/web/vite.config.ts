@@ -49,15 +49,18 @@ export default defineConfig({
   build: {
     outDir: '../assets/web',
     emptyOutDir: true,
-    // No hashed filenames: the bundle is committed, so stable names keep the
-    // diff legible and stop every rebuild from churning the tree with new
-    // files. The World release is versioned as a whole, so cache-busting names
-    // add nothing.
+    // Hashed filenames, deliberately. This file used to say stable names were
+    // fine because "the World release is versioned as a whole" — but a head
+    // serves every release of this World at the same URLs, so an upgrade (or a
+    // local-World redeploy) changes the bytes behind an unchanged /app.js and
+    // a browser's cache happily keeps the old ones. A content hash makes every
+    // deploy its own URL; index.html is the one mutable entry, and it is tiny.
+    // The committed diff shows one rename per build, which is the price.
     rollupOptions: {
       output: {
-        entryFileNames: 'app.js',
-        chunkFileNames: '[name].js',
-        assetFileNames: '[name][extname]',
+        entryFileNames: 'app.[hash].js',
+        chunkFileNames: '[name].[hash].js',
+        assetFileNames: '[name].[hash][extname]',
       },
     },
   },

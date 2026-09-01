@@ -1,0 +1,21 @@
+[Unit]
+Description=Astrolabe Display reference receiver
+Wants=network-online.target
+After=network-online.target lait.service
+
+[Service]
+Type=simple
+User=kiosk
+Group=kiosk
+ExecStart=/usr/local/sbin/lait-receiver-run
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/boot/firmware
+ReadWritePaths=/var/lib/astrolabe-display
+
+[Install]
+WantedBy=multi-user.target

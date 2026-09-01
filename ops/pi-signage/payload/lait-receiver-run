@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+bootstrap=/boot/firmware/signage-bootstrap.json
+while [ ! -s "$bootstrap" ]; do
+  echo "receiver: waiting for $bootstrap"
+  sleep 10
+done
+printf 'yes\n' | exec /usr/local/bin/astrolabe-display-reference \
+  --bootstrap "$bootstrap" \
+  --state /var/lib/astrolabe-display/state \
+  --output /var/lib/astrolabe-display/output \
+  --width 1920 --height 1080 --locale en-US

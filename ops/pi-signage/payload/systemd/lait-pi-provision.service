@@ -1,0 +1,14 @@
+[Unit]
+Description=Provision the Lait Signage Raspberry Pi canary
+Wants=network-online.target
+After=network-online.target cloud-final.service
+
+[Service]
+Type=oneshot
+ExecStart=/boot/firmware/lait-pi/lait-pi-provision
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
