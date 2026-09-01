@@ -33,7 +33,7 @@ async fn serve() -> (String, tempfile::TempDir) {
 }
 
 async fn serve_locally(dir: tempfile::TempDir) -> (String, tempfile::TempDir) {
-    let store = FsStore::open(dir.path()).expect("open");
+    let store: lait_post::store::BoxedStore = Box::new(FsStore::open(dir.path()).expect("open"));
     let shared: Shared = Arc::new(Mutex::new(Post::new(store)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -236,4 +236,71 @@ fn preimage_ack(ack: &SignedAck) -> Vec<u8> {
         framed(&mut out, id.as_bytes());
     }
     out
+}
+
+/// A deposit rings the recipient's wake doorbell within the round trip, and
+/// the sweep route answers how much it collected. The stream carries no
+/// value — the wake spares the poll; the signed fetch is still the only way
+/// to a letter.
+#[tokio::test]
+async fn a_deposit_rings_the_wake_doorbell_and_sweep_answers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (base, _dir) = serve().await;
+    let sender = device_from_seed(&SENDER_SEED);
+    let recipient = device_from_seed(&RECIPIENT_SEED);
+
+    // Subscribe before depositing, so the ring cannot be missed.
+    let rest = base.strip_prefix("http://").expect("http url");
+    let mut wake = tokio::net::TcpStream::connect(rest).await.expect("connect");
+    wake.write_all(
+        format!(
+            "GET /wake?device={} HTTP/1.1\r\nHost: {rest}\r\nAccept: text/event-stream\r\n\r\n",
+            recipient.as_str()
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("subscribe");
+    let mut seen = String::new();
+    let mut buf = [0u8; 1024];
+    while !seen.contains("event: ready") {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), wake.read(&mut buf))
+            .await
+            .expect("ready in time")
+            .expect("read");
+        assert!(n > 0, "the wake stream closed before it was ready");
+        seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+
+    let envelope = Envelope {
+        recipient: recipient.clone(),
+        sealed: b"ring".to_vec(),
+        expires_at: now() + 600,
+        envelope_version: 1,
+    };
+    let deposit = SignedDeposit {
+        signature: sign_detached(&SENDER_SEED, &preimage_deposit(&sender, &envelope)),
+        sender,
+        envelope,
+    };
+    let (status, body) = reqwest_lite::post(
+        &format!("{base}/deposit"),
+        &serde_json::to_string(&deposit).expect("json"),
+    )
+    .await;
+    assert_eq!(status, 200, "deposit refused: {body}");
+
+    while !seen.contains("event: mail") {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), wake.read(&mut buf))
+            .await
+            .expect("a ring in time")
+            .expect("read");
+        assert!(n > 0, "the wake stream closed before it rang");
+        seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+
+    // The sweep is safe for anyone to trigger and says what it collected.
+    let (status, body) = reqwest_lite::post(&format!("{base}/sweep"), "{}").await;
+    assert_eq!(status, 200, "sweep refused: {body}");
+    assert!(body.contains("swept"), "sweep answers a count: {body}");
 }

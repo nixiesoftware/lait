@@ -39,7 +39,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util", "sync"] }
+# The wake doorbell's SSE stream: a broadcast receiver worn as a Stream. The
+# `sync` feature is the wrapper for exactly that and nothing else rides in.
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3"

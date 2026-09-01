@@ -149,7 +149,9 @@ impl FirestoreStore {
         Ok(value)
     }
 
-    fn get(&mut self, collection: &str, id: &str) -> Result<Option<Value>> {
+    /// Read one document. Part of the shared document surface the
+    /// co-deployed services (the Post's deposit store) build on.
+    pub fn get(&mut self, collection: &str, id: &str) -> Result<Option<Value>> {
         let token = self.token()?;
         let url = format!("{}/{collection}/{}", self.base, encode(id));
         match self
@@ -169,7 +171,7 @@ impl FirestoreStore {
     /// **The atomic mint.** Firestore refuses a create whose `documentId`
     /// already exists, and it refuses it consistently rather than
     /// last-write-wins, so two replicas racing produce exactly one winner.
-    fn create(&mut self, collection: &str, id: &str, fields: Value) -> Result<bool> {
+    pub fn create(&mut self, collection: &str, id: &str, fields: Value) -> Result<bool> {
         let token = self.token()?;
         let url = format!("{}/{collection}?documentId={}", self.base, encode(id));
         match self
@@ -185,7 +187,7 @@ impl FirestoreStore {
     }
 
     /// Write a document, creating or replacing it.
-    fn put(&mut self, collection: &str, id: &str, fields: Value) -> Result<()> {
+    pub fn put(&mut self, collection: &str, id: &str, fields: Value) -> Result<()> {
         let token = self.token()?;
         let url = format!("{}/{collection}/{}", self.base, encode(id));
         self.agent
@@ -202,7 +204,7 @@ impl FirestoreStore {
     /// The precondition is what makes spending a challenge single-use across
     /// replicas: an unconditional delete succeeds against a missing document, so
     /// two callers would both believe they had spent the same nonce.
-    fn delete_if_present(&mut self, collection: &str, id: &str) -> Result<bool> {
+    pub fn delete_if_present(&mut self, collection: &str, id: &str) -> Result<bool> {
         let token = self.token()?;
         let name = format!("{}/{collection}/{}", self.resource, encode(id));
         // `:commit` hangs off `documents`, not off the database — the API is
@@ -231,7 +233,7 @@ impl FirestoreStore {
     /// name order — which, for ids minted as zero-padded indices, is append
     /// order. Pages until the listing is exhausted, so the one caller reads a
     /// whole small collection rather than a window of a big one.
-    fn list(&mut self, collection: &str) -> Result<Vec<(String, Value)>> {
+    pub fn list(&mut self, collection: &str) -> Result<Vec<(String, Value)>> {
         let mut collected = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
@@ -282,13 +284,13 @@ fn encode(id: &str) -> String {
         .collect()
 }
 
-fn string(value: &Value, field: &str) -> Option<String> {
+pub fn string(value: &Value, field: &str) -> Option<String> {
     value["fields"][field]["stringValue"]
         .as_str()
         .map(ToOwned::to_owned)
 }
 
-fn integer(value: &Value, field: &str) -> Option<u64> {
+pub fn integer(value: &Value, field: &str) -> Option<u64> {
     value["fields"][field]["integerValue"]
         .as_str()
         .and_then(|raw| raw.parse().ok())

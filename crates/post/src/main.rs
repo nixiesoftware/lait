@@ -74,7 +74,20 @@ async fn main() -> Result<()> {
     let http = http.ok_or_else(|| anyhow!("--http is required"))?;
     let root = root.ok_or_else(|| anyhow!("--root is required"))?;
 
-    let store = FsStore::open(&root).context("open the deposit root")?;
+    // The store is chosen by where this service runs. A machine whose disk
+    // persists keeps deposits on it; the hosted deployment names a project
+    // and keeps them in Firestore, where an instance dying loses nothing —
+    // which is the durability a carrier owes an undelivered letter.
+    let store: lait_post::store::BoxedStore = match directory_project.as_deref() {
+        Some(project) => {
+            tracing::info!(project, "deposits are kept in Firestore");
+            Box::new(lait_post::FirestoreDeposits::open(
+                project,
+                lait_directory::Credentials::Metadata,
+            ))
+        }
+        None => Box::new(FsStore::open(&root).context("open the deposit root")?),
+    };
     let shared: Shared = Arc::new(Mutex::new(Post::new(store)));
 
     let sweeper = Arc::clone(&shared);

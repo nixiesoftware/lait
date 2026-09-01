@@ -36,9 +36,11 @@ use std::collections::HashMap;
 use mechanics::ids::DeviceId;
 use serde::{Deserialize, Serialize};
 
+pub mod firestore;
 pub mod http;
 pub mod store;
 
+pub use firestore::FirestoreDeposits;
 pub use store::{Deposited, FsStore, MemStore, Store};
 
 /// Signature domains. Distinct so a signature gathered for one operation can

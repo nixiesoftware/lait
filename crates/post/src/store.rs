@@ -78,6 +78,41 @@ pub trait Store {
     fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool>;
 }
 
+/// A boxed store is a store, so the service can choose its backing at boot —
+/// the filesystem for a machine whose disk persists, Firestore for the hosted
+/// deployment — behind one concrete `Post<BoxedStore>`.
+impl<S: Store + ?Sized> Store for Box<S> {
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String> {
+        (**self).put(sender, envelope, now)
+    }
+    fn list(&self, device: &DeviceId, now: u64) -> anyhow::Result<Vec<Deposited>> {
+        (**self).list(device, now)
+    }
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize> {
+        (**self).count(device)
+    }
+    fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize> {
+        (**self).drop_all(device, ids)
+    }
+    fn sweep(&mut self, now: u64) -> anyhow::Result<usize> {
+        (**self).sweep(now)
+    }
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()> {
+        (**self).set_block(recipient, sender, blocked)
+    }
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool> {
+        (**self).is_blocked(recipient, sender)
+    }
+}
+
+/// The boxed backing the binary serves over: chosen at boot, one type after.
+pub type BoxedStore = Box<dyn Store + Send>;
+
 /// A deterministic id for a deposit: the content, so the same envelope
 /// deposited twice is one deposit rather than two.
 ///
