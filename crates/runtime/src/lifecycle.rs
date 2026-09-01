@@ -221,45 +221,9 @@ impl CancelToken {
     }
 }
 
-/// How the local Exec drain paces its own labor.
-///
-/// Options rather than constants, per the compatibility doctrine: a bound an
-/// operator cannot set is decorative. Every field paces the Station's *own*
-/// work — none of this ranks candidates for a Run, which stays behind the
-/// direction gate. Hand-written `Default` because zero fails closed: a
-/// zero-action pass performs nothing, forever.
-///
-/// There is deliberately no failure backoff here yet. Under the current
-/// failure classes only an Unknown-classed stale lease is ever re-tried,
-/// and delaying that would delay honest crash recovery; a retry loop a
-/// backoff could tame only exists once an external performer backend can
-/// die mid-Attempt. The field joins this struct in the same commit as the
-/// backend that makes it real — never before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExecPacing {
-    /// Most perform actions one drain pass may commit.
-    pub actions_per_pass: u32,
-    /// The idle beat between drain passes; a fresh commit still wakes the
-    /// drain immediately through the exec tick.
-    pub drain_interval: Duration,
-    /// How long a resolved, uncited Run is kept before its reserved Body is
-    /// tombstoned. `None` — the default — keeps everything forever: disposal
-    /// of signed history is something an operator turns on, never something
-    /// a default does. Eligibility is a reachability projection; this window
-    /// is only the grace on top of it, counted in activation memory, so a
-    /// restart forgets elapsed grace and can only ever delay disposal.
-    pub retention_window: Option<Duration>,
-}
-
-impl Default for ExecPacing {
-    fn default() -> Self {
-        Self {
-            actions_per_pass: 16,
-            drain_interval: Duration::from_millis(50),
-            retention_window: None,
-        }
-    }
-}
+// `ExecPacing` lives in `session.rs` since the guest carve: the StationCore
+// holds it, and the StationCore boards wasm while this module does not.
+pub use crate::session::ExecPacing;
 
 /// Options for activating an Orbit into a Station.
 #[derive(Debug, Default)]

@@ -10,4 +10,5 @@
 /// envelope: `u16be(domain_len) || domain || u32be(body_len) || body`. The
 /// domain separates use-sites; the explicit lengths make the framing
 /// unambiguous and canonical.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use ::contact::wire::length_framed;

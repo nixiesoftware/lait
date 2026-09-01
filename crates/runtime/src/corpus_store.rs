@@ -941,6 +941,18 @@ fn sync_dir(dir: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
+/// No wasm target has a directory to sync — or a way to construct this store
+/// at all (`std::fs` opens fail before anything reaches a sync). The arm
+/// exists so the guest carve compiles; it refuses rather than pretends.
+#[cfg(target_arch = "wasm32")]
+fn sync_dir(_dir: &Path) -> Result<(), Failure> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no durable directory exists on this target",
+    )
+    .into())
+}
+
 #[cfg(windows)]
 fn sync_dir(dir: &Path) -> Result<(), Failure> {
     use std::os::windows::fs::OpenOptionsExt;

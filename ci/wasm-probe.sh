@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Does the engine reach the browser target? Four claims, checked in order:
+# Does the engine reach the browser target? Five claims, checked in order:
 #
 #   1. the store stack (mechanics, journal, fabric, replica) compiles for
 #      wasm32-unknown-unknown;
-#   2. the transport (comms, and iroh behind it) compiles too;
+#   2. the transport (comms, iroh behind it) and the Contact pull compile too;
 #   3. the CRDT core RUNS in a JS host — fork, concurrent edit, exchange,
-#      converge — via wasm-pack's Node runner.
+#      converge — via wasm-pack's Node runner;
+#   4. the OPFS medium carries the store in a real headless Chrome worker;
+#   5. the World runner stack (runtime's guest carve, world-sdk, the Issues
+#      World and its runner binary) compiles for the same target.
 #
-# Claim 2 needs a C compiler that can emit wasm32 objects, because iroh's TLS
-# pulls `ring`, whose build compiles C. Apple clang has no wasm backend; this
-# script looks for one that does and SKIPS the claim, saying so, when none is
-# found. A skip is "could not be asked", never "passes" — do not fold them.
+# Claims 2 and 5 need a C compiler that can emit wasm32 objects, because
+# iroh's TLS pulls `ring`, whose build compiles C. Apple clang has no wasm
+# backend; this script looks for one that does and SKIPS the claim, saying
+# so, when none is found. A skip is "could not be asked", never "passes" —
+# do not fold them.
 set -euo pipefail
 cd "$(dirname "$0")/../wasm-probe"
 
@@ -62,4 +66,21 @@ elif [ -z "${CHROME:-}" ]     && ! command -v google-chrome >/dev/null 2>&1     
     echo "wasm-probe: checked. A skip is 'could not be asked', never a pass." >&2
 else
     wasm-pack test --headless --chrome --test opfs
+fi
+
+echo "== claim 5: the World runner stack compiles for wasm32-unknown-unknown"
+# The guest carve: runtime's contract surface (world/exec/find/publication and
+# what they stand on), the SDK's typed operations, the Issues World, and the
+# runner binary itself all reach the browser target. Compiles, not runs — the
+# native serve loop's sockets are std stubs on wasm, and the in-Worker
+# execution door is a later slice — but a dependency regression that knocks
+# the runner off the target fails here, not in that slice.
+if [ -n "$wasm_cc" ]; then
+    CC_wasm32_unknown_unknown="$wasm_cc" \
+        RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+        cargo check --manifest-path ../Cargo.toml --target wasm32-unknown-unknown \
+        -p runtime -p world-sdk -p lait-issues -p lait-issues-runner
+else
+    echo "wasm-probe: SKIPPED — no clang with a wasm backend found (see" >&2
+    echo "wasm-probe: claim 2), so the runner-stack claim was not checked." >&2
 fi

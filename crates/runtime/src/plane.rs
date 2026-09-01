@@ -25,11 +25,18 @@
 use serde::{Deserialize, Serialize};
 
 pub mod contact;
+// The plane handlers drive real connections; the guest carve keeps only the
+// vocabulary (bounds, stream kinds, the contact shim) — see `lib.rs`.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod exec;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod freight;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod live;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use crate::contact_driver::{CommsOptions, GossipOptions, MAX_CONTACTS_IN_FLIGHT};
+#[cfg(not(target_arch = "wasm32"))]
 pub use crate::lifecycle::Activation;
 
 /// Typed stream kinds within one live connection.

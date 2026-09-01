@@ -47,47 +47,71 @@
 //! World/Session/Contact in S5); their signatures here fix ownership and
 //! consumption semantics.
 
+// The guest carve. A World runner links this crate for its contract surface —
+// `world`, `exec`, `find`, `publication` and what they stand on — and that
+// surface must reach wasm32, where there is no process, no thread, no file
+// lock and no clock of the Station's kind. The modules below are the Station's
+// own machinery: drivers, transports, stores, the lifecycle machine. They stay
+// native. Gating is by target, never by feature, so a native build carries
+// exactly what it always carried and the carve cannot be mis-composed.
 mod action;
+#[cfg(not(target_arch = "wasm32"))]
 mod admission;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod beacon;
 pub(crate) mod body_image;
 mod budget;
 pub mod change;
+#[cfg(not(target_arch = "wasm32"))]
 mod contact_driver;
+#[cfg(not(target_arch = "wasm32"))]
 mod content_cursor;
+#[cfg(not(target_arch = "wasm32"))]
 mod content_host;
 pub mod coordinates;
 pub(crate) mod corpus;
 pub(crate) mod corpus_store;
 /// The identity-scoped correspondence dial tone (`lait/correspondence/1`).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod correspondence;
 #[cfg(test)]
 mod dispatch_tests;
 mod dto;
 pub mod exec;
+#[cfg(not(target_arch = "wasm32"))]
 mod fetch;
 pub mod find;
 pub(crate) mod find_evaluator;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod generation;
 mod implementation;
 #[cfg(test)]
 mod internal_tests;
+#[cfg(not(target_arch = "wasm32"))]
 mod lifecycle;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod neighbor;
+#[cfg(not(target_arch = "wasm32"))]
 mod neighbor_presence;
+#[cfg(not(target_arch = "wasm32"))]
 mod neighbors;
+#[cfg(not(target_arch = "wasm32"))]
 mod peer_supply;
 #[cfg(test)]
 mod placement_tests;
 pub mod plane;
+#[cfg(not(target_arch = "wasm32"))]
 mod plane_driver;
+#[cfg(not(target_arch = "wasm32"))]
 mod plane_stream;
 pub mod poison;
 pub mod publication;
 mod registry;
 mod session;
 pub mod signal;
+#[cfg(not(target_arch = "wasm32"))]
 mod store;
+#[cfg(not(target_arch = "wasm32"))]
 mod transfer;
 pub mod transient;
 pub(crate) mod wire;
@@ -98,8 +122,11 @@ extern crate self as runtime;
 
 /// Exported without the cursor: outside this crate a read goes through
 /// [`Station::content_acquire`], which owns the supply.
+#[cfg(not(target_arch = "wasm32"))]
 pub use content_cursor::Gap;
+#[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::Failure as Error;
+#[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::{
     Acquired, Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
     RemovalConfirmation, Runtime, Station, StorageReading,

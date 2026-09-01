@@ -47,12 +47,6 @@ schemars = "1"
 # NFC validation of the human-facing display-name/nick hints in Coordinates v1
 # (the canonical form rejects non-NFC UTF-8).
 unicode-normalization = "0.1"
-# Cross-platform advisory file lock: the Orbit's exclusive store lock (the typed
-# double-lock). Same lock the product's single-instance daemon guard uses.
-fs2 = "0.4"
-# The Station's Contact plane: one tracked driver thread runs a current-thread
-# tokio runtime to drive the comms transport (accept loop, scheduler, gossip).
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 # Minting a fresh SpaceId digest at formation.
 getrandom = "0.3"
 anyhow = "1"
@@ -65,6 +59,21 @@ tracing = "0.1"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser target's entropy door — the same switch wasm-probe throws.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# The guest half needs only the runtime-agnostic channels; `rt`/`time` are the
+# Station's, and the Station does not board the browser.
+tokio = { version = "1", features = ["sync", "macros"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Cross-platform advisory file lock: the Orbit's exclusive store lock (the typed
+# double-lock). Same lock the product's single-instance daemon guard uses.
+fs2 = "0.4"
+# The Station's Contact plane: one tracked driver thread runs a current-thread
+# tokio runtime to drive the comms transport (accept loop, scheduler, gossip).
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 [target.'cfg(unix)'.dependencies]
 # The wall limit is enforced by killing, and killing a *process* is not killing

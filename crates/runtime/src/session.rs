@@ -2167,6 +2167,46 @@ pub struct StationCore {
     exec_tick: tokio::sync::watch::Sender<u64>,
 }
 
+/// How the local Exec drain paces its own labor.
+///
+/// Options rather than constants, per the compatibility doctrine: a bound an
+/// operator cannot set is decorative. Every field paces the Station's *own*
+/// work — none of this ranks candidates for a Run, which stays behind the
+/// direction gate. Hand-written `Default` because zero fails closed: a
+/// zero-action pass performs nothing, forever.
+///
+/// There is deliberately no failure backoff here yet. Under the current
+/// failure classes only an Unknown-classed stale lease is ever re-tried,
+/// and delaying that would delay honest crash recovery; a retry loop a
+/// backoff could tame only exists once an external performer backend can
+/// die mid-Attempt. The field joins this struct in the same commit as the
+/// backend that makes it real — never before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecPacing {
+    /// Most perform actions one drain pass may commit.
+    pub actions_per_pass: u32,
+    /// The idle beat between drain passes; a fresh commit still wakes the
+    /// drain immediately through the exec tick.
+    pub drain_interval: std::time::Duration,
+    /// How long a resolved, uncited Run is kept before its reserved Body is
+    /// tombstoned. `None` — the default — keeps everything forever: disposal
+    /// of signed history is something an operator turns on, never something
+    /// a default does. Eligibility is a reachability projection; this window
+    /// is only the grace on top of it, counted in activation memory, so a
+    /// restart forgets elapsed grace and can only ever delay disposal.
+    pub retention_window: Option<std::time::Duration>,
+}
+
+impl Default for ExecPacing {
+    fn default() -> Self {
+        Self {
+            actions_per_pass: 16,
+            drain_interval: std::time::Duration::from_millis(50),
+            retention_window: None,
+        }
+    }
+}
+
 struct ExecGate {
     inflight: std::collections::BTreeSet<crate::exec::AttemptId>,
     busy: bool,
@@ -2177,7 +2217,7 @@ struct ExecGate {
     /// retention window counts from here. Activation memory — a restart
     /// forgets elapsed grace, which only ever delays disposal.
     resolved_seen: std::collections::BTreeMap<crate::exec::RunId, std::time::Instant>,
-    pacing: crate::lifecycle::ExecPacing,
+    pacing: ExecPacing,
     consent: crate::exec::Consent,
     /// When this activation first observed each foreign in-flight Attempt, on
     /// its own clock, and how many of that Attempt's renewals it had seen then.
@@ -2269,7 +2309,7 @@ impl StationCore {
                 busy: false,
                 cursor: std::collections::BTreeMap::new(),
                 resolved_seen: std::collections::BTreeMap::new(),
-                pacing: crate::lifecycle::ExecPacing::default(),
+                pacing: ExecPacing::default(),
                 consent: crate::exec::Consent::none(),
                 liveness_observed: std::collections::BTreeMap::new(),
             }),
@@ -2285,11 +2325,11 @@ impl StationCore {
         self.exec_tick.send_modify(|n| *n = n.saturating_add(1));
     }
 
-    pub(crate) fn set_exec_pacing(&self, pacing: crate::lifecycle::ExecPacing) {
+    pub(crate) fn set_exec_pacing(&self, pacing: ExecPacing) {
         self.exec.lock_recovering().pacing = pacing;
     }
 
-    pub fn exec_pacing(&self) -> crate::lifecycle::ExecPacing {
+    pub fn exec_pacing(&self) -> ExecPacing {
         self.exec.lock_recovering().pacing
     }
 
@@ -3414,6 +3454,7 @@ impl replica::transaction::TransactionAuthorizer for SessionAuthorizer<'_> {
 /// publication selection. Each call pins the shared snapshot under the Station
 /// lock, releases it, then mints or resolves the anchor without holding the
 /// committing writer.
+#[cfg(not(target_arch = "wasm32"))]
 impl crate::plane::live::AnchorSource for StationCore {
     fn anchor_in_body(
         &self,

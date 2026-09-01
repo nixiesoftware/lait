@@ -729,6 +729,7 @@ pub enum OfferGates {
 /// `ours` is the actor this Station acts as. An offer auto-accepts only from a
 /// device resolving to that same actor — which is what makes it a file moving
 /// between somebody's own machines rather than a stranger writing to their disk.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn offer_gates(
     from: &crate::admission::AdmittedPeer,
     ours: &mechanics::ids::ActorId,
