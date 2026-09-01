@@ -214,8 +214,10 @@ async fn wait_for_daemon_stop(home: &Path) {
     panic!("identity daemon did not stop within its process bound");
 }
 
+// Thirty seconds, not ten: the receiver's first exec on a CI machine pays
+// Gatekeeper's assessment of a freshly linked binary before it can even dial.
 async fn wait_for_pairing(client: &Client) -> String {
-    for _ in 0..100 {
+    for _ in 0..300 {
         let display = client
             .display_status()
             .await
@@ -225,11 +227,11 @@ async fn wait_for_pairing(client: &Client) -> String {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("reference receiver did not open a pairing within ten seconds");
+    panic!("reference receiver did not open a pairing within thirty seconds");
 }
 
 async fn wait_for_receiver(client: &Client) -> String {
-    for _ in 0..100 {
+    for _ in 0..300 {
         let display = client
             .display_status()
             .await
@@ -241,11 +243,11 @@ async fn wait_for_receiver(client: &Client) -> String {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("reference receiver did not complete enrollment within ten seconds");
+    panic!("reference receiver did not complete enrollment within thirty seconds");
 }
 
 async fn wait_for_new_receiver(client: &Client, existing: &str) -> String {
-    for _ in 0..100 {
+    for _ in 0..300 {
         let display = client
             .display_status()
             .await
@@ -261,7 +263,7 @@ async fn wait_for_new_receiver(client: &Client, existing: &str) -> String {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("second reference receiver did not complete enrollment within ten seconds");
+    panic!("second reference receiver did not complete enrollment within thirty seconds");
 }
 
 async fn wait_for_unassigned(path: &Path, device: &str) {
@@ -1414,8 +1416,8 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     // serving without display coordination rather than refusing to start, which
     // is right for the product and leaves this test with nothing to pair against.
     //
-    // Said here, before ten seconds of polling. Without it the failure is
-    // "reference receiver did not open a pairing within ten seconds" — a symptom
+    // Said here, before thirty seconds of polling. Without it the failure is
+    // "reference receiver did not open a pairing within thirty seconds" — a symptom
     // that names neither the port nor the process holding it, which is the class
     // of message this suite exists to stop shipping.
     if let Err(error) = std::net::TcpListener::bind((
