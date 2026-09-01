@@ -293,6 +293,22 @@ impl ClientInvocation {
         &self.world
     }
 
+    /// The same invocation, addressed to `world`.
+    ///
+    /// See [`WorldClientPackage::readdress`]: a product parses in its own
+    /// words, and the host re-addresses the result to the id it serves the
+    /// World under here.
+    pub fn readdressed(mut self, world: WorldId) -> Self {
+        self.kind = match self.kind {
+            ClientInvocationKind::World(call) => {
+                ClientInvocationKind::World(call.readdressed(world.clone()))
+            }
+            other => other,
+        };
+        self.world = world;
+        self
+    }
+
     /// What this invocation would do, as its own package classifies it. See
     /// [`ClientAccess`] for what a head may and may not conclude from it.
     pub fn access(&self) -> ClientAccess {
@@ -1507,7 +1523,7 @@ impl WorldClientPackage {
         if let Some(adapter) = self.adapter.as_deref() {
             let invocation = adapter.parse_web(input)?;
             self.validate_invocation(&invocation)?;
-            return Ok(invocation);
+            return Ok(self.readdress(invocation));
         }
         let parser = self.web_parser.ok_or_else(|| {
             Failure::new(format!(
@@ -1517,7 +1533,24 @@ impl WorldClientPackage {
         })?;
         let invocation = parser(input)?;
         self.validate_invocation(&invocation)?;
-        Ok(invocation)
+        Ok(self.readdress(invocation))
+    }
+
+    /// Address a parsed invocation the way this host serves the World.
+    ///
+    /// A package parses with the World's own code, which speaks one id — the
+    /// one the tree declares. A re-keyed local World *executes* under the
+    /// host's assignment: the launcher tells its runner that id, the runner's
+    /// data is keyed by it, and the route guard refuses a World call that
+    /// says otherwise. So the declared id is right while parsing and wrong the
+    /// moment the invocation leaves the package, and this is the seam between
+    /// those two facts. For everything the host did not re-key it is the
+    /// identity function.
+    fn readdress(&self, invocation: ClientInvocation) -> ClientInvocation {
+        if self.world == self.declared {
+            return invocation;
+        }
+        invocation.readdressed(self.world.clone())
     }
 
     /// The prompt a client must show before running `invocation`, or `None`
@@ -1567,6 +1600,10 @@ impl WorldClientPackage {
     ) -> ClientFuture<'a, Value> {
         Box::pin(async move {
             self.validate_invocation(&invocation)?;
+            // An invocation can reach here without passing through
+            // `parse_web` — an MCP tool's factory builds one directly — so
+            // the re-address happens here too. It is idempotent.
+            let invocation = self.readdress(invocation);
             if let Some(adapter) = self.adapter.as_deref() {
                 return adapter.execute(host, invocation).await;
             }
@@ -1617,12 +1654,13 @@ impl WorldClientPackage {
 
     /// Refuse an invocation this package does not own.
     ///
-    /// Against [`Self::declared`], never the host's assignment. A package parses
-    /// requests with the World's own code, which knows one id — the one the tree
-    /// declares — so a re-keyed local World would otherwise refuse every request
-    /// it just parsed, naming both ids and explaining neither.
+    /// Two ids are this package's own and no other is: the declared id, which
+    /// is what its parser produces, and the host's assignment, which is what
+    /// [`Self::readdress`] stamps on the way out. A re-keyed local World would
+    /// otherwise refuse every request it just parsed — or every request it
+    /// just re-addressed — naming two ids and explaining neither.
     pub fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), Failure> {
-        if invocation.world_id() == &self.declared {
+        if invocation.world_id() == &self.declared || invocation.world_id() == &self.world {
             Ok(())
         } else {
             Err(Failure::new(format!(
@@ -2090,6 +2128,54 @@ mod tests {
         assert!(
             package.validate_invocation(&stranger).is_err(),
             "a package must not execute another World's invocation"
+        );
+    }
+
+    /// A re-keyed package addresses what it parsed to the host's assignment.
+    ///
+    /// The parser speaks the declared id — the only one the World's code
+    /// knows — but the runner executes under the id the host assigned, and
+    /// the route guard refuses a World call that disagrees with its route.
+    /// `parse_web` is where the two meet: parse in the World's words, hand
+    /// back an invocation in the host's. Leaving it declared is what made a
+    /// local World's every page answer `invalid call`.
+    #[test]
+    fn a_re_keyed_package_readdresses_what_it_parses() {
+        let assigned = WorldId::parse("local.files").unwrap();
+        let package = package_with_tool("com.example.files", "files", Sealing::Unsealed, "list")
+            .with_web_parser(files_invocation)
+            .registered_as(assigned.clone())
+            .mounted_at("local_files");
+
+        let invocation = package
+            .parse_web(Value::Null)
+            .expect("its own parser's request is accepted");
+        assert_eq!(
+            invocation.world_id(),
+            &assigned,
+            "the invocation leaves addressed to the host's assignment"
+        );
+        match invocation.kind() {
+            ClientInvocationKind::World(call) => assert_eq!(
+                call.world(),
+                &assigned,
+                "and so does the World call inside it"
+            ),
+            other => panic!("expected a World call, got {other:?}"),
+        }
+        // Re-addressed is still owned: execution's validation accepts it.
+        package
+            .validate_invocation(&invocation)
+            .expect("a package executes what it re-addressed");
+
+        // A package the host did not re-key is untouched.
+        let released = package_with_tool("com.example.files", "files", Sealing::Sealed, "list")
+            .with_web_parser(files_invocation);
+        let invocation = released.parse_web(Value::Null).expect("parses");
+        assert_eq!(
+            invocation.world_id(),
+            released.declared(),
+            "a released World's invocation keeps its declared address"
         );
     }
 

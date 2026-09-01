@@ -166,6 +166,19 @@ impl Call {
         &self.world
     }
 
+    /// The same call, addressed to `world`.
+    ///
+    /// The host's re-keying seam. A product encodes a call addressed to the
+    /// id its tree declares, because that is the only id its code knows; the
+    /// host serves a local World under an id it assigned, and the runner —
+    /// told that id by the launcher — refuses a call addressed any other way.
+    /// Re-addressing is the same decision `served_world` makes, made by the
+    /// party that knows the assignment.
+    pub fn readdressed(mut self, world: WorldId) -> Self {
+        self.world = world;
+        self
+    }
+
     pub fn operation(&self) -> &str {
         &self.operation
     }
