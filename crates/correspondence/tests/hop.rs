@@ -60,7 +60,8 @@ async fn serve() -> (String, tempfile::TempDir) {
     if let Ok(remote) = std::env::var("POST_SMOKE_URL") {
         return (remote.trim_end_matches('/').to_owned(), dir);
     }
-    let store = FsStore::open(dir.path()).expect("open the store");
+    let store: lait_post::store::BoxedStore =
+        Box::new(FsStore::open(dir.path()).expect("open the store"));
     let shared: Shared = Arc::new(Mutex::new(Post::new(store)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

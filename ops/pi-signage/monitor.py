@@ -178,6 +178,12 @@ class Monitor:
             return default
 
     def coordinator(self, host: str) -> dict | None:
+        # Unverified on purpose, and bounded on purpose: the Pi's display
+        # coordinator serves a per-device self-signed certificate, this bench
+        # monitor sends no credential and derives no authority from the
+        # answer (health numbers a spoofer could only make *look* wrong), and
+        # certificate pinning lives where it matters — the product's pairing
+        # ceremony. Verify here if this ever grows past reading health.
         context = ssl._create_unverified_context()
         try:
             with urlopen(f"https://{host}:7443/head/v1/instance", timeout=3, context=context) as response:
