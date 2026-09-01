@@ -1,11 +1,11 @@
 /**
  * The browser socket — the socket that carries what the doorbell stream must not.
  *
- * `useDoorbell` stays exactly as it is. Its `EventSource` carries dirty flags
- * over one broadcast ring, and a `lagged` there costs every tab a full
- * rebaseline. That is the correct price for "something you can see has changed"
- * and the wrong price for "this upload is at 40%", which is superseded half a
- * second later and matters to one tab.
+ * The doorbell (`httpLink.events`) carries dirty flags over one broadcast
+ * ring, and a `lagged` there costs every tab a full rebaseline. That is the
+ * correct price for "something you can see has changed" and the wrong price
+ * for "this upload is at 40%", which is superseded half a second later and
+ * matters to one tab.
  *
  * So progress rides its own socket, and nothing in this module touches the
  * doorbell.

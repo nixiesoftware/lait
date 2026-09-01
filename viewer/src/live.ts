@@ -46,6 +46,7 @@ import {
   SocketMutationError,
 } from "./socket";
 import { rpc as httpRpc } from "./api";
+import { engineLink } from "./link";
 import { useWorldResource, useWorldViewStore } from "./core/worldViewReact";
 import type { ResourceKey, WorldViewStore } from "./core/worldViewStore";
 import type {
@@ -681,7 +682,10 @@ const planes = new WeakMap<WorldViewStore, LivePlane>();
 function planeFor(store: WorldViewStore): LivePlane {
   let plane = planes.get(store);
   if (!plane) {
-    plane = new LivePlane(store);
+    // The session comes from the engine link so a bound backend carries the
+    // live plane too; the mutation fallback is `api.rpc`, which already goes
+    // through the same link.
+    plane = new LivePlane(store, (onEvent) => engineLink().session(onEvent));
     planes.set(store, plane);
   }
   return plane;

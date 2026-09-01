@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
+import { engineLink } from "./link";
 import type { SpaceDoorbell } from "./types";
 
-export type Liveness = "connecting" | "live" | "retrying";
+export type { Liveness } from "./link";
+import type { Liveness } from "./link";
 
 /**
  * The doorbell stream — one `EventSource` over every attached space.
@@ -23,8 +25,9 @@ export type Liveness = "connecting" | "live" | "retrying";
  * We surface it as a bare "something changed, trust nothing" signal, because the
  * recovery is identical and pretending otherwise invites a subtle bug.
  *
- * `EventSource` reconnects on its own, so there is no retry loop here — only the
- * liveness the user should see.
+ * The stream itself belongs to the engine link: reconnection and its liveness
+ * statements are one backend's mechanics, and every backend owes this hook the
+ * same contract — rings are dirty flags, `null` means rebaseline.
  */
 export function useDoorbell(onRing: (d: SpaceDoorbell | null) => void): Liveness {
   const [liveness, setLiveness] = useState<Liveness>("connecting");
@@ -32,22 +35,10 @@ export function useDoorbell(onRing: (d: SpaceDoorbell | null) => void): Liveness
   const cb = useRef(onRing);
   cb.current = onRing;
 
-  useEffect(() => {
-    const es = new EventSource("/api/events", { withCredentials: true });
-    es.onopen = () => setLiveness("live");
-    es.onerror = () => setLiveness("retrying");
-    es.addEventListener("doorbell", (ev) => {
-      try {
-        cb.current(JSON.parse((ev as MessageEvent<string>).data) as SpaceDoorbell);
-      } catch {
-        // A frame we can't read is still news: rebaseline rather than ignore it.
-        cb.current(null);
-      }
-    });
-    // Frames were dropped — our view may be stale in ways we can't name.
-    es.addEventListener("lagged", () => cb.current(null));
-    return () => es.close();
-  }, []);
+  useEffect(
+    () => engineLink().events((ring) => cb.current(ring), setLiveness),
+    [],
+  );
 
   return liveness;
 }

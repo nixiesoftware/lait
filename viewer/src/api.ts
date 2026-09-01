@@ -1,14 +1,15 @@
 /**
  * The engine, from the browser.
  *
- * This file is the whole backend. The previous viewer had a `server/` directory —
- * a Vite middleware that spawned `lait --json` once per request and re-parsed its
- * stdout — because there was no other way in. Bare `lait` runs the HTTP head,
- * which exposes the control plane directly, so all of that collapses to `fetch`.
- *
- * Everything is same-origin: the page is served by the engine itself, so the
- * `HttpOnly` cookie rides along and no token is ever visible to script. There is
- * no dev server and no proxy — this page only ever runs where the engine put it.
+ * This file is the policy layer over the engine link (`link.ts`): the error
+ * vocabulary, the mount cache, the wrong-head retry, and the operation
+ * envelope. The previous viewer had a `server/` directory — a Vite middleware
+ * that spawned `lait --json` once per request and re-parsed its stdout —
+ * because there was no other way in. Bare `lait` runs the HTTP head, which
+ * exposes the control plane directly, so all of that collapsed to `fetch`,
+ * and the fetch now lives in the link's default HTTP implementation. There is
+ * still no dev server and no proxy — which backend answers is decided by a
+ * shipped composition root, never by a dev flag.
  */
 
 import type {
@@ -19,6 +20,7 @@ import type {
   SpacesReply,
   WorldRequest,
 } from "./types";
+import { engineLink, onLinkBound, type LinkReply, type RpcOpts } from "./link";
 
 /** A refusal from the engine, carrying its own words. */
 export class LaitError extends Error {
@@ -74,8 +76,27 @@ export class ConfirmRequired extends Error {
   }
 }
 
-async function parse(r: globalThis.Response): Promise<unknown> {
-  return r.json().catch(() => null);
+/**
+ * Rehydrate one link answer into this module's error vocabulary.
+ *
+ * Refusals cross the link as data because a later backend answers from a
+ * Worker, where an Error subclass does not survive the boundary. The classes
+ * — and the `errorKindOf` side table they feed — are reconstructed here, on
+ * this side, for every backend alike.
+ */
+function rehydrate<R>(reply: LinkReply): R {
+  switch (reply.kind) {
+    case "reply":
+      return reply.body as R;
+    case "confirm":
+      throw new ConfirmRequired(reply.question);
+    case "refusal":
+      throw new LaitError(
+        reply.refusal.message,
+        reply.refusal.status,
+        reply.refusal.errorKind,
+      );
+  }
 }
 
 /**
@@ -123,21 +144,18 @@ const DECLARED_MOUNT = "issues";
 
 /** The spaces picker. Supervisor-level: not a control-plane `Request`. */
 export async function spaces(signal?: AbortSignal): Promise<SpacesReply> {
-  const r = await fetch("/api/spaces", { credentials: "same-origin", ...(signal ? { signal } : {}) });
-  const body = (await parse(r)) as SpacesReply | { kind: "error"; message: string } | null;
-  if (!r.ok || (body && "kind" in body && body.kind === "error")) {
-    throw new LaitError(
-      body && "message" in body ? body.message : `HTTP ${r.status}`,
-      r.status,
-    );
-  }
-  if (!body) throw new LaitError("no reply", r.status);
-  const reply = body as SpacesReply;
-  // Recorded on every answer, not only the first: this is the head restating a
-  // fact about itself, and the page has no other way to learn it.
+  const reply = rehydrate<SpacesReply>(await engineLink().spaces(signal));
+  // Recorded on every answer, not only the first: this is the backend
+  // restating a fact about itself, and the page has no other way to learn it.
   served = reply.world ?? DECLARED_MOUNT;
   return reply;
 }
+
+// The mount cache is a fact about one backend; a rebind drops it.
+onLinkBound(() => {
+  served = null;
+  asking = null;
+});
 
 /**
  * Send one Issues World request through its explicit package route.
@@ -156,11 +174,8 @@ export async function rpc<R extends Response = Response>(
   request: WorldRequest,
   opts: { confirm?: boolean; signal?: AbortSignal } = {},
 ): Promise<R> {
-  const sendTo = (world: string) => send<IssuesWireResponse>(
-    `/api/spaces/${encodeURIComponent(space)}/worlds/${encodeURIComponent(world)}/rpc`,
-    request,
-    opts,
-  );
+  const sendTo = async (world: string) =>
+    rehydrate<IssuesWireResponse>(await engineLink().worldRpc(space, world, request, opts));
   const addressed = await mount();
   let response: IssuesWireResponse;
   try {
@@ -202,45 +217,16 @@ function isWrongHead(error: unknown): error is LaitError {
  */
 export async function hostRpc<R extends Response = Response>(
   request: HostRequest,
-  opts: { signal?: AbortSignal } = {},
+  opts: RpcOpts = {},
 ): Promise<R> {
-  return send("/api/host/rpc", request, opts);
+  return rehydrate<R>(await engineLink().hostRpc(request, opts));
 }
 
 /** Send one generic Space-control request to the selected Orbit. */
 export async function spaceRpc<R extends Response = Response>(
   space: string,
   request: SpaceRequest,
-  opts: { confirm?: boolean; signal?: AbortSignal } = {},
+  opts: RpcOpts = {},
 ): Promise<R> {
-  return send(`/api/spaces/${encodeURIComponent(space)}/rpc`, request, opts);
-}
-
-async function send<R = Response>(
-  endpoint: string,
-  request: WorldRequest | SpaceRequest | HostRequest,
-  opts: { confirm?: boolean; signal?: AbortSignal },
-): Promise<R> {
-  const qs = opts.confirm ? "?confirm=true" : "";
-  const r = await fetch(`${endpoint}${qs}`, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(request),
-    ...(opts.signal ? { signal: opts.signal } : {}),
-  });
-  const body = (await parse(r)) as Record<string, unknown> | null;
-
-  if (r.status === 409 && body?.kind === "confirm_required") {
-    throw new ConfirmRequired(String(body.question ?? "Are you sure?"));
-  }
-  if (!r.ok || body?.kind === "error") {
-    throw new LaitError(
-      String(body?.message ?? `HTTP ${r.status}`),
-      r.status,
-      typeof body?.error_kind === "string" ? body.error_kind : null,
-    );
-  }
-  if (!body) throw new LaitError("no reply", r.status);
-  return body as R;
+  return rehydrate<R>(await engineLink().spaceRpc(space, request, opts));
 }
