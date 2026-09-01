@@ -163,20 +163,25 @@ fn replace(key: &BodyKey, value: &[u8]) -> (BodyKey, Op) {
     )
 }
 
-/// What one store directory currently holds: object count and total bytes,
-/// plus the manifest's size. These are the durable cost the commit paid.
+/// What one store directory currently holds: slot count and total durable
+/// bytes. These are the durable cost the commit paid.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct StoreFootprint {
     objects: u64,
     object_bytes: u64,
-    manifest_bytes: u64,
 }
 
 fn footprint(root: &Path) -> StoreFootprint {
+    // Objects live inside pack slots now, so the durable size is the slot
+    // family's, read from metadata alone — safe beside the live store.
     let mut out = StoreFootprint::default();
-    if let Ok(entries) = std::fs::read_dir(root.join("objects")) {
+    if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
+            let is_slot = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("hot-"));
+            if let (true, Ok(meta)) = (is_slot, entry.metadata()) {
                 if meta.is_file() {
                     out.objects += 1;
                     out.object_bytes += meta.len();
@@ -184,10 +189,19 @@ fn footprint(root: &Path) -> StoreFootprint {
             }
         }
     }
-    out.manifest_bytes = std::fs::metadata(root.join("current-manifest"))
-        .map(|m| m.len())
-        .unwrap_or(0);
     out
+}
+
+/// The commit point's size — the caller-meta index republished by every
+/// commit. Reads through the store's own table, so the live store must be
+/// dropped first (one root, one holder of write custody).
+fn commit_point_bytes(root: &Path) -> u64 {
+    let store = journal::Store::open(root).expect("reopen the measured store");
+    store
+        .caller_meta()
+        .expect("read the commit point")
+        .map(|meta| meta.len() as u64)
+        .unwrap_or(0)
 }
 
 /// Peak resident set of this process, in bytes, on every platform the harness
@@ -292,6 +306,8 @@ fn measure(bodies: u64, samples: usize) -> Measurement {
         timings.push(started.elapsed().as_micros());
     }
     let after = footprint(&dir);
+    drop(replica);
+    let manifest_bytes = commit_point_bytes(dir.as_path());
     timings.sort_unstable();
 
     let per_edit = samples as f64;
@@ -306,7 +322,7 @@ fn measure(bodies: u64, samples: usize) -> Measurement {
         object_bytes_before: before.object_bytes,
         object_bytes_per_edit: (after.object_bytes.saturating_sub(before.object_bytes)) as f64
             / per_edit,
-        manifest_bytes: after.manifest_bytes,
+        manifest_bytes,
     };
     let _ = std::fs::remove_dir_all(&dir);
     measurement

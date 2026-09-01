@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Does the engine reach the browser target? Three claims, checked in order:
+# Does the engine reach the browser target? Four claims, checked in order:
 #
 #   1. the store stack (mechanics, journal, fabric, replica) compiles for
 #      wasm32-unknown-unknown;
@@ -24,7 +24,7 @@ echo "== claim 1: the store stack compiles (and lints) for wasm32-unknown-unknow
 # wall that never compiles a module is not covering it.
 cargo clippy --target wasm32-unknown-unknown
 
-echo "== claim 2: the transport compiles for wasm32-unknown-unknown"
+echo "== claim 2: the transport and the Contact pull compile for wasm32-unknown-unknown"
 wasm_cc=""
 for candidate in "${CC_wasm32_unknown_unknown:-}" /opt/homebrew/opt/llvm@21/bin/clang \
     /opt/homebrew/opt/llvm/bin/clang /usr/bin/clang clang; do
@@ -39,7 +39,7 @@ if [ -n "$wasm_cc" ]; then
     ar_dir="$(dirname "$wasm_cc")"
     [ -x "$ar_dir/llvm-ar" ] && export AR_wasm32_unknown_unknown="$ar_dir/llvm-ar"
     CC_wasm32_unknown_unknown="$wasm_cc" \
-        cargo check --target wasm32-unknown-unknown --features probe-comms
+        cargo check --target wasm32-unknown-unknown --features probe-contact
 else
     echo "wasm-probe: SKIPPED — no clang with a wasm backend found, so ring" >&2
     echo "wasm-probe: cannot build and the transport claim was not checked." >&2

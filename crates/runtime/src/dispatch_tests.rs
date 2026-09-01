@@ -365,24 +365,33 @@ pub(crate) fn temp_root() -> PathBuf {
     dir
 }
 
-fn find_journal_object(root: &std::path::Path, hash: &[u8; 32]) -> Option<PathBuf> {
-    let name = hash
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+/// Flip one stored object's bytes wherever its store lives under `root`.
+/// Objects live inside pack slots now, so the tamper goes through the pack's
+/// own table rather than a per-object file.
+fn corrupt_journal_object(root: &std::path::Path, hash: &[u8; 32]) -> bool {
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(directory).ok()? {
-            let entry = entry.ok()?;
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut holds_slots = false;
+        for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.file_name().and_then(|value| value.to_str()) == Some(name.as_str()) {
-                return Some(path);
+            } else if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.starts_with("hot-"))
+            {
+                holds_slots = true;
             }
         }
+        if holds_slots && journal::corrupt_object_for_test(&directory, hash) {
+            return true;
+        }
     }
-    None
+    false
 }
 
 fn station_with(reg: Descriptor, world: Arc<dyn World>) -> crate::lifecycle::Station {
@@ -2302,8 +2311,10 @@ fn cold_historical_status_maps_generation_index_tamper_without_reconstruction() 
     let index_root = session
         .generation_index_root_for_test()
         .expect("durable generation index root");
-    let object = find_journal_object(&root, &index_root).expect("generation index object");
-    std::fs::write(object, b"tampered").unwrap();
+    assert!(
+        corrupt_journal_object(&root, &index_root),
+        "generation index object"
+    );
     assert!(matches!(
         session
             .operation_status(request.as_bytes(), payload_hash)

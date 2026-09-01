@@ -49,6 +49,8 @@ probe-replica = ["dep:replica"]
 # test is cfg-gated on both, and a feature drift that silently compiled that
 # test away would let `wasm-pack` pass with zero tests run.
 probe-comms = ["dep:comms", "probe-mechanics"]
+# The Contact crossing: protocol + coordinates + the portable initiator.
+probe-contact = ["dep:contact", "probe-comms", "probe-replica"]
 
 [dependencies]
 mechanics = { path = "../crates/mechanics", optional = true }
@@ -56,6 +58,7 @@ journal = { path = "../crates/journal", optional = true, features = ["opfs"] }
 fabric = { path = "../crates/fabric", optional = true }
 replica = { path = "../crates/replica", optional = true }
 comms = { path = "../crates/comms", optional = true, default-features = false }
+contact = { path = "../crates/contact", optional = true }
 
 # The entropy door, opened toward JS.
 #
@@ -70,6 +73,7 @@ comms = { path = "../crates/comms", optional = true, default-features = false }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
+postcard = { version = "1", features = ["use-std"] }
 wasm-bindgen = "0.2"
 
 [dev-dependencies]

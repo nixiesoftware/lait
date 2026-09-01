@@ -9,6 +9,7 @@ members = [
     "crates/fabric",
     "crates/addressbook",
     "crates/comms",
+    "crates/contact",
     "crates/correspondence",
     "crates/directory",
     "crates/post",
@@ -325,6 +326,9 @@ mediabox = { path = "crates/mediabox", features = ["testkit"] }
 lait-feed-notify = { path = "tools/feed-notify" }
 tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
+# The commit-cost baseline reads the pack's commit point through the store's
+# own table — objects no longer have a per-object file to stat.
+journal = { path = "crates/journal" }
 replica = { path = "crates/replica", features = ["fault-injection"] }
 issues-app = { package = "lait-issues-app", path = "products/issues-app", features = ["fault-injection"] }
 issues = { package = "lait-issues", path = "products/issues" }

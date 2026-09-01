@@ -40,8 +40,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use mechanics::{ids::SpaceId, station::Key};
-use replica::convergence::{AuthorityIncorporator, StagedContactMaterial};
-use replica::transaction::AuthoritySource;
+use replica::convergence::StagedContactMaterial;
 
 use crate::admission::{judge, AcceptedOpenings, Admission, OpeningContext, PlanePolicy, Replay};
 use crate::beacon::{RouteHint, SignedBeacon, BEACON_FLAG_DORMANT, BEACON_PROTOCOL};
@@ -75,21 +74,7 @@ pub(crate) fn now_ms() -> u64 {
     mechanics::wallclock::now_millis()
 }
 
-/// The mechanics seam the Contact plane needs, supplied at activation by the
-/// composition root. Everything here is mechanics-owned policy; the Station
-/// only orchestrates.
-pub struct Authority {
-    /// Validates signer standing at referenced authority frontiers.
-    pub source: Arc<dyn AuthoritySource + Send + Sync>,
-    /// Durably, idempotently commits received authority batches (the explicit
-    /// first Convergence phase).
-    pub incorporator: Arc<Mutex<dyn AuthorityIncorporator + Send>>,
-    /// The canonical authority batch this Station serves to peers.
-    pub export: Arc<dyn Fn() -> Vec<Vec<u8>> + Send + Sync>,
-    /// The current local authority frontier (for signing manifests and
-    /// attributing incorporation).
-    pub frontier: Arc<dyn Fn() -> replica::frontier::AuthorityFrontier + Send + Sync>,
-}
+pub use ::contact::Authority;
 
 /// Gossip participation for Beacon emission/ingestion.
 #[derive(Clone)]

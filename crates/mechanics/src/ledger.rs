@@ -712,8 +712,19 @@ const CHECKPOINT_CACHE_MAX: usize = 64;
 impl Authority {
     /// Create a fresh ledger for a Space at `root` (fails if one exists).
     pub fn create(root: impl Into<PathBuf>, genesis: Genesis) -> Result<Self, Failure> {
-        let root = root.into();
-        let store = Store::open(&root)?;
+        Self::create_with(Store::open(root.into())?, genesis)
+    }
+
+    /// [`Authority::create`] over any medium — the browser door, where a
+    /// ledger has a store but no path.
+    pub fn create_on(
+        medium: std::sync::Arc<dyn journal::Medium>,
+        genesis: Genesis,
+    ) -> Result<Self, Failure> {
+        Self::create_with(Store::open_on(medium)?, genesis)
+    }
+
+    fn create_with(store: Store, genesis: Genesis) -> Result<Self, Failure> {
         if store.manifest().is_some() {
             return Err(Failure::corrupt("a ledger already exists at this root"));
         }
@@ -746,6 +757,11 @@ impl Authority {
         Self::open_expecting_semantics(root, LEDGER_SEMANTICS_VERSION)
     }
 
+    /// [`Authority::open`] over any medium — the browser door.
+    pub fn open_on(medium: std::sync::Arc<dyn journal::Medium>) -> Result<Self, Failure> {
+        Self::open_with(Store::open_on(medium)?, LEDGER_SEMANTICS_VERSION)
+    }
+
     /// [`Authority::open`] at an explicit semantics version — the test
     /// seam proving the semantics-version rebuild is a verified recovery from
     /// the signed effects, never a silent cache miss.
@@ -754,7 +770,10 @@ impl Authority {
         root: impl Into<PathBuf>,
         semantics: u16,
     ) -> Result<Self, Failure> {
-        let store = Store::open(root)?;
+        Self::open_with(Store::open(root)?, semantics)
+    }
+
+    fn open_with(store: Store, semantics: u16) -> Result<Self, Failure> {
         let meta_bytes = store
             .caller_meta()?
             .ok_or_else(|| Failure::corrupt("no committed ledger at this root"))?;

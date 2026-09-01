@@ -342,7 +342,7 @@ fn validate_object(root: &Path, object: &Object) -> Result<(), Failure> {
 }
 
 fn read_object(root: &Path, object: &Object) -> Result<Vec<u8>, Failure> {
-    crate::v1::read_file_bounded(
+    crate::retired::read_file_bounded(
         &root.join(OBJECTS_DIR).join(crate::hex(&object.hash)),
         &object.hash,
         object.len,

@@ -41,6 +41,18 @@ const RUNNING: u64 = u64::MAX;
 
 static FROZEN_MILLIS: AtomicU64 = AtomicU64::new(RUNNING);
 
+#[cfg(target_arch = "wasm32")]
+fn real_millis() -> u64 {
+    // web-time asks the JS host; std's SystemTime panics in a browser, and a
+    // panic inside a timestamp is a worse lie than any clock.
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn real_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

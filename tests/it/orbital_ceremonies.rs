@@ -334,9 +334,12 @@ fn threshold_recovery_installs_the_exact_root_and_fences_the_old_epoch() {
     );
 
     // Durable restart result: reopen c1's store cold; the exact terminal
-    // state — root, generation, effect count — survives.
-    let space = c1.1.space();
-    let reopened = SpaceAuthority::open(&c1.0, &space, &C1_SEED).unwrap();
+    // state — root, generation, effect count — survives. Cold means the warm
+    // handle is gone first — one root, one holder of write custody.
+    let (c1_home, c1_auth) = c1;
+    let space = c1_auth.space();
+    drop(c1_auth);
+    let reopened = SpaceAuthority::open(&c1_home, &space, &C1_SEED).unwrap();
     let (state, terminal) = reopened.space_root_state();
     assert_eq!((state.gen, terminal), (2, 2));
     assert_eq!(state.root, vec![c1_actor]);

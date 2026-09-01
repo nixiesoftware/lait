@@ -80,6 +80,11 @@ anyhow = "1"
 # Ceremony-engine diagnostics (per-transcript fault isolation logs).
 tracing = "0.1"
 
+# The wall clock's browser arm: web-time shims SystemTime over the JS host
+# where std's panics. Target-gated so a native build never sees it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [lints]
 workspace = true
 

@@ -46,7 +46,6 @@ use crate::store::{OrbitStore, StoreLock};
 use crate::world::{AuthorityView, LocalIdentity, PrincipalFacts};
 use replica::body::BodyKeySource;
 use replica::body::WorldId;
-use replica::convergence::ConvergenceOutcome;
 
 /// How often [`Station::content_acquire`] looks again while a chunk is in flight.
 const ACQUIRE_POLL: Duration = Duration::from_millis(25);
@@ -1751,13 +1750,9 @@ pub enum Reachability {
     Unreachable,
 }
 
-/// The outcome of a Contact: bytes moved reported **separately** from the
-/// Convergence classification of the material.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContactOutcome {
-    pub bytes_moved: u64,
-    pub convergence: ConvergenceOutcome,
-}
+/// The outcome of a Contact — the contact crate's type, under the name this
+/// module has always exported.
+pub use ::contact::Outcome as ContactOutcome;
 
 #[cfg(test)]
 mod tests {

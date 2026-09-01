@@ -1,0 +1,31 @@
+[package]
+name = "contact"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Contact v2 — the bounded direct material exchange (`lait/contact/2`): the signed Hello/Ack, the twelve-frame grammar, the pure transport-free transcript machines, and the initiator that drives them over a comms stream. Extracted from the runtime so a browser peer and the daemon speak from ONE set of types; the scheduler, registry, and accept side remain the runtime's."
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[dependencies]
+mechanics = { path = "../mechanics" }
+replica = { path = "../replica" }
+# The transport seam the initiator drives; wasm-clean end to end.
+comms = { path = "../comms" }
+
+anyhow = "1"
+blake3 = "1"
+# Ticket rendering: base32 link form, NFC-stable display names.
+data-encoding = "2.6"
+unicode-normalization = "0.1"
+getrandom = "0.3"
+# The initiator's two-deadline discipline needs a clock that exists on every
+# target; n0-future's is web-time-backed in a browser.
+n0-future = "0.3"
+postcard = { version = "1", features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+serde-byte-array = "0.1"
+tracing = "0.1"
+
+[lints]
+workspace = true

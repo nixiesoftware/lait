@@ -1046,6 +1046,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "contact"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "comms",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "mechanics",
+ "n0-future",
+ "postcard",
+ "replica",
+ "serde",
+ "serde-byte-array",
+ "tracing",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3741,6 +3760,7 @@ dependencies = [
  "hyper-util",
  "install-layout",
  "interprocess",
+ "journal",
  "lait-directory",
  "lait-feed-notify",
  "lait-issues",
@@ -4350,6 +4370,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tracing",
+ "web-time",
  "windows-sys 0.61.2",
  "x25519-dalek",
 ]
@@ -5990,6 +6011,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "comms",
+ "contact",
  "data-encoding",
  "fabric",
  "fs2",

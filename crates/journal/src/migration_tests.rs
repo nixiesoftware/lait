@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{index, v1, Defect, Failure, Index, Manifest, Object, Store, FAULT_POINTS};
+use crate::{index, retired, Defect, Failure, Index, Manifest, Object, Store, FAULT_POINTS};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -82,7 +82,7 @@ fn assert_migrated(root: &Path, meta: &[u8], refs: &[Object]) {
             usize::try_from(object.len).unwrap()
         );
     }
-    assert!(v1::tombstoned(root), "the tombstone stands");
+    assert!(retired::tombstoned(root), "the tombstone stands");
     assert!(!root.join("objects").exists(), "the source moved aside");
     assert!(root.join("retired-v1").is_dir(), "…into retirement");
 }
@@ -180,7 +180,7 @@ fn a_tombstone_whose_pack_is_missing_is_a_divergence() {
 
 #[test]
 fn a_never_committed_prior_layout_retires_into_a_fresh_pack() {
-    let root = temp_root("empty-v1");
+    let root = temp_root("empty-retired");
     std::fs::create_dir_all(root.join("objects")).unwrap();
     std::fs::create_dir_all(root.join("journal")).unwrap();
 
@@ -190,7 +190,7 @@ fn a_never_committed_prior_layout_retires_into_a_fresh_pack() {
         .commit(&[b"first".to_vec()], &[], Index::NONE, b"m".to_vec())
         .unwrap();
     drop(store);
-    assert!(v1::tombstoned(&root));
+    assert!(retired::tombstoned(&root));
     assert_eq!(
         Store::open(&root).unwrap().caller_meta().unwrap().unwrap(),
         b"m"
@@ -200,7 +200,7 @@ fn a_never_committed_prior_layout_retires_into_a_fresh_pack() {
 
 #[test]
 fn the_tombstone_reads_as_unsupported_and_refuses_the_old_rebuild() {
-    let bytes = v1::tombstone_bytes();
+    let bytes = retired::tombstone_bytes();
     // An old binary's open: unsupported, never corrupt — the message that
     // says rebuild-or-restore instead of summoning a damage response.
     assert!(matches!(

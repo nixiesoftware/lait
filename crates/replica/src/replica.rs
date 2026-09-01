@@ -4480,7 +4480,33 @@ impl Replica {
         root: impl Into<std::path::PathBuf>,
         keys: Arc<dyn BodyKeySource>,
     ) -> Result<Self, Failure> {
-        let store = match Store::open(root) {
+        Self::open_from(Store::open(root), keys)
+    }
+
+    /// [`Replica::open`] over any medium — the browser door, where a replica
+    /// has a store but no path. The prior-generation migration is a native
+    /// concern the medium form never meets.
+    pub fn open_on(
+        medium: Arc<dyn journal::Medium>,
+        keys: Arc<dyn BodyKeySource>,
+    ) -> Result<Self, Failure> {
+        Self::open_from(Store::open_on(medium), keys)
+    }
+
+    /// Hand write custody of the durable store to a successor generation —
+    /// see [`Store::release_owner_lock`]. Called at Station close, after the
+    /// closed flag forbids every further commit through this Replica.
+    pub fn release_owner_lock(&mut self) {
+        if let Some(store) = self.durable.as_mut() {
+            store.release_owner_lock();
+        }
+    }
+
+    fn open_from(
+        opened: Result<Store, journal::Failure>,
+        keys: Arc<dyn BodyKeySource>,
+    ) -> Result<Self, Failure> {
+        let store = match opened {
             Ok(s) => s,
             Err(journal::Failure::Integrity(defect)) => {
                 return Err(Failure::Integrity(Defect::Store(defect)));

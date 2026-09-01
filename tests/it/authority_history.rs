@@ -431,7 +431,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     let mut target = Replica::open(&store_dir, Arc::new(mech_b.clone()))
         .unwrap()
         .with_store_fault_injector(Box::new(move |point| {
-            point == "manifest-rename" && crash_flag.load(Ordering::SeqCst)
+            point == "pack-flush" && crash_flag.load(Ordering::SeqCst)
         }));
     target.set_supported(supported());
 
@@ -439,7 +439,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     let frontier_before_contact = mech_b.current_frontier();
 
     // Phase 1: validation (authority incorporates durably) then a Body-phase
-    // crash at the manifest rename.
+    // crash at the pack flush — the authoritative switch.
     let bundle = {
         let mut inc = incorporator.lock().unwrap();
         target
@@ -457,8 +457,12 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
         "the injected Body-phase crash fails the commit"
     );
     drop(target);
+    drop(incorporator);
+    drop(mech_b);
 
     // Authority survived the crash: a reopened mechanics still shows it.
+    // Reopening cold means every warm handle is gone first — one root, one
+    // holder of write custody.
     let mech_b2 = SpaceAuthority::open(&root_b, &space, &FOUNDER_SEED).unwrap();
     assert_eq!(mech_b2.current_frontier(), frontier_after_authority);
 

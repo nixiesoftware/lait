@@ -99,6 +99,7 @@ const RECORD_KEY_CONTEXT: &str = "lait/pack-record/1";
 /// Every named crash boundary in the pack log, for fault-matrix coverage.
 /// `pack-compact-retire` is post-authoritative: a crash there loses cleanup,
 /// never a commit.
+#[cfg(any(test, feature = "fault-injection"))]
 pub const PACK_FAULT_POINTS: &[&str] = &[
     "pack-objects",
     "pack-seal",

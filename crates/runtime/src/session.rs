@@ -3361,9 +3361,15 @@ impl StationCore {
     /// before the close or observes it and is refused. Every acknowledged
     /// commit is already on disk, so closing needs no checkpoint. Observation
     /// streams end with a typed `StationDormant`.
+    ///
+    /// The store's owner lock is released here too: this core may outlive the
+    /// Station in a lingering Session's `Arc`, and a successor generation must
+    /// be able to take write custody the moment commits are forbidden, not
+    /// when the last reader lets go.
     pub(crate) fn close(&self) {
-        let _replica = self.replica_lock();
+        let mut replica = self.replica_lock();
         self.lock().closed = true;
+        replica.release_owner_lock();
         self.broadcaster.close();
     }
 }

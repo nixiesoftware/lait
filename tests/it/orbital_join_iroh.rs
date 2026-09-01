@@ -368,12 +368,19 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     });
 
     // 9. Restart both endpoints/stores; recontact; the issue is still readable.
+    // A restart means the prior generation's handles are gone before the next
+    // opens — one root, one holder of write custody.
     drop(session_f);
     drop(session_j);
     let _ = station_j.vacate();
     let _ = station_f.vacate();
+    let space_f = mech_f.space();
+    drop(mech_f);
+    drop(mech_j);
+    drop(_rt_f);
+    drop(_rt_j);
 
-    let mech_f2 = SpaceAuthority::open(root_f.as_path(), &mech_f.space(), &FOUNDER_SEED).unwrap();
+    let mech_f2 = SpaceAuthority::open(root_f.as_path(), &space_f, &FOUNDER_SEED).unwrap();
     let (_rt_f2, station_f2) = activate(
         root_f.as_path(),
         FOUNDER_SEED,

@@ -33,7 +33,7 @@
 //! sync, and no counter file on the commit path; the seal *is* the sequence
 //! reservation, so a gap cannot exist and a reuse cannot be constructed. A
 //! root still carrying the retired file-per-object layout is migrated at
-//! open, once, verified end to end — see [`v1`] for the rules and the
+//! open, once, verified end to end — see [`retired`] for the rules and the
 //! tombstone an old binary meets afterwards.
 //!
 //! Recovery on open exposes **the complete old or the complete new** state:
@@ -82,7 +82,7 @@ mod pack_tests;
 )]
 mod pool_header;
 mod prior;
-mod v1;
+mod retired;
 
 pub use medium::{DirMedium, Medium, MemMedium, ReadAt, SlotWriter};
 #[cfg(all(
@@ -91,7 +91,9 @@ pub use medium::{DirMedium, Medium, MemMedium, ReadAt, SlotWriter};
     feature = "opfs"
 ))]
 pub use opfs::OpfsMedium;
-pub use pack::{PackStore, PackView, Provenance, PACK_FAULT_POINTS};
+#[cfg(any(test, feature = "fault-injection"))]
+pub use pack::PACK_FAULT_POINTS;
+pub use pack::{PackStore, PackView, Provenance};
 pub use prior::Store as GenerationSource;
 
 #[cfg(test)]
@@ -377,8 +379,8 @@ pub struct Store {
     manifest: Option<Manifest>,
     pins: Arc<Mutex<BTreeMap<[u8; 32], u64>>>,
     root_pins: Arc<Mutex<BTreeMap<([u8; 32], u64), u64>>>,
-    /// Held for the store's whole life; the OS releases it when the process
-    /// ends, however it ends.
+    /// Held until [`Store::release_owner_lock`] or the end of the process,
+    /// however it ends.
     _lock: Option<StoreLock>,
 }
 
@@ -531,6 +533,81 @@ impl StoreLock {
             }
         }
         Ok(Self { _file: file })
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod owner_lock_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lait-lock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One writer per root: a second open while the first stands is refused,
+    /// not queued and not silently shared.
+    #[test]
+    fn a_second_open_is_refused_while_the_first_holds_custody() {
+        let root = temp_root("held");
+        let _first = Store::open(&root).unwrap();
+        assert!(matches!(
+            Store::open(&root),
+            Err(Failure::Operation {
+                operation: Operation::Open,
+                kind: IoKind::PermissionDenied,
+            })
+        ));
+    }
+
+    /// Releasing custody is what lets a successor generation open in the same
+    /// process the prior one is still draining in — a closed Station's core
+    /// lingers in Session `Arc`s, and its frozen readers must not fence the
+    /// next activation out of the store.
+    #[test]
+    fn released_custody_admits_a_successor_while_the_prior_store_stands() {
+        let root = temp_root("released");
+        let mut first = Store::open(&root).unwrap();
+        first.release_owner_lock();
+        let _second = Store::open(&root).unwrap();
+    }
+
+    /// The other half of the release-at-close claim: a prior generation's
+    /// frozen reader keeps answering for the bytes it already verified while
+    /// the successor commits past it — sealed bytes are immutable in place,
+    /// so a coasting reader and a live writer never contradict each other.
+    #[test]
+    fn a_prior_readers_sealed_bytes_survive_the_successors_commits() {
+        let root = temp_root("coast");
+        let payload = b"sealed before handover".to_vec();
+        let held = Object {
+            hash: object_content_hash(&payload),
+            len: payload.len() as u64,
+        };
+        let mut first = Store::open(&root).unwrap();
+        first
+            .commit(&[payload.clone()], &[], Index::NONE, b"m1".to_vec())
+            .unwrap();
+        let reader = first.reader();
+        first.release_owner_lock();
+
+        let mut successor = Store::open(&root).unwrap();
+        successor
+            .commit(
+                &[b"the successor's material".to_vec()],
+                &[],
+                Index::NONE,
+                b"m2".to_vec(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            reader.read_object(&held).unwrap(),
+            payload,
+            "the coasting reader still answers for what it verified"
+        );
     }
 }
 
@@ -777,7 +854,7 @@ impl Store {
     /// its current manifest (`None` for a fresh store). The exposed state is
     /// always the complete old or complete new one. A root still carrying
     /// the retired file-per-object layout is migrated here, once, verified
-    /// end to end — see [`v1`] for the rules — and a root another process
+    /// end to end — see [`retired`] for the rules — and a root another process
     /// already holds is refused.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Failure> {
         Self::open_root(root.into(), None)
@@ -811,6 +888,16 @@ impl Store {
         Self::assemble(PathBuf::new(), pack, None)
     }
 
+    /// Hand write custody of this root to a successor while frozen readers
+    /// coast. The lock exists to keep two WRITERS off one pack; a closed
+    /// store that will never commit again holds only readers, and sealed
+    /// bytes are immutable in place (a successor appends past `sealed_len`
+    /// and never truncates below it), so releasing early is what lets a new
+    /// generation open in the same process the old one is still draining in.
+    pub fn release_owner_lock(&mut self) {
+        self._lock = None;
+    }
+
     fn open_native(
         medium: Arc<dyn Medium>,
         root: PathBuf,
@@ -825,13 +912,15 @@ impl Store {
             // prove it stands on its own, clear the stillborn slots, and let
             // the ordinary flow migrate again. Refusing here would brick a
             // store whose data is entirely intact.
-            Err(Failure::Integrity(defect)) if v1::present(&root) && !v1::tombstoned(&root) => {
+            Err(Failure::Integrity(defect))
+                if retired::present(&root) && !retired::tombstoned(&root) =>
+            {
                 tracing::warn!(
                     ?root,
                     ?defect,
                     "unusable pack beside an authoritative prior-layout source; re-migrating"
                 );
-                v1::Source::open(&root).map(drop)?;
+                retired::Source::open(&root).map(drop)?;
                 pack::remove_family(medium.as_ref(), HOT_PREFIX)?;
                 pack::PackStore::open(medium.clone(), HOT_PREFIX)?
             }
@@ -844,16 +933,16 @@ impl Store {
         #[cfg(not(any(test, feature = "fault-injection")))]
         let _ = injector;
         if pack.manifest().is_none() {
-            if v1::tombstoned(&root) {
+            if retired::tombstoned(&root) {
                 // The tombstone promises a pack that is not here: somebody
                 // removed the slots, or restored half a backup. Only a person
                 // can say which side of history to keep.
                 return Err(Failure::Integrity(Defect::Diverged));
             }
-            if v1::present(&root) {
-                migrate_v1(&root, &mut pack)?;
+            if retired::present(&root) {
+                migrate_retired(&root, &mut pack)?;
             }
-        } else if v1::present(&root) {
+        } else if retired::present(&root) {
             // A sealed pack beside prior-layout remnants: a crash between
             // the migration seal and the end of retirement. Only a source
             // that still matches the seal's provenance may be retired.
@@ -1635,17 +1724,17 @@ fn verify_semantics(pack: &pack::PackStore) -> Result<Option<Manifest>, Failure>
 /// slot's existence durable with the one directory fsync the pack medium
 /// never performs, then retire the source. Every step before the seal leaves
 /// the source authoritative; every step after is resumable cleanup.
-fn migrate_v1(root: &std::path::Path, pack: &mut pack::PackStore) -> Result<(), Failure> {
-    let source = v1::Source::open(root)?;
+fn migrate_retired(root: &std::path::Path, pack: &mut pack::PackStore) -> Result<(), Failure> {
+    let source = retired::Source::open(root)?;
     if source.manifest_bytes.is_empty() {
         // The old layout was opened but never committed: nothing to carry,
         // and nothing whose sequence anyone could have observed.
         tracing::info!(?root, "retiring a never-committed prior-layout store");
-        v1::retire(root)?;
+        retired::retire(root)?;
         return Ok(());
     }
     let needed = source.total_bytes();
-    if let Some(available) = v1::available_bytes(root) {
+    if let Some(available) = retired::available_bytes(root) {
         let margin = (needed / 10).saturating_add(64 * 1024 * 1024);
         if available < needed.saturating_add(margin) {
             tracing::warn!(
@@ -1691,8 +1780,8 @@ fn migrate_v1(root: &std::path::Path, pack: &mut pack::PackStore) -> Result<(), 
     pack.migrate_commit(&mut stream, source.manifest_bytes.clone(), provenance)?;
     // The pack medium never syncs directories; the migration driver must,
     // or a crash could lose the slot file after the source is retired.
-    v1::sync_dir(root)?;
-    v1::retire(root)
+    retired::sync_dir(root)?;
+    retired::retire(root)
 }
 
 /// Finish a retirement a crash interrupted — but only for a source the
@@ -1710,9 +1799,9 @@ fn resume_retirement(root: &std::path::Path, pack: &pack::PackStore) -> Result<(
     // The crash may have landed before migration's own directory sync: the
     // slot's existence must be durable before the source starts moving, on
     // this path exactly as on the first attempt.
-    v1::sync_dir(root)?;
+    retired::sync_dir(root)?;
     match std::fs::read(root.join(MANIFEST_FILE)) {
-        Ok(bytes) if !v1::is_tombstone(&bytes) => {
+        Ok(bytes) if !retired::is_tombstone(&bytes) => {
             if manifest_hash(&bytes) != provenance.source_manifest {
                 tracing::warn!(
                     ?root,
@@ -1725,7 +1814,7 @@ fn resume_retirement(root: &std::path::Path, pack: &pack::PackStore) -> Result<(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(io_err(Operation::Read, e)),
     }
-    v1::retire(root)
+    retired::retire(root)
 }
 
 /// Flip bytes of one stored object in place — the corruption a rot test

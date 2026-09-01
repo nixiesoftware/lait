@@ -111,6 +111,10 @@ impl Node {
     /// run that is over.
     fn restart(&mut self) {
         self.stop();
+        // The prior generation hands over write custody at close, exactly as
+        // `Station::vacate` does; without it the successor's open is refused
+        // as a second writer.
+        self.core.close();
         let mut replica = replica::Replica::open(
             self.dir.join("store"),
             Arc::new(replica::body::StaticBodyKeys::new(

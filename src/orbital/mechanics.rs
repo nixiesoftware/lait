@@ -37,7 +37,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
 
 use mechanics::actor;
 use mechanics::actor::device_from_seed;
@@ -150,48 +149,10 @@ fn persist_hex_key(dir: &Path, file: &str, secret: &[u8; 32]) -> Result<()> {
     mechanics::recovery::artifact::install(dir, file, secret).map_err(anyhow::Error::new)
 }
 
-/// One authority-record unit riding Contact's authority section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AuthorityRecord {
-    /// One canonical signed ledger effect (actor event, ACL op, or terminal
-    /// SpaceAuthority event). Import validates the complete batch, then
-    /// commits atomically.
-    Effect(Vec<u8>),
-    /// One canonical [`mechanics::recovery::CeremonyMaterial`] record — ceremony
-    /// transcript traffic under its distinct material-class tag and signing
-    /// domain. Rides the same mechanics channel but commits to the ledger's
-    /// separate bounded ceremony log, never an authority frontier.
-    Ceremony(Vec<u8>),
-    /// One sealed key-epoch envelope record (canonical
-    /// [`SealedKeyRecord`] bytes). Authorization is the signed mint;
-    /// a forged envelope is inert.
-    SealedKey(Vec<u8>),
-    /// A joiner's admission redemption: the admin-signed capability, the
-    /// joiner's canonical inception bytes, the joiner's signed acceptance
-    /// proof, and the canonical digest of the Coordinates it accepted. An
-    /// admin incorporator validates the proof + capability and redeems it
-    /// (AddMember + the evidence role expansion + epoch sealing); everyone
-    /// else retains the effect material it rides beside.
-    Admission {
-        admission: Vec<u8>,
-        inception: Vec<u8>,
-        proof: Vec<u8>,
-        coordinates_digest: [u8; 32],
-    },
-}
-
-impl AuthorityRecord {
-    // Postcard serialization of this closed, allocation-backed enum has no
-    // data-dependent failure mode; changing this durable helper's shape would
-    // obscure the invariant at every caller.
-    #[allow(clippy::expect_used)]
-    pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("authority record")
-    }
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
-    }
-}
+/// The one authority-record unit riding Contact's authority section — the
+/// contact crate's type, because a browser peer and this daemon must encode
+/// with one shape or they drift apart on the wire.
+pub use runtime::plane::contact::authority::AuthorityRecord;
 
 pub(super) struct Inner {
     pub(super) space: SpaceId,

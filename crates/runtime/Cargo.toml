@@ -23,6 +23,7 @@ fabric = { path = "../fabric" }
 # comms — gossip, presence dial, framed streams, ALPN adapters. Runtime drives
 # the transport seam; `iroh` is absent from this manifest by construction.
 comms = { path = "../comms" }
+contact = { path = "../contact" }
 journal = { path = "../journal" }
 # Publication-local indexes use Arc-backed persistent vectors, HAMTs, and
 # B+trees so one generation copies only changed rows/posting paths.
@@ -73,6 +74,9 @@ libc = "0.2"
 
 [dev-dependencies]
 replica = { path = "../replica", features = ["scale-fixtures"] }
+# Objects live inside pack slots; a rot test tampers through the pack's own
+# table, which only the injection seam exposes.
+journal = { path = "../journal", features = ["fault-injection"] }
 regex = "1.13.1"
 # The Contact wire decoders run BEFORE a signature is checked — they have to,
 # because the signature is inside the thing being decoded — so the parser is
