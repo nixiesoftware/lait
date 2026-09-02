@@ -731,6 +731,11 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
             "runtime",
             &[
                 "beacon",
+                // The daemon's own Station machinery composed with no daemon
+                // around it — a browser tab's engine over a pulled Space.
+                // wasm32-only in cfg, but the name is part of the public
+                // vocabulary either way.
+                "browser",
                 // The bounded description of what one accepted operation did,
                 // which the product surfaces need in order to render an
                 // outcome without re-reading the store.

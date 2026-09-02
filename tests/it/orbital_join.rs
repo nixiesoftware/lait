@@ -274,15 +274,22 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
         );
     }
 
-    // 6. The joiner pulls again: membership + sealed keys arrive FIRST (the
-    //    authority-first phase), and the SAME pass upgrades the previously
-    //    opaque Bodies into interpreted product state.
-    let after = station_j.contact(&station_id(&FOUNDER_SEED)).unwrap();
-    assert!(
-        after.convergence.accepted >= 1,
-        "opaque material upgraded to interpreted once the keys arrived"
-    );
-    assert!(mech_j.am_i_member(), "the joiner holds standing");
+    // 6. The joiner converges again. Under symmetric convergence the
+    //    membership, sealed keys, and body upgrade may ALREADY have arrived on
+    //    the reverse phase of the founder's step-5 dial (the responder
+    //    incorporates the push asynchronously after acking it), so the claim
+    //    is the OUTCOME — standing held, previously opaque material now
+    //    interpreted — never which pass delivered it.
+    let _ = station_j.contact(&station_id(&FOUNDER_SEED)).unwrap();
+    let mut member = false;
+    for _ in 0..100 {
+        if mech_j.am_i_member() {
+            member = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(member, "the joiner holds standing");
     let session_j = dock(&station_j, &JOINER_SEED);
     let view: IssueView = query(
         &session_j,
@@ -363,11 +370,13 @@ fn a_joiners_own_dial_pushes_its_admission_and_the_founder_redeems() {
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    // Single-use, exactly the shape the browser harness ships — the reverse
+    // push must redeem under the nonce cap, not around it.
     let admission = mech_f
         .mint_admission(
             &FOUNDER_SEED,
             3600,
-            true,
+            false,
             now,
             crate::world_fixture::role_evidence("contributor", [0u8; 32]),
         )
