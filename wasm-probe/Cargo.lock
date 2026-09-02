@@ -5072,6 +5072,7 @@ dependencies = [
  "postcard",
  "replica",
  "runtime",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-test",

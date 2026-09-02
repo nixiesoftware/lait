@@ -159,6 +159,20 @@ pub struct BrowserEngine {
     identity: runtime::world::LocalIdentity,
     actor: String,
     device: String,
+    ledger: contact::authority::SharedLedgerAuthority,
+    space: String,
+    mount: String,
+}
+
+/// One answer over the frame link, mirroring the viewer's `LinkReply`
+/// (`viewer/src/link.ts`): a reply body, a refusal as clone-safe data, or a
+/// confirmation question. Serialized `{kind, …}`.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LinkReply {
+    Reply { body: serde_json::Value },
+    Refusal { refusal: browser_control::Refusal },
+    Confirm { question: String },
 }
 
 impl BrowserEngine {
@@ -167,6 +181,7 @@ impl BrowserEngine {
     /// `call_world`), and a SEPARATE `client_runner` instance backing the
     /// `ClientAdapter`. The two instances are what keep `execute`'s callback
     /// into `call_world` from re-entering the instance `execute` runs in.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: Session,
         control: Arc<RemoteWorld>,
@@ -174,6 +189,9 @@ impl BrowserEngine {
         identity: runtime::world::LocalIdentity,
         actor: String,
         device: String,
+        ledger: contact::authority::SharedLedgerAuthority,
+        space: String,
+        mount: String,
     ) -> anyhow::Result<Self> {
         let client = RemoteClient::connect(client_runner)?;
         Ok(Self {
@@ -183,7 +201,63 @@ impl BrowserEngine {
             identity,
             actor,
             device,
+            ledger,
+            space,
+            mount,
         })
+    }
+
+    /// The spaces reply a browser backend gives: the single served Space, in a
+    /// shape that carries no daemon probe readings (see
+    /// `browser_control::reply`).
+    pub fn spaces(&self) -> LinkReply {
+        let row = browser_control::reply::ServedSpaceRow {
+            kind: browser_control::reply::ServedKind::Served,
+            id: self.mount.clone(),
+            space: self.space.clone(),
+            // The live catalog name is a later refinement (a status read); a
+            // served row is honest with it absent.
+            name: None,
+            identity: browser_control::reply::ServedIdentity::Own,
+        };
+        let reply = browser_control::reply::ServedSpacesReply {
+            spaces: vec![row],
+            world: self.mount.clone(),
+        };
+        reply_of(serde_json::to_value(reply))
+    }
+
+    /// A control-plane request (host or Space plane), answered
+    /// world-agnostically: `whoami`/`members` from the pulled ledger, and every
+    /// daemon-only or not-yet command refused legibly with `not_hosted`.
+    pub fn control_rpc(&self, cmd: &str) -> LinkReply {
+        use browser_control::Disposition;
+        match browser_control::disposition(cmd) {
+            Some(Disposition::Answered) => match cmd {
+                "whoami" => reply_of(serde_json::to_value(browser_control::answer::whoami(
+                    &self.ledger,
+                ))),
+                "members" => reply_of(serde_json::to_value(browser_control::answer::members(
+                    &self.ledger,
+                ))),
+                // The classification names a command Answered that this
+                // dispatcher has not wired — treat as not-yet rather than
+                // pretend. (The completeness test keeps this arm empty in
+                // practice.)
+                other => LinkReply::Refusal {
+                    refusal: browser_control::Refusal::not_yet(other),
+                },
+            },
+            Some(Disposition::DaemonOnly) => LinkReply::Refusal {
+                refusal: browser_control::Refusal::daemon_only(cmd),
+            },
+            Some(Disposition::NotYet) => LinkReply::Refusal {
+                refusal: browser_control::Refusal::not_yet(cmd),
+            },
+            None => LinkReply::Refusal {
+                refusal: browser_control::Refusal::unclassified(cmd),
+            },
+        }
     }
 
     fn host(&self) -> BrowserClientHost<'_> {
@@ -200,10 +274,47 @@ impl BrowserEngine {
     /// Run one product World request through the world-agnostic seam:
     /// `parse_web` classifies it, `execute` forwards it into the runner, and
     /// the runner's callbacks come back through the browser ClientHost — the
-    /// re-entrant path when a call reaches `call_world`.
+    /// re-entrant path when a call reaches `call_world`. Returns the raw
+    /// product value (or its Failure); [`Self::world_link`] wraps it as a
+    /// frame reply.
     pub fn world_rpc(&self, request: serde_json::Value) -> Result<serde_json::Value, Failure> {
         let host = self.host();
         let invocation = self.client.parse_web(request)?;
         futures_lite::future::block_on(self.client.execute(&host, invocation))
+    }
+
+    /// The world verb as a frame `LinkReply`: a product answer, or the
+    /// runner's Failure carried across as a refusal (never the native head's
+    /// wrong-mount refusal — a browser refusal is `not_hosted`-family, and a
+    /// World's own Failure keeps its diagnostic).
+    pub fn world_link(&self, request: serde_json::Value) -> LinkReply {
+        match self.world_rpc(request) {
+            Ok(body) => LinkReply::Reply { body },
+            Err(failure) => LinkReply::Refusal {
+                refusal: browser_control::Refusal {
+                    status: 400,
+                    message: failure
+                        .diagnostic()
+                        .unwrap_or("the World refused the call")
+                        .to_string(),
+                    error_kind: "error".to_string(),
+                },
+            },
+        }
+    }
+}
+
+/// A `serde_json` result into a reply frame, folding an encode error into a
+/// legible refusal.
+fn reply_of(result: Result<serde_json::Value, serde_json::Error>) -> LinkReply {
+    match result {
+        Ok(body) => LinkReply::Reply { body },
+        Err(error) => LinkReply::Refusal {
+            refusal: browser_control::Refusal {
+                status: 500,
+                message: format!("could not encode the reply: {error}"),
+                error_kind: "error".to_string(),
+            },
+        },
     }
 }

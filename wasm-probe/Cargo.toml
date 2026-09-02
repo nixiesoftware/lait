@@ -67,7 +67,7 @@ probe-engine = ["dep:runtime", "dep:world-sdk", "dep:lait-issues", "probe-runner
 # ClientAdapter/ClientHost seam (RemoteClient, never a named World), and the
 # control plane answers through the honest browser vocabulary. Needs the
 # pulled Space (probe-contact) to compose over.
-probe-dispatch = ["probe-engine", "probe-contact", "dep:world-interface", "dep:browser-control", "dep:futures-lite", "dep:serde_json"]
+probe-dispatch = ["probe-engine", "probe-contact", "dep:world-interface", "dep:browser-control", "dep:futures-lite", "dep:serde_json", "dep:serde"]
 
 [dependencies]
 mechanics = { path = "../crates/mechanics", optional = true }
@@ -84,6 +84,7 @@ world-interface = { path = "../crates/world-interface", optional = true }
 browser-control = { path = "../crates/browser-control", optional = true }
 futures-lite = { version = "2", optional = true }
 serde_json = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 # The query contract only — schema id, version, and the `IssueQuery` payload
 # grammar — so the engine test asks the real product question. The runner
 # module itself arrives as bytes, not as a dependency.

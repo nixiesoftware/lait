@@ -108,12 +108,15 @@ async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
         identity,
         actor,
         device.as_str().to_string(),
+        pulled.authority.clone(),
+        pulled.space.as_str().to_string(),
+        "issues".to_string(),
     )
     .expect("the browser engine composes over the runner");
 
-    // The world-agnostic Call: a product request in, a product answer out,
-    // crossing parse_web → execute → the runner's callbacks → the composed
-    // Session (re-entering the runner). alice's ENG project comes back.
+    // The world verb: a product request in, a product answer out, crossing
+    // parse_web → execute → the runner's callbacks → the composed Session
+    // (re-entering across the three instances). alice's ENG project comes back.
     let answer = engine
         .world_rpc(serde_json::json!({ "cmd": "project_list", "page": {} }))
         .expect("the product world RPC crosses the dispatch seam and answers");
@@ -122,4 +125,37 @@ async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
         text.contains("ENG"),
         "alice's ENG project crossed the dispatch seam: {text}",
     );
+
+    // The spaces verb: one served row, honestly shaped (no daemon probe fields).
+    let spaces = serde_json::to_value(engine.spaces()).expect("serialize spaces");
+    assert_eq!(spaces["kind"], "reply");
+    assert_eq!(spaces["body"]["spaces"][0]["kind"], "served");
+    assert_eq!(spaces["body"]["spaces"][0]["space"], pulled.space.as_str());
+    assert_eq!(spaces["body"]["world"], "issues");
+
+    // The control plane, world-agnostic: whoami answers from the pulled ledger,
+    // members lists the roster, and a daemon-only act refuses `not_hosted`.
+    let whoami = serde_json::to_value(engine.control_rpc("whoami")).expect("serialize whoami");
+    assert_eq!(whoami["kind"], "reply");
+    assert_eq!(
+        whoami["body"]["member"], true,
+        "bob is a member of the pulled Space: {whoami}"
+    );
+    let members = serde_json::to_value(engine.control_rpc("members")).expect("serialize members");
+    assert_eq!(members["kind"], "reply");
+    assert!(
+        members["body"]
+            .as_array()
+            .map(|m| !m.is_empty())
+            .unwrap_or(false),
+        "the roster is non-empty: {members}"
+    );
+    let refused =
+        serde_json::to_value(engine.control_rpc("member_remove")).expect("serialize refusal");
+    assert_eq!(refused["kind"], "refusal");
+    assert_eq!(
+        refused["refusal"]["error_kind"], "not_hosted",
+        "a daemon-only act refuses not_hosted, never the wrong-mount refusal: {refused}"
+    );
+    assert_ne!(refused["refusal"]["status"], 404);
 }
