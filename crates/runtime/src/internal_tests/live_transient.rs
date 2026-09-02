@@ -1042,7 +1042,9 @@ mod dialling {
         // And the negotiated intersection reaches the plane that honours it.
         assert_eq!(
             live.peer.features,
-            runtime::plane::feature::RESIDENCY_HINTS | runtime::plane::feature::NATIVE_LIVE_MEDIA
+            runtime::plane::feature::RESIDENCY_HINTS
+                | runtime::plane::feature::NATIVE_LIVE_MEDIA
+                | runtime::plane::feature::RECIPROCAL_CONVERGE
         );
         // And the identity is this Station's own resolution, never the packet's.
         assert_eq!(live.peer.actor.as_str(), format!("act_{}", "12".repeat(32)));

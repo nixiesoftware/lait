@@ -135,7 +135,7 @@ fn a_capability_this_build_does_not_implement_is_not_echoed_back() {
     // behind it, which is the whole point of having the assertion.
     assert_eq!(
         accept.capability.features,
-        feature::RESIDENCY_HINTS | feature::NATIVE_LIVE_MEDIA,
+        feature::RESIDENCY_HINTS | feature::NATIVE_LIVE_MEDIA | feature::RECIPROCAL_CONVERGE,
         "everything offered, intersected down to what is actually implemented"
     );
     assert_eq!(accept.capability.features & feature::UNSOLICITED_PROVIDE, 0);

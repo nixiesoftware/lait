@@ -82,6 +82,13 @@ pub mod feature {
     /// The peer implements the lait-live generation-1 media vocabulary and
     /// serves the `MEDIA_GROUP`/`MEDIA_CONTROL` lane pair.
     pub const NATIVE_LIVE_MEDIA: u64 = 1 << 2;
+    /// The peer runs Contact symmetrically: after serving its own material it
+    /// receives and incorporates the dialer's excess, so one dial converges
+    /// BOTH sides. Without it a dialer that cannot be dialed back — a browser
+    /// tab above all — never gets its writes out; with it, the tab pushes on
+    /// the same connection it pulls on. Negotiated (not an ALPN bump) so an old
+    /// peer that never sets it simply does today's one-way pull, no regression.
+    pub const RECIPROCAL_CONVERGE: u64 = 1 << 3;
 
     /// What *this* build actually implements.
     ///
@@ -94,7 +101,7 @@ pub mod feature {
     ///
     /// A bit joins this constant in the same commit as the code that honours
     /// it, and never before.
-    pub const LOCAL_SUPPORTED: u64 = RESIDENCY_HINTS | NATIVE_LIVE_MEDIA;
+    pub const LOCAL_SUPPORTED: u64 = RESIDENCY_HINTS | NATIVE_LIVE_MEDIA | RECIPROCAL_CONVERGE;
 }
 
 /// What a peer advertises about a plane it speaks.

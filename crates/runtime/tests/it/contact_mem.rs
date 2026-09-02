@@ -549,10 +549,10 @@ fn two_stations_converge_through_the_public_contact_api() {
     assert_eq!(read_kv(&station_b, "greeting"), b"hello");
     assert_eq!(read_kv(&station_b, "farewell"), b"bye");
 
-    // An unchanged second Contact converges nothing new — and under the
-    // O(changed) protocol it also SHIPS nothing new: B's signed holdings
-    // declaration covers every head, so the accepter serves only the
-    // manifest advertisement and the idle pull is a fraction of the first.
+    // An unchanged second Contact converges nothing new. The FORWARD pull is
+    // still O(changed): B's signed holdings declaration covers every head, so
+    // the accepter serves only the manifest advertisement, B accepts nothing,
+    // and nothing publishes.
     let again = station_b.contact(&station_id(&STATION_A_SEED)).unwrap();
     assert_eq!(again.convergence.accepted, 0);
     assert!(!again.convergence.advanced());
@@ -560,11 +560,19 @@ fn two_stations_converge_through_the_public_contact_api() {
         obs.try_next().unwrap().is_none(),
         "exact replay must not publish a duplicate attributed change"
     );
+    // The idle dial is NOT cheaper than the first, though: under symmetric
+    // convergence (RECIPROCAL_CONVERGE) the dialer PUSHES its whole material on
+    // every dial — correctness-first, before the reverse holdings-declaration
+    // dedup lands — so it re-ships B's accumulated heads to A (idempotent,
+    // converging nothing on A). The O(changed) idle property holds for the pull
+    // direction (`accepted == 0` above); restoring it for the push is the
+    // reverse-dedup follow-up. So idle traffic is bounded by that re-push, and
+    // is not a fraction of the first sync — it can exceed it once B has pulled
+    // A's material.
+    let _ = outcome.bytes_moved;
     assert!(
-        again.bytes_moved < outcome.bytes_moved,
-        "idle delta pull ({}) must move fewer bytes than the first sync ({})",
-        again.bytes_moved,
-        outcome.bytes_moved
+        again.bytes_moved > 0,
+        "the symmetric dial still moves its reverse-push bytes"
     );
     obs_session.close();
 
@@ -601,6 +609,77 @@ fn two_stations_converge_through_the_public_contact_api() {
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
     let _ = station_id_a;
+}
+
+#[test]
+fn a_dialers_own_write_pushes_to_the_responder_under_symmetric_convergence() {
+    // Bidirectional convergence — the parity claim. One dial converges BOTH
+    // sides: B writes locally, then B DIALS A exactly once. Gossip is off in
+    // this harness, so A NEVER reciprocally dials B — the only way A can get
+    // B's write is the reverse incorporate. The forward transfer gives B A's
+    // write; the reverse phase (RECIPROCAL_CONVERGE, negotiated) pushes B's
+    // write to A on the same connection, and A incorporates it through the
+    // exact path its own pull uses. This is how a browser tab — which nothing
+    // can dial — gets its writes out: it pushes on the dial it initiates.
+    let (_space, coords) = coordinates();
+    let net = comms::mem::MemNet::new();
+    let ta: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
+    let tb: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
+
+    let root_a = temp_root("sym-a");
+    let root_b = temp_root("sym-b");
+    let rt_a = runtime_at(&root_a);
+    let rt_b = runtime_at(&root_b);
+
+    let station_a = activate_with(&rt_a, &coords, ta, STATION_A_SEED, None);
+    submit_kv(&station_a, &WRITER_SEED, "greeting=hello");
+
+    let station_b = activate_with(&rt_b, &coords, tb, STATION_B_SEED, None);
+    // B's own write, before it dials — A has never seen it.
+    let b_write = submit_kv(&station_b, &WRITER_2_SEED, "reply=hi");
+    assert_eq!(read_kv(&station_b, "reply"), b"hi");
+
+    // Watch A for the pushed change it incorporates.
+    let world_id = WorldId::parse("dev.example.kv").unwrap();
+    let a_writer = Runtime::identity_from_seed(&WRITER_SEED);
+    let a_obs_session = station_a.dock(&world_id, &a_writer).unwrap();
+    let mut a_obs = a_obs_session.observe(None);
+    assert!(a_obs.try_next().unwrap().unwrap().reset);
+
+    // B dials A ONCE.
+    let outcome = station_b.contact(&station_id(&STATION_A_SEED)).unwrap();
+    // Forward still works: B pulled A's write (incorporated before contact returns).
+    assert!(outcome.convergence.accepted >= 1);
+    assert_eq!(read_kv(&station_b, "greeting"), b"hello");
+
+    // The responder incorporates the push asynchronously after acking receipt,
+    // so its doorbell ring is the synchronization point: block on it, THEN read.
+    let rung = a_obs
+        .next_timeout(Duration::from_secs(5))
+        .unwrap()
+        .expect("the responder rings its doorbell for the pushed, incorporated change");
+    assert!(!rung.reset);
+    assert_eq!(
+        rung.change.attribution.as_ref().unwrap().operation,
+        b_write.as_bytes(),
+        "the responder's ring names the dialer's pushed write"
+    );
+
+    // The parity claim proven: A holds B's write, converged OUT with no dial
+    // from A.
+    assert_eq!(
+        read_kv(&station_a, "reply"),
+        b"hi",
+        "the dialer's write converged OUT to the responder with no dial from the responder"
+    );
+
+    a_obs_session.close();
+    drop(station_a);
+    drop(station_b);
+    let _ = std::fs::remove_dir_all(&root_a);
+    let _ = std::fs::remove_dir_all(&root_b);
 }
 
 #[test]

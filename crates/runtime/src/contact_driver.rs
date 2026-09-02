@@ -635,7 +635,22 @@ async fn contact_attempt(
         .await
         .map_err(|failure| (failure, false))?;
     drop(stream); // dialer close: we have the transcript
+    incorporate_received(ctx, station, received, bytes_moved).await
+}
 
+/// Stage → validate (authority first, durable) → incorporate one received
+/// transfer under the Station writer, then publish its ordered per-transaction
+/// changes. Shared by the dialer's own pull (`contact_attempt`) and, under
+/// symmetric convergence, by the responder incorporating a dialer's PUSHED
+/// excess (`serve_contact`) — one incorporation path, not two, so authority-
+/// first ordering and the publish / revocation-wake tail are identical whichever
+/// side received the material.
+async fn incorporate_received(
+    ctx: &DriverContext,
+    peer: &Key,
+    received: ReceivedMaterial,
+    bytes_moved: u64,
+) -> Result<ContactOutcome, (Failure, bool)> {
     // Stage → validate (authority first, durable) → incorporate under the
     // Station writer. TransferAck already went out — it acknowledged the
     // transcript, not convergence. Each Body byte string is now the bounded
@@ -683,7 +698,7 @@ async fn contact_attempt(
         // The one place the cause exists. Logged as well as returned: the
         // caller sees it inline, and an operator reading the daemon afterwards
         // does not have to have been holding the connection.
-        tracing::warn!(?failure, peer = %station, "contact material was refused");
+        tracing::warn!(?failure, peer = %peer, "contact material was refused");
         // Keep the discriminant alive across the stringification. Root
         // completeness is the one refusal this Station can repair by itself.
         contact_commit_failure(failure)
@@ -785,6 +800,156 @@ fn contact_commit_failure(failure: replica::transaction::commit::Failure) -> (Fa
     }
 }
 
+/// Build this Station's outbound material for a transfer: its authorized
+/// manifest and Bodies excluding `held`, or an authority-only transfer when
+/// this device holds no authoring standing at its current frontier — an
+/// unadmitted joiner serves (and, symmetric, pushes) only its admission
+/// request. The single `with_replica_read` snapshot is what keeps root
+/// completeness satisfiable from what arrives; `held` empty means serve whole.
+fn build_outbound(
+    ctx: &DriverContext,
+    held: &std::collections::BTreeSet<(replica::body::BodyKey, [u8; 32])>,
+) -> Result<OutboundTransfer, Failure> {
+    let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
+    let frontier = (ctx.options.authority.frontier)();
+    let advertise = ctx
+        .options
+        .authority
+        .source
+        .signer_authorized(&ctx.station_key, &frontier);
+    let (material, manifest) = if advertise {
+        ctx.core
+            .with_replica_read(|replica| {
+                let commit_ctx = replica::transaction::CommitContext {
+                    space: &ctx.space,
+                    signer: &signer,
+                    authority_frontier: frontier.clone(),
+                };
+                let material = replica.export_material_excluding(held)?;
+                let manifest = replica.export_manifest(&commit_ctx)?;
+                Ok((material, manifest))
+            })
+            .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?
+    } else {
+        (Vec::new(), (Vec::new(), Vec::new()))
+    };
+    let mut authority_records = (ctx.options.authority.export)();
+    let mut bodies = Vec::new();
+    for (tx, closures) in &material {
+        authority_records.push(tx.encode());
+        for (key, artifact_pack) in closures {
+            bodies.push((tx.id(), key.clone(), artifact_pack.clone()));
+        }
+    }
+    Ok(OutboundTransfer {
+        authority_frontier: frontier.as_bytes().to_vec(),
+        authority_records,
+        manifest_root_bytes: manifest.0,
+        manifest_nodes: manifest.1,
+        bodies,
+    })
+}
+
+/// Serve one transfer's frames and drive the `AccepterValidator` to the peer's
+/// `TransferAck`. Does NOT close the stream — the caller owns `finish`, and
+/// under symmetric convergence a reverse phase follows the forward serve.
+/// Shared by the responder's forward serve and the dialer's reverse push.
+async fn serve_transfer(
+    ctx: &DriverContext,
+    stream: &mut dyn comms::Stream,
+    contact: &ContactId,
+    transfer: &OutboundTransfer,
+    deadline: Instant,
+) -> Result<u64, Failure> {
+    let progress = ctx.options.progress_deadline;
+    let frames = build_transfer_frames(contact, transfer);
+    let mut validator = AccepterValidator::new(*contact);
+    let mut bytes_sent = 0u64;
+    for frame in &frames {
+        if ctx.cancel.is_cancelled() {
+            return Err(Failure::Interrupted);
+        }
+        validator.record_sent(frame);
+        bytes_sent += frame.len() as u64;
+        step(deadline, progress, stream.send(frame))
+            .await
+            .map_err(|_| Failure::Deadline("serve: no progress within the deadline".into()))?
+            .map_err(|e| Failure::Transport(format!("serve: {e:#}")))?;
+    }
+    loop {
+        let frame = step(deadline, progress, stream.recv())
+            .await
+            .map_err(|_| Failure::Deadline("serve-ack: no reply within the deadline".into()))?
+            .map_err(|e| Failure::Transport(format!("serve-ack: {e:#}")))?
+            .ok_or_else(|| Failure::Protocol("serve: the peer closed before acking".into()))?;
+        match validator.on_frame(&frame) {
+            Ok(AccepterEvent::Acked { .. }) => break,
+            Ok(AccepterEvent::PeerAborted(code)) => return Err(Failure::PeerAborted(code)),
+            Ok(_) => {}
+            Err(code) => {
+                let _ = stream
+                    .send(&ContactFrame::Abort { code }.encode(contact))
+                    .await;
+                return Err(Failure::PeerAborted(code));
+            }
+        }
+    }
+    Ok(bytes_sent)
+}
+
+/// Receive one transfer into `ReceivedMaterial`, sending the `TransferAck`.
+/// Does NOT close the stream — the caller owns `finish`. Shared by the dialer's
+/// forward receive and, under symmetric convergence, the responder receiving a
+/// dialer's pushed excess. `prior_bytes` seeds the moved-bytes tally.
+async fn receive_transfer(
+    ctx: &DriverContext,
+    stream: &mut dyn comms::Stream,
+    contact: &ContactId,
+    deadline: Instant,
+    prior_bytes: u64,
+) -> Result<(ReceivedMaterial, u64), Failure> {
+    let progress = ctx.options.progress_deadline;
+    let mut receiver = InitiatorReceiver::new(*contact);
+    let mut bytes_moved = prior_bytes;
+    loop {
+        let frame = step(deadline, progress, stream.recv())
+            .await
+            .map_err(|_| Failure::Deadline("transfer: no frame within the deadline".into()))?
+            .map_err(|e| Failure::Transport(format!("transfer: {e:#}")))?
+            .ok_or_else(|| {
+                Failure::Protocol("transfer: the peer closed before the material ended".into())
+            })?;
+        if frame.len() > MAX_FRAME {
+            return Err(Failure::Protocol(format!(
+                "a {}-byte frame exceeds the {MAX_FRAME}-byte maximum",
+                frame.len()
+            )));
+        }
+        bytes_moved += frame.len() as u64;
+        match receiver.on_frame(&frame) {
+            Ok(Progress::Continue) => {}
+            Ok(Progress::SendAck(ack_frame)) => {
+                let raw = ack_frame.encode(contact);
+                bytes_moved += raw.len() as u64;
+                step(deadline, progress, stream.send(&raw))
+                    .await
+                    .map_err(|_| {
+                        Failure::Deadline("transfer-ack: no progress within the deadline".into())
+                    })?
+                    .map_err(|e| Failure::Transport(format!("transfer-ack: {e:#}")))?;
+                break;
+            }
+            Ok(Progress::PeerAborted(code)) | Err(code) => {
+                return Err(Failure::PeerAborted(code));
+            }
+        }
+    }
+    let received = receiver.into_received().ok_or_else(|| {
+        Failure::Protocol("the transfer ended before the material was complete".into())
+    })?;
+    Ok((received, bytes_moved))
+}
+
 /// A step under both the whole-contact deadline and the progress deadline.
 async fn step<F: std::future::Future>(
     whole_deadline: Instant,
@@ -818,7 +983,10 @@ async fn initiate(
     let opening = Open {
         plane: Plane::Contact,
         protocol_version: CONTACT_PROTOCOL,
-        features: 0,
+        // Offer symmetric convergence: if the responder grants it back, we push
+        // our excess on this same connection after pulling. An old responder
+        // never echoes the bit and we do exactly today's one-way pull.
+        features: crate::plane::feature::RECIPROCAL_CONVERGE,
         space: ctx.space_bytes,
         initiator_station: ctx.station_key,
         responder_station: responder.key_bytes(),
@@ -855,6 +1023,9 @@ async fn initiate(
             "the accept did not echo this connection".into(),
         ));
     }
+    // Symmetric convergence is on only if the responder echoed the bit back —
+    // it both implements it and we asked. Otherwise this is a one-way pull.
+    let reciprocal = accept.capability.features & crate::plane::feature::RECIPROCAL_CONVERGE != 0;
     // The declaration is a root. It used to be every head this replica holds,
     // streamed as chunked frames after the hello; a root is 40 bytes whatever
     // the catalog contains, and equal roots prove equal catalogs outright
@@ -970,45 +1141,23 @@ async fn initiate(
         Failure::Protocol("the hello ack did not bind the hello and the Station identity".into())
     })?;
 
-    let mut receiver = InitiatorReceiver::new(contact);
-    let mut bytes_moved = (hello.encode().len() + ack_bytes.len()) as u64 + holdings_sent;
-    loop {
-        let frame = step(deadline, progress, stream.recv())
-            .await
-            .map_err(|_| Failure::Deadline("transfer: no frame within the deadline".into()))?
-            .map_err(|e| Failure::Transport(format!("transfer: {e:#}")))?
-            .ok_or_else(|| {
-                Failure::Protocol("transfer: the peer closed before the material ended".into())
-            })?;
-        if frame.len() > MAX_FRAME {
-            return Err(Failure::Protocol(format!(
-                "a {}-byte frame exceeds the {MAX_FRAME}-byte maximum",
-                frame.len()
-            )));
-        }
-        bytes_moved += frame.len() as u64;
-        match receiver.on_frame(&frame) {
-            Ok(Progress::Continue) => {}
-            Ok(Progress::SendAck(ack_frame)) => {
-                let raw = ack_frame.encode(&contact);
-                bytes_moved += raw.len() as u64;
-                step(deadline, progress, stream.send(&raw))
-                    .await
-                    .map_err(|_| {
-                        Failure::Deadline("transfer-ack: no progress within the deadline".into())
-                    })?
-                    .map_err(|e| Failure::Transport(format!("transfer-ack: {e:#}")))?;
-                let _ = step(deadline, progress, stream.finish()).await;
-                break;
-            }
-            Ok(Progress::PeerAborted(code)) | Err(code) => {
-                return Err(Failure::PeerAborted(code));
-            }
-        }
+    // Pull the responder's material (the forward transfer), sending our
+    // TransferAck. The stream is NOT finished here — under symmetric
+    // convergence we push next on the same connection.
+    let prior = (hello.encode().len() + ack_bytes.len()) as u64 + holdings_sent;
+    let (received, mut bytes_moved) =
+        receive_transfer(ctx, stream, &contact, deadline, prior).await?;
+
+    // The reverse phase: if the responder granted symmetric convergence, PUSH
+    // our own excess on this same stream before closing, so a dialer that can
+    // never be dialed back — a browser tab above all — still gets its writes
+    // out. First correct cut serves WHOLE (empty `held`); the reverse holdings
+    // declaration that dedups this is a follow-up, feature-gated the same way.
+    if reciprocal {
+        let excess = build_outbound(ctx, &std::collections::BTreeSet::new())?;
+        bytes_moved += serve_transfer(ctx, stream, &contact, &excess, deadline).await?;
     }
-    let received = receiver.into_received().ok_or_else(|| {
-        Failure::Protocol("the transfer ended before the material was complete".into())
-    })?;
+    let _ = step(deadline, progress, stream.finish()).await;
     Ok((received, bytes_moved))
 }
 
@@ -1084,6 +1233,11 @@ async fn serve_contact(
             )));
         }
     };
+    // `judge` already intersected the dialer's requested features against
+    // LOCAL_SUPPORTED, so the Accept we are about to send carries the grant. If
+    // it grants symmetric convergence, we receive and incorporate the dialer's
+    // pushed excess after our forward serve.
+    let reciprocal = accept.capability.features & crate::plane::feature::RECIPROCAL_CONVERGE != 0;
     step(deadline, progress, stream.send(&accept.encode()))
         .await
         .map_err(|_| Failure::Unreachable("accept: no progress within the deadline".into()))?
@@ -1218,80 +1372,28 @@ async fn serve_contact(
         .map_err(|_| Failure::Unreachable("hello-ack: no progress within the deadline".into()))?
         .map_err(|e| Failure::Transport(format!("hello-ack: {e:#}")))?;
 
-    // Snapshot the served material under the writer lock. A Station whose
-    // device holds no authoring standing at its own current frontier (an
-    // unadmitted joiner) cannot sign an authorized Manifest advertisement —
-    // it serves an **authority-only** Contact: its mechanics records (its
-    // admission request rides there), an empty Manifest root, and no Bodies.
-    let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
-    let frontier = (ctx.options.authority.frontier)();
-    let advertise = ctx
-        .options
-        .authority
-        .source
-        .signer_authorized(&ctx.station_key, &frontier);
-    let (material, manifest) = if advertise {
-        ctx.core
-            .with_replica_read(|replica| {
-                let commit_ctx = replica::transaction::CommitContext {
-                    space: &ctx.space,
-                    signer: &signer,
-                    authority_frontier: frontier.clone(),
-                };
-                let material = replica.export_material_excluding(&held)?;
-                let manifest = replica.export_manifest(&commit_ctx)?;
-                Ok((material, manifest))
-            })
-            .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?
-    } else {
-        (Vec::new(), (Vec::new(), Vec::new()))
-    };
-    let mut authority_records = (ctx.options.authority.export)();
-    let mut bodies = Vec::new();
-    for (tx, closures) in &material {
-        authority_records.push(tx.encode());
-        for (key, artifact_pack) in closures {
-            bodies.push((tx.id(), key.clone(), artifact_pack.clone()));
-        }
-    }
-    let transfer = OutboundTransfer {
-        authority_frontier: frontier.as_bytes().to_vec(),
-        authority_records,
-        manifest_root_bytes: manifest.0,
-        manifest_nodes: manifest.1,
-        bodies,
-    };
+    // Snapshot and serve this Station's material, excluding what the dialer
+    // declared it holds. A Station whose device holds no authoring standing at
+    // its own current frontier (an unadmitted joiner) serves an authority-only
+    // Contact — its admission request rides the mechanics records, empty
+    // Manifest, no Bodies. The stream is NOT finished: under symmetric
+    // convergence a reverse receive follows the serve.
     let contact = hello.contact;
-    let frames = build_transfer_frames(&contact, &transfer);
-    let mut validator = AccepterValidator::new(contact);
-    for frame in &frames {
-        if ctx.cancel.is_cancelled() {
-            return Err(Failure::Interrupted);
-        }
-        validator.record_sent(frame);
-        step(deadline, progress, stream.send(frame))
+    let transfer = build_outbound(ctx, &held)?;
+    serve_transfer(ctx, &mut *stream, &contact, &transfer, deadline).await?;
+
+    // The reverse phase: if we granted symmetric convergence, RECEIVE the
+    // dialer's pushed excess on this same stream and incorporate it through the
+    // one shared path — the same validate → incorporate → ordered-publish the
+    // dialer's own pull runs, so authority-first ordering and the doorbell ring
+    // are identical whichever side received. This is what carries a browser
+    // tab's write to an always-on node: nothing dials a tab, so it pushes here,
+    // and a live daemon rings its own doorbell for the incorporated change.
+    if reciprocal {
+        let (received, bytes) = receive_transfer(ctx, &mut *stream, &contact, deadline, 0).await?;
+        incorporate_received(ctx, &transport_peer, received, bytes)
             .await
-            .map_err(|_| Failure::Deadline("serve: no progress within the deadline".into()))?
-            .map_err(|e| Failure::Transport(format!("serve: {e:#}")))?;
-    }
-    // Await the TransferAck through the validator, then finish + wait_closed.
-    loop {
-        let frame = step(deadline, progress, stream.recv())
-            .await
-            .map_err(|_| Failure::Deadline("serve-ack: no reply within the deadline".into()))?
-            .map_err(|e| Failure::Transport(format!("serve-ack: {e:#}")))?
-            .ok_or_else(|| Failure::Protocol("serve: the dialer closed before acking".into()))?;
-        match validator.on_frame(&frame) {
-            Ok(AccepterEvent::Acked { .. }) => break,
-            Ok(AccepterEvent::PeerAborted(code)) => return Err(Failure::PeerAborted(code)),
-            Ok(_) => {}
-            Err(code) => {
-                let _ = stream
-                    .send(&ContactFrame::Abort { code }.encode(&contact))
-                    .await;
-                return Err(Failure::PeerAborted(code));
-            }
-        }
+            .map_err(|(failure, _)| failure)?;
     }
     let _ = step(deadline, progress, stream.finish()).await;
     let _ = step(deadline, progress, stream.wait_closed()).await;
