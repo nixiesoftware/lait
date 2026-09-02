@@ -44,12 +44,25 @@ pub struct Station {
     alive: Arc<AtomicBool>,
 }
 
+/// Declare the registry's schemas on a Replica BEFORE remote material
+/// arrives. Convergence classifies each body at incorporation: an undeclared
+/// `(world, schema, version)` takes the opaque-retention branch, and only
+/// re-receipt upgrades it — a later declaration reinterprets nothing. The
+/// native Station declares at activation, before its Contact driver ever
+/// pulls; a browser composition that pulls before composing must make the
+/// same declaration through this seam, or the pull lands unreadable and the
+/// dock's corpus build refuses, loudly but avoidably.
+pub fn declare_schemas(replica: &mut replica::Replica, registry: &crate::registry::Catalog) {
+    replica.set_supported(registry.supported_schemas());
+}
+
 impl Station {
     /// Compose the query layer over an already-opened Replica. Declares the
     /// registry's schemas on the Replica exactly as the native activation
-    /// does, so Convergence classifies remote material identically. Corpus
-    /// image acceleration is native-only (`None` here): the wasm store seam
-    /// refuses `sync_dir` rather than pretending.
+    /// does, so Convergence classifies remote material identically — though
+    /// material that already arrived undeclared stays opaque; see
+    /// [`declare_schemas`]. Corpus image acceleration is native-only (`None`
+    /// here): the wasm store seam refuses `sync_dir` rather than pretending.
     pub fn compose(
         space: mechanics::ids::SpaceId,
         mut replica: replica::Replica,
@@ -57,7 +70,7 @@ impl Station {
         registry: crate::registry::Catalog,
         epoch: mechanics::station::Epoch,
     ) -> Result<Self, ComposeRefusal> {
-        replica.set_supported(registry.supported_schemas());
+        declare_schemas(&mut replica, &registry);
         let core = Arc::new(
             StationCore::new(
                 epoch,

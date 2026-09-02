@@ -186,3 +186,23 @@ touch "$root/wasm-probe/tests/space.rs"
         wasm-pack test --headless --chrome --test space --features probe-contact
 )
 echo "browser-live-space: the tab joined and pulled the Space over Contact."
+
+# --- the engine answers from the pulled Space -------------------------------
+# The same pull, then the daemon's own Session machinery composed over it
+# (`runtime::browser`, LedgerAuthorityView over the pulled ledger), querying
+# the real Issues runner — the issues alice wrote come back in a tab.
+echo "== build the Issues runner wasm module"
+runner_wasm="$root/target/wasm32-unknown-unknown/release/lait_issues_runner.wasm"
+RUSTFLAGS='--cfg getrandom_backend="custom"' \
+    cargo build --manifest-path "$root/Cargo.toml" --release \
+    --target wasm32-unknown-unknown -p lait-issues-runner --quiet
+echo "== the engine in the tab answers a real query from the pulled Space"
+touch "$root/wasm-probe/tests/space_call.rs"
+(
+    cd "$root/wasm-probe"
+    LIVE_RELAY_URL="$relay" LIVE_SEED_HEX="$SEED_HEX" LIVE_TICKET="$LINK" \
+        ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --test space_call \
+        --features probe-engine,probe-contact
+)
+echo "browser-live-space: the engine in the tab answered from the pulled Space."

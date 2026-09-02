@@ -13,3 +13,10 @@
 
 #[cfg(all(target_arch = "wasm32", feature = "probe-runner"))]
 pub mod runner;
+
+#[cfg(all(
+    target_arch = "wasm32",
+    feature = "probe-contact",
+    feature = "probe-journal"
+))]
+pub mod space_pull;
