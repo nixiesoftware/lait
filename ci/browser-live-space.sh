@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
-# The 4b claim, end to end: a browser worker joins a real Space as a
-# pre-admitted member device and pulls it over lait/contact/2 from a real
-# daemon — through lait's own relay, onto real OPFS, with the production
-# Contact grammar. Three native processes (relay, alice's daemon, briefly
-# bob's), one headless Chrome; nothing mocked, nothing public.
-#
-# The pre-admission trick: the daemon loads an existing secret.key before
-# minting one, so this harness CHOOSES bob's seed, lets a scratch daemon
-# redeem the invite natively (creating the admitted actor + sealed keys in
-# the replicated ledger), stops it — one DeviceId, one holder — and hands
-# the browser the seed + the ticket. The browser is then a member device
-# pulling, never a second self-inception.
+# The join-from-link claim, end to end: a browser worker holding nothing but
+# a fresh seed and an invite link joins a real Space over lait/contact/2 from
+# a real daemon — through lait's own relay, onto real OPFS, with the
+# production Contact grammar. Two native processes (relay, alice's daemon),
+# one headless Chrome; nothing mocked, nothing public, and NO daemon ever
+# holds bob's seed: the tab self-incepts, pushes its pending admission
+# request on its own dial, and alice's daemon redeems it — the admission
+# courier for a device nothing can dial back.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -55,7 +51,7 @@ unset LAIT_HOME LAIT_STORE LAIT_AGENT LAIT_AS || true
 
 PIDS=()
 cleanup() {
-    for node in ALICE BOB; do
+    for node in ALICE; do
         token="$(eval "printf '%s' \"\${${node}_TOKEN:-}\"")"
         port="$(eval "printf '%s' \"\${${node}_PORT:-}\"")"
         [ -n "$token" ] && [ -n "$port" ] && curl -sS -m 5 -X POST \
@@ -148,36 +144,11 @@ TICKET="$(printf '%s' "$invited" | sed -n 's/.*"reff":[[:space:]]*"\([^"]*\)".*/
 [ -n "$TICKET" ] || { echo "::error::no ticket in:"; echo "$invited"; exit 1; }
 LINK="lait://join/$TICKET"
 
-# --- bob: OUR seed, native admission, then gone ----------------------------
+# --- bob is ONLY a tab: a fresh seed no daemon ever holds -------------------
 SEED_HEX="$(openssl rand -hex 32)"
-mkdir -p "$ROOT/bob/config"
-printf '%s' "$SEED_HEX" > "$ROOT/bob/config/secret.key"
-start_node bob
-entered="$(post "$BOB_TOKEN" "$BOB_PORT" /api/host/rpc \
-    "{\"cmd\":\"host_space_enter\",\"link\":\"$LINK\",\"home\":\"$ROOT/bob/space/.lait\",\"nick\":\"bob\"}")"
-has "$entered" '"host":"entered"'
 
-seen=""
-for _ in $(seq 1 60); do
-    members="$(post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/rpc" '{"cmd":"members"}')"
-    actors="$(printf '%s' "$members" | grep -o '"key":"act_' | wc -l | tr -d ' ')"
-    case "$members" in
-        *'"role":"member"'*) [ "$actors" -ge 2 ] && { seen=yes; break; } ;;
-    esac
-    sleep 1
-done
-[ -n "$seen" ] || { echo "::error::alice never saw the second member:"; echo "$members"; exit 1; }
-
-# One DeviceId, one holder: bob's daemon stops before the browser continues
-# his identity. host_restart stops the daemon under the head; killing the head
-# right after means nothing stands it back up.
-post "$BOB_TOKEN" "$BOB_PORT" /api/host/rpc '{"cmd":"host_restart"}' >/dev/null 2>&1 || true
-kill "$BOB_PID" 2>/dev/null || true
-wait "$BOB_PID" 2>/dev/null || true
-BOB_TOKEN=""
-
-# --- the browser pulls ------------------------------------------------------
-echo "== the browser pulls the Space through the relay"
+# --- the browser enters and pulls -------------------------------------------
+echo "== the browser enters the Space from the invite alone"
 touch "$root/wasm-probe/tests/space.rs"
 (
     cd "$root/wasm-probe"
@@ -185,7 +156,22 @@ touch "$root/wasm-probe/tests/space.rs"
         LIVE_EXPECT_BODIES=3 \
         wasm-pack test --headless --chrome --test space --features probe-contact
 )
-echo "browser-live-space: the tab joined and pulled the Space over Contact."
+echo "browser-live-space: the tab entered and pulled the Space over Contact."
+
+# The founder-side proof of the in-tab admission: alice's ledger now carries
+# bob's actor as an admitted member — redeemed from the request the tab
+# pushed, since no daemon ever ran bob's enter.
+seen=""
+for _ in $(seq 1 30); do
+    members="$(post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/rpc" '{"cmd":"members"}')"
+    actors="$(printf '%s' "$members" | grep -o '"key":"act_' | wc -l | tr -d ' ')"
+    case "$members" in
+        *'"role":"member"'*) [ "$actors" -ge 2 ] && { seen=yes; break; } ;;
+    esac
+    sleep 1
+done
+[ -n "$seen" ] || { echo "::error::alice never admitted the tab's actor:"; echo "$members"; exit 1; }
+echo "browser-live-space: alice's ledger admitted the actor the tab incepted."
 
 # --- the engine answers from the pulled Space -------------------------------
 # The same pull, then the daemon's own Session machinery composed over it

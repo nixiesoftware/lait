@@ -122,7 +122,9 @@ impl LedgerAuthority {
 
     /// This device's admitted actor, if the ledger now carries it — the signal
     /// that a pending admission has been redeemed and need no longer be served.
-    fn admitted(&mut self) -> bool {
+    /// Public because a joiner's await-admission loop exits on exactly this
+    /// predicate — the same one `LedgerAuthorityView::resolve` answers with.
+    pub fn admitted(&mut self) -> bool {
         let Some(actor) = self.ledger.actor_plane().actor_of_device(&self.me).cloned() else {
             return false;
         };

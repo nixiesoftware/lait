@@ -310,6 +310,11 @@ pub async fn pull_receive(
 /// why the commit is inlined here rather than factored out (its error type is
 /// the Replica's, unexported, and inlining keeps both callers identical to the
 /// driver).
+///
+/// `reverse` rides to [`pull_receive`] unchanged: `Some` offers symmetric
+/// convergence and pushes that transfer on the same dial — how an unadmitted
+/// joiner's pending admission request travels, since nothing can dial it back.
+#[allow(clippy::too_many_arguments)]
 pub async fn pull_whole(
     transport: &dyn comms::Transport,
     responder: &Key,
@@ -317,6 +322,7 @@ pub async fn pull_whole(
     station_seed: &[u8; 32],
     authority: &Authority,
     replica: &mut Replica,
+    reverse: Option<OutboundTransfer>,
     deadlines: Deadlines,
 ) -> Result<Outcome, Failure> {
     let holdings_root = replica.published_root().map(|r| r.0).unwrap_or([0u8; 32]);
@@ -327,7 +333,7 @@ pub async fn pull_whole(
         station_seed,
         authority,
         holdings_root,
-        None,
+        reverse,
         deadlines,
     )
     .await?;

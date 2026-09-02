@@ -5059,6 +5059,7 @@ name = "wasm-probe"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "browser-control",
  "comms",
  "contact",
@@ -5069,6 +5070,7 @@ dependencies = [
  "journal",
  "lait-issues",
  "mechanics",
+ "n0-future",
  "postcard",
  "replica",
  "runtime",
@@ -5077,6 +5079,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-time",
  "world-interface",
  "world-runner",
  "world-sdk",

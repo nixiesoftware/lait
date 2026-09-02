@@ -1,22 +1,30 @@
-//! The member-device pull, shared by every claim that stands on it: parse the
+//! The device pull, shared by every claim that stands on it: parse the
 //! ticket, stand up the ledger and Replica on real OPFS, reach the relay, and
 //! pull the Space whole over `lait/contact/2`. `tests/space.rs` proves this
 //! crossing by itself; `tests/space_call.rs` composes the engine on top of
 //! what it returns. One flow, so a drift between "the pull the pull-test
 //! proves" and "the pull the engine stands on" cannot open.
 //!
-//! Deliberately a *member device pull*, never a second self-inception: the
-//! seed already maps to an admitted actor in the replicated ledger, and
-//! re-entering would mint a different actor.
+//! A ticket that carries an admission capability makes this the tab's ENTER:
+//! the device self-incepts, stashes the pending admission request, and its
+//! first dials push that request out on the symmetric reverse phase until an
+//! admin redeems it — request-and-founder-redeems, never self-admit. The
+//! inception is DETERMINISTIC in `(device seed, space)`: every nonce it needs
+//! is derived, never drawn from entropy, so a reload or a fresh browser
+//! profile re-mints byte-identical inception material and the same actor.
+//! That determinism is what keeps the single-use invite nonce alive across
+//! reloads — a different actor on re-entry would burn it and lock the person
+//! out — and it is what makes redemption idempotent on the founder, which
+//! keys idempotency by actor.
 
 use std::sync::Arc;
 
 use comms::policy::{LocalNet, Network};
 use comms::{DefaultFactory, Protocols, Transport, TransportFactory};
-use contact::authority::{LedgerAuthority, SharedLedgerAuthority};
+use contact::authority::{LedgerAuthority, PendingAdmission, SharedLedgerAuthority};
 use contact::coordinates::SignedCoordinates;
 use contact::pull::{pull_whole, Deadlines};
-use contact::Outcome;
+use contact::{Outcome, OutboundTransfer};
 use mechanics::ids::{ActorId, SpaceId};
 use mechanics::space::{Authority, Effect, Genesis};
 use mechanics::station::Key;
@@ -63,6 +71,7 @@ impl PulledSpace {
             &self.seed,
             &self.authority.bundle(),
             &mut self.replica,
+            None,
             Deadlines::default(),
         )
         .await
@@ -70,9 +79,116 @@ impl PulledSpace {
     }
 }
 
-/// Join as the pre-admitted member device and pull the Space whole: ticket →
-/// genesis + founder inception → fresh ledger and Replica on OPFS → relay-only
-/// transport → `pull_whole`.
+/// Derive one of the enter flow's nonces from `(device seed, space)` — the
+/// determinism that keeps re-entry byte-identical. Each caller passes its own
+/// derivation context, so no two nonces collide.
+fn derive16(context: &str, seed: &[u8; 32], space: &SpaceId) -> [u8; 16] {
+    let mut material = Vec::with_capacity(32 + space.as_str().len());
+    material.extend_from_slice(seed);
+    material.extend_from_slice(space.as_str().as_bytes());
+    let full = blake3::derive_key(context, &material);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&full[..16]);
+    out
+}
+
+/// Self-incept deterministically and stash the pending admission request the
+/// export closure will serve. The recovery seed is DERIVED from the device
+/// seed — a tab has nowhere durable to keep an independent one — which trades
+/// recovery independence for reload-stability; a tab-born actor's recovery is
+/// only as separate as its device seed. Stated, not hidden.
+fn stash_admission_request(
+    authority: &SharedLedgerAuthority,
+    coordinates: &SignedCoordinates,
+    admission: &contact::coordinates::AdmissionCapability,
+    seed: &[u8; 32],
+    space: &SpaceId,
+) {
+    let recovery_seed = {
+        let mut material = Vec::with_capacity(32 + space.as_str().len());
+        material.extend_from_slice(seed);
+        material.extend_from_slice(space.as_str().as_bytes());
+        blake3::derive_key("lait.browser-enter.recovery.v1", &material)
+    };
+    let recovery_pub = mechanics::actor::device_from_seed(&recovery_seed);
+    let recovery_commit =
+        mechanics::actor::recovery_commitment(&recovery_pub).expect("recovery commitment");
+    let (inception, candidate_actor) = mechanics::actor::incept_single(
+        seed,
+        space,
+        derive16("lait.browser-enter.incept-nonce.v1", seed, space),
+        derive16("lait.browser-enter.binding-nonce.v1", seed, space),
+        Some(recovery_commit),
+    );
+    let coordinates_digest = coordinates.digest();
+    let space_bytes =
+        <[u8; 29]>::try_from(space.as_str().as_bytes()).expect("space id is 29 rendered bytes");
+    let accepted_at = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .expect("wall clock")
+        .as_secs();
+    let proof = contact::coordinates::InvitationAcceptanceProof::sign(
+        seed,
+        accepted_at,
+        derive16("lait.browser-enter.acceptance-nonce.v1", seed, space),
+        &coordinates_digest,
+        &space_bytes,
+        &admission.issuer,
+        &admission.capability_id(),
+        candidate_actor.as_str(),
+    )
+    .expect("sign acceptance proof");
+    let pending = PendingAdmission {
+        admission: postcard::to_stdvec(admission).expect("admission encodes"),
+        inception: postcard::to_stdvec(&inception).expect("inception encodes"),
+        proof: postcard::to_stdvec(&proof).expect("proof encodes"),
+        coordinates_digest,
+    };
+    match authority.0.lock() {
+        Ok(mut inner) => inner.stash_admission(pending),
+        Err(poisoned) => poisoned.into_inner().stash_admission(pending),
+    }
+}
+
+/// Is this device's actor admitted on the local ledger replay?
+fn admitted(authority: &SharedLedgerAuthority) -> bool {
+    match authority.0.lock() {
+        Ok(mut inner) => inner.admitted(),
+        Err(poisoned) => poisoned.into_inner().admitted(),
+    }
+}
+
+/// Build the admission-only reverse transfer an unadmitted joiner pushes —
+/// byte-identical in shape to the native driver's `build_outbound` for a
+/// signer with no authoring standing: the export's records, nothing else.
+fn admission_push(authority: &SharedLedgerAuthority) -> Option<OutboundTransfer> {
+    let (records, frontier) = match authority.0.lock() {
+        Ok(mut inner) => (inner.export_records(), inner.frontier()),
+        Err(poisoned) => {
+            let mut inner = poisoned.into_inner();
+            (inner.export_records(), inner.frontier())
+        }
+    };
+    if records.is_empty() {
+        return None;
+    }
+    Some(OutboundTransfer {
+        authority_frontier: frontier.as_bytes().to_vec(),
+        authority_records: records,
+        manifest_root_bytes: Vec::new(),
+        manifest_nodes: Vec::new(),
+        bodies: Vec::new(),
+    })
+}
+
+/// Join and pull the Space whole: ticket → genesis + founder inception →
+/// fresh ledger and Replica on OPFS → relay-only transport → `pull_whole`.
+///
+/// A ticket carrying an admission capability runs the ENTER: the device
+/// self-incepts (deterministically — see the module doc), stashes the pending
+/// admission request, and loops pull-with-push until an admin redeems it and
+/// the membership arrives on the next pull. A pre-admitted device's ticket
+/// resolves on the first pull and the loop never spins.
 ///
 /// `configure` runs on the fresh Replica BEFORE the pull — the seam for
 /// declarations that must precede incorporation, such as the engine's
@@ -108,6 +224,13 @@ pub async fn pull_space(
         .commit_batch(&[Effect::Actor(founder_inception).encode()], &[])
         .expect("founder inception lands");
     let authority = SharedLedgerAuthority::new(LedgerAuthority::new(space.clone(), ledger, seed));
+    // A ticket carrying an admission makes this an enter: self-incept and
+    // stash the request the export closure serves until an admin redeems it.
+    if let Some(admission) = verified.admission.as_ref() {
+        if !admitted(&authority) {
+            stash_admission_request(&authority, &coordinates, admission, &seed, &space);
+        }
+    }
     let replica_medium = journal::OpfsMedium::open(&unique_dir("replica"))
         .await
         .expect("opfs");
@@ -127,17 +250,38 @@ pub async fn pull_space(
     let responder = Key::from_key_bytes(coordinates.payload.approach_station);
     transport.learn(responder.as_device(), &[]);
 
-    let outcome = pull_whole(
-        transport.as_ref(),
-        &responder,
-        &space,
-        &seed,
-        &authority.bundle(),
-        &mut replica,
-        Deadlines::default(),
-    )
-    .await
-    .expect("the pull completes");
+    // The await-admission loop. Each iteration pulls the responder's material
+    // AND — while unadmitted with a stashed request — pushes the admission on
+    // the same dial's reverse phase. The responder redeems asynchronously
+    // after acking the push, so the membership and sealed keys arrive on a
+    // LATER pull; the loop's re-dial is load-bearing, not a retry. A member
+    // device (no pending request) breaks after its single pull, exactly the
+    // old behavior.
+    let deadline = n0_future::time::Instant::now() + n0_future::time::Duration::from_secs(60);
+    let outcome = loop {
+        let reverse = admission_push(&authority);
+        let awaiting = reverse.is_some();
+        let outcome = pull_whole(
+            transport.as_ref(),
+            &responder,
+            &space,
+            &seed,
+            &authority.bundle(),
+            &mut replica,
+            reverse,
+            Deadlines::default(),
+        )
+        .await
+        .expect("the pull completes");
+        if !awaiting || admitted(&authority) {
+            break outcome;
+        }
+        assert!(
+            n0_future::time::Instant::now() < deadline,
+            "the admission was not redeemed within the deadline"
+        );
+        n0_future::time::sleep(n0_future::time::Duration::from_millis(750)).await;
+    };
 
     PulledSpace {
         space,

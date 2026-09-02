@@ -49,8 +49,11 @@ probe-replica = ["dep:replica"]
 # test is cfg-gated on both, and a feature drift that silently compiled that
 # test away would let `wasm-pack` pass with zero tests run.
 probe-comms = ["dep:comms", "probe-mechanics"]
-# The Contact crossing: protocol + coordinates + the portable initiator.
-probe-contact = ["dep:contact", "probe-comms", "probe-replica"]
+# The Contact crossing: protocol + coordinates + the portable initiator —
+# and the joiner's enter: deterministic self-inception (blake3 derivation),
+# a wall clock for the acceptance proof (web-time), and the await-admission
+# loop's cadence (n0-future's web-time-backed sleep).
+probe-contact = ["dep:contact", "probe-comms", "probe-replica", "dep:blake3", "dep:web-time", "dep:n0-future"]
 # The runner crossing: a World runner module driven from the engine module in
 # a browser, through the same four-function ABI the native wasmtime host uses —
 # but with the browser's own WebAssembly and JS glue as the host, since
@@ -78,6 +81,9 @@ fabric = { path = "../crates/fabric", optional = true }
 replica = { path = "../crates/replica", optional = true }
 comms = { path = "../crates/comms", optional = true, default-features = false }
 contact = { path = "../crates/contact", optional = true, features = ["wire"] }
+blake3 = { version = "1", optional = true }
+web-time = { version = "1", optional = true }
+n0-future = { version = "0.3", optional = true }
 runtime = { path = "../crates/runtime", optional = true }
 world-sdk = { path = "../crates/world-sdk", optional = true }
 world-interface = { path = "../crates/world-interface", optional = true }
