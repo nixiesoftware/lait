@@ -108,24 +108,37 @@ impl IssuesCallHandler {
         // inside the same microsecond and gets the same answer, so what looked
         // like four attempts was one attempt made four times. Wait a little
         // between them, growing, so the condition has a chance to clear.
-        let deadline = std::time::Instant::now() + RETRY_DEADLINE;
-        let mut waited = RETRY_BACKOFF;
-        let mut response = router.route(request.clone(), &facts).0;
-        while matches!(
-            &response,
-            Response::Error {
-                error_kind: crate::IssuesErrorKind::Retry,
-                ..
+        //
+        // A browser Worker cannot do this and does not need to: it is
+        // single-threaded, so a `sleep` here would freeze the only thread that
+        // could clear the condition (and `Instant`/`sleep` trap on wasm
+        // besides). It makes one attempt and hands a `Retry` refusal straight
+        // back — the caller re-issues on a later event-loop turn, which is the
+        // wasm analogue of waiting.
+        #[cfg(target_arch = "wasm32")]
+        let response = router.route(request.clone(), &facts).0;
+        #[cfg(not(target_arch = "wasm32"))]
+        let response = {
+            let deadline = std::time::Instant::now() + RETRY_DEADLINE;
+            let mut waited = RETRY_BACKOFF;
+            let mut response = router.route(request.clone(), &facts).0;
+            while matches!(
+                &response,
+                Response::Error {
+                    error_kind: crate::IssuesErrorKind::Retry,
+                    ..
+                }
+            ) {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::sleep(waited.min(deadline - now));
+                waited = waited.saturating_mul(2).min(RETRY_BACKOFF_CAP);
+                response = router.route(request.clone(), &facts).0;
             }
-        ) {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            std::thread::sleep(waited.min(deadline - now));
-            waited = waited.saturating_mul(2).min(RETRY_BACKOFF_CAP);
-            response = router.route(request.clone(), &facts).0;
-        }
+            response
+        };
         // Hand back the refusal that actually happened. This used to answer
         // "membership changed repeatedly" for every exhausted retry, which
         // named one cause out of several and was usually the wrong one: a
@@ -158,8 +171,13 @@ const REACTIONS_PER_VIEW: u32 = 4 * issues::contract::DEFAULT_PAGE_SIZE;
 ///
 /// Bounded, because a request that cannot be admitted should eventually say
 /// so rather than hang.
+// wasm makes a single attempt and never waits (see the handler), so the
+// backoff schedule is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 const RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(not(target_arch = "wasm32"))]
 const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(4);
+#[cfg(not(target_arch = "wasm32"))]
 const RETRY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Handler for IssuesCallHandler {

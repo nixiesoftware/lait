@@ -2742,6 +2742,48 @@ struct ClientCallback {
     reply: std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>,
 }
 
+/// The browser variant: a synchronous client call over the wasm runner.
+///
+/// The native path below runs the guest's blocking `dispatch` on a worker
+/// thread and pumps its async ClientHost callbacks on a `tokio::select!` loop,
+/// because the guest call blocks and the callbacks are futures. A browser
+/// Worker has no thread to spawn, and its ClientHost resolves every callback
+/// synchronously (it drives the composed Session, reads local state, and
+/// refuses the rest — none of it real async I/O). So the whole pump collapses:
+/// run the guest inline, and answer each host callback in place with
+/// `block_on`. There is nothing to park on, because the callback future is
+/// Ready on its first poll.
+#[cfg(target_arch = "wasm32")]
+async fn invoke_client_async<I, O>(
+    world: Arc<RemoteWorld>,
+    operation: &'static str,
+    input: I,
+    host: &dyn world_interface::ClientHost,
+) -> Result<O>
+where
+    I: Serialize + Send + 'static,
+    O: DeserializeOwned + Send + 'static,
+{
+    let payload = encode(&input).map_err(anyhow::Error::msg)?;
+    let mut client = world.client()?;
+    let mut callback = |operation: &str, payload: &[u8]| {
+        futures_lite::future::block_on(client_host_callback(host, operation, payload))
+    };
+    let reply = client.dispatch(
+        Operation::Call {
+            operation: operation.to_string(),
+            payload,
+        },
+        &mut callback,
+        no_detached_callbacks(),
+    )?;
+    let Reply::Call { payload } = reply else {
+        bail!("World client call returned a non-call reply");
+    };
+    decode(&payload).map_err(anyhow::Error::msg)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn invoke_client_async<I, O>(
     world: Arc<RemoteWorld>,
     operation: &'static str,
