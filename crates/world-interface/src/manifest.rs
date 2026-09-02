@@ -172,11 +172,35 @@ pub struct Runner {
     pub cwd: Option<String>,
 }
 
+/// The architecture marker that makes a runner a WebAssembly module rather
+/// than a native executable.
+///
+/// It is truthful — the runner really is built for that Rust target — and it
+/// is load-bearing twice over. A daemon too old to run wasm filters runners by
+/// its own `std::env::consts::ARCH` (never `wasm32`), so the marker hides a
+/// wasm runner from it, and it refuses the release for a runner it cannot see.
+/// A daemon new enough reads the marker as a *kind*, not a host condition, and
+/// runs the module in-process regardless of its own architecture.
+pub const WASM_ARCH: &str = "wasm32";
+
 impl Runner {
+    /// Whether a native host of the given OS/arch applies this runner. A wasm
+    /// runner never admits here — it is not a native executable for any host —
+    /// and is selected by [`Self::is_wasm`] instead.
     pub fn admits(&self, os: &str, arch: &str) -> bool {
         self.when
             .as_ref()
             .is_none_or(|condition| condition.admits(os, arch))
+    }
+
+    /// Whether this runner is a WebAssembly module — its `when.arch` names
+    /// [`WASM_ARCH`]. A wasm-capable host runs it in-process whatever its own
+    /// architecture; a host that cannot run wasm never selects it, because it
+    /// filters by its native arch, which is never `wasm32`.
+    pub fn is_wasm(&self) -> bool {
+        self.when
+            .as_ref()
+            .is_some_and(|condition| condition.arch.iter().any(|a| a == WASM_ARCH))
     }
 }
 
@@ -564,6 +588,38 @@ mod tests {
             "id": "world.lait.issues",
             "version": "0.8.0",
         })
+    }
+
+    #[test]
+    fn a_wasm_runner_is_a_kind_no_native_host_admits_and_a_wasm_marker_names_it() {
+        let native = Runner {
+            preferred: true,
+            when: Some(When {
+                os: vec!["linux".into()],
+                arch: vec!["x86_64".into()],
+            }),
+            program: "bin/runner".into(),
+            args: vec![],
+            cwd: None,
+        };
+        let wasm = Runner {
+            preferred: true,
+            when: Some(When {
+                os: vec![],
+                arch: vec![WASM_ARCH.into()],
+            }),
+            program: "runner.wasm".into(),
+            args: vec![],
+            cwd: None,
+        };
+        assert!(!native.is_wasm(), "a native runner is not a wasm kind");
+        assert!(wasm.is_wasm(), "the wasm32 arch marker names a wasm runner");
+        // The wasm runner never admits as a native runner for any host — it is
+        // selected by kind, in-process, not by matching the host's arch.
+        assert!(!wasm.admits("linux", "x86_64"));
+        assert!(!wasm.admits("macos", "aarch64"));
+        // And the native runner is not confused for wasm on its own host.
+        assert!(native.admits("linux", "x86_64"));
     }
 
     #[test]

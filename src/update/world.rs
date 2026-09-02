@@ -330,6 +330,14 @@ pub fn pointer_url(base: &str, world: &str, channel: feed::Channel) -> String {
 /// The native artifact for this exact build target.
 pub const ARTIFACT: &str = env!("LAIT_TARGET");
 
+/// The artifact key a wasm World publishes under: one platform-independent
+/// bundle for every host, since a wasm runner runs the same bytes everywhere.
+/// A build that carries the wasmtime host falls back to this key when the
+/// channel holds no native artifact for its target — and the manifest's
+/// `requires: lait.runner.wasm` then refuses, by name, any host that reaches
+/// the bundle but cannot run it.
+pub const WASM_ARTIFACT: &str = "wasm32-unknown-unknown";
+
 /// Fetch and stage this World's payload, if the channel holds one this node
 /// does not already have and can run.
 ///
@@ -369,12 +377,13 @@ where
         .cloned()
         .unwrap_or_else(|| resolved.version.to_string());
 
-    let Some(artifact) = resolved
-        .manifest
-        .artifacts
-        .get(world)
-        .and_then(|keyed| keyed.get(ARTIFACT))
-    else {
+    let Some(artifact) = resolved.manifest.artifacts.get(world).and_then(|keyed| {
+        // The native artifact first; then the platform-independent wasm one,
+        // so a wasm-only release stages here rather than reading as "nothing
+        // published". Whether this host can actually run it is settled by the
+        // manifest's requirements against `offers` in `stage_into`.
+        keyed.get(ARTIFACT).or_else(|| keyed.get(WASM_ARTIFACT))
+    }) else {
         return Ok(Outcome::NothingPublished { version });
     };
 
@@ -510,10 +519,16 @@ fn stage_into(
     // before sealing it, and prove there is one unambiguous formation default.
     // Launch repeats the containment proof after canonicalization so a tree
     // changed on disk still cannot turn a relative declaration into an escape.
+    // Native runners for this host, plus every wasm runner — a wasm runner's
+    // module is platform-independent and this build can run it, so its bytes
+    // must be proven present before sealing exactly as a native executable's
+    // are. Without this a wasm-only bundle would seal with no runner proven.
     let applicable: Vec<_> = manifest
         .runners
         .iter()
-        .filter(|runner| runner.admits(std::env::consts::OS, std::env::consts::ARCH))
+        .filter(|runner| {
+            runner.is_wasm() || runner.admits(std::env::consts::OS, std::env::consts::ARCH)
+        })
         .collect();
     for runner in &applicable {
         let executable = scratch.join(&runner.program);
@@ -843,6 +858,104 @@ mod tests {
         worlds: &Path,
     ) -> Result<Outcome> {
         stage_bundle_with(fetcher(objects), resolved, WORLD, offers, worlds)
+    }
+
+    /// A wasm-only release: a wasm runner keyed on the `wasm32` arch marker,
+    /// requiring the host's wasm-runner fact, carrying its `.wasm` module.
+    fn wasm_archive(version: &str) -> Vec<u8> {
+        let declaration = serde_json::json!({
+            "format": 1,
+            "id": WORLD,
+            "mount": "issues",
+            "version": version,
+            "requires": [{ "name": "lait.runner.wasm", "range": ">=1, <2" }],
+            "runners": [{
+                "preferred": true,
+                "when": { "arch": ["wasm32"] },
+                "program": "runner.wasm",
+            }],
+            "launch": [{ "id": "app", "present": "primary",
+                         "target": { "type": "web", "path": "/" } }],
+        })
+        .to_string()
+        .into_bytes();
+        bundle(
+            &format!("world-{WORLD}-{version}"),
+            &[
+                ("world.json".into(), declaration),
+                ("runner.wasm".into(), b"\0asm-a-placeholder-module".to_vec()),
+                ("index.html".into(), b"<html>the head</html>".to_vec()),
+            ],
+        )
+    }
+
+    /// [`sealed`] publishing under the platform-independent wasm artifact key.
+    fn sealed_wasm(
+        version: &str,
+        archive: &[u8],
+        size_claim: u64,
+        digest_claim: &str,
+    ) -> (std::collections::HashMap<String, Vec<u8>>, [u8; 32]) {
+        let (seed, pubkey) = feed::tests::test_keypair();
+        let url = format!("https://feed.example/releases/worlds/{WORLD}/{version}/bundle.tar.gz");
+        let manifest = serde_json::json!({
+            "version": version,
+            "bundles": { WORLD: version },
+            "artifacts": { WORLD: { WASM_ARTIFACT: {
+                "url": url, "blake3": digest_claim, "size": size_claim,
+            }}},
+        });
+        let pointer = serde_json::json!({
+            "kind": "release",
+            "version": version,
+            "manifest": format!("https://feed.example/releases/worlds/{WORLD}/{version}/manifest.json"),
+        });
+        let mut objects = std::collections::HashMap::new();
+        objects.insert(
+            pointer_url("https://feed.example", WORLD, Channel::Test),
+            feed::tests::seal(&pointer, &seed).into_bytes(),
+        );
+        objects.insert(
+            format!("https://feed.example/releases/worlds/{WORLD}/{version}/manifest.json"),
+            feed::tests::seal(&manifest, &seed).into_bytes(),
+        );
+        objects.insert(url, archive.to_vec());
+        (objects, pubkey)
+    }
+
+    #[test]
+    fn a_wasm_only_release_stages_where_wasm_runs_and_is_refused_by_name_elsewhere() {
+        let archive = wasm_archive("0.1.0");
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed_wasm("0.1.0", &archive, archive.len() as u64, &digest);
+        let resolved = resolve(&objects, pubkey);
+
+        // A daemon too old to run wasm offers no wasm-runner fact. It reaches
+        // the bundle through the artifact-key fallback, then refuses it by the
+        // name of the fact it lacks — not "nothing published", not "no runner
+        // for this platform".
+        let old = tempfile::tempdir().expect("worlds");
+        let refused =
+            stage(&objects, &resolved, &offers(13), old.path()).expect("a refusal, not an error");
+        let Outcome::Unmet { why, .. } = refused else {
+            panic!("an old daemon staged a wasm-only release: {refused:?}");
+        };
+        assert!(
+            why.iter().any(|reason| reason.contains("lait.runner.wasm")),
+            "the refusal did not name the wasm-runner fact: {why:?}"
+        );
+
+        // A wasm-capable daemon offers the fact, so the same release stages.
+        let mut wasm_offers = offers(13);
+        wasm_offers.insert("lait.runner.wasm".into(), semver::Version::new(1, 0, 0));
+        let host = tempfile::tempdir().expect("worlds");
+        let staged = stage(&objects, &resolved, &wasm_offers, host.path()).expect("stages");
+        assert_eq!(
+            staged,
+            Outcome::Staged {
+                version: "0.1.0".into()
+            }
+        );
     }
 
     #[test]

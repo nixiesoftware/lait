@@ -14,6 +14,7 @@ use data_encoding::HEXLOWER;
 use runtime::world::World as _;
 use world_interface::manifest::WorldManifest;
 use world_runner::{Instance, Provenance, Release};
+use world_runner_wasm::WasmInstance;
 use world_sdk::{remote_exec_package, RemoteClient, RemoteWorld};
 
 use crate::orbital::{WorldPackage, WorldPackages};
@@ -252,20 +253,49 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
             crate::world::local::MOUNT_PREFIX
         );
     }
-    let applicable: Vec<_> = manifest
+    // A World named by this host has no history here to migrate: its store
+    // begins at the implementation it is being admitted with. A historical
+    // runner would also be claiming a reviewed implementation minted for the
+    // id its tree declares — a coordinate no Space has ever activated under
+    // the name this one is being run as, which is a false entry in the record
+    // rather than a useful one.
+    let admits_history = !matches!(admission.provenance, Provenance::Local);
+    // Two kinds, partitioned. A native runner applies iff this host's own
+    // OS/arch admit it; a wasm runner applies on any host, because this build
+    // carries the wasmtime host and runs the module in-process regardless of
+    // its own architecture — which is why a wasm runner never keys on the
+    // host arch.
+    let native: Vec<_> = manifest
         .runners
         .iter()
+        .filter(|runner| !runner.is_wasm())
         .filter(|runner| runner.admits(std::env::consts::OS, std::env::consts::ARCH))
-        // A World named by this host has no history here to migrate: its store
-        // begins at the implementation it is being admitted with. A historical
-        // runner would also be claiming a reviewed implementation minted for the
-        // id its tree declares — a coordinate no Space has ever activated under
-        // the name this one is being run as, which is a false entry in the
-        // record rather than a useful one.
-        .filter(|runner| runner.preferred || !matches!(admission.provenance, Provenance::Local))
+        .filter(|runner| runner.preferred || admits_history)
         .collect();
+    let wasm: Vec<_> = manifest
+        .runners
+        .iter()
+        .filter(|runner| runner.is_wasm())
+        .filter(|runner| runner.preferred || admits_history)
+        .collect();
+    // Prefer native when both apply: it is functionally complete, while the
+    // wasm backend still drops a retained Find lease's detached callbacks
+    // until a later slice. A wasm-only release selects wasm.
+    let applicable = if native.is_empty() { wasm } else { native };
     if applicable.is_empty() {
         bail!("selected World {world} has no runner for this platform");
+    }
+    // The parse-time "exactly one preferred applicable" check keys on the real
+    // host arch, so it never runs for a wasm-only release (nothing is
+    // real-arch-applicable there). Enforce the invariant here, over the kind
+    // actually selected, so a wasm release cannot smuggle in two preferred
+    // runners the host would choose between by declaration order.
+    let preferred = applicable.iter().filter(|runner| runner.preferred).count();
+    if preferred != 1 {
+        bail!(
+            "selected World {world} must declare exactly one preferred runner for its kind, \
+             found {preferred}"
+        );
     }
     // What this host calls the World, which is what its runner is told and what
     // its data is keyed by. The same string as `world` for every installed
@@ -282,12 +312,39 @@ fn admit(root: &Path, manifest: &WorldManifest, admission: &Admission) -> Result
             runner.args.clone(),
             runner.cwd.as_deref(),
         )?;
-        let instance = Instance::launch(release)
-            .with_context(|| format!("launch selected World {world} runner"))?;
-        let remote = Arc::new(
+        let remote = Arc::new(if runner.is_wasm() {
+            // The three facts a native runner reads from its environment
+            // become the guest's instantiation, since a wasm module has no
+            // environment: the host-chosen name, the release version, and the
+            // provenance label (`local`, or the sealed digest).
+            //
+            // The wasm-runner ABI itself is proven end to end by
+            // `world-runner-wasm`'s proof tests, and the selection that lands
+            // here by the manifest/facts/staging unit tests. Admitting a real
+            // wasm World all the way through `connect_runner` — the world-sdk
+            // Descriptor, client declaration and mount — is proven once a
+            // World answers that full surface in wasm, which arrives with the
+            // real Issues wasm runner. Until then this branch is wired and
+            // reviewed but not exercised end to end.
+            let bytes = read_contained_wasm(&release)
+                .with_context(|| format!("read selected World {world} wasm runner"))?;
+            let wasm = WasmInstance::launch(
+                &bytes,
+                world_runner::wasm_abi::GuestInit {
+                    world: called.clone(),
+                    version: manifest.version.clone(),
+                    release: admission.provenance.stated(),
+                },
+            )
+            .with_context(|| format!("launch selected World {world} wasm runner"))?;
+            RemoteWorld::connect_runner(Box::new(wasm))
+                .with_context(|| format!("connect selected World {world} semantic service"))?
+        } else {
+            let instance = Instance::launch(release)
+                .with_context(|| format!("launch selected World {world} runner"))?;
             RemoteWorld::connect(instance)
-                .with_context(|| format!("connect selected World {world} semantic service"))?,
-        );
+                .with_context(|| format!("connect selected World {world} semantic service"))?
+        });
         let reviewed = remote.reviewed_implementation();
         // Against the name this host gave it, not the tree's. A runner that
         // takes its id from the host reports `called` back; one that compiled
@@ -360,6 +417,38 @@ of it can run beside the release it came from."
         });
     }
     Ok(admitted)
+}
+
+/// Read a wasm runner's module out of its release tree, re-proving containment
+/// exactly as `Instance::launch` does for a native executable: a tree that
+/// changed on disk cannot turn a validated relative declaration into a path
+/// that escapes the release root. `Release::under` proved the declaration was
+/// a plain relative path; this proves the resolved path is still inside.
+fn read_contained_wasm(release: &Release) -> Result<Vec<u8>> {
+    let root = release
+        .root
+        .canonicalize()
+        .with_context(|| format!("World release root {} is absent", release.root.display()))?;
+    let module = root
+        .join(&release.program)
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "World wasm runner {} is absent",
+                root.join(&release.program).display()
+            )
+        })?;
+    if !module.starts_with(&root) {
+        bail!(
+            "World wasm runner {} resolves outside release {}",
+            module.display(),
+            root.display()
+        );
+    }
+    if !module.is_file() {
+        bail!("World wasm runner {} is not a file", module.display());
+    }
+    std::fs::read(&module).with_context(|| format!("read World wasm runner {}", module.display()))
 }
 
 fn leaked(value: String) -> &'static str {

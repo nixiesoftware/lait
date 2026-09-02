@@ -32,6 +32,12 @@ pub const ENGINE: &str = "lait.version";
 pub const RUNNER: &str = "lait.world-runner.protocol";
 pub const WORLD_ABI: &str = "lait.world-sdk.protocol";
 
+/// This host can execute a World runner compiled to WebAssembly in-process.
+/// A wasm-only release requires it, so a daemon too old to run wasm — which
+/// does not offer this fact — refuses the release by name rather than failing
+/// to find a runner for its platform.
+pub const WASM_RUNNER: &str = "lait.runner.wasm";
+
 /// Every fact this build offers, by name.
 ///
 /// Cheap and pure: it reads host protocol constants, so callers may build it
@@ -57,6 +63,9 @@ pub fn offered() -> BTreeMap<String, semver::Version> {
             0,
         ),
     );
+    // This build carries the wasmtime host (world-runner-wasm), so it can run
+    // a wasm runner. Version 1 is the ABI the guest carve proved.
+    facts.insert(WASM_RUNNER.to_string(), semver::Version::new(1, 0, 0));
     facts
 }
 
@@ -95,6 +104,10 @@ mod tests {
         // World requiring an earlier minor still runs on a host offering a
         // later one.
         assert_eq!(facts[WORLD_ABI].minor, u64::from(world_sdk::ABI_MINOR));
+        // This build carries the wasmtime host, so it offers the wasm-runner
+        // fact — the one a wasm-only release names, and the one an old daemon
+        // lacks, so its refusal says why.
+        assert_eq!(facts[WASM_RUNNER].major, 1);
     }
 
     #[test]
