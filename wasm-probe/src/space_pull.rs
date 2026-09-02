@@ -10,12 +10,14 @@
 //! first dials push that request out on the symmetric reverse phase until an
 //! admin redeems it — request-and-founder-redeems, never self-admit. The
 //! inception is DETERMINISTIC in `(device seed, space)`: every nonce it needs
-//! is derived, never drawn from entropy, so a reload or a fresh browser
-//! profile re-mints byte-identical inception material and the same actor.
-//! That determinism is what keeps the single-use invite nonce alive across
-//! reloads — a different actor on re-entry would burn it and lock the person
-//! out — and it is what makes redemption idempotent on the founder, which
-//! keys idempotency by actor.
+//! is derived, never drawn from entropy, so any re-entry that still holds the
+//! same seed — a reload, a crash, a wiped local ledger — re-mints
+//! byte-identical inception material and the same actor. That determinism is
+//! what keeps the single-use invite nonce alive across re-entries (redemption
+//! is idempotent per actor on the founder). It does NOT survive losing the
+//! seed itself: cleared site data or a different browser profile mints a new
+//! seed, hence a new actor a spent single-use invite cannot admit — that
+//! person needs an admin to re-mint, and slice-3's boot must say so legibly.
 
 use std::sync::Arc;
 
@@ -255,13 +257,15 @@ pub async fn pull_space(
     // the same dial's reverse phase. The responder redeems asynchronously
     // after acking the push, so the membership and sealed keys arrive on a
     // LATER pull; the loop's re-dial is load-bearing, not a retry. A member
-    // device (no pending request) breaks after its single pull, exactly the
-    // old behavior.
+    // device (no pending request) breaks after its first successful pull,
+    // exactly the old behavior. A FAILED pull is "could not be asked", never
+    // "refused" — a browser join rides a residential network, so a transient
+    // dial failure retries until the deadline instead of killing the enter.
     let deadline = n0_future::time::Instant::now() + n0_future::time::Duration::from_secs(60);
     let outcome = loop {
         let reverse = admission_push(&authority);
         let awaiting = reverse.is_some();
-        let outcome = pull_whole(
+        match pull_whole(
             transport.as_ref(),
             &responder,
             &space,
@@ -272,14 +276,25 @@ pub async fn pull_space(
             Deadlines::default(),
         )
         .await
-        .expect("the pull completes");
-        if !awaiting || admitted(&authority) {
-            break outcome;
+        {
+            Ok(outcome) => {
+                if !awaiting || admitted(&authority) {
+                    break outcome;
+                }
+                // The two terminal absences are different facts and say so:
+                // the peer ANSWERED but no admin has redeemed the request.
+                assert!(
+                    n0_future::time::Instant::now() < deadline,
+                    "the peer answered but the admission was not redeemed within the deadline"
+                );
+            }
+            Err(failure) => {
+                assert!(
+                    n0_future::time::Instant::now() < deadline,
+                    "the Space could not be pulled within the deadline: {failure:?}"
+                );
+            }
         }
-        assert!(
-            n0_future::time::Instant::now() < deadline,
-            "the admission was not redeemed within the deadline"
-        );
         n0_future::time::sleep(n0_future::time::Duration::from_millis(750)).await;
     };
 
