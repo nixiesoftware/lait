@@ -21,6 +21,9 @@ mp4-atom = "0.15"
 # The live plane's media vocabulary: Catalog, ReceivedGroup, the bounds.
 runtime = { path = "../runtime" }
 data-encoding = "2.6"
+# Decoding a rendered still (a PNG asset) back to pixels for the H.264 still
+# encoder. Pure Rust, already in the workspace graph via `image`.
+png = "0.17"
 
 [features]
 testkit = []

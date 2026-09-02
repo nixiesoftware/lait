@@ -39,6 +39,37 @@ pub enum StillError {
     Dimensions,
     /// The pixel buffer is not `width * height * 4` bytes of RGBA.
     PixelCount,
+    /// The PNG bytes could not be decoded.
+    Png,
+}
+
+/// Encode a rendered still, delivered as a PNG (what the World produces and
+/// the coordinator holds as a frame asset), into one H.264 IDR frame. The PNG
+/// is decoded to RGBA and handed to [`encode_still`]; its dimensions must be
+/// multiples of 16, which a panel-sized render already is.
+pub fn encode_still_png(png_bytes: &[u8]) -> Result<StillH264, StillError> {
+    let decoder = png::Decoder::new(png_bytes);
+    let mut reader = decoder.read_info().map_err(|_| StillError::Png)?;
+    let mut buffer = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|_| StillError::Png)?;
+    buffer.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buffer,
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(buffer.len() / 3 * 4);
+            for chunk in buffer.chunks_exact(3) {
+                out.extend_from_slice(chunk);
+                out.push(255);
+            }
+            out
+        }
+        // The signage renderer only emits RGB/RGBA; anything else is a still
+        // this path was not built for.
+        _ => return Err(StillError::Png),
+    };
+    encode_still(&rgba, info.width, info.height)
 }
 
 const PROFILE_IDC: u8 = 66; // Constrained Baseline
@@ -468,6 +499,24 @@ mod tests {
             .expect("ffprobe runs");
         let dims = String::from_utf8_lossy(&probe.stdout);
         assert!(dims.trim().starts_with("1280,720"), "decoded dims: {dims}");
+    }
+
+    #[test]
+    fn a_png_still_decodes_and_encodes_to_the_same_frame_as_its_pixels() {
+        // A tiny PNG encoded here, then decoded and H.264-encoded, matches the
+        // frame the raw pixels produce — the PNG path is just a front door.
+        let rgba = solid(16, 16, [40, 90, 160]);
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 16, 16);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&rgba).unwrap();
+        }
+        let from_png = encode_still_png(&png_bytes).unwrap();
+        let from_pixels = encode_still(&rgba, 16, 16).unwrap();
+        assert_eq!(from_png, from_pixels);
     }
 
     #[test]

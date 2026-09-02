@@ -204,57 +204,96 @@ impl LiveMediaHub {
         height: u32,
         duration_ms: u32,
     ) -> Result<()> {
-        let still = mediabox::h264still::encode_still(rgba, width, height)
-            .map_err(|error| anyhow!("still could not be encoded for the stream: {error:?}"))?;
-        const SEGMENT_MS: u32 = 1_000;
-        const TIMESCALE: u32 = 90_000;
-        let segments = duration_ms.div_ceil(SEGMENT_MS).max(1);
-        let frame_bytes = still.access_unit.len();
-        let catalog = Catalog {
-            version: CATALOG_VERSION,
-            jitter_hint_ms: 0,
-            tracks: vec![CatalogTrack {
-                track: resource.to_string(),
-                kind: TrackKind::Video,
-                codec: still.codec.clone(),
-                timescale: TIMESCALE,
-                decoder_config_hex: data_encoding::HEXLOWER.encode(&still.avcc),
-                max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
-                target_latency_ms: DEFAULT_MAX_LATENCY_MS,
-                bitrate_bps: u32::try_from(frame_bytes.saturating_mul(8)).unwrap_or(u32::MAX),
-                width: Some(width),
-                height: Some(height),
-                frame_rate_milli: Some(1_000),
-                sample_rate: None,
-                channels: None,
-                render_group: Some(resource.to_string()),
-                cmaf_rendition: None,
-                hls_v3_rendition: Some(resource.to_string()),
-            }],
-        };
-        let groups = (0..segments).map(|sequence| ReceivedGroup {
-            header: GroupHeader {
-                subscription_id: FIRST_MEDIA_SUBSCRIPTION_ID,
-                track: resource.to_string(),
-                track_kind: TrackKind::Video,
-                group_sequence: u64::from(sequence),
-                published_at_micros: 0,
-                timescale: TIMESCALE,
-                max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
-            },
-            frames: vec![Frame {
-                header: FrameHeader {
-                    timestamp: i64::from(sequence).saturating_mul(i64::from(TIMESCALE)),
-                    duration: Some(u64::from(TIMESCALE)),
-                    timescale: TIMESCALE,
-                    kind: FrameKind::Key,
-                    payload_len: u32::try_from(frame_bytes).unwrap_or(u32::MAX),
-                    composition_offset: 0,
-                },
-                payload: still.access_unit.clone(),
-            }],
-        });
+        let (catalog, groups) = still_part(resource, rgba, width, height, duration_ms)?;
         self.install_whole(orbit, resource, &catalog, groups)
+    }
+
+    /// Compose a program from ordered parts into one HLS presentation, so a
+    /// receiver plays the whole thing on a single player and never switches
+    /// surfaces mid-program. Each part is packaged on its own — a part is a
+    /// still or a clip, with its own codec parameters — and the parts are laid
+    /// end to end, an `EXT-X-DISCONTINUITY` at every seam because the stream's
+    /// parameters change there. Segments are renumbered into one sequence, so
+    /// the playlist reads as one timeline.
+    ///
+    /// Whole and complete: the playlist is a VOD the receiver loops by
+    /// restarting. A revision change re-composes and the receiver picks up the
+    /// new program on its change poll.
+    pub fn install_program(
+        &self,
+        orbit: &str,
+        resource: &str,
+        parts: Vec<(Catalog, Vec<ReceivedGroup>)>,
+    ) -> Result<()> {
+        if parts.is_empty() {
+            return Err(anyhow!("a program stream needs at least one part"));
+        }
+        let mut segments: VecDeque<HlsSegment> = VecDeque::new();
+        let mut description: Option<HlsRenditionDescription> = None;
+        let mut next_sequence = 0u64;
+        for (part_index, (catalog, groups)) in parts.into_iter().enumerate() {
+            let mut hls = HlsCatalogPackager::new(&catalog)
+                .map_err(|error| anyhow!("program part {part_index} cannot be HLS: {error}"))?;
+            if description.is_none() {
+                description = hls.descriptions().first().cloned();
+            }
+            let mut first_of_part = true;
+            for group in &groups {
+                let Some(mut segment) = hls
+                    .push_group(group)
+                    .map_err(|error| anyhow!("program part {part_index} group refused: {error}"))?
+                else {
+                    continue;
+                };
+                segment.rendition = resource.to_string();
+                segment.group_sequence = next_sequence;
+                // A seam between parts is a parameter change; mark it so a
+                // player resets its decoder rather than tearing.
+                segment.discontinuity = (part_index > 0 && first_of_part) || segment.discontinuity;
+                segments.push_back(segment);
+                next_sequence += 1;
+                first_of_part = false;
+            }
+        }
+        if segments.is_empty() {
+            return Err(anyhow!("no program part produced a segment"));
+        }
+        let mut description =
+            description.ok_or_else(|| anyhow!("program stream has no rendition"))?;
+        description.rendition = resource.to_string();
+        let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
+        let mut state = lock(&self.inner)?;
+        state.presentations.insert(
+            PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            },
+            Presentation {
+                cmaf_tracks: Vec::new(),
+                cmaf_fragments: BTreeMap::new(),
+                hls_renditions: vec![description],
+                hls_segments: BTreeMap::from([(resource.to_string(), segments)]),
+                retention: Retention::Whole { complete: true },
+                plan: None,
+                updates,
+            },
+        );
+        Ok(())
+    }
+
+    /// Build the catalog and one-second segment groups for a still, the unit a
+    /// program stream is composed from. Public so the compiler can assemble a
+    /// program's parts without going through a full install per still.
+    pub fn still_part(
+        &self,
+        resource: &str,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        duration_ms: u32,
+    ) -> Result<(Catalog, Vec<ReceivedGroup>)> {
+        still_part(resource, rgba, width, height, duration_ms)
     }
 
     /// Install a presentation from a finite, already-written sequence of groups.
@@ -1025,6 +1064,70 @@ fn planned_track_descriptions(
     packager.descriptions().to_vec()
 }
 
+/// A still as a program part: its catalog and one-second single-IDR segment
+/// groups, spanning `duration_ms`.
+fn still_part(
+    resource: &str,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    duration_ms: u32,
+) -> Result<(Catalog, Vec<ReceivedGroup>)> {
+    let still = mediabox::h264still::encode_still(rgba, width, height)
+        .map_err(|error| anyhow!("still could not be encoded for the stream: {error:?}"))?;
+    const SEGMENT_MS: u32 = 1_000;
+    const TIMESCALE: u32 = 90_000;
+    let segments = duration_ms.div_ceil(SEGMENT_MS).max(1);
+    let frame_bytes = still.access_unit.len();
+    let catalog = Catalog {
+        version: CATALOG_VERSION,
+        jitter_hint_ms: 0,
+        tracks: vec![CatalogTrack {
+            track: resource.to_string(),
+            kind: TrackKind::Video,
+            codec: still.codec.clone(),
+            timescale: TIMESCALE,
+            decoder_config_hex: data_encoding::HEXLOWER.encode(&still.avcc),
+            max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
+            target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+            bitrate_bps: u32::try_from(frame_bytes.saturating_mul(8)).unwrap_or(u32::MAX),
+            width: Some(width),
+            height: Some(height),
+            frame_rate_milli: Some(1_000),
+            sample_rate: None,
+            channels: None,
+            render_group: Some(resource.to_string()),
+            cmaf_rendition: None,
+            hls_v3_rendition: Some(resource.to_string()),
+        }],
+    };
+    let groups = (0..segments)
+        .map(|sequence| ReceivedGroup {
+            header: GroupHeader {
+                subscription_id: FIRST_MEDIA_SUBSCRIPTION_ID,
+                track: resource.to_string(),
+                track_kind: TrackKind::Video,
+                group_sequence: u64::from(sequence),
+                published_at_micros: 0,
+                timescale: TIMESCALE,
+                max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
+            },
+            frames: vec![Frame {
+                header: FrameHeader {
+                    timestamp: i64::from(sequence).saturating_mul(i64::from(TIMESCALE)),
+                    duration: Some(u64::from(TIMESCALE)),
+                    timescale: TIMESCALE,
+                    kind: FrameKind::Key,
+                    payload_len: u32::try_from(frame_bytes).unwrap_or(u32::MAX),
+                    composition_offset: 0,
+                },
+                payload: still.access_unit.clone(),
+            }],
+        })
+        .collect();
+    Ok((catalog, groups))
+}
+
 fn unique_presentation<'a>(
     state: &'a HubState,
     orbit: &str,
@@ -1454,6 +1557,40 @@ mod tests {
             .expect("the first still segment is served");
         assert_eq!(segment.len() % 188, 0, "a real transport stream");
         assert_eq!(segment.first(), Some(&0x47));
+    }
+
+    #[test]
+    fn a_program_composes_its_parts_into_one_playlist_with_seams() {
+        let hub = LiveMediaHub::default();
+        let a = hub
+            .still_part("prog", &still_rgba(320, 240), 320, 240, 2_000)
+            .unwrap();
+        let b = hub
+            .still_part("prog", &still_rgba(160, 240), 160, 240, 3_000)
+            .unwrap();
+        hub.install_program("space/orbit", "prog", vec![a, b])
+            .expect("a program composes");
+        let playlist = hub
+            .hls_media_playlist("space/orbit", "prog", "prog", "..")
+            .expect("the program serves one playlist");
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
+        assert_eq!(
+            playlist.matches("#EXTINF:").count(),
+            5,
+            "two seconds then three, as one five-segment timeline"
+        );
+        assert_eq!(
+            playlist.matches("#EXT-X-DISCONTINUITY").count(),
+            1,
+            "exactly one seam, at the boundary between the two parts"
+        );
+        // The segments renumber into one sequence the player walks straight.
+        for sequence in 0..5 {
+            assert!(hub
+                .hls_segment("space/orbit", "prog", "prog", sequence)
+                .is_ok());
+        }
     }
 
     /// The still, all the way through the coordinator's packager and back out a
