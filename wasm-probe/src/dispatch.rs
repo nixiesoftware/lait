@@ -1,0 +1,209 @@
+//! The browser Worker's world-agnostic dispatch: a product World RPC reaches
+//! the runner through the `ClientAdapter`/`ClientHost` seam, exactly as the
+//! daemon's `world_rpc` does — never naming a World.
+//!
+//! TWO runner instances of the one module, because a wasm instance cannot be
+//! re-entered mid-callback (a single instance traps — proven). Every Issues
+//! app call routes `RemoteClient::execute` → the guest's `client.host.world`
+//! callback → the control `Handler` → `APPLICATION_CALL` back into a runner.
+//! If that landed on the SAME instance the `execute` is suspended in, it is a
+//! nested activation of one instance on one stack, and it traps. So:
+//!
+//! - the **control** `Arc<RemoteWorld>` wears two hats — the `World` the
+//!   Catalog registers (so `Session::query`/`submit` reach it) and the control
+//!   `Handler` [`BrowserClientHost::call_world`] drives — and its
+//!   `APPLICATION_CALL` reads via the Context's semantic callbacks straight
+//!   from the Replica, so it re-enters nothing;
+//! - the **client** `Arc<RemoteWorld>` is a separate instance backing the
+//!   `ClientAdapter` (`RemoteClient`), which forwards a product request in with
+//!   `parse_web`/`execute`.
+//!
+//! `execute` (client instance) → `call_world` → `APPLICATION_CALL` (control
+//! instance) crosses between two distinct instances, so neither is re-entered.
+
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use runtime::world::call::{Call, Context, Handler, Reply};
+use runtime::Session;
+use world_interface::{
+    ClientAdapter, ClientFuture, ClientHost, Failure, HostContentRequest, HostControlRequest,
+    PresentationHandle, PresentationResolution,
+};
+use world_sdk::{RemoteClient, RemoteWorld};
+
+/// A browser ClientHost over the composed Session: it answers the runner's
+/// callbacks synchronously, drives world sub-calls back through the control
+/// Handler, keeps caller-local state in memory, and refuses — honestly, with
+/// a typed failure — every capability a tab does not have (a filesystem, the
+/// content plane, the exec drain, an address book).
+pub struct BrowserClientHost<'a> {
+    session: &'a Session,
+    control: Arc<RemoteWorld>,
+    identity: &'a runtime::world::LocalIdentity,
+    actor: String,
+    device: String,
+    local: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+}
+
+impl<'a> BrowserClientHost<'a> {
+    fn context(&self) -> Context<'_> {
+        Context {
+            session: self.session,
+            identity: self.identity,
+            actor: &self.actor,
+            device: &self.device,
+        }
+    }
+}
+
+impl ClientHost for BrowserClientHost<'_> {
+    fn local_root(&self) -> &std::path::Path {
+        // A browser host has no filesystem; nothing should read this, but the
+        // trait demands a path. A stable sentinel that no real op touches.
+        std::path::Path::new("/browser")
+    }
+
+    fn local_get(&self, key: &str) -> Option<Vec<u8>> {
+        self.local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    fn local_put(&self, key: &str, bytes: &[u8]) -> Result<(), Failure> {
+        self.local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.to_string(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn save_user_file(&self, _destination: &str, _bytes: &[u8]) -> Result<(), Failure> {
+        Err(Failure::new(
+            "this browser session cannot write files to the device",
+        ))
+    }
+
+    fn call_world<'b>(&'b self, call: Call) -> ClientFuture<'b, Reply> {
+        // The re-entrant seam: run the product call through the control Handler
+        // over the composed Session — a nested dispatch back into the runner.
+        let reply = self.control.call(&call, &self.context());
+        Box::pin(async move { Ok(reply) })
+    }
+
+    fn call_find<'b>(
+        &'b self,
+        _world: replica::body::WorldId,
+        query: runtime::find::Query,
+    ) -> ClientFuture<'b, serde_json::Value> {
+        let answer = runtime::world::call::SessionAccess::find(self.session, query);
+        Box::pin(async move {
+            match answer {
+                Ok(answer) => serde_json::to_value(answer)
+                    .map_err(|e| Failure::new(format!("encode Find answer: {e}"))),
+                Err(failure) => Err(Failure::new(format!("Find refused: {failure:?}"))),
+            }
+        })
+    }
+
+    fn call_work<'b>(
+        &'b self,
+        _request: runtime::exec::WorkRequest,
+    ) -> ClientFuture<'b, serde_json::Value> {
+        Box::pin(async move {
+            Err(Failure::new(
+                "durable Run lifecycle is not available in this browser session",
+            ))
+        })
+    }
+
+    fn call_control<'b>(
+        &'b self,
+        _request: HostControlRequest,
+    ) -> ClientFuture<'b, serde_json::Value> {
+        Box::pin(async move {
+            Err(Failure::new(
+                "Space control is not available in this browser session",
+            ))
+        })
+    }
+
+    fn call_content<'b>(
+        &'b self,
+        _request: HostContentRequest,
+    ) -> ClientFuture<'b, serde_json::Value> {
+        Box::pin(async move {
+            Err(Failure::new(
+                "the content plane is not available in this browser session",
+            ))
+        })
+    }
+
+    fn call_identity<'b>(
+        &'b self,
+        _handles: Vec<PresentationHandle>,
+    ) -> ClientFuture<'b, PresentationResolution> {
+        // No address book in a tab: an honest empty resolution, not an error.
+        Box::pin(async move { Ok(PresentationResolution::unavailable()) })
+    }
+}
+
+/// The browser engine: the composed Session plus the runner as adapter and
+/// control Handler, ready to answer a world RPC world-agnostically.
+pub struct BrowserEngine {
+    session: Session,
+    control: Arc<RemoteWorld>,
+    client: RemoteClient,
+    identity: runtime::world::LocalIdentity,
+    actor: String,
+    device: String,
+}
+
+impl BrowserEngine {
+    /// Compose over an already-docked Session, the control runner (the same
+    /// `Arc<RemoteWorld>` the Session's Catalog registered, which also serves
+    /// `call_world`), and a SEPARATE `client_runner` instance backing the
+    /// `ClientAdapter`. The two instances are what keep `execute`'s callback
+    /// into `call_world` from re-entering the instance `execute` runs in.
+    pub fn new(
+        session: Session,
+        control: Arc<RemoteWorld>,
+        client_runner: Arc<RemoteWorld>,
+        identity: runtime::world::LocalIdentity,
+        actor: String,
+        device: String,
+    ) -> anyhow::Result<Self> {
+        let client = RemoteClient::connect(client_runner)?;
+        Ok(Self {
+            session,
+            control,
+            client,
+            identity,
+            actor,
+            device,
+        })
+    }
+
+    fn host(&self) -> BrowserClientHost<'_> {
+        BrowserClientHost {
+            session: &self.session,
+            control: self.control.clone(),
+            identity: &self.identity,
+            actor: self.actor.clone(),
+            device: self.device.clone(),
+            local: Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// Run one product World request through the world-agnostic seam:
+    /// `parse_web` classifies it, `execute` forwards it into the runner, and
+    /// the runner's callbacks come back through the browser ClientHost — the
+    /// re-entrant path when a call reaches `call_world`.
+    pub fn world_rpc(&self, request: serde_json::Value) -> Result<serde_json::Value, Failure> {
+        let host = self.host();
+        let invocation = self.client.parse_web(request)?;
+        futures_lite::future::block_on(self.client.execute(&host, invocation))
+    }
+}

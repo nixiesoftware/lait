@@ -295,6 +295,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-control"
+version = "0.1.0"
+dependencies = [
+ "contact",
+ "data-encoding",
+ "mechanics",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5048,9 +5059,11 @@ name = "wasm-probe"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "browser-control",
  "comms",
  "contact",
  "fabric",
+ "futures-lite",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "journal",
@@ -5062,6 +5075,7 @@ dependencies = [
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-test",
+ "world-interface",
  "world-runner",
  "world-sdk",
 ]

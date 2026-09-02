@@ -20,3 +20,6 @@ pub mod runner;
     feature = "probe-journal"
 ))]
 pub mod space_pull;
+
+#[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
+pub mod dispatch;

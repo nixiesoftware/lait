@@ -206,3 +206,18 @@ touch "$root/wasm-probe/tests/space_call.rs"
         --features probe-engine,probe-contact
 )
 echo "browser-live-space: the engine in the tab answered from the pulled Space."
+
+# --- a product world RPC crosses the world-agnostic dispatch seam -----------
+# parse_web → execute → the runner's callbacks → the composed Session, naming
+# no World — and the runner re-enters itself through call_world. The settling
+# proof that a product request (not a raw semantic Query) crosses in a tab.
+echo "== a product world RPC crosses the dispatch seam in the tab"
+touch "$root/wasm-probe/tests/dispatch.rs"
+(
+    cd "$root/wasm-probe"
+    LIVE_RELAY_URL="$relay" LIVE_SEED_HEX="$SEED_HEX" LIVE_TICKET="$LINK" \
+        ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --test dispatch \
+        --features probe-dispatch
+)
+echo "browser-live-space: a product world RPC crossed the dispatch seam."
