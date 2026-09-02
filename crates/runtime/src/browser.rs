@@ -120,6 +120,34 @@ impl Station {
     pub fn identity_from_seed(seed: &[u8; 32]) -> LocalIdentity {
         LocalIdentity::from_seed(seed)
     }
+
+    /// This live Station's current published root — the holdings root a
+    /// re-pull signs into its Offer. See [`StationCore::published_root`].
+    pub fn published_root(&self) -> [u8; 32] {
+        self.core.published_root()
+    }
+
+    /// Install converged Contact material into this LIVE Station's Replica: the
+    /// seam a browser re-pull commits through, so the new snapshot reaches the
+    /// docked Session and the doorbell fires — the same `with_replica_
+    /// convergence` the native Contact driver installs through, exposed for the
+    /// Worker that owns both ends of the pull. The closure runs the
+    /// `validate_contact` + `incorporate_bundle` a `contact::pull_receive`'s
+    /// staged material feeds, under the Station's own writer lock.
+    pub fn with_replica_convergence<F>(
+        &self,
+        f: F,
+    ) -> Result<replica::convergence::ConvergenceOutcome, replica::transaction::commit::Failure>
+    where
+        F: FnOnce(
+            &mut replica::Replica,
+        ) -> Result<
+            replica::convergence::ConvergenceOutcome,
+            replica::transaction::commit::Failure,
+        >,
+    {
+        self.core.with_replica_convergence(f)
+    }
 }
 
 /// The pulled ledger as the Session's authority: every answer delegates to

@@ -45,9 +45,12 @@ pub struct PulledSpace {
     pub authority: SharedLedgerAuthority,
     pub replica: Replica,
     pub outcome: Outcome,
-    transport: Arc<dyn Transport>,
-    responder: Key,
-    seed: [u8; 32],
+    /// The live transport, kept so a caller can re-pull after the Replica has
+    /// been composed into a Station (which takes it by value) — the seam a
+    /// live re-pull installs new material through.
+    pub transport: Arc<dyn Transport>,
+    pub responder: Key,
+    pub seed: [u8; 32],
 }
 
 impl PulledSpace {

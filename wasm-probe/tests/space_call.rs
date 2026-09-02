@@ -237,4 +237,74 @@ async fn the_engine_in_a_tab_reads_and_writes_a_pulled_space() {
         after_titles.contains(&"written from a tab"),
         "bob's issue, written in the tab, reads back: {after_titles:?}",
     );
+
+    // Slice 8.5: a LIVE re-pull installs into the already-composed core. The
+    // browser re-receives over the same transport (contact::pull_receive, no
+    // Replica lock) and commits the staged material through the Station's OWN
+    // writer (with_replica_convergence) — the exact seam the native Contact
+    // driver installs through, and the one reactivity is built on. Here the
+    // material is idempotent (alice holds nothing bob lacks), so this proves
+    // the install path executes end to end in a browser and leaves the live
+    // core intact; new material takes the identical path, and the write above
+    // already proved a durable commit rings the doorbell (its try_next drain).
+    let holdings = station.published_root();
+    let received = contact::pull::pull_receive(
+        pulled.transport.as_ref(),
+        &pulled.responder,
+        &pulled.space,
+        &pulled.seed,
+        &pulled.authority.bundle(),
+        holdings,
+        contact::pull::Deadlines::default(),
+    )
+    .await
+    .expect("the live re-receive completes over the same transport");
+    let bundle = pulled.authority.bundle();
+    let signer = replica::transaction::SeedSigner(&pulled.seed);
+    station
+        .with_replica_convergence(|replica| {
+            let ctx = replica::transaction::CommitContext {
+                space: &pulled.space,
+                signer: &signer,
+                authority_frontier: (bundle.frontier)(),
+            };
+            let mut incorporator = bundle
+                .incorporator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let validated = replica.validate_contact(
+                &received.staged,
+                bundle.source.as_ref(),
+                &mut *incorporator,
+            )?;
+            replica.incorporate_bundle(&ctx, validated, bundle.source.as_ref())
+        })
+        .expect("the live re-pull installs into the composed core through its writer");
+
+    // The live core survived the convergence: it still answers, still holding
+    // alice's issues and bob's write.
+    let live = ask(
+        &session,
+        IssueQuery::List {
+            project: None,
+            label: None,
+            status: None,
+            milestone: None,
+            mine: None,
+            all: false,
+            me: None,
+            facets: Default::default(),
+            page: PageRequest::default(),
+        },
+    );
+    let live_titles: Vec<&str> = live["items"]
+        .as_array()
+        .expect("an issues page")
+        .iter()
+        .filter_map(|r| r["title"].as_str())
+        .collect();
+    assert!(
+        live_titles.contains(&"written from a tab"),
+        "the live core still answers after a re-pull installed through its writer: {live_titles:?}",
+    );
 }

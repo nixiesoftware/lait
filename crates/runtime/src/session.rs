@@ -2551,6 +2551,18 @@ impl StationCore {
         self.replica.lock_recovering()
     }
 
+    /// This Station's current published manifest root, or all-zero before it
+    /// has published one. A live Contact re-pull signs this into its Offer as
+    /// its holdings root, so the responder omits what this Station already
+    /// holds — the browser analogue of the value the one-shot pull reads from
+    /// a Replica it owns.
+    pub fn published_root(&self) -> [u8; 32] {
+        self.replica_lock()
+            .published_root()
+            .map(|root| root.0)
+            .unwrap_or([0u8; 32])
+    }
+
     fn try_mutation_lane(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, ()>, replica::transaction::commit::Failure> {
