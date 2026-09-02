@@ -35,16 +35,39 @@ extern "C" {
         wasm: &[u8],
         host_call: &Closure<dyn FnMut(String, Vec<u8>) -> Vec<u8>>,
     ) -> u32;
+    fn compile_module(wasm: &[u8]) -> u32;
+    fn instantiate_from(
+        module: u32,
+        host_call: &Closure<dyn FnMut(String, Vec<u8>) -> Vec<u8>>,
+    ) -> u32;
     #[wasm_bindgen(catch)]
     fn call_guest(id: u32, name: &str, frame: &[u8]) -> std::result::Result<Vec<u8>, JsValue>;
     fn drop_guest(id: u32);
+}
+
+/// A World runner module compiled once, ready to instantiate many times. The
+/// browser-native runner needs one instance per nested guest layer (world,
+/// control, client), and a 39 MiB module should be compiled a single time.
+#[derive(Clone)]
+pub struct WebModule {
+    id: u32,
+}
+
+impl WebModule {
+    /// Compile the runner module once.
+    pub fn compile(wasm: &[u8]) -> Self {
+        Self {
+            id: compile_module(wasm),
+        }
+    }
 }
 
 /// The engine-side callback for the duration of one dispatch, borrow lifetime
 /// erased. Installed and cleared inside `dispatch`, so the erased lifetime
 /// never outlives the real one — and single-threaded, so nothing else observes
 /// it. It is the browser analogue of the native host's `Store` callback slot.
-type ErasedCallback = *mut (dyn FnMut(&str, &[u8]) -> std::result::Result<Vec<u8>, String> + 'static);
+type ErasedCallback =
+    *mut (dyn FnMut(&str, &[u8]) -> std::result::Result<Vec<u8>, String> + 'static);
 
 thread_local! {
     static CURRENT: Cell<Option<ErasedCallback>> = const { Cell::new(None) };
@@ -66,7 +89,7 @@ impl Drop for Live {
 
 /// One World runner backed by a browser-instantiated wasm module.
 pub struct WebInstance {
-    wasm: Vec<u8>,
+    module: u32,
     init: GuestInit,
     descriptor: ServiceDescriptor,
     live: Rc<std::cell::RefCell<Live>>,
@@ -93,11 +116,19 @@ impl WebInstance {
 
     /// Instantiate a guest module and run `init` to build its service and read
     /// back the descriptor — the browser analogue of a process announcing
-    /// readiness and answering Describe.
+    /// readiness and answering Describe. Compiles the module; use
+    /// [`Self::launch_from`] to share one compile across several instances.
     pub fn launch(wasm: &[u8], init: GuestInit) -> Result<Self> {
-        let (live, descriptor) = instantiate(wasm, &init)?;
+        Self::launch_from(&WebModule::compile(wasm), init)
+    }
+
+    /// Instantiate from an already-compiled [`WebModule`] — the shippable
+    /// shape when several instances of one runner are needed (one per nested
+    /// guest layer), paying the 39 MiB compile once.
+    pub fn launch_from(module: &WebModule, init: GuestInit) -> Result<Self> {
+        let (live, descriptor) = instantiate(module.id, &init)?;
         Ok(Self {
-            wasm: wasm.to_vec(),
+            module: module.id,
             init,
             descriptor,
             live: Rc::new(std::cell::RefCell::new(live)),
@@ -105,8 +136,8 @@ impl WebInstance {
     }
 }
 
-/// Build a fresh guest and answer its Describe.
-fn instantiate(wasm: &[u8], init: &GuestInit) -> Result<(Live, ServiceDescriptor)> {
+/// Build a fresh guest from a compiled module and answer its Describe.
+fn instantiate(module: u32, init: &GuestInit) -> Result<(Live, ServiceDescriptor)> {
     let host_call = Closure::new(move |op: String, payload: Vec<u8>| -> Vec<u8> {
         let result: std::result::Result<Vec<u8>, String> = CURRENT.with(|current| {
             match current.get() {
@@ -118,14 +149,14 @@ fn instantiate(wasm: &[u8], init: &GuestInit) -> Result<(Live, ServiceDescriptor
         });
         encode(&result).unwrap_or_default()
     });
-    let id = instantiate_guest(wasm, &host_call);
+    let id = instantiate_from(module, &host_call);
     let live = Live {
         id,
         _host_call: host_call,
     };
     let init_frame = encode(init).map_err(|e| anyhow!("encode guest init: {e}"))?;
-    let descriptor_bytes = call_guest(id, exports::INIT, &init_frame)
-        .map_err(|_| anyhow!("guest init trapped"))?;
+    let descriptor_bytes =
+        call_guest(id, exports::INIT, &init_frame).map_err(|_| anyhow!("guest init trapped"))?;
     let descriptor: ServiceDescriptor =
         decode(&descriptor_bytes).map_err(|e| anyhow!("guest init returned no descriptor: {e}"))?;
     Ok((live, descriptor))
@@ -139,7 +170,7 @@ impl HostedRunner for WebInstance {
     fn open(&mut self) -> Result<Box<dyn Conversation>> {
         Ok(Box::new(WebConversation {
             live: Rc::clone(&self.live),
-            wasm: self.wasm.clone(),
+            module: self.module,
             init: self.init.clone(),
             descriptor: self.descriptor.clone(),
         }))
@@ -150,7 +181,7 @@ impl HostedRunner for WebInstance {
 /// owned and independent — matching the native client.
 pub struct WebConversation {
     live: Rc<std::cell::RefCell<Live>>,
-    wasm: Vec<u8>,
+    module: u32,
     init: GuestInit,
     descriptor: ServiceDescriptor,
 }
@@ -189,9 +220,10 @@ impl Conversation for WebConversation {
             Ok(bytes) => bytes,
             Err(_) => {
                 // A trap discards the guest instance; re-instantiate from the
-                // immutable bytes so the next call meets a fresh guest of the
-                // same identity — the browser analogue of restart_if_gone.
-                if let Ok((fresh, descriptor)) = instantiate(&self.wasm, &self.init) {
+                // cached module so the next call meets a fresh guest of the
+                // same identity — the browser analogue of restart_if_gone, and
+                // cheaper now that it does not recompile.
+                if let Ok((fresh, descriptor)) = instantiate(self.module, &self.init) {
                     if descriptor == self.descriptor {
                         *self.live.borrow_mut() = fresh;
                     }

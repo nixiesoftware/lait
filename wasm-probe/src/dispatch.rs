@@ -175,6 +175,53 @@ pub enum LinkReply {
     Confirm { question: String },
 }
 
+/// A frame the viewer's `workerLink` sends (`viewer/src/workerLink.ts`
+/// `WorkerLinkRequest`). The Worker glue decodes one of these per message and
+/// hands it to [`BrowserEngine::handle_link`].
+#[derive(serde::Deserialize)]
+#[serde(tag = "lait", rename_all = "snake_case")]
+pub enum WorkerLinkRequest {
+    Rpc {
+        id: u64,
+        verb: LinkVerb,
+        #[serde(default)]
+        space: Option<String>,
+        #[serde(default)]
+        world: Option<String>,
+        #[serde(default)]
+        request: Option<serde_json::Value>,
+        #[serde(default)]
+        confirm: bool,
+    },
+    Abort {
+        id: u64,
+    },
+    Events {
+        id: u64,
+    },
+    Close {
+        id: u64,
+    },
+}
+
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkVerb {
+    Spaces,
+    Host,
+    Space,
+    World,
+}
+
+/// A frame the engine sends back (`WorkerLinkResponse`). The one-shot rpc
+/// verbs answer with `reply`; the events lane's `ring`/`liveness` frames are
+/// pushed by the Worker composition root over time, not returned here.
+#[derive(serde::Serialize)]
+#[serde(tag = "lait", rename_all = "snake_case")]
+pub enum WorkerLinkResponse {
+    Reply { id: u64, reply: LinkReply },
+}
+
 impl BrowserEngine {
     /// Compose over an already-docked Session, the control runner (the same
     /// `Arc<RemoteWorld>` the Session's Catalog registered, which also serves
@@ -281,6 +328,52 @@ impl BrowserEngine {
         let host = self.host();
         let invocation = self.client.parse_web(request)?;
         futures_lite::future::block_on(self.client.execute(&host, invocation))
+    }
+
+    /// Route one decoded frame to the right verb and answer it. The one-shot
+    /// rpc verbs (spaces / host / space / world) answer with a `reply` frame;
+    /// the streaming lanes (events / abort / close) are the Worker composition
+    /// root's to manage — they carry no synchronous answer, so this returns
+    /// `None` for them.
+    pub fn handle_link(&self, request: WorkerLinkRequest) -> Option<WorkerLinkResponse> {
+        let WorkerLinkRequest::Rpc {
+            id, verb, request, ..
+        } = request
+        else {
+            return None;
+        };
+        let reply = match verb {
+            LinkVerb::Spaces => self.spaces(),
+            LinkVerb::Host | LinkVerb::Space => {
+                // A control request carries its command in the `cmd` tag, the
+                // one fact the world-agnostic dispatcher needs to classify it.
+                match request
+                    .as_ref()
+                    .and_then(|value| value.get("cmd"))
+                    .and_then(|cmd| cmd.as_str())
+                {
+                    Some(cmd) => self.control_rpc(cmd),
+                    None => LinkReply::Refusal {
+                        refusal: browser_control::Refusal {
+                            status: 400,
+                            message: "a control request must name its cmd".to_string(),
+                            error_kind: "error".to_string(),
+                        },
+                    },
+                }
+            }
+            LinkVerb::World => match request {
+                Some(product) => self.world_link(product),
+                None => LinkReply::Refusal {
+                    refusal: browser_control::Refusal {
+                        status: 400,
+                        message: "a world request carries no product payload".to_string(),
+                        error_kind: "error".to_string(),
+                    },
+                },
+            },
+        };
+        Some(WorkerLinkResponse::Reply { id, reply })
     }
 
     /// The world verb as a frame `LinkReply`: a product answer, or the

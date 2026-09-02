@@ -19,7 +19,7 @@ use mechanics::station::Epoch;
 use runtime::world::{AuthorityView, Builder, World};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 use wasm_probe::dispatch::BrowserEngine;
-use wasm_probe::runner::WebInstance;
+use wasm_probe::runner::{WebInstance, WebModule};
 use wasm_probe::space_pull::{pull_space, unhex32};
 use world_runner::wasm_abi::GuestInit;
 use world_sdk::{RemoteClient, RemoteWorld};
@@ -39,10 +39,12 @@ async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
     // (CLIENT_EXECUTE) calls back into the control Handler (APPLICATION_CALL),
     // which calls session.query (QUERY) — three activations that would nest on
     // one instance and trap. Each layer gets its own instance so no instance
-    // is ever entered while it is suspended.
+    // is ever entered while it is suspended. The 39 MiB module is COMPILED
+    // ONCE and instantiated three times — the shippable shape.
+    let module = WebModule::compile(ISSUES_RUNNER);
     let launch = |tag: &str| {
-        let instance = WebInstance::launch(
-            ISSUES_RUNNER,
+        let instance = WebInstance::launch_from(
+            &module,
             GuestInit {
                 world: "com.lait.issues".into(),
                 version: "0.9.5".into(),
@@ -158,4 +160,49 @@ async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
         "a daemon-only act refuses not_hosted, never the wrong-mount refusal: {refused}"
     );
     assert_ne!(refused["refusal"]["status"], 404);
+
+    // The frame router: a decoded WorkerLinkRequest in, a WorkerLinkResponse
+    // out — the exact seam the JS Worker wires. A world rpc frame carrying a
+    // product request answers with a reply frame naming its id.
+    let frame: wasm_probe::dispatch::WorkerLinkRequest =
+        serde_json::from_value(serde_json::json!({
+            "lait": "rpc",
+            "id": 7,
+            "verb": "world",
+            "request": { "cmd": "project_list", "page": {} },
+        }))
+        .expect("the world rpc frame decodes");
+    let response = serde_json::to_value(
+        engine
+            .handle_link(frame)
+            .expect("a world rpc answers a frame"),
+    )
+    .expect("serialize the response frame");
+    assert_eq!(response["lait"], "reply");
+    assert_eq!(response["id"], 7);
+    assert_eq!(response["reply"]["kind"], "reply");
+    assert!(
+        serde_json::to_string(&response["reply"]["body"])
+            .unwrap()
+            .contains("ENG"),
+        "the world rpc frame returned alice's ENG: {response}"
+    );
+
+    // A host frame carrying a daemon-only cmd answers a refusal frame.
+    let host_frame: wasm_probe::dispatch::WorkerLinkRequest =
+        serde_json::from_value(serde_json::json!({
+            "lait": "rpc",
+            "id": 8,
+            "verb": "host",
+            "request": { "cmd": "host_orbit_forget" },
+        }))
+        .expect("the host rpc frame decodes");
+    let host_response =
+        serde_json::to_value(engine.handle_link(host_frame).expect("a host rpc answers"))
+            .expect("serialize");
+    assert_eq!(host_response["reply"]["kind"], "refusal");
+    assert_eq!(
+        host_response["reply"]["refusal"]["error_kind"],
+        "not_hosted"
+    );
 }

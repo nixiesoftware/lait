@@ -13,6 +13,11 @@
 const guests = new Map();
 let nextId = 1;
 
+// Compiled modules, cached so N instances of the one runner share a single
+// (expensive) WebAssembly.Module compile.
+const modules = new Map();
+let nextModuleId = 1;
+
 // Re-fetch the memory view every time: a `wr_alloc` may have grown linear
 // memory, which detaches any prior ArrayBuffer view.
 function bytes(guest) {
@@ -23,11 +28,21 @@ function pack(ptr, len) {
   return (BigInt(ptr >>> 0) << 32n) | BigInt(len >>> 0);
 }
 
-// Instantiate a guest from its wasm bytes. `hostCall(op, payload)` is the
-// engine-side callback: it takes the operation string and the payload bytes
-// and returns the answer bytes (a postcard `Result<Vec<u8>, String>`).
-export function instantiate_guest(wasm, hostCall) {
-  const id = nextId++;
+// Compile the runner module ONCE. Returns a module id an
+// `instantiate_from` reuses; a 39 MiB module is compiled a single time and
+// instantiated N times (the browser-native runner needs one instance per
+// nested guest layer — world, control, client).
+export function compile_module(wasm) {
+  const mid = nextModuleId++;
+  modules.set(mid, new WebAssembly.Module(wasm));
+  return mid;
+}
+
+// The per-instance imports: `host_call`/`random`/`log` closures bound to this
+// guest's id, plus the minimal `__wbindgen` stubs the module declares. Every
+// instance of one module builds its own set (separate memory, separate
+// hostCall).
+function buildImports(id, hostCall, module) {
   const imports = {
     lait: {
       host_call: (opPtr, opLen, payloadPtr, payloadLen) => {
@@ -58,7 +73,6 @@ export function instantiate_guest(wasm, hostCall) {
       },
     },
   };
-  const module = new WebAssembly.Module(wasm);
   // A near-pure guest still carries a little wasm-bindgen scaffolding from
   // web-time's clock (Date.now returns a number, so no externref ever
   // crosses). Provide minimal stubs for whatever `__wbindgen`/`__wbg` imports
@@ -80,9 +94,27 @@ export function instantiate_guest(wasm, hostCall) {
       table[imp.name] = () => 0;
     }
   }
+  return imports;
+}
+
+// Instantiate a guest from an already-compiled module id. `hostCall(op,
+// payload)` is the engine-side callback (operation string + payload bytes ->
+// answer bytes, a postcard `Result<Vec<u8>, String>`).
+export function instantiate_from(moduleId, hostCall) {
+  const module = modules.get(moduleId);
+  if (!module) throw new Error("unknown compiled module id");
+  const id = nextId++;
+  const imports = buildImports(id, hostCall, module);
   const instance = new WebAssembly.Instance(module, imports);
   guests.set(id, { exports: instance.exports });
   return id;
+}
+
+// Instantiate a guest from its wasm bytes — compile then instantiate, for
+// one-shot callers. Reuse `compile_module` + `instantiate_from` when more than
+// one instance of the same module is needed.
+export function instantiate_guest(wasm, hostCall) {
+  return instantiate_from(compile_module(wasm), hostCall);
 }
 
 // Call one guest export that takes a (ptr, len) input frame and returns a
