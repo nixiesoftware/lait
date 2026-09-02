@@ -7,6 +7,15 @@ description = "Independent process runner for LAIT's first-party Issues World"
 license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
+# The service builder and the wasm guest entry (the four exported ABI
+# functions) live in the library, so the native binary and the wasm module
+# build the identical service. `cdylib` is what a wasm host loads; `rlib`
+# keeps the binary and tests able to call `build_service`.
+[lib]
+name = "lait_issues_runner"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
 [[bin]]
 name = "lait-world-issues"
 path = "src/main.rs"
@@ -18,6 +27,16 @@ issues-app = { package = "lait-issues-app", path = "../issues-app" }
 world-runner = { path = "../../crates/world-runner" }
 world-sdk = { path = "../../crates/world-sdk" }
 runtime = { path = "../../crates/runtime" }
+
+# A wasm World runner takes its entropy from the host, through a `lait.random`
+# import — not from `crypto` directly. That keeps the guest a pure core-wasm
+# module whose only imports are the runner ABI, and it is the honest sandbox
+# posture: the host, not the guest, reaches the platform. These pull the custom
+# backend of every getrandom major the runner links (0.4 rides 0.3's symbol),
+# built under `--cfg getrandom_backend="custom"`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["custom"] }
+getrandom_v03 = { package = "getrandom", version = "0.3" }
 
 [lints]
 workspace = true

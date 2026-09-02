@@ -7,11 +7,22 @@ description = "Contact v2 — the bounded direct material exchange (`lait/contac
 license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
+[features]
+# The `pull` initiator drives a comms stream, which pulls iroh. Only a peer
+# that actually pulls a Space needs it (the browser engine); the types — the
+# grammar, the transcript machines, the coordinates — are transport-free and
+# always present. A World runner links contact for those types and must not
+# drag iroh into its wasm, so `wire` is off by default and the engine turns
+# it on.
+default = []
+wire = ["dep:comms"]
+
 [dependencies]
 mechanics = { path = "../mechanics" }
 replica = { path = "../replica" }
-# The transport seam the initiator drives; wasm-clean end to end.
-comms = { path = "../comms" }
+# The transport seam the initiator drives; wasm-clean end to end. Optional,
+# behind `wire`.
+comms = { path = "../comms", optional = true }
 
 anyhow = "1"
 blake3 = "1"

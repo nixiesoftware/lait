@@ -66,7 +66,7 @@ journal = { path = "../crates/journal", optional = true, features = ["opfs"] }
 fabric = { path = "../crates/fabric", optional = true }
 replica = { path = "../crates/replica", optional = true }
 comms = { path = "../crates/comms", optional = true, default-features = false }
-contact = { path = "../crates/contact", optional = true }
+contact = { path = "../crates/contact", optional = true, features = ["wire"] }
 
 # The entropy door, opened toward JS.
 #

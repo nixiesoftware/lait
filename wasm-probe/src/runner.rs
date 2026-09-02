@@ -78,6 +78,17 @@ unsafe impl Send for WebInstance {}
 unsafe impl Send for WebConversation {}
 
 impl WebInstance {
+    /// Instantiate the guest module under the browser's WebAssembly WITHOUT
+    /// running `init` — proves the module compiles, fits in the tab's memory,
+    /// and its imports resolve, separate from whether its service builds. The
+    /// answer to "does a 39 MiB typst/CRDT runner even load in a browser".
+    pub fn instantiate_module(wasm: &[u8]) -> Result<()> {
+        let host_call = Closure::new(|_op: String, _payload: Vec<u8>| Vec::new());
+        let id = instantiate_guest(wasm, &host_call);
+        drop_guest(id);
+        Ok(())
+    }
+
     /// Instantiate a guest module and run `init` to build its service and read
     /// back the descriptor — the browser analogue of a process announcing
     /// readiness and answering Describe.

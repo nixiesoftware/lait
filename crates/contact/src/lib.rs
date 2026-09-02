@@ -8,6 +8,10 @@ pub mod admission;
 pub mod authority;
 pub mod coordinates;
 mod protocol;
+/// The initiator that drives the transcript over a comms stream. Behind the
+/// `wire` feature, because it links comms (and thus iroh); the transcript
+/// machines it drives are transport-free and always available in `protocol`.
+#[cfg(feature = "wire")]
 pub mod pull;
 pub mod wire;
 

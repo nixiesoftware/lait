@@ -10,9 +10,22 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(proof_world_wasm)");
+    println!("cargo:rustc-check-cfg=cfg(issues_runner_wasm)");
     if std::env::var("CARGO_FEATURE_PROBE_RUNNER").is_err() {
         return;
     }
+
+    // The real Issues runner is a 39 MiB module built by the harness (claim 7),
+    // not here — its build is minutes long and needs the wasm clang. If the
+    // harness prepared one and named it, the test that runs it compiles; else
+    // that test reads the missing cfg and does not run.
+    if let Ok(path) = std::env::var("ISSUES_RUNNER_WASM") {
+        if PathBuf::from(&path).is_file() {
+            println!("cargo:rustc-cfg=issues_runner_wasm");
+            println!("cargo:rustc-env=ISSUES_RUNNER_WASM={path}");
+        }
+    }
+    println!("cargo:rerun-if-env-changed=ISSUES_RUNNER_WASM");
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let proof = manifest.join("../crates/world-runner-wasm/tests/proof-world");

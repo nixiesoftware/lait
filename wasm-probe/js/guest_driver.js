@@ -42,9 +42,40 @@ export function instantiate_guest(wasm, hostCall) {
         bytes(guest).set(answer, outPtr);
         return pack(outPtr, answer.length);
       },
+      // Host entropy: a wasm runner takes randomness from the host rather than
+      // reaching `crypto` itself. crypto.getRandomValues caps at 65536 bytes
+      // per call, so fill in chunks.
+      random: (ptr, len) => {
+        const view = new Uint8Array(guests.get(id).exports.memory.buffer, ptr, len);
+        for (let off = 0; off < len; off += 65536) {
+          crypto.getRandomValues(view.subarray(off, Math.min(off + 65536, len)));
+        }
+      },
     },
   };
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm), imports);
+  const module = new WebAssembly.Module(wasm);
+  // A near-pure guest still carries a little wasm-bindgen scaffolding from
+  // web-time's clock (Date.now returns a number, so no externref ever
+  // crosses). Provide minimal stubs for whatever `__wbindgen`/`__wbg` imports
+  // the module declares — matched by shape, since some names carry a
+  // per-build hash — so the module instantiates without its bindgen runtime.
+  for (const imp of WebAssembly.Module.imports(module)) {
+    if (!imp.module.startsWith("__wbindgen")) continue;
+    const table = (imports[imp.module] ??= {});
+    if (imp.name.startsWith("__wbg_now")) {
+      table[imp.name] = () => Date.now();
+    } else if (imp.name === "__wbindgen_throw") {
+      table[imp.name] = (ptr, len) => {
+        const view = bytes(guests.get(id));
+        throw new Error(new TextDecoder().decode(view.subarray(ptr, ptr + len)));
+      };
+    } else {
+      // __wbindgen_describe, externref table ops: unreachable for a guest that
+      // never stores a JS value. No-ops keep instantiation happy.
+      table[imp.name] = () => 0;
+    }
+  }
+  const instance = new WebAssembly.Instance(module, imports);
   guests.set(id, { exports: instance.exports });
   return id;
 }

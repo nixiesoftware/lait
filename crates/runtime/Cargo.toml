@@ -20,9 +20,6 @@ mechanics = { path = "../mechanics" }
 # replica — Body semantics, schemas, descriptors, frontiers, Convergence.
 replica = { path = "../replica" }
 fabric = { path = "../fabric" }
-# comms — gossip, presence dial, framed streams, ALPN adapters. Runtime drives
-# the transport seam; `iroh` is absent from this manifest by construction.
-comms = { path = "../comms" }
 contact = { path = "../contact" }
 journal = { path = "../journal" }
 # Publication-local indexes use Arc-backed persistent vectors, HAMTs, and
@@ -63,11 +60,19 @@ workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The browser target's entropy door — the same switch wasm-probe throws.
 getrandom = { version = "0.3", features = ["wasm_js"] }
-# The guest half needs only the runtime-agnostic channels; `rt`/`time` are the
-# Station's, and the Station does not board the browser.
-tokio = { version = "1", features = ["sync", "macros"] }
+# The guest half needs the channels and the time primitives (deadlines, the
+# exec pacing clock, `Instant`); only `rt` — the Station's driver runtime —
+# stays off the browser. `time` used to ride in transitively through comms;
+# with comms gated off wasm it must be named here.
+tokio = { version = "1", features = ["sync", "macros", "time"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# comms — gossip, presence dial, framed streams, ALPN adapters. The Station's
+# transport, and native-only: it pulls iroh, which a wasm World runner has no
+# use for (it answers RPCs, it does not network) and which would drag the whole
+# QUIC/TLS graph — and a getrandom wasm backend conflict — into the browser.
+# The guest carve already gates every module that drives it off wasm.
+comms = { path = "../comms" }
 # Cross-platform advisory file lock: the Orbit's exclusive store lock (the typed
 # double-lock). Same lock the product's single-instance daemon guard uses.
 fs2 = "0.4"

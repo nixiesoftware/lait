@@ -206,6 +206,7 @@ pub fn declaration_for(selector: u16) -> Option<SignalDeclaration> {
 ///
 /// The stream kind is read by the caller, which is what decides this is a
 /// signal flow at all.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn read_signal(flow: &mut dyn comms::RecvFlow) -> Result<crate::plane::Signal, Refusal> {
     let selector = flow.read_exact(2).await.map_err(|_| Refusal::Malformed)?;
     let selector = u16::from_le_bytes(
@@ -296,6 +297,7 @@ const REFUSED: u32 = 1;
 /// refused peer can still drain a full `MAX_SIGNAL_BYTES` past a refusal that
 /// already happened. `stop` is what tells the sender to stop sending, so the
 /// refusal costs the refused rather than the refuser.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn refuse_flow(send: &mut dyn comms::SendFlow, recv: &mut dyn comms::RecvFlow) {
     recv.stop(REFUSED);
     send.reset(REFUSED);
@@ -472,6 +474,7 @@ pub enum SignalOutcome {
 /// is read and a second deadline is spent — and not which flow is opened. A
 /// caller still cannot choose to wait for an answer to something nobody
 /// promised to answer.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn send_signal(
     connection: &dyn comms::Connection,
     signal: &crate::plane::Signal,
@@ -512,6 +515,7 @@ pub async fn send_signal(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn write_and_finish(send: &mut dyn comms::SendFlow, framed: &[u8]) -> Result<(), Refusal> {
     tokio::time::timeout(deadline::SIGNAL_WRITE, send.write_all(framed))
         .await
@@ -525,6 +529,7 @@ async fn write_and_finish(send: &mut dyn comms::SendFlow, framed: &[u8]) -> Resu
 /// The caller has read the kind byte and decided this is a signal flow. What is
 /// left is the lane, the declaration, the body, and whether this peer may have
 /// sent it — in that order, because each one bounds the next.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn serve_signal(
     send: &mut dyn comms::SendFlow,
     recv: &mut dyn comms::RecvFlow,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Does the engine reach the browser target? Six claims, checked in order:
+# Does the engine reach the browser target? Seven claims, checked in order:
 #
 #   1. the store stack (mechanics, journal, fabric, replica) compiles for
 #      wasm32-unknown-unknown;
@@ -10,7 +10,9 @@
 #   5. the World runner stack (runtime's guest carve, world-sdk, the Issues
 #      World and its runner binary) compiles for the same target;
 #   6. a World runner's four-function ABI RUNS in a real browser worker, with
-#      the browser's own WebAssembly as the host in place of wasmtime.
+#      the browser's own WebAssembly as the host in place of wasmtime;
+#   7. the REAL Issues runner (typst, CRDT — 39 MiB) instantiates under that
+#      browser WebAssembly: it compiles, fits, and its imports resolve.
 #
 # Claims 2 and 5 need a C compiler that can emit wasm32 objects, because
 # iroh's TLS pulls `ring`, whose build compiles C. Apple clang has no wasm
@@ -110,4 +112,31 @@ elif [ -z "${CHROME:-}" ] \
 else
     ${wasm_cc:+CC_wasm32_unknown_unknown="$wasm_cc"} \
         wasm-pack test --headless --chrome --no-default-features --features probe-runner --test runner
+fi
+
+echo "== claim 7: the real Issues runner instantiates under browser WebAssembly"
+# The plan-invalidator for browser execution: a 39 MiB typst/CRDT World runner
+# must compile, fit, and instantiate in a tab. The runner links no iroh on wasm
+# (comms is native-only; contact's `wire` is off) and takes entropy from a
+# `lait.random` host import, so it is a near-pure core-wasm module needing no
+# wasm-bindgen runtime to load. The harness builds it here (minutes; needs the
+# wasm clang) and hands the path to the browser test.
+if ! command -v wasm-pack >/dev/null 2>&1; then
+    echo "wasm-probe: SKIPPED — wasm-pack is not installed (see claim 3)." >&2
+elif [ -z "$wasm_cc" ]; then
+    echo "wasm-probe: SKIPPED — no wasm clang (see claim 2), so the Issues" >&2
+    echo "wasm-probe: runner was not built and the claim was not checked." >&2
+elif [ -z "${CHROME:-}" ] \
+    && ! command -v google-chrome >/dev/null 2>&1 \
+    && ! command -v chromium >/dev/null 2>&1 \
+    && [ ! -e "/Applications/Google Chrome.app" ]; then
+    echo "wasm-probe: SKIPPED — no Chrome found, so the claim was not checked." >&2
+else
+    runner_wasm="$(cd .. && pwd)/target/wasm32-unknown-unknown/release/lait_issues_runner.wasm"
+    CC_wasm32_unknown_unknown="$wasm_cc" \
+        RUSTFLAGS='--cfg getrandom_backend="custom"' \
+        cargo build --manifest-path ../Cargo.toml --release \
+        --target wasm32-unknown-unknown -p lait-issues-runner
+    CC_wasm32_unknown_unknown="$wasm_cc" ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --no-default-features --features probe-runner --test issues_runner
 fi
