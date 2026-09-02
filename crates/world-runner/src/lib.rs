@@ -218,6 +218,55 @@ impl CallbackHandler for NoDetachedCallbacks {
     }
 }
 
+/// A detached handler that refuses — the caller retains no Find lease, so no
+/// callback outlives the request. The default for every request that is not a
+/// semantic call.
+pub fn no_detached_callbacks() -> std::sync::Arc<dyn CallbackHandler> {
+    std::sync::Arc::new(NoDetachedCallbacks)
+}
+
+/// A supervised World generation, whatever executes it: a native child process
+/// or a WebAssembly module the host runs in-process. The host addresses it
+/// through the same postcard `Operation`/`Reply` frames either way — the seam
+/// exists so everything above the frame (all of `world-sdk`, all product code)
+/// is written once and neither backend leaks its transport upward.
+pub trait HostedRunner: Send {
+    /// The reviewed service identity declared at readiness, checked against the
+    /// descriptor before any call is dispatched.
+    fn descriptor(&self) -> &ServiceDescriptor;
+    /// Prepare one request route to this exact generation. Preparation detects
+    /// and restarts a crashed generation (preserving its immutable identity)
+    /// and allocates a request id; the returned [`Conversation`] then runs
+    /// independently, so the host releases the supervision lock before
+    /// dispatching — a World callback may synchronously re-enter this same
+    /// generation.
+    fn open(&mut self) -> Result<Box<dyn Conversation>>;
+}
+
+/// One prepared request against a [`HostedRunner`]. Given an `Operation` and a
+/// synchronous callback, it produces a `Reply`, servicing every callback the
+/// World raises in between. Owned and independent of the runner's supervision
+/// lock, so two conversations may run without deadlocking a re-entrant call.
+pub trait Conversation: Send {
+    fn dispatch(
+        &mut self,
+        operation: Operation,
+        callback: &mut dyn FnMut(&str, &[u8]) -> Result<Vec<u8>, String>,
+        detached: std::sync::Arc<dyn CallbackHandler>,
+    ) -> Result<Reply>;
+}
+
+impl Conversation for RequestClient {
+    fn dispatch(
+        &mut self,
+        operation: Operation,
+        callback: &mut dyn FnMut(&str, &[u8]) -> Result<Vec<u8>, String>,
+        detached: std::sync::Arc<dyn CallbackHandler>,
+    ) -> Result<Reply> {
+        self.request_with_detached(operation, callback, detached)
+    }
+}
+
 /// One running process pinned to one exact release.
 pub struct Instance {
     release: Release,
@@ -525,6 +574,18 @@ impl Instance {
         self.child.kill().context("force World process to stop")?;
         self.child.wait().context("collect World process")?;
         Ok(Stopped::Forced)
+    }
+}
+
+impl HostedRunner for Instance {
+    fn descriptor(&self) -> &ServiceDescriptor {
+        // The inherent accessor; the trait exists so a wasm-backed runner can
+        // answer the same question without a process behind it.
+        Instance::service(self)
+    }
+
+    fn open(&mut self) -> Result<Box<dyn Conversation>> {
+        Ok(Box::new(Instance::client(self)?))
     }
 }
 

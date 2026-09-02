@@ -41,7 +41,8 @@ use runtime::world::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use world_runner::{
-    CallbackHandler, Host, Instance, Operation, Reply, RequestClient, Service, ServiceDescriptor,
+    no_detached_callbacks, CallbackHandler, Conversation, Host, HostedRunner, Operation, Reply,
+    Service, ServiceDescriptor,
 };
 
 /// Protocol generation of the typed World service operations in this crate.
@@ -2399,7 +2400,7 @@ impl BodyReader for RemoteLifecycleReader {
 /// A Runtime [`World`] whose implementation lives in one supervised process.
 pub struct RemoteWorld {
     descriptor: Descriptor,
-    instance: Mutex<Instance>,
+    instance: Mutex<Box<dyn HostedRunner>>,
     broker: Arc<Broker>,
     last_failure: Mutex<Option<String>>,
 }
@@ -2471,12 +2472,13 @@ impl runtime::exec::Handler for RemoteExecHandler {
             }
         };
         let reply = client
-            .request_with(
+            .dispatch(
                 Operation::Call {
                     operation: EXEC_HANDLE.to_string(),
                     payload,
                 },
                 &mut callback,
+                no_detached_callbacks(),
             )
             .map_err(|_| runtime::exec::Failure::Handler)?;
         let Reply::Call { payload } = reply else {
@@ -2769,12 +2771,13 @@ where
                     .recv()
                     .map_err(|_| "World client callback response was lost".to_string())?
             };
-            let reply = client.request_with(
+            let reply = client.dispatch(
                 Operation::Call {
                     operation: operation.to_string(),
                     payload,
                 },
                 &mut callback,
+                no_detached_callbacks(),
             )?;
             let Reply::Call { payload } = reply else {
                 bail!("World client call returned a non-call reply");
@@ -2829,10 +2832,16 @@ impl std::fmt::Debug for RemoteWorld {
 }
 
 impl RemoteWorld {
-    pub fn connect(mut instance: Instance) -> Result<Self> {
-        let service = instance.service().clone();
-        let mut client = instance.client()?;
-        let descriptor: Descriptor = call(&mut client, DESCRIBE, &(), None, None)?;
+    /// Connect over a native child process.
+    pub fn connect(instance: world_runner::Instance) -> Result<Self> {
+        Self::connect_runner(Box::new(instance))
+    }
+
+    /// Connect over any [`HostedRunner`] — a native process or a wasm module.
+    pub fn connect_runner(mut runner: Box<dyn HostedRunner>) -> Result<Self> {
+        let service = runner.descriptor().clone();
+        let mut client = runner.open()?;
+        let descriptor: Descriptor = call(client.as_mut(), DESCRIBE, &(), None, None)?;
         if descriptor.id.to_string() != service.world
             || descriptor.implementation_version.0 != service.implementation_version
         {
@@ -2840,7 +2849,7 @@ impl RemoteWorld {
         }
         Ok(Self {
             descriptor,
-            instance: Mutex::new(instance),
+            instance: Mutex::new(runner),
             broker: Arc::new(Broker::default()),
             last_failure: Mutex::new(None),
         })
@@ -2849,7 +2858,7 @@ impl RemoteWorld {
     pub fn reviewed_implementation(&self) -> [u8; 32] {
         self.instance
             .lock()
-            .map(|instance| instance.service().implementation)
+            .map(|runner| runner.descriptor().implementation)
             .unwrap_or([0; 32])
     }
 
@@ -2885,12 +2894,12 @@ impl RemoteWorld {
     /// to detect/restart a dead process and allocate a request identifier.
     /// The request itself must run after the lock is released because its host
     /// callbacks may synchronously re-enter this same World generation.
-    fn client(&self) -> Result<RequestClient> {
+    fn client(&self) -> Result<Box<dyn Conversation>> {
         let mut instance = self
             .instance
             .lock()
             .map_err(|_| anyhow!("World runner process lock was poisoned"))?;
-        instance.client()
+        instance.open()
     }
 
     fn invoke<I: Serialize, O: DeserializeOwned>(
@@ -2902,7 +2911,7 @@ impl RemoteWorld {
     ) -> Result<O> {
         let mut client = self.client()?;
         call(
-            &mut client,
+            client.as_mut(),
             operation,
             input,
             context.map(|context| (context, Arc::clone(&self.broker))),
@@ -2930,12 +2939,13 @@ impl RemoteWorld {
                 "World called host operation {operation:?} without an application context"
             )),
         };
-        let reply = client.request_with(
+        let reply = client.dispatch(
             Operation::Call {
                 operation: operation.to_string(),
                 payload,
             },
             &mut callback,
+            no_detached_callbacks(),
         )?;
         let Reply::Call { payload } = reply else {
             bail!("World application call returned a non-call reply");
@@ -2966,12 +2976,13 @@ impl RemoteWorld {
         let mut callback = |operation: &str, payload: &[u8]| {
             application_callback(session, identity, local, operation, payload)
         };
-        let reply = client.request_with(
+        let reply = client.dispatch(
             Operation::Call {
                 operation: operation.to_string(),
                 payload,
             },
             &mut callback,
+            no_detached_callbacks(),
         )?;
         let Reply::Call { payload } = reply else {
             bail!("World application call returned a non-call reply");
@@ -3265,7 +3276,7 @@ impl WorldApplication for RemoteWorld {
 }
 
 fn call<I: Serialize, O: DeserializeOwned>(
-    client: &mut RequestClient,
+    client: &mut dyn Conversation,
     operation: &str,
     input: &I,
     context: Option<(&Context<'_>, Arc<Broker>)>,
@@ -3283,7 +3294,7 @@ fn call<I: Serialize, O: DeserializeOwned>(
             "World called host operation {operation:?} without a context"
         )),
     };
-    let reply = client.request_with_detached(
+    let reply = client.dispatch(
         Operation::Call {
             operation: operation.to_string(),
             payload,
