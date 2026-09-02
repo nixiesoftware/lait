@@ -1193,7 +1193,15 @@ async fn hls_master(
         .hls_master(&stream.orbit, &stream.resource, ".")
     {
         Ok(playlist) => media_response("application/vnd.apple.mpegurl", playlist.into_bytes()),
-        Err(_) => public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest),
+        Err(error) => {
+            // The player sees a 404 it cannot explain; the operator's log can.
+            tracing::warn!(
+                resource = %stream.resource,
+                error = %format_args!("{error:#}"),
+                "display HLS master playlist could not be rendered"
+            );
+            public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest)
+        }
     }
 }
 
@@ -1267,6 +1275,10 @@ fn hls_authorization(
             state
                 .coordinator
                 .authorize_live_ticket(ticket, LiveTransport::Hls, false, now())
+                .inspect_err(|error| {
+                    // The player sees a 403 it cannot explain; the log can.
+                    tracing::warn!(error = %format_args!("{error:#}"), "display HLS ticket refused");
+                })
         })
         .and_then(Result::ok)
 }

@@ -198,10 +198,13 @@ export default function ScreenList() {
             const channel = channels.find((entry) => entry.id === screen.tuned) ?? null;
             return (
               <ItemMenu key={screen.id} items={menuFor(screen)} className="ds-device">
+                {/* The chip is the row's one way in: the screen itself,
+                    small, beside its name — the shape the chip was drawn
+                    for. The facts beside it are copy, not a second press. */}
                 <button
                   type="button"
                   className="ds-attached-hit"
-                  aria-label={`Open ${screen.name}`}
+                  title={`Open ${screen.name}`}
                   onClick={() => open(screen)}
                 >
                   <Bezel
@@ -214,35 +217,33 @@ export default function ScreenList() {
                     orbit={orbit}
                     now={now}
                   />
+                  <span className="ds-attached-name">{screen.name}</span>
                 </button>
-                <button type="button" className="ds-row-hit" onClick={() => open(screen)}>
-                  <span className="ds-row-copy">
-                    <strong>{screen.name}</strong>
-                    <span>
-                      <MapPin size={12} />
-                      {screen.place ? (
-                        screen.place.region ?? screen.place.timezone
-                      ) : (
-                        <span style={{ color: "var(--ds-miss)" }}>Not placed</span>
-                      )}
-                      {(screen.labels ?? []).length > 0 && (
-                        <span className="ds-device-tags">
-                          {(screen.labels ?? []).map((held) => (
-                            <span className="ds-tag" key={held}>
-                              {held}
-                            </span>
-                          ))}
-                        </span>
-                      )}
-                      {tvSummary(screen.id) && (
-                        <span className={`ds-tag ds-tv-count is-${tvSummary(screen.id)!.tone}`}>
-                          <Tv size={11} />
-                          {tvSummary(screen.id)!.label}
-                        </span>
-                      )}
-                    </span>
+                <span className="ds-row-copy">
+                  <span>
+                    <MapPin size={12} />
+                    {screen.place ? (
+                      screen.place.region ?? screen.place.timezone
+                    ) : (
+                      <span style={{ color: "var(--ds-miss)" }}>Not placed</span>
+                    )}
+                    {(screen.labels ?? []).length > 0 && (
+                      <span className="ds-device-tags">
+                        {(screen.labels ?? []).map((held) => (
+                          <span className="ds-tag" key={held}>
+                            {held}
+                          </span>
+                        ))}
+                      </span>
+                    )}
+                    {tvSummary(screen.id) && (
+                      <span className={`ds-tag ds-tv-count is-${tvSummary(screen.id)!.tone}`}>
+                        <Tv size={11} />
+                        {tvSummary(screen.id)!.label}
+                      </span>
+                    )}
                   </span>
-                </button>
+                </span>
                 <ChoiceMenu
                   label={`Tune ${screen.name}`}
                   className={`ds-tuned${channel ? "" : " is-absent"}`}

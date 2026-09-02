@@ -797,6 +797,10 @@
 }
 
 .ds-chin {
+  /* A near-full-width hill can leave less than one fillet of frame beside it.
+     Spend only that real gutter; never paint outward into the console rim. */
+  --chin-half-gap: max(0px, calc(50% - min(280px, 50%)));
+  --chin-fillet-w: min(18px, var(--chin-half-gap));
   position: relative;
   height: 60px;
 }
@@ -838,53 +842,33 @@
   right: 0;
   margin: 0 auto;
   width: min(560px, 100%);
-  /* The hill's own measured height, kept current by the chin. */
-  height: var(--chin-hill-h, 60px);
+  height: 60px;
   border-radius: 26px 26px 0 0;
   box-shadow: 0 -14px 30px -12px rgb(var(--ds-ink-rgb) / 0.25);
   z-index: 1;
-  opacity: 0;
   pointer-events: none;
-  /* Asymmetric on purpose: a delay declared once would also hold the
-     shadow on screen through a dismissal — the lingering-frames bug. */
-  transition: opacity 120ms var(--ds-ease);
-}
-
-.ds-chin.is-open .ds-chin-shade {
-  opacity: 1;
-  transition: opacity 200ms var(--ds-ease) 260ms;
 }
 
 /* The fillets: the flat chin edge curving up into the hill's walls. They
    belong to the chin, not the hill — the hill clips its overflow — and sit
-   just above the chin line, hugging where the walls land. They fade in a
-   beat behind the swell, once the walls are where they will stay. */
-.ds-chin::before,
-.ds-chin::after {
-  content: "";
+   just above the chin line, hugging where the walls land. Motion divides the
+   live rise between these elliptical fillets and the crown, so both curves
+   take part in a short entrance without ever overlapping. */
+.ds-chin-fillet {
   position: absolute;
-  top: -18px;
-  width: 18px;
-  height: 18px;
+  top: 0;
+  width: var(--chin-fillet-w);
+  height: 0;
   z-index: 4;
-  opacity: 0;
   pointer-events: none;
-  transition: opacity 240ms var(--ds-ease) 200ms;
 }
 
-.ds-chin::before {
-  left: calc(50% - min(280px, 50%) - 18px);
-  background: radial-gradient(circle at top left, transparent 17.5px, var(--ds-surface) 18px);
+.ds-chin-fillet.is-before {
+  left: calc(50% - min(280px, 50%) - var(--chin-fillet-w));
 }
 
-.ds-chin::after {
-  right: calc(50% - min(280px, 50%) - 18px);
-  background: radial-gradient(circle at top right, transparent 17.5px, var(--ds-surface) 18px);
-}
-
-.ds-chin.is-open::before,
-.ds-chin.is-open::after {
-  opacity: 1;
+.ds-chin-fillet.is-after {
+  right: calc(50% - min(280px, 50%) - var(--chin-fillet-w));
 }
 
 /* The band is the console's width; what it holds reads at a column's. */
@@ -897,8 +881,12 @@
 
 .ds-chin-band {
   position: absolute;
-  inset: 0;
+  /* The chin itself sits inside the console's 10px side padding, but this
+     foundation is the console's outer skin. Reach back through that rim so
+     both layers finish on one curve instead of nesting two nearby curves. */
+  inset: 0 -10px 0;
   background: var(--ds-surface);
+  border-radius: 0 0 var(--ds-r-lg) var(--ds-r-lg);
   z-index: 3;
   display: grid;
 }
@@ -1265,6 +1253,13 @@
 .ds-attached-hit:hover {
   background: var(--ds-surface);
   box-shadow: var(--ds-material-control);
+}
+
+/* A name that outgrows its chip ends in an ellipsis, never a wider row. */
+.ds-attached-hit > .ds-attached-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Transit: a broadcast as a row — when it is open, whom it reaches ──── */

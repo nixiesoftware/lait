@@ -124,6 +124,7 @@ hex_id!(Sha256Digest, 64, "SHA-256 digest");
 hex_id!(CoordinatorFingerprint, 64, "coordinator fingerprint");
 hex_id!(Challenge, 64, "challenge");
 hex_id!(ReceiverNonce, 64, "receiver nonce");
+hex_id!(ReceiverId, 64, "receiver id");
 hex_id!(PollKey, 64, "pairing poll key");
 hex_id!(ProofKey, 64, "receiver proof key");
 hex_id!(AuthenticationTag, 64, "authentication tag");
@@ -153,6 +154,7 @@ visible_debug!(
     CoordinatorFingerprint,
     Challenge,
     ReceiverNonce,
+    ReceiverId,
     AuthenticationTag,
 );
 

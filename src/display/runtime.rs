@@ -592,6 +592,7 @@ impl DisplayRuntime {
                 platform: wire_name(&device.capabilities.platform),
                 build: device.capabilities.build.clone(),
                 issued_at_unix_ms: device.issued_at_unix_ms,
+                repaired_at_unix_ms: device.repaired_at_unix_ms,
                 health: self
                     .pairing
                     .health(&device.device)
@@ -751,6 +752,7 @@ impl DisplayRuntime {
                     build: device.capabilities.build.clone(),
                     issued_at_unix_ms: device.issued_at_unix_ms,
                     revoked_at_unix_ms: device.revoked_at_unix_ms,
+                    repaired_at_unix_ms: device.repaired_at_unix_ms,
                     health,
                 }
             })

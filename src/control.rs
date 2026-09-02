@@ -521,6 +521,10 @@ pub struct DisplayWorldReceiverView {
     pub platform: String,
     pub build: String,
     pub issued_at_unix_ms: u64,
+    /// When the receiver last came back without its credential and was
+    /// re-keyed onto this record, if ever.
+    #[serde(default)]
+    pub repaired_at_unix_ms: Option<u64>,
     pub health: Option<DisplayHealthView>,
     /// `None` is a receiver nobody holds, which this World may take.
     pub assignment: Option<DisplayWorldAssignmentView>,
@@ -557,6 +561,8 @@ pub struct DisplayDeviceView {
     pub build: String,
     pub issued_at_unix_ms: u64,
     pub revoked_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub repaired_at_unix_ms: Option<u64>,
     pub health: Option<DisplayHealthView>,
 }
 

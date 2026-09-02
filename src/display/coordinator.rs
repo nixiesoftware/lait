@@ -403,10 +403,25 @@ impl DisplayCoordinator {
                 stored.media_type
             ));
         }
+        // The dimensions a receiver checks are the ones it decodes, and what
+        // it decodes is these bytes — so they are read from the bytes, not
+        // from the catalog's memory of the upload. A record that disagrees is
+        // noted and overruled; refusing it would blank a still whose only
+        // fault is a stale number beside it.
+        let (width, height) = still_dimensions(held, &bytes)
+            .ok_or_else(|| anyhow!("stored frame header does not carry its dimensions"))?;
+        if (width, height) != (stored.width, stored.height) {
+            tracing::warn!(
+                resource = %resource,
+                declared = %format_args!("{}x{}", stored.width, stored.height),
+                held = %format_args!("{width}x{height}"),
+                "stored display frame is not the size its record says; serving the bytes' own size"
+            );
+        }
         Ok(RenderedFrame {
             media_type: held,
-            width: stored.width,
-            height: stored.height,
+            width,
+            height,
             bytes,
         })
     }
@@ -1218,6 +1233,78 @@ fn sniff_still(bytes: &[u8]) -> Option<FrameMediaType> {
         Some(FrameMediaType::WebP)
     } else {
         None
+    }
+}
+
+/// The pixel dimensions a still's header declares — what a decoder will
+/// report, read without decoding.
+fn still_dimensions(kind: FrameMediaType, bytes: &[u8]) -> Option<(u32, u32)> {
+    let be32 = |at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let le24 = |at: usize| {
+        bytes
+            .get(at..at + 3)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], 0]))
+    };
+    let le16 = |at: usize| {
+        bytes
+            .get(at..at + 2)
+            .map(|b| u32::from_le_bytes([b[0], b[1], 0, 0]))
+    };
+    let nonzero = |width: u32, height: u32| (width > 0 && height > 0).then_some((width, height));
+    match kind {
+        // IHDR is always the first chunk: length, "IHDR", width, height.
+        FrameMediaType::Png => {
+            if bytes.get(12..16) != Some(b"IHDR".as_slice()) {
+                return None;
+            }
+            nonzero(be32(16)?, be32(20)?)
+        }
+        // Walk the marker segments to the first start-of-frame.
+        FrameMediaType::Jpeg => {
+            let mut at = 2;
+            while let Some(&[0xFF, marker]) = bytes.get(at..at + 2).map(|m| [m[0], m[1]]).as_ref() {
+                if marker == 0xFF {
+                    at += 1;
+                    continue;
+                }
+                if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+                    at += 2;
+                    continue;
+                }
+                let length = usize::from(u16::from_be_bytes([
+                    *bytes.get(at + 2)?,
+                    *bytes.get(at + 3)?,
+                ]));
+                let is_sof = matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+                if is_sof {
+                    let height = u32::from(u16::from_be_bytes([
+                        *bytes.get(at + 5)?,
+                        *bytes.get(at + 6)?,
+                    ]));
+                    let width = u32::from(u16::from_be_bytes([
+                        *bytes.get(at + 7)?,
+                        *bytes.get(at + 8)?,
+                    ]));
+                    return nonzero(width, height);
+                }
+                at += 2 + length;
+            }
+            None
+        }
+        // The first chunk after the RIFF header names the bitstream form.
+        FrameMediaType::WebP => match bytes.get(12..16)? {
+            b"VP8X" => nonzero(le24(24)? + 1, le24(27)? + 1),
+            b"VP8L" => {
+                let bits = be32(21).map(u32::swap_bytes)?;
+                nonzero((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+            }
+            b"VP8 " => nonzero(le16(26)? & 0x3FFF, le16(28)? & 0x3FFF),
+            _ => None,
+        },
     }
 }
 

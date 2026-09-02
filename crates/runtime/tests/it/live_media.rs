@@ -113,6 +113,7 @@ fn frame(timestamp: i64, kind: FrameKind, payload: &[u8]) -> FrameHeader {
         timescale: 90_000,
         kind,
         payload_len: u32::try_from(payload.len()).expect("small fixture"),
+        composition_offset: 0,
     }
 }
 
@@ -223,6 +224,7 @@ async fn a_catalog_update_is_one_canonical_group_on_mem_and_real_quic() {
                         timescale: media::CATALOG_TIMESCALE,
                         kind: FrameKind::Key,
                         payload_len: u32::try_from(payload.len()).expect("bounded catalog"),
+                        composition_offset: 0,
                     },
                     &payload,
                 )

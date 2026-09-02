@@ -80,6 +80,8 @@ function AstrolabeTranscript(domain as string) as object
 end function
 
 function AstrolabeSha256(bytes as object) as string
+    ' roEVPDigest has nothing to say about zero bytes; SHA-256 does.
+    if bytes.Count() = 0 then return "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     digest = CreateObject("roEVPDigest")
     if digest.Setup("sha256") <> 0 then return ""
     return LCase(digest.Process(bytes))
@@ -395,7 +397,9 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
             if not AstrolabeEncodeAsset(bytes, item.scene.asset) then return invalid
         else if item.scene.kind = "media"
             if not AstrolabeExactFields(item.scene, ["kind", "manifest", "protocol", "live"]) then return invalid
-            if item.scene.protocol <> "hls" or item.scene.live <> true then return invalid
+            ' A stored clip and a live source both reach this receiver as HLS
+            ' behind a ticket; `live` says which, and both are playable.
+            if item.scene.protocol <> "hls" or (item.scene.live <> true and item.scene.live <> false) then return invalid
             if item.scene.manifest.media_type <> "hls_manifest" then return invalid
             AstrolabeTextField(bytes, "media")
             if not AstrolabeEncodeAsset(bytes, item.scene.manifest) then return invalid
@@ -446,17 +450,8 @@ function AstrolabeConformanceCheck() as boolean
     }
     requestTag = AstrolabeRequestTag("0000000000000000000000000000000000000000000000000000000000000000", context)
     if requestTag <> "130ed97e77f7751b21fe524e1d48f49f40129342cdfcce26ef3c12ce56a7ff0d" then return false
-    completeTag = AstrolabePairingCompleteTag(
-        "2222222222222222222222222222222222222222222222222222222222222222",
-        "33333333333333333333333333333333",
-        "ffeeddccbbaa99887766554433221100",
-        "4444444444444444444444444444444444444444444444444444444444444444"
-    )
+    completeTag = AstrolabePairingCompleteTag("2222222222222222222222222222222222222222222222222222222222222222", "33333333333333333333333333333333", "ffeeddccbbaa99887766554433221100", "4444444444444444444444444444444444444444444444444444444444444444")
     if completeTag <> "d8a85ed4a54c510ab3b4837ac9152675dfd9169c77fec2bc06ac7a14df077287" then return false
-    phrase = AstrolabeConfirmationPhrase(
-        "6666666666666666666666666666666666666666666666666666666666666666",
-        "77777777777777777777777777777777",
-        "8888888888888888888888888888888888888888888888888888888888888888"
-    )
-    return phrase.Count() = 6 and phrase[0] = "spruce" and phrase[1] = "violet" and phrase[2] = "quartz" and phrase[3] = "coral" and phrase[4] = "juniper" and phrase[5] = "willow"
+    phrase = AstrolabeConfirmationPhrase("6666666666666666666666666666666666666666666666666666666666666666", "77777777777777777777777777777777", "8888888888888888888888888888888888888888888888888888888888888888")
+    return phrase.Count() = 6 and phrase[0] = "juniper" and phrase[1] = "willow" and phrase[2] = "beacon" and phrase[3] = "beacon" and phrase[4] = "signal" and phrase[5] = "juniper"
 end function

@@ -10,8 +10,8 @@ use crate::bounds::{
 };
 use crate::ids::{
     decode_hex_32, encode_hex, AuthenticationTag, Challenge, CoordinatorFingerprint,
-    CoordinatorProfile, DisplayDeviceId, DisplayPairingId, PollKey, ProofKey, ReceiverNonce,
-    RendezvousId,
+    CoordinatorProfile, DisplayDeviceId, DisplayPairingId, PollKey, ProofKey, ReceiverId,
+    ReceiverNonce, RendezvousId,
 };
 use crate::receiver::ReceiverCapabilities;
 use crate::wire::Transcript;
@@ -79,6 +79,13 @@ pub struct PairingStartRequest {
     pub poll_key: PollKey,
     pub rendezvous: Option<RendezvousId>,
     pub capabilities: ReceiverCapabilities,
+    /// What the receiver derives from whatever outlives its own store — a
+    /// platform identity bound to this coordinator's profile. A returning id
+    /// with no credential is repaired onto its device record rather than
+    /// enrolled as a stranger. Absent from a receiver with nothing durable
+    /// to derive it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_id: Option<ReceiverId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

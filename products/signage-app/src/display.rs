@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
-use font8x8::{UnicodeFonts, BASIC_FONTS};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+
+use crate::typeset::{self, Align, Style, Weight};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -53,7 +54,7 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
     input_digest.update(b"signage.program.input.v2:{screen:body-id}");
     let mut renderer_identity = Sha256::new();
     renderer_identity.update(
-        b"signage.program.renderer.v8:font8x8:png:library:content:lait-live:channels:broadcasts:place-facts-preset",
+        b"signage.program.renderer.v9:inter:png:library:content:lait-live:channels:broadcasts:place-facts-preset",
     );
     let mut descriptor = DisplaySurfaceDescriptor {
         id: DisplaySurfaceId::new(SURFACE_ID)?,
@@ -523,99 +524,136 @@ fn theme_colors(theme: crate::athan::Theme) -> (Rgba<u8>, Rgba<u8>, Rgba<u8>) {
     }
 }
 
+/// The Athan card, laid out the way the console's preview lays it out: the
+/// name and the day line across the top, then one row per prayer with its
+/// time on the right edge and the next one set in the accent at Medium. The
+/// block is centred on the panel. Every measure is a fraction of the panel's
+/// height, so the card reads the same at 720 and 1080.
 fn render_athan(day: &crate::athan::DayTimes, width: u32, height: u32) -> Result<Vec<u8>, Failure> {
     let (background, muted, accent) = theme_colors(day.theme);
     let mut image = RgbaImage::from_pixel(width, height, background);
-    let inset = width.min(height) / 12;
+    let (w, h) = (width as f32, height as f32);
+    let left = w * 0.10;
+    let right = w * 0.90;
+    let em = |ratio: f32| h * ratio;
     match day.phase {
         crate::athan::Phase::Silence => {
-            let scale = (width / 160).min(height / 60).clamp(3, 12);
-            draw_line(
+            let style = Style::new(Weight::Medium, em(0.09), accent);
+            let y = (h - typeset::line_height(style)) / 2.0;
+            typeset::draw_aligned(
                 &mut image,
                 "Prayer in progress",
-                inset,
-                height / 2 - scale.saturating_mul(4),
-                scale,
-                accent,
+                left,
+                right,
+                y,
+                style,
+                Align::Center,
             );
         }
         crate::athan::Phase::Countdown { label, remain_s } => {
-            let title_scale = (width / 160).min(height / 70).clamp(3, 12);
-            draw_line(&mut image, label, inset, height / 5, title_scale, muted);
-            let mins = remain_s / 60;
-            let secs = remain_s % 60;
-            let clock = format!("{mins}:{secs:02}");
-            draw_line(
+            let label_style = Style::new(Weight::Regular, em(0.065), muted);
+            let clock_style = Style::new(Weight::Medium, em(0.22), accent);
+            let gap = em(0.02);
+            let total = typeset::line_height(label_style) + gap + typeset::line_height(clock_style);
+            let mut y = (h - total) / 2.0;
+            typeset::draw_aligned(
+                &mut image,
+                label,
+                left,
+                right,
+                y,
+                label_style,
+                Align::Center,
+            );
+            y += typeset::line_height(label_style) + gap;
+            let clock = format!("{}:{:02}", remain_s / 60, remain_s % 60);
+            typeset::draw_aligned(
                 &mut image,
                 &clock,
-                inset,
-                height / 5 + title_scale.saturating_mul(14),
-                title_scale.saturating_add(4).min(16),
-                accent,
+                left,
+                right,
+                y,
+                clock_style,
+                Align::Center,
             );
         }
         crate::athan::Phase::Table => {
-            let title_scale = (width / 220).min(height / 90).clamp(2, 10);
-            draw_line(&mut image, "Athan", inset, height / 12, title_scale, accent);
-            let mut sub = day.now_label.clone();
+            // Read across a room, not at arm's length: larger than the
+            // console's preview of the same card by design.
+            let title = Style::new(Weight::Medium, em(0.08), accent);
+            let day_line = Style::new(Weight::Regular, em(0.08) * 0.62, muted);
+            let row = Style::new(Weight::Regular, em(0.065), muted);
+            let next = Style::new(Weight::Medium, em(0.065), accent);
+            let header_gap = em(0.05);
+            let row_gap = row.size * 0.45;
+            let rows = day.prayers.len() as f32;
+            let row_height = typeset::line_height(row);
+            let total = typeset::line_height(title)
+                + header_gap
+                + rows * row_height
+                + (rows - 1.0).max(0.0) * row_gap;
+            let mut y = ((h - total) / 2.0).max(h * 0.08);
+
+            typeset::draw(&mut image, "Athan", left, y, title);
+            let mut sub = format!("{} · {}", day.now_label, day.zone);
             if day.show_hijri && !day.hijri_label.is_empty() {
-                sub = format!("{}  {}", sub, day.hijri_label);
+                sub = format!("{sub} · {}", day.hijri_label);
             }
-            draw_line(
+            // The day line shares the title's baseline.
+            let baseline_shift = typeset::line_metrics(title).0 - typeset::line_metrics(day_line).0;
+            typeset::draw_aligned(
                 &mut image,
                 &sub,
-                inset,
-                height / 12 + title_scale.saturating_mul(12),
-                title_scale.saturating_sub(1).max(2),
-                muted,
+                left,
+                right,
+                y + baseline_shift,
+                day_line,
+                Align::Right,
             );
-            let row_scale = (width / 300).min(height / 120).clamp(2, 8);
-            let row_height = row_scale.saturating_mul(12);
-            let start_y = height / 12
-                + title_scale.saturating_mul(12)
-                + title_scale.saturating_mul(8)
-                + row_height;
-            let iqamah_x = width
-                .saturating_sub(inset)
-                .saturating_sub(row_scale.saturating_mul(9).saturating_mul(5));
-            let adhan_x = if day.show_iqamah {
-                iqamah_x.saturating_sub(row_scale.saturating_mul(9).saturating_mul(6))
+            y += typeset::line_height(title) + header_gap;
+
+            // Times sit in two right-aligned columns when iqamah is shown; the
+            // column is as wide as the widest time it holds, plus 1.2em.
+            let iqamah_width = if day.show_iqamah {
+                day.prayers
+                    .iter()
+                    .map(|prayer| {
+                        let text = prayer.iqamah.map_or_else(
+                            || "—".to_string(),
+                            |clock| crate::athan::format_clock(clock, day.clock_24h),
+                        );
+                        typeset::measure(&text, next)
+                    })
+                    .fold(0.0, f32::max)
+                    + row.size * 1.2
             } else {
-                iqamah_x
+                0.0
             };
             for (index, prayer) in day.prayers.iter().enumerate() {
-                let y = start_y
-                    .saturating_add(row_height.saturating_mul(u32::try_from(index).unwrap_or(0)));
-                let color = if index == day.next { accent } else { muted };
-                draw_line(&mut image, prayer.name, inset, y, row_scale, color);
+                let style = if index == day.next { next } else { row };
+                typeset::draw(&mut image, prayer.name, left, y, style);
                 let adhan = crate::athan::format_clock(prayer.adhan, day.clock_24h);
-                draw_line(&mut image, &adhan, adhan_x, y, row_scale, color);
+                typeset::draw_aligned(
+                    &mut image,
+                    &adhan,
+                    left,
+                    right - iqamah_width,
+                    y,
+                    style,
+                    Align::Right,
+                );
                 if day.show_iqamah {
                     let iqamah = prayer.iqamah.map_or_else(
-                        || "--:--".into(),
+                        || "—".to_string(),
                         |clock| crate::athan::format_clock(clock, day.clock_24h),
                     );
-                    draw_line(&mut image, &iqamah, iqamah_x, y, row_scale, color);
+                    typeset::draw_aligned(&mut image, &iqamah, left, right, y, style, Align::Right);
                 }
+                y += row_height + row_gap;
             }
         }
     }
     encode_png(image)
-}
-
-fn draw_line(image: &mut RgbaImage, text: &str, x: u32, y: u32, scale: u32, color: Rgba<u8>) {
-    let cell = scale.saturating_mul(9).max(1);
-    for (column, character) in text.chars().enumerate() {
-        let line_x = x.saturating_add(
-            u32::try_from(column)
-                .unwrap_or(u32::MAX)
-                .saturating_mul(cell),
-        );
-        if line_x >= image.width() {
-            break;
-        }
-        draw_character(image, character, line_x, y, scale, color);
-    }
 }
 
 fn encode_png(image: RgbaImage) -> Result<Vec<u8>, Failure> {
@@ -637,30 +675,39 @@ fn render_card(
     let background = rgb(background)?;
     let foreground = rgb(foreground)?;
     let mut image = RgbaImage::from_pixel(width, height, background);
-    let inset = width.min(height) / 12;
-    let title_scale = (width / 180).min(height / 80).clamp(2, 12);
-    let body_scale = title_scale.saturating_sub(2).max(2);
-    let title_y = height / 4;
-    draw_wrapped(
+    let (w, h) = (width as f32, height as f32);
+    let (left, right) = (w * 0.10, w * 0.90);
+    let title_style = Style::new(Weight::Medium, h * 0.075, foreground);
+    let body_style = Style::new(Weight::Regular, h * 0.042, foreground);
+    let title_lines = typeset::wrap(title, right - left, title_style, 2).len() as f32;
+    let body_lines = typeset::wrap(body, right - left, body_style, 5).len() as f32;
+    let gap = h * 0.04;
+    let total = title_lines * typeset::line_height(title_style) * 1.1
+        + gap
+        + body_lines * typeset::line_height(body_style) * 1.45;
+    let mut y = ((h - total) / 2.0).max(h * 0.08);
+    y += typeset::draw_paragraph(
         &mut image,
         title,
-        inset,
-        title_y,
-        width.saturating_sub(inset.saturating_mul(2)),
-        title_scale,
-        foreground,
+        left,
+        right,
+        y,
+        title_style,
+        Align::Left,
         2,
+        1.1,
     );
-    let body_y = title_y.saturating_add(title_scale.saturating_mul(11));
-    draw_wrapped(
+    y += gap;
+    typeset::draw_paragraph(
         &mut image,
         body,
-        inset,
-        body_y,
-        width.saturating_sub(inset.saturating_mul(2)),
-        body_scale,
-        foreground,
+        left,
+        right,
+        y,
+        body_style,
+        Align::Left,
         5,
+        1.45,
     );
     encode_png(image)
 }
@@ -677,90 +724,6 @@ fn rgb(value: &str) -> Result<Rgba<u8>, Failure> {
     match (parse(0), parse(2), parse(4)) {
         (Some(red), Some(green), Some(blue)) => Ok(Rgba([red, green, blue, 255])),
         _ => Err(Failure::new("invalid Signage RGB color")),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_wrapped(
-    image: &mut RgbaImage,
-    text: &str,
-    x: u32,
-    y: u32,
-    width: u32,
-    scale: u32,
-    color: Rgba<u8>,
-    max_lines: usize,
-) {
-    let cell = scale.saturating_mul(9).max(1);
-    let columns = usize::try_from(width / cell).unwrap_or(1).max(1);
-    let mut lines = Vec::<String>::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let extra = usize::from(!line.is_empty());
-        if !line.is_empty() && line.chars().count() + extra + word.chars().count() > columns {
-            lines.push(std::mem::take(&mut line));
-            if lines.len() == max_lines {
-                break;
-            }
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.extend(
-            word.chars()
-                .take(columns.saturating_sub(line.chars().count())),
-        );
-    }
-    if lines.len() < max_lines && !line.is_empty() {
-        lines.push(line);
-    }
-    for (line_index, line) in lines.iter().enumerate() {
-        let line_y = y.saturating_add(
-            u32::try_from(line_index)
-                .unwrap_or(u32::MAX)
-                .saturating_mul(scale.saturating_mul(10)),
-        );
-        for (column, character) in line.chars().enumerate() {
-            let line_x = x.saturating_add(
-                u32::try_from(column)
-                    .unwrap_or(u32::MAX)
-                    .saturating_mul(cell),
-            );
-            draw_character(image, character, line_x, line_y, scale, color);
-        }
-    }
-}
-
-fn draw_character(
-    image: &mut RgbaImage,
-    character: char,
-    x: u32,
-    y: u32,
-    scale: u32,
-    color: Rgba<u8>,
-) {
-    let glyph = BASIC_FONTS
-        .get(character)
-        .or_else(|| BASIC_FONTS.get('?'))
-        .unwrap_or([0; 8]);
-    for (row, bits) in glyph.into_iter().enumerate() {
-        for column in 0..8u32 {
-            if bits & (1u8 << column) == 0 {
-                continue;
-            }
-            let pixel_x = x.saturating_add(column.saturating_mul(scale));
-            let pixel_y =
-                y.saturating_add(u32::try_from(row).unwrap_or(u32::MAX).saturating_mul(scale));
-            for dy in 0..scale {
-                for dx in 0..scale {
-                    let target_x = pixel_x.saturating_add(dx);
-                    let target_y = pixel_y.saturating_add(dy);
-                    if target_x < image.width() && target_y < image.height() {
-                        image.put_pixel(target_x, target_y, color);
-                    }
-                }
-            }
-        }
     }
 }
 

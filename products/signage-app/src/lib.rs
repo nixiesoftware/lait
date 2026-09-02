@@ -25,6 +25,7 @@ mod display;
 mod host;
 mod protocol;
 mod tv;
+mod typeset;
 
 pub use protocol::{
     decode_call, decode_reply, encode_call, SignageCallHandler, SignageRequest, SignageResponse,

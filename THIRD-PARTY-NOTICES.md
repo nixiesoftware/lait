@@ -4,7 +4,7 @@ lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crate
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-847 crates, under 43 distinct licence expressions.
+850 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
@@ -15,8 +15,8 @@ Listed here is every crate reachable from this workspace through normal and buil
 | `Apache-2.0 OR MIT` | 76 |
 | `MIT/Apache-2.0` | 40 |
 | `Apache-2.0 WITH LLVM-exception` | 28 |
+| `Apache-2.0` | 26 |
 | `Unicode-3.0` | 25 |
-| `Apache-2.0` | 23 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 19 |
 | `Unlicense OR MIT` | 11 |
 | `Zlib OR Apache-2.0 OR MIT` | 11 |
@@ -58,6 +58,8 @@ Listed here is every crate reachable from this workspace through normal and buil
 
 | Crate | Version | Licence | Source |
 | --- | --- | --- | --- |
+| ab_glyph | 0.2.32 | `Apache-2.0` | <https://github.com/alexheretic/ab-glyph> |
+| ab_glyph_rasterizer | 0.1.10 | `Apache-2.0` | <https://github.com/alexheretic/ab-glyph> |
 | addr2line | 0.26.1 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/addr2line> |
 | adler2 | 2.0.1 | `0BSD OR MIT OR Apache-2.0` | <https://github.com/oyvindln/adler2> |
 | aead | 0.5.2 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
@@ -487,6 +489,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | opaque-debug | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
 | openssl-probe | 0.2.1 | `MIT OR Apache-2.0` | <https://github.com/rustls/openssl-probe> |
 | option-ext | 0.2.0 | `MPL-2.0` | <https://github.com/soc/option-ext.git> |
+| owned_ttf_parser | 0.25.1 | `Apache-2.0` | <https://github.com/alexheretic/owned-ttf-parser> |
 | palette | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
 | palette_derive | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
 | palette_math | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |

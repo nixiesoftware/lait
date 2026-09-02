@@ -185,6 +185,12 @@ struct PendingPairing {
     /// The code that opened this pairing, so its enrollment can be recorded
     /// against the code the controller is watching.
     rendezvous: Option<String>,
+    /// The durable id the receiver presented, recorded on enrollment so the
+    /// receiver can be recognised if it ever comes back without its key.
+    receiver_id: Option<String>,
+    /// This pairing repairs an existing record rather than enrolling a new
+    /// one: the device is already enrolled and only its key is being reissued.
+    repair: bool,
 }
 
 struct PendingRendezvous {
@@ -309,15 +315,57 @@ impl DisplayPairingService {
         let expires_at_unix_ms = now_unix_ms
             .checked_add(u64::from(MAX_PAIRING_LIFETIME_MS))
             .ok_or_else(|| anyhow!("display pairing expiry overflow"))?;
+        let receiver_id = request
+            .receiver_id
+            .as_ref()
+            .map(|id| id.as_str().to_string());
+        // A receiver that enrolled before and lost only its own store comes
+        // back as itself, not as a stranger: the same record, a new key, its
+        // assignment untouched. Read before the lock, because it is a store
+        // read and the lock guards only what is pending.
+        let returning = match receiver_id.as_deref() {
+            Some(id) => self.store.device_by_receiver_id(id)?,
+            None => None,
+        };
         let mut state = self.lock()?;
-        let (decision, promised, rendezvous) = match &request.rendezvous {
-            None => (PairingDecision::Pending, None, None),
+        let (decision, promised, rendezvous, repair) = match (&request.rendezvous, returning) {
+            (_, Some(record)) => {
+                let proof_key = random_proof_key()?;
+                let enrollment_challenge = random_challenge()?;
+                // A code named alongside is spent against the repaired
+                // device, so the controller watching it sees this television
+                // arrive; its promise is not taken, the record already holds
+                // what it was assigned.
+                let rendezvous = request.rendezvous.as_ref().and_then(|named| {
+                    let held = state.rendezvous.get_mut(named.as_str()).filter(|held| {
+                        held.spent.is_none() && held.expires_at_unix_ms > now_unix_ms
+                    })?;
+                    held.spent = Some(SpentRendezvous {
+                        device: record.device.clone(),
+                        enrolled: false,
+                    });
+                    Some(named.as_str().to_string())
+                });
+                (
+                    PairingDecision::Approved {
+                        label: record.label.clone(),
+                        device: record.device.clone(),
+                        proof_key,
+                        enrollment_challenge,
+                        completed: false,
+                    },
+                    None,
+                    rendezvous,
+                    true,
+                )
+            }
+            (None, None) => (PairingDecision::Pending, None, None, false),
             // The doorbell carried a secret the controller handed out, which
             // is the assurance the six-word compare buys the other way round.
             // Spending it here — before any answer leaves — is what makes the
             // code single-use: a second start naming it is refused exactly as
             // one that never held it.
-            Some(named) => {
+            (Some(named), None) => {
                 let device = random_device_id()?;
                 let proof_key = random_proof_key()?;
                 let enrollment_challenge = random_challenge()?;
@@ -340,6 +388,7 @@ impl DisplayPairingService {
                     },
                     held.assignment.clone(),
                     Some(named.as_str().to_string()),
+                    false,
                 )
             }
         };
@@ -354,6 +403,8 @@ impl DisplayPairingService {
                 decision,
                 promised,
                 rendezvous,
+                receiver_id,
+                repair,
             },
         );
         drop(state);
@@ -584,17 +635,28 @@ impl DisplayPairingService {
             }
             let was_completed = *completed;
             if !was_completed {
-                self.store.enrol(
-                    DeviceRecord {
-                        version: 1,
-                        device: device.clone(),
-                        label: label.clone(),
-                        capabilities: pending.capabilities.clone(),
-                        issued_at_unix_ms: now_unix_ms,
-                        revoked_at_unix_ms: None,
-                    },
-                    proof_key.clone(),
-                )?;
+                if pending.repair {
+                    self.store.repair(
+                        device,
+                        proof_key.clone(),
+                        pending.capabilities.clone(),
+                        now_unix_ms,
+                    )?;
+                } else {
+                    self.store.enrol(
+                        DeviceRecord {
+                            version: 1,
+                            device: device.clone(),
+                            label: label.clone(),
+                            capabilities: pending.capabilities.clone(),
+                            issued_at_unix_ms: now_unix_ms,
+                            revoked_at_unix_ms: None,
+                            receiver_id: pending.receiver_id.clone(),
+                            repaired_at_unix_ms: None,
+                        },
+                        proof_key.clone(),
+                    )?;
+                }
                 *completed = true;
             }
             let device = device.clone();
@@ -967,6 +1029,7 @@ mod tests {
                     poll_key: poll_key.clone(),
                     rendezvous: None,
                     capabilities: capabilities(),
+                    receiver_id: None,
                 },
                 1_000,
             )
@@ -1108,6 +1171,7 @@ mod tests {
             poll_key: PollKey::parse("22".repeat(32)).unwrap(),
             rendezvous,
             capabilities: capabilities(),
+            receiver_id: None,
         }
     }
 
@@ -1247,6 +1311,110 @@ mod tests {
             )
             .unwrap_err();
         assert!(never.is::<RendezvousRefused>(), "{never:#}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_returning_receiver_is_repaired_onto_its_record_and_keeps_its_assignment() {
+        let root = root();
+        let (store, service) = service_at(&root);
+        let kept: Arc<Mutex<Vec<DisplayDeviceId>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = kept.clone();
+        let service = service.with_enrollment_hook(Arc::new(move |device, _intent| {
+            recorder.lock().unwrap().push(device.clone());
+            Ok(())
+        }));
+        let receiver_id = display_protocol::ids::ReceiverId::parse("ab".repeat(32)).unwrap();
+        let poll_key = PollKey::parse("22".repeat(32)).unwrap();
+        let approved = |started: &PairingStartResponse, now: u64| {
+            let proof = authenticate_pairing_status(&poll_key, &started.pairing).unwrap();
+            match service
+                .status(
+                    PairingStatusRequest {
+                        protocol_major: display_protocol::PROTOCOL_MAJOR,
+                        pairing: started.pairing.clone(),
+                        proof,
+                    },
+                    now,
+                )
+                .unwrap()
+            {
+                PairingStatus::Approved {
+                    device,
+                    proof_key,
+                    enrollment_challenge,
+                } => (device, proof_key, enrollment_challenge),
+                other => panic!("expected approval, got {other:?}"),
+            }
+        };
+        let complete = |started: &PairingStartResponse,
+                        device: &DisplayDeviceId,
+                        proof_key: &ProofKey,
+                        challenge: &Challenge,
+                        now: u64| {
+            service
+                .complete(
+                    PairingCompleteRequest {
+                        protocol_major: display_protocol::PROTOCOL_MAJOR,
+                        pairing: started.pairing.clone(),
+                        device: device.clone(),
+                        enrollment_challenge: challenge.clone(),
+                        proof: authenticate_pairing_complete(
+                            proof_key,
+                            &started.pairing,
+                            device,
+                            challenge,
+                        )
+                        .unwrap(),
+                    },
+                    now,
+                )
+                .unwrap()
+        };
+
+        // Enrolled once, by a code, presenting what outlives its own store.
+        let minted = service
+            .mint_rendezvous("Lobby".into(), Some(lobby_loop()), 1_000)
+            .unwrap();
+        let mut first = start_request(Some(minted.rendezvous.clone()));
+        first.receiver_id = Some(receiver_id.clone());
+        let started = service.start(first, 1_002).unwrap();
+        let (device, proof_key, challenge) = approved(&started, 1_003);
+        complete(&started, &device, &proof_key, &challenge, 1_004);
+        let record = store.device(&device).unwrap().unwrap();
+        assert_eq!(record.receiver_id.as_deref(), Some(receiver_id.as_str()));
+        assert_eq!(record.repaired_at_unix_ms, None);
+        assert_eq!(kept.lock().unwrap().as_slice(), &[device.clone()]);
+
+        // Its store is wiped. It comes back with the id and no key, no code:
+        // nobody is asked, it is the same device with a new key, and the
+        // assignment it was promised is neither lost nor promised twice.
+        let mut back = start_request(None);
+        back.receiver_id = Some(receiver_id.clone());
+        let restarted = service.start(back, 2_000).unwrap();
+        assert!(service.pending(2_001).unwrap().is_empty());
+        let (same, new_key, new_challenge) = approved(&restarted, 2_002);
+        assert_eq!(same, device);
+        assert_ne!(new_key, proof_key);
+        assert!(matches!(
+            complete(&restarted, &same, &new_key, &new_challenge, 2_003),
+            PairingCompleteResponse::Enrolled { .. }
+        ));
+        let record = store.device(&device).unwrap().unwrap();
+        assert_eq!(record.repaired_at_unix_ms, Some(2_003));
+        assert_eq!(store.proof_key(&device).unwrap().unwrap(), new_key);
+        assert_eq!(kept.lock().unwrap().len(), 1);
+
+        // A stranger with nothing durable still waits for a person.
+        service.start(start_request(None), 2_010).unwrap();
+        assert_eq!(service.pending(2_011).unwrap().len(), 1);
+
+        // A revoked record is not something to come back to.
+        assert!(store.revoke_device(&device, 2_020).unwrap());
+        let mut revoked = start_request(None);
+        revoked.receiver_id = Some(receiver_id);
+        service.start(revoked, 2_021).unwrap();
+        assert_eq!(service.pending(2_022).unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 

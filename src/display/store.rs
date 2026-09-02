@@ -83,6 +83,15 @@ pub struct DeviceRecord {
     pub capabilities: ReceiverCapabilities,
     pub issued_at_unix_ms: u64,
     pub revoked_at_unix_ms: Option<u64>,
+    /// The durable id the receiver presented when it enrolled, if it had one.
+    /// A receiver that comes back with it and no credential is repaired onto
+    /// this record.
+    #[serde(default)]
+    pub receiver_id: Option<String>,
+    /// When the receiver last came back without its credential and was
+    /// re-keyed onto this record. What the controller reads as "reconnected".
+    #[serde(default)]
+    pub repaired_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,6 +521,44 @@ impl CoordinatorStore {
         })
     }
 
+    /// The enrolled, unrevoked device that presented this durable receiver id.
+    pub fn device_by_receiver_id(&self, receiver_id: &str) -> Result<Option<DeviceRecord>> {
+        Ok(self
+            .snapshot()?
+            .devices
+            .values()
+            .find(|record| {
+                record.revoked_at_unix_ms.is_none()
+                    && record.receiver_id.as_deref() == Some(receiver_id)
+            })
+            .cloned())
+    }
+
+    /// Re-key a receiver that came back without its credential: a new proof
+    /// key behind the same record, so its assignment and its standing stay.
+    /// The key is written first for the same reason `enrol` writes it first.
+    pub fn repair(
+        &self,
+        device: &DisplayDeviceId,
+        proof_key: ProofKey,
+        capabilities: ReceiverCapabilities,
+        now_unix_ms: u64,
+    ) -> Result<()> {
+        let key = device.as_str().to_string();
+        if self.proof_key(device)?.is_none() {
+            return Err(anyhow!("display device is not enrolled"));
+        }
+        self.update_secrets(|secrets| {
+            secrets.proof_keys.insert(key.clone(), proof_key);
+        })?;
+        self.update_policy(|policy| {
+            if let Some(record) = policy.devices.get_mut(&key) {
+                record.capabilities = capabilities;
+                record.repaired_at_unix_ms = Some(now_unix_ms);
+            }
+        })
+    }
+
     /// Amend standing for a receiver that is already enrolled — a negotiated
     /// capability, a label. It cannot enrol, because a device row with no key
     /// behind it would authenticate as nothing while reading as present.
@@ -748,6 +795,8 @@ fn migrate_legacy(path: &Path) -> Result<(CoordinatorPolicy, CoordinatorSecrets,
                 capabilities: device.capabilities,
                 issued_at_unix_ms: device.issued_at_unix_ms,
                 revoked_at_unix_ms: device.revoked_at_unix_ms,
+                receiver_id: None,
+                repaired_at_unix_ms: None,
             },
         );
     }
@@ -902,6 +951,8 @@ mod tests {
             capabilities: capabilities(),
             issued_at_unix_ms: 1,
             revoked_at_unix_ms: None,
+            receiver_id: None,
+            repaired_at_unix_ms: None,
         }
     }
 

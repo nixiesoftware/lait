@@ -34,6 +34,8 @@ export interface TvReceiver {
   platform: string;
   build: string;
   issued_at_unix_ms: number;
+  /** When the TV last came back without its credential and was re-keyed onto this record. */
+  repaired_at_unix_ms?: number | null;
   health: TvHealth | null;
   /** `null` is a TV nobody holds, which this World may point at a screen. */
   assignment: TvAssignment | null;
@@ -109,9 +111,18 @@ export type TvTone = 'good' | 'warn' | 'crit' | 'neutral';
  * A TV's state in one word, by the clock as much as by the report: the
  * report cannot say "and then I stopped"; only the clock can.
  */
-export function tvStatus(receiver: Pick<TvReceiver, 'health' | 'issued_at_unix_ms'>, now = Date.now()): { label: string; tone: TvTone } {
+export function tvStatus(
+  receiver: Pick<TvReceiver, 'health' | 'issued_at_unix_ms' | 'repaired_at_unix_ms'>,
+  now = Date.now(),
+): { label: string; tone: TvTone } {
+  // A TV that lost its own state and was re-keyed onto its record says so,
+  // briefly: the same screen, back on its own, worth a glance and no more.
+  const repaired = receiver.repaired_at_unix_ms ?? null;
+  if (repaired !== null && now - repaired < connectingGraceMs) {
+    return { label: `Reconnected ${agoLabel(now - repaired)}`, tone: 'good' };
+  }
   if (receiver.health === null) {
-    return now - receiver.issued_at_unix_ms < connectingGraceMs
+    return now - Math.max(receiver.issued_at_unix_ms, repaired ?? 0) < connectingGraceMs
       ? { label: 'Connecting…', tone: 'neutral' }
       : { label: 'Not heard from', tone: 'warn' };
   }

@@ -349,7 +349,17 @@ fn mux_segment(
         };
         let stream = mux.stream_index(pid).ok_or(Failure::InvalidGroup)?;
         for frame in &group.frames {
-            let pts = clock_90k(frame.header.timestamp, track.catalog.timescale)?;
+            // Frames arrive in decode order; the PES carries both clocks
+            // whenever presentation trails decode.
+            let dts = clock_90k(frame.header.timestamp, track.catalog.timescale)?;
+            let pts = clock_90k(
+                frame
+                    .header
+                    .timestamp
+                    .checked_add(i64::from(frame.header.composition_offset))
+                    .ok_or(Failure::TimestampOutOfRange)?,
+                track.catalog.timescale,
+            )?;
             let duration = frame.header.duration.ok_or(Failure::InvalidGroup)?;
             let end = frame
                 .header
@@ -376,7 +386,7 @@ fn mux_segment(
                 MuxFrame {
                     data,
                     is_key_frame: frame.header.kind == FrameKind::Key,
-                    pts_dts: Some((pts, None).into()),
+                    pts_dts: Some((pts, (pts != dts).then_some(dts)).into()),
                 },
             );
         }
@@ -447,6 +457,20 @@ fn avc_parameter_sets(config: &[u8]) -> Result<Vec<u8>, Failure> {
     cursor = cursor.checked_add(1).ok_or(Failure::TooLarge)?;
     for _ in 0..pps_count {
         copy_parameter_set(config, &mut cursor, &mut output)?;
+    }
+    // A High-family profile (100, 110, 122, 144) carries an extension after
+    // the picture parameter sets: chroma format, the two bit depths, and a
+    // count of SPS extensions. They are walked so the box is proven whole,
+    // and not emitted: an SPS extension is not needed to decode the stream.
+    let profile = config.get(1).copied().unwrap_or(0);
+    if matches!(profile, 100 | 110 | 122 | 144) && cursor < config.len() {
+        cursor = cursor.checked_add(3).ok_or(Failure::InvalidCatalog)?;
+        let ext_count = usize::from(*config.get(cursor).ok_or(Failure::InvalidCatalog)?);
+        cursor = cursor.checked_add(1).ok_or(Failure::TooLarge)?;
+        let mut discarded = Vec::new();
+        for _ in 0..ext_count {
+            copy_parameter_set(config, &mut cursor, &mut discarded)?;
+        }
     }
     if output.is_empty() || cursor != config.len() {
         return Err(Failure::InvalidCatalog);
@@ -598,10 +622,35 @@ mod tests {
                     timescale: 90_000,
                     kind: FrameKind::Key,
                     payload_len: u32::try_from(payload.len()).unwrap(),
+                    composition_offset: 0,
                 },
                 payload,
             }],
         }
+    }
+
+    /// A High-profile avcC ends in an extension block; the parameter sets in
+    /// front of it are the same ones a Baseline box would give.
+    #[test]
+    fn a_high_profile_avcc_extension_is_walked_and_not_mistaken_for_junk() {
+        let sps = [0x67, 0x64, 0x00, 0x1f, 0xac];
+        let pps = [0x68, 0xee, 0x3c, 0x80];
+        let mut baseline = vec![1, 66, 0x00, 0x1f, 0xff, 0xe1, 0, sps.len() as u8];
+        baseline.extend_from_slice(&sps);
+        baseline.extend_from_slice(&[1, 0, pps.len() as u8]);
+        baseline.extend_from_slice(&pps);
+        let mut high = baseline.clone();
+        high[1] = 100;
+        // chroma_format 1, bit depths 8 and 8, one SPS extension of two bytes.
+        high.extend_from_slice(&[0xfd, 0xf8, 0xf8, 1, 0, 2, 0x6d, 0x00]);
+        let plain = avc_parameter_sets(&baseline).unwrap();
+        assert_eq!(avc_parameter_sets(&high).unwrap(), plain);
+        // A High box cut short inside its extension is still refused.
+        high.truncate(high.len() - 1);
+        assert_eq!(
+            avc_parameter_sets(&high).unwrap_err(),
+            Failure::InvalidCatalog
+        );
     }
 
     #[test]

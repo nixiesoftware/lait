@@ -9,6 +9,8 @@
 //! `mp4-atom` is already a dependency and already decodes every box below; it is
 //! used bidirectionally in `cmaf.rs`'s own tests. Nothing new is pulled in.
 
+pub mod h264still;
+
 use std::error::Error;
 use std::fmt;
 
@@ -26,15 +28,6 @@ pub enum Failure {
     UnsupportedCodec,
     /// A field the catalog requires is absent or out of range.
     Incomplete,
-    /// The track carries composition offsets — B-frames.
-    ///
-    /// Both muxers write presentation time as decode time (`TrunEntry.cts` is
-    /// `None`; `pts_dts` carries no DTS), so a file with a B-pyramid would be
-    /// packaged with its frames in decode order and presented that way. Refused
-    /// by name rather than played wrong: this plane can *read* the offsets and
-    /// cannot *write* them, and the gap between those two is the whole reason
-    /// this variant exists.
-    CompositionOffsets,
     /// The sample table disagrees with itself.
     Malformed,
     /// This container cannot produce a catalog the plane will accept.
@@ -57,9 +50,6 @@ impl fmt::Display for Failure {
             Self::Container => write!(f, "not a readable initialization segment"),
             Self::UnsupportedCodec => write!(f, "unsupported codec"),
             Self::Incomplete => write!(f, "incomplete track description"),
-            Self::CompositionOffsets => {
-                write!(f, "composition offsets cannot be packaged by this plane")
-            }
             Self::Malformed => write!(f, "the sample table disagrees with itself"),
             Self::Unpackageable => write!(f, "no valid catalog can be built from this file"),
         }
@@ -195,6 +185,10 @@ pub struct Sample {
     pub duration: u32,
     /// A sync sample: a group may begin here and nowhere else.
     pub sync: bool,
+    /// Presentation time minus decode time, from `ctts`: zero without the
+    /// box, positive for a frame that is shown after B-frames that reference
+    /// it decode, negative only in a version 1 box.
+    pub composition_offset: i32,
 }
 
 /// Walk one track's sample table into the samples it describes.
@@ -206,14 +200,6 @@ pub struct Sample {
 /// that nothing reports.
 pub fn samples(trak: &mp4_atom::Trak) -> Result<Vec<Sample>, Failure> {
     let stbl = &trak.mdia.minf.stbl;
-
-    if stbl
-        .ctts
-        .as_ref()
-        .is_some_and(|ctts| ctts.entries.iter().any(|entry| entry.sample_offset != 0))
-    {
-        return Err(Failure::CompositionOffsets);
-    }
 
     let sizes: Vec<u32> = match &stbl.stsz.samples {
         mp4_atom::StszSamples::Identical { count, size } => {
@@ -234,6 +220,21 @@ pub fn samples(trak: &mp4_atom::Trak) -> Result<Vec<Sample>, Failure> {
     }
     if durations.len() < sizes.len() {
         return Err(Failure::Malformed);
+    }
+
+    // `ctts` is run-length encoded the same way; a track without it presents
+    // every sample when it decodes. A table shorter than the sample count is
+    // the sample table disagreeing with itself.
+    let mut composition_offsets: Vec<i32> = Vec::with_capacity(sizes.len());
+    if let Some(ctts) = &stbl.ctts {
+        for entry in &ctts.entries {
+            let count = usize::try_from(entry.sample_count).map_err(|_| Failure::Malformed)?;
+            let offset = i32::try_from(entry.sample_offset).map_err(|_| Failure::Malformed)?;
+            composition_offsets.extend(std::iter::repeat_n(offset, count));
+        }
+        if composition_offsets.len() < sizes.len() {
+            return Err(Failure::Malformed);
+        }
     }
 
     let chunk_offsets: Vec<u64> = match (&stbl.stco, &stbl.co64) {
@@ -295,6 +296,7 @@ pub fn samples(trak: &mp4_atom::Trak) -> Result<Vec<Sample>, Failure> {
                     decode_time,
                     duration,
                     sync: every_sample_syncs || sync.contains(&number),
+                    composition_offset: composition_offsets.get(sample_index).copied().unwrap_or(0),
                 });
                 offset = offset
                     .checked_add(u64::from(size))
@@ -395,6 +397,7 @@ pub fn track_groups(
                         FrameKind::Delta
                     },
                     payload_len: sample.size,
+                    composition_offset: sample.composition_offset,
                 },
                 payload,
             });
@@ -860,6 +863,7 @@ impl StoredPlan {
                             FrameKind::Delta
                         },
                         payload_len: sample.size,
+                        composition_offset: sample.composition_offset,
                     },
                     payload: payload.clone(),
                 });
@@ -1457,20 +1461,45 @@ mod tests {
         assert!(samples.iter().all(|sample| sample.sync));
     }
 
-    /// B-frames are refused by name rather than presented out of order.
+    /// B-frames travel: every sample carries the offset its `ctts` run gives
+    /// it, so a packager can present them in their own order.
     #[test]
-    fn composition_offsets_are_refused_because_neither_muxer_can_write_them() {
+    fn composition_offsets_are_read_per_sample_from_their_runs() {
         let trak = sampled_trak(
             vec![10, 20, 30],
             Some(vec![1]),
             Some(Ctts {
+                entries: vec![
+                    CttsEntry {
+                        sample_count: 1,
+                        sample_offset: 6_000,
+                    },
+                    CttsEntry {
+                        sample_count: 2,
+                        sample_offset: 3_000,
+                    },
+                ],
+            }),
+        );
+        let offsets: Vec<i32> = samples(&trak)
+            .unwrap()
+            .iter()
+            .map(|sample| sample.composition_offset)
+            .collect();
+        assert_eq!(offsets, vec![6_000, 3_000, 3_000]);
+
+        // A table that stops short of the samples is a disagreement, not zero.
+        let short = sampled_trak(
+            vec![10, 20, 30],
+            Some(vec![1]),
+            Some(Ctts {
                 entries: vec![CttsEntry {
-                    sample_count: 3,
+                    sample_count: 2,
                     sample_offset: 3_000,
                 }],
             }),
         );
-        assert_eq!(samples(&trak).unwrap_err(), Failure::CompositionOffsets);
+        assert_eq!(samples(&short).unwrap_err(), Failure::Malformed);
     }
 
     /// A `ctts` whose offsets are all zero is a file that carries the box and

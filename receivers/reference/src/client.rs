@@ -224,6 +224,9 @@ impl ReferenceReceiver {
             poll_key: poll_key.clone(),
             rendezvous: self.bootstrap.rendezvous.clone(),
             capabilities: self.capabilities.clone(),
+            // The reference receiver keeps its credential in a file it owns;
+            // it has no platform identity that outlives that file to offer.
+            receiver_id: None,
         };
         let response: PairingStartResponse = self.public_post(
             "/head/v1/pairings",

@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use runtime::plane::live::media::{
-    Catalog, Control, Event, EventBody, ReceivedGroup, RequestKeyframe, Session, Subscribe,
-    TrackKind, CATALOG_TRACK, DEFAULT_MAX_LATENCY_MS,
+    Catalog, CatalogTrack, Control, Event, EventBody, Frame, FrameHeader, FrameKind, GroupHeader,
+    ReceivedGroup, RequestKeyframe, Session, Subscribe, TrackKind, CATALOG_TRACK, CATALOG_VERSION,
+    DEFAULT_MAX_LATENCY_MS,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -186,6 +187,76 @@ impl LiveMediaHub {
         Ok(())
     }
 
+    /// Install one still as an HLS presentation the receiver plays as video.
+    ///
+    /// The bridge that lets a card and a clip share one stream: the still is
+    /// encoded once to an H.264 IDR (see [`mediabox::h264still`]) and laid out
+    /// as a run of one-second segments, so a receiver holding a single player
+    /// shows it for `duration_ms` and then flows into whatever segment follows.
+    /// Encoding is the caller's to cache — a still is keyed by its digest, so
+    /// the same card is never encoded twice.
+    pub fn install_still(
+        &self,
+        orbit: &str,
+        resource: &str,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        duration_ms: u32,
+    ) -> Result<()> {
+        let still = mediabox::h264still::encode_still(rgba, width, height)
+            .map_err(|error| anyhow!("still could not be encoded for the stream: {error:?}"))?;
+        const SEGMENT_MS: u32 = 1_000;
+        const TIMESCALE: u32 = 90_000;
+        let segments = duration_ms.div_ceil(SEGMENT_MS).max(1);
+        let frame_bytes = still.access_unit.len();
+        let catalog = Catalog {
+            version: CATALOG_VERSION,
+            jitter_hint_ms: 0,
+            tracks: vec![CatalogTrack {
+                track: resource.to_string(),
+                kind: TrackKind::Video,
+                codec: still.codec.clone(),
+                timescale: TIMESCALE,
+                decoder_config_hex: data_encoding::HEXLOWER.encode(&still.avcc),
+                max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
+                target_latency_ms: DEFAULT_MAX_LATENCY_MS,
+                bitrate_bps: u32::try_from(frame_bytes.saturating_mul(8)).unwrap_or(u32::MAX),
+                width: Some(width),
+                height: Some(height),
+                frame_rate_milli: Some(1_000),
+                sample_rate: None,
+                channels: None,
+                render_group: Some(resource.to_string()),
+                cmaf_rendition: None,
+                hls_v3_rendition: Some(resource.to_string()),
+            }],
+        };
+        let groups = (0..segments).map(|sequence| ReceivedGroup {
+            header: GroupHeader {
+                subscription_id: FIRST_MEDIA_SUBSCRIPTION_ID,
+                track: resource.to_string(),
+                track_kind: TrackKind::Video,
+                group_sequence: u64::from(sequence),
+                published_at_micros: 0,
+                timescale: TIMESCALE,
+                max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
+            },
+            frames: vec![Frame {
+                header: FrameHeader {
+                    timestamp: i64::from(sequence).saturating_mul(i64::from(TIMESCALE)),
+                    duration: Some(u64::from(TIMESCALE)),
+                    timescale: TIMESCALE,
+                    kind: FrameKind::Key,
+                    payload_len: u32::try_from(frame_bytes).unwrap_or(u32::MAX),
+                    composition_offset: 0,
+                },
+                payload: still.access_unit.clone(),
+            }],
+        });
+        self.install_whole(orbit, resource, &catalog, groups)
+    }
+
     /// Install a presentation from a finite, already-written sequence of groups.
     ///
     /// The packagers are the reusable half of this plane: they take a `Catalog`
@@ -285,8 +356,19 @@ impl LiveMediaHub {
         let catalog = plan.catalog.clone();
         // Either transport's absence is survivable alone; both missing is a
         // catalog nothing can serve — the same rule the eager install applies.
-        let hls = HlsCatalogPackager::new(&catalog).ok();
-        let cmaf = CmafCatalogPackager::new(&catalog).ok();
+        // A transport that cannot package this catalog is named in the log,
+        // because a receiver on that transport will only ever see a playlist
+        // that is not there.
+        let hls = HlsCatalogPackager::new(&catalog)
+            .inspect_err(
+                |error| tracing::warn!(resource, %error, "stored media cannot be packaged for HLS"),
+            )
+            .ok();
+        let cmaf = CmafCatalogPackager::new(&catalog)
+            .inspect_err(|error| {
+                tracing::warn!(resource, %error, "stored media cannot be packaged for CMAF")
+            })
+            .ok();
         if hls.is_none() && cmaf.is_none() {
             return Err(anyhow!("no rendition in this catalog can be packaged"));
         }
@@ -528,8 +610,17 @@ impl LiveMediaHub {
             // A planned presentation lists every group from its table; no
             // segment has to exist for the playlist to be complete.
             let count = plan.group_count();
+            // A stored file's groups are its own key-frame intervals, which
+            // can run longer than the catalog's target. The target duration
+            // a playlist declares must cover its longest segment, or a
+            // strict player (Roku's, for one) refuses the whole stream.
+            let longest_ms = (0..count)
+                .filter_map(|sequence| plan.group_duration_ms(sequence))
+                .max()
+                .unwrap_or(0);
             let target_seconds = description
                 .target_duration_ms
+                .max(longest_ms)
                 .checked_add(999)
                 .and_then(|value| value.checked_div(1_000))
                 .unwrap_or(1)
@@ -554,8 +645,14 @@ impl LiveMediaHub {
         let first = segments
             .front()
             .ok_or_else(|| anyhow!("HLS live edge is not ready"))?;
+        let longest_ms = segments
+            .iter()
+            .map(|segment| segment.duration_ms)
+            .max()
+            .unwrap_or(0);
         let target_seconds = description
             .target_duration_ms
+            .max(longest_ms)
             .checked_add(999)
             .and_then(|value| value.checked_div(1_000))
             .unwrap_or(1)
@@ -1011,10 +1108,9 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
 mod tests {
     use super::*;
 
-    use runtime::plane::live::media::{
-        CatalogTrack, Frame, FrameHeader, FrameKind, GroupHeader, CATALOG_VERSION,
-        DEFAULT_MAX_GROUP_DURATION_MS, DEFAULT_MAX_LATENCY_MS,
-    };
+    // Most of these types are now used by `install_still` and imported at the
+    // module level; only the ones this module alone needs are pulled in here.
+    use runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS;
 
     /// One H.264 rendition, the baseline `Catalog::validate` insists on.
     fn stored_catalog() -> Catalog {
@@ -1061,6 +1157,7 @@ mod tests {
                     timescale: 90_000,
                     kind: FrameKind::Key,
                     payload_len: u32::try_from(payload.len()).unwrap(),
+                    composition_offset: 0,
                 },
                 payload,
             }],
@@ -1318,6 +1415,105 @@ mod tests {
     /// descriptions — the film untouched — and any segment packages into
     /// CMAF fragments on demand, out of order, exactly as the HLS half
     /// serves segment 41 before segment 3.
+    fn still_rgba(width: u32, height: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let r = if x < width / 2 { 200u8 } else { 40 };
+                let g = if y < height / 2 { 180u8 } else { 40 };
+                buf.extend_from_slice(&[r, g, 60, 255]);
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn a_still_installs_as_a_run_of_hls_segments() {
+        let hub = LiveMediaHub::default();
+        hub.install_still(
+            "space/orbit",
+            "card",
+            &still_rgba(320, 240),
+            320,
+            240,
+            5_000,
+        )
+        .expect("a still installs as an HLS presentation");
+        let playlist = hub
+            .hls_media_playlist("space/orbit", "card", "card", "..")
+            .expect("the still serves a playlist");
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
+        assert_eq!(
+            playlist.matches("#EXTINF:").count(),
+            5,
+            "five one-second segments span the five-second still"
+        );
+        let segment = hub
+            .hls_segment("space/orbit", "card", "card", 0)
+            .expect("the first still segment is served");
+        assert_eq!(segment.len() % 188, 0, "a real transport stream");
+        assert_eq!(segment.first(), Some(&0x47));
+    }
+
+    /// The still, all the way through the coordinator's packager and back out a
+    /// real decoder: install it, pull segment zero, and have ffmpeg decode the
+    /// transport stream to the still's dimensions. Ignored (shells ffmpeg).
+    #[test]
+    #[ignore]
+    fn ffmpeg_decodes_a_packaged_still_segment() {
+        use std::io::Write;
+        use std::process::Command;
+        let dir = std::env::var("STILL_DUMP_DIR").unwrap_or_else(|_| "/tmp".into());
+        let hub = LiveMediaHub::default();
+        hub.install_still(
+            "space/orbit",
+            "card",
+            &still_rgba(1280, 720),
+            1280,
+            720,
+            2_000,
+        )
+        .expect("a still installs");
+        let ts = hub
+            .hls_segment("space/orbit", "card", "card", 0)
+            .expect("segment zero");
+        let path = format!("{dir}/still-segment.ts");
+        let png = format!("{dir}/still-segment.png");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&ts)
+            .unwrap();
+        let out = Command::new("ffmpeg")
+            .args(["-v", "error", "-i", &path, "-frames:v", "1", "-y", &png])
+            .output()
+            .expect("ffmpeg runs");
+        assert!(
+            out.status.success(),
+            "ffmpeg refused the segment: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+                &path,
+            ])
+            .output()
+            .expect("ffprobe runs");
+        assert!(
+            String::from_utf8_lossy(&probe.stdout)
+                .trim()
+                .starts_with("1280,720"),
+            "decoded dims: {}",
+            String::from_utf8_lossy(&probe.stdout)
+        );
+    }
+
     #[test]
     fn a_planned_presentation_serves_mse_from_its_table() {
         use crate::display::{CatalogPolicy, StoredPlan};

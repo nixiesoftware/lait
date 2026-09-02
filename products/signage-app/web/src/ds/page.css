@@ -922,11 +922,33 @@
   font-size: var(--ds-fs-body);
 }
 
+/* In a device row the thumbnail is the preview: no chip capsule behind it —
+   the hover surface is the whole affordance a row needs. */
+.ds-device > .ds-attached-hit {
+  min-width: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ds-device > .ds-attached-hit:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+.ds-device > .ds-attached-hit:hover > .ds-attached-name {
+  text-decoration: underline;
+}
+
 .ds-device .ds-row-copy > span {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
+}
+
+/* The breath under a title, only where there is one. */
+.ds-device .ds-row-copy strong + span {
   margin-top: 4px;
 }
 

@@ -22,12 +22,14 @@ function AstrolabeHeader(event as object, wanted as string) as dynamic
     return found
 end function
 
-function AstrolabeTransfer(path as string, method as string, body as string, headers as object, timeoutMs as integer, targetFile = invalid as dynamic) as dynamic
+function AstrolabeTransfer(path as string, method as string, body as string, headers as object, timeoutMs as integer, targetFile = invalid as dynamic, interruptible = false as boolean) as dynamic
     transfer = CreateObject("roUrlTransfer")
     transfer.SetPort(m.port)
     transfer.SetCertificatesFile(m.certificates)
     transfer.EnablePeerVerification(true)
-    transfer.EnableHostVerification(true)
+    ' A pinned certificate is the identity; the names inside it are where it
+    ' once lived. Web PKI trust still checks the host.
+    transfer.EnableHostVerification(m.trustKind <> "pinned_certificate")
     transfer.RetainBodyOnError(true)
     transfer.SetUrl(m.origin + path)
     transfer.AddHeader("Accept", "application/json")
@@ -57,7 +59,10 @@ function AstrolabeTransfer(path as string, method as string, body as string, hea
                 m.credential = invalid
                 return invalid
             end if
-            if m.credential.mode = "paired" and Left(m.top.command, 13) = "media_failed:"
+            ' A failed player interrupts only the long poll it would otherwise
+            ' wait behind. Cancelling every transfer on it cancelled the very
+            ' re-staging that answers the failure.
+            if interruptible and m.credential.mode = "paired" and Left(m.top.command, 13) = "media_failed:"
                 transfer.AsyncCancel()
                 return invalid
             end if
@@ -82,6 +87,17 @@ function AstrolabeJson(path as string, method as string, value as dynamic, heade
     if bytes.Count() > 65536 then return invalid
     result.json = ParseJson(result.body)
     return result
+end function
+
+' What outlives this channel's own store: the device's channel client id,
+' bound to the coordinator it is presented to so it names this receiver
+' here and nowhere else.
+function AstrolabeReceiverId(profile as string) as string
+    bytes = AstrolabeTranscript("astrolabe-display/receiver-id/v1")
+    AstrolabeU32Field(bytes, 1)
+    AstrolabeTextField(bytes, profile)
+    AstrolabeTextField(bytes, CreateObject("roDeviceInfo").GetChannelClientId())
+    return AstrolabeSha256(bytes)
 end function
 
 function AstrolabeCapabilities() as object
@@ -210,16 +226,23 @@ function AstrolabeAuthorizedJson(route as string, method as string, path as stri
     context = AstrolabeContext(route, method, bodySha, overrides)
     headers = AstrolabeHeaders(context, AstrolabeRequestTag(m.credential.proofKey, context))
     m.challenge = invalid
-    result = AstrolabeTransfer(path, method, body, headers, timeoutMs)
+    result = AstrolabeTransfer(path, method, body, headers, timeoutMs, invalid, route = "program_changes")
     if result = invalid
         m.transport = "offline"
         return invalid
     end if
     nextChallenge = AstrolabeHeader(result.event, "X-Astrolabe-Next-Challenge")
-    if not AstrolabeIsHex(nextChallenge, 64) then return invalid
+    if AstrolabeByteArray(result.body).Count() > 65536 then return invalid
+    if not AstrolabeIsHex(nextChallenge, 64)
+        ' A refusal carries no next challenge; revocation and re-pair arrive
+        ' exactly this way, so the body is read before the header is required.
+        if result.status < 400 then return invalid
+        result.json = ParseJson(result.body)
+        if not AstrolabeValidApiError(result.json) then return invalid
+        return result
+    end if
     m.challenge = nextChallenge
     m.transport = "online"
-    if AstrolabeByteArray(result.body).Count() > 65536 then return invalid
     result.json = ParseJson(result.body)
     return result
 end function
@@ -292,7 +315,8 @@ function AstrolabeAuthorizedLive(item as object, program as object) as dynamic
     if not AstrolabeIntegerIn(ticket.expires_at_unix_ms, 1, 9007199254740991) then return invalid
     matcher = CreateObject("roRegex", "^/head/v1/live/[0-9a-f]{64}/master[.]m3u8$", "")
     if not AstrolabeIsString(ticket.endpoint) or not matcher.IsMatch(ticket.endpoint) then return invalid
-    return { uri: m.origin + ticket.endpoint, bytes: manifest.encoded_len, live: true }
+    ' The player runs its own TLS; it is handed the same pin the API calls use.
+    return { uri: m.origin + ticket.endpoint, bytes: manifest.encoded_len, live: true, certificates: m.certificates }
 end function
 
 function AstrolabeRefreshLive() as boolean
@@ -300,11 +324,16 @@ function AstrolabeRefreshLive() as boolean
     playback = AstrolabeCurrentPlayback()
     item = m.program.items[playback.currentIndex]
     if item.scene.kind <> "media" then return false
-    failureCommand = m.top.command
+    ' The failure is answered once. Restoring the command on a refused ticket
+    ' made every later transfer cancel itself on the next tick — a livelock.
     m.top.command = ""
     entry = AstrolabeAuthorizedLive(item, m.program)
     if entry = invalid
-        m.top.command = failureCommand
+        ' A ticket the coordinator will not renew is a program to fetch again:
+        ' the snapshot re-stages every item with tickets the coordinator holds.
+        AstrolabeRetireStage(m.stage)
+        m.program = invalid
+        m.stage = {}
         return false
     end if
     m.stage[item.scene.manifest.id] = entry
@@ -322,23 +351,26 @@ end function
 sub AstrolabePair()
     instance = AstrolabeJson("/head/v1/instance", "GET", invalid)
     if instance = invalid or instance.status <> 200 or instance.json = invalid
-        AstrolabePublish({ kind: "message", title: "Coordinator unavailable", body: "Astrolabe will retry from a fresh trust ceremony." })
+        AstrolabePublish({ kind: "message", title: "Coordinator unavailable", body: "" })
         return
     end if
     offer = instance.json
-    if not AstrolabeExactFields(offer, ["protocol_major", "instance", "label", "trust"]) or offer.protocol_major <> 1
-        AstrolabePublish({ kind: "message", title: "Coordinator refused", body: "The endpoint does not speak Astrolabe Display 1." })
+    if not AstrolabeExactFields(offer, ["protocol_major", "instance", "label", "profile", "trust"]) or offer.protocol_major <> 1
+        AstrolabePublish({ kind: "message", title: "Coordinator refused", body: "Not Astrolabe Display 1." })
         return
     end if
-    if not AstrolabeIsHex(offer.instance, 32) or not AstrolabeIsString(offer.label) then return
+    if not AstrolabeIsHex(offer.instance, 32) or not AstrolabeIsString(offer.label) or not AstrolabeIsProfileId(offer.profile) then return
     if Len(offer.label) < 1 or Len(offer.label) > 96 then return
     if m.trustKind = "web_pki_origin"
         trustMatches = AstrolabeExactFields(offer.trust, ["kind", "origin"]) and offer.trust.kind = m.trustKind and offer.trust.origin = m.origin
     else
-        trustMatches = AstrolabeExactFields(offer.trust, ["kind", "origin", "sha256"]) and offer.trust.kind = m.trustKind and offer.trust.origin = m.origin and offer.trust.sha256 = m.fingerprint
+        ' The pin is the certificate. The origin it advertises is where it
+        ' believes it lives, which a moved coordinator gets wrong.
+        trustMatches = AstrolabeExactFields(offer.trust, ["kind", "origin", "sha256"]) and offer.trust.kind = m.trustKind and offer.trust.sha256 = m.fingerprint
     end if
+    m.coordinatorProfile = offer.profile
     if not trustMatches
-        AstrolabePublish({ kind: "message", title: "Trust profile refused", body: "The coordinator does not match this Roku bootstrap." })
+        AstrolabePublish({ kind: "message", title: "Trust profile refused", body: "Coordinator does not match the bootstrap." })
         return
     end if
 
@@ -349,8 +381,13 @@ sub AstrolabePair()
         receiver_nonce: nonce,
         poll_key: pollKey,
         rendezvous: m.rendezvous,
+        receiver_id: AstrolabeReceiverId(m.coordinatorProfile),
         capabilities: AstrolabeCapabilities()
     })
+    if response <> invalid and response.status = 403 and m.rendezvous <> invalid
+        AstrolabePublish({ kind: "message", title: "Code not accepted", body: "A code works once. Get a new one in Astrolabe." })
+        return
+    end if
     if response = invalid or response.status <> 200 or response.json = invalid then return
     pairing = response.json
     if not AstrolabeExactFields(pairing, ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint", "coordinator_profile"]) then return
@@ -358,6 +395,7 @@ sub AstrolabePair()
     if not AstrolabeIsHex(pairing.pairing, 32) or not AstrolabeIsHex(pairing.coordinator_fingerprint, 64) then return
     if not AstrolabeIsProfileId(pairing.coordinator_profile) then return
     if m.fingerprint <> invalid and pairing.coordinator_fingerprint <> m.fingerprint then return
+    if pairing.coordinator_profile <> m.coordinatorProfile then return
     phrase = AstrolabeConfirmationPhrase(pairing.coordinator_profile, pairing.pairing, nonce)
     if FormatJson(phrase) <> FormatJson(pairing.confirmation_phrase) then return
     m.credential = {
@@ -369,7 +407,7 @@ sub AstrolabePair()
         fingerprint: pairing.coordinator_fingerprint,
         profile: pairing.coordinator_profile,
         phrase: phrase,
-        userConfirmed: false
+        userConfirmed: m.rendezvous <> invalid ' a code typed in Astrolabe is the confirmation
     }
     if not AstrolabeSaveCredential(m.credential) then return
     AstrolabeContinuePairing()
@@ -426,16 +464,16 @@ sub AstrolabeContinuePairing()
                 enrollmentChallenge: status.json.enrollment_challenge
             }
             if not AstrolabeSaveCredential(m.credential) then return
-            AstrolabePublish({ kind: "message", title: "Enrolling this display", body: "Completing authenticated receiver enrollment…" })
+            AstrolabePublish({ kind: "message", title: "Enrolling…", body: "" })
             AstrolabeFinishEnrollment()
         else if status.json.kind = "rejected"
             if not AstrolabeExactFields(status.json, ["kind", "reason"]) then return
             if status.json.reason <> "user_rejected" and status.json.reason <> "controller_unavailable" and status.json.reason <> "policy_refused" and status.json.reason <> "fingerprint_mismatch" then return
-            AstrolabePublish({ kind: "message", title: "Pairing stopped", body: "Approval was rejected. Press Back and relaunch to begin again." })
+            AstrolabePublish({ kind: "message", title: "Pairing stopped", body: "Rejected. Press Back, then relaunch." })
             return
         else if status.json.kind = "expired"
             if not AstrolabeExactFields(status.json, ["kind"]) then return
-            AstrolabePublish({ kind: "message", title: "Pairing stopped", body: "Approval was rejected or expired. Press Back and relaunch to begin again." })
+            AstrolabePublish({ kind: "message", title: "Pairing stopped", body: "Expired. Press Back, then relaunch." })
             return
         else
             return
@@ -534,7 +572,7 @@ sub AstrolabeRenderCurrent()
     stale = m.lastProgramDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
     m.lastRenderedStale = stale
     if stale and m.program.freshness.on_stale = "blank"
-        AstrolabePublish({ kind: "message", title: "Coordinator unavailable", body: "The assigned content is no longer eligible to remain on screen.", source: source, stale: true })
+        AstrolabePublish({ kind: "message", title: "Coordinator unavailable", body: "Assigned content expired.", source: source, stale: true })
         return
     end if
     if item.scene.kind = "frame"
@@ -550,15 +588,29 @@ sub AstrolabeRenderCurrent()
         })
     else if item.scene.kind = "media"
         entry = m.stage[item.scene.manifest.id]
+        ' The still that follows a clip is named now, so the scene can hold it
+        ' decoded behind the player and cut to it before the player runs dry.
+        nextFrame = invalid
+        nextIndex = m.program.playback.current_index + 1
+        if nextIndex >= m.program.items.Count() and m.program.playback.cycle = "loop" then nextIndex = 0
+        if nextIndex < m.program.items.Count()
+            nextItem = m.program.items[nextIndex]
+            if nextItem.scene.kind = "frame" and m.stage.DoesExist(nextItem.scene.asset.id)
+                nextEntry = m.stage[nextItem.scene.asset.id]
+                nextFrame = { uri: nextEntry.uri, expectedWidth: nextEntry.width, expectedHeight: nextEntry.height }
+            end if
+        end if
         AstrolabePublish({
             kind: "media",
             uri: entry.uri,
+            certificates: entry.certificates,
+            nextFrame: nextFrame,
             spokenSummary: item.spoken_summary,
             source: source,
             stale: stale
         })
     else
-        AstrolabePublish({ kind: "message", title: "Receiver-owned state", body: item.scene.reason, source: source, stale: stale })
+        AstrolabePublish({ kind: "blank", reason: item.scene.reason, source: source, stale: stale })
     end if
 end sub
 
@@ -567,14 +619,18 @@ sub AstrolabeTickPlayback()
     staleNow = m.lastProgramDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
     if m.lastRenderedStale = invalid or staleNow <> m.lastRenderedStale then AstrolabeRenderCurrent()
     item = m.program.items[m.program.playback.current_index]
-    if item.duration_ms = invalid then return
-    if AstrolabeCurrentPlayback().elapsedMs < item.duration_ms then return
+    ' A clip that reached its own end moves the program on at once; the
+    ' slot's duration is a ceiling, not a wait.
+    finished = item.scene.kind = "media" and Left(m.top.command, 15) = "media_finished:"
+    if finished then m.top.command = ""
+    if item.duration_ms = invalid and not finished then return
+    if not finished and AstrolabeCurrentPlayback().elapsedMs < item.duration_ms then return
     nextIndex = m.program.playback.current_index + 1
     if nextIndex >= m.program.items.Count()
         if m.program.playback.cycle = "loop"
             nextIndex = 0
         else if m.program.playback.cycle = "blank_at_end"
-            AstrolabePublish({ kind: "message", title: "Program complete", body: "Astrolabe is waiting for a newer assigned program." })
+            AstrolabePublish({ kind: "message", title: "Program complete", body: "" })
             return
         else if m.program.playback.cycle = "poll_at_end"
             AstrolabeRetireStage(m.stage)
@@ -605,7 +661,7 @@ sub AstrolabeHandleProgramResponse(response as dynamic)
         end if
         staged = AstrolabeStageProgram(body.program)
         if staged = invalid
-            AstrolabePublish({ kind: "message", title: "Program refused", body: "The assigned program or one of its assets failed verification." })
+            AstrolabePublish({ kind: "message", title: "Program refused", body: "Failed verification." })
             return
         end if
         previous = m.stage
@@ -637,7 +693,7 @@ sub AstrolabeHandleProgramResponse(response as dynamic)
         m.stage = {}
         m.challenge = invalid
         m.credential.mode = "revoked"
-        AstrolabePublish({ kind: "message", title: "This display was revoked", body: "Staged content has been cleared." })
+        AstrolabePublish({ kind: "message", title: "Screen revoked", body: "" })
     else if body.kind = "re_pair"
         if not AstrolabeExactFields(body, ["kind"]) then return
         AstrolabeRetireStage(m.stage)
@@ -645,7 +701,7 @@ sub AstrolabeHandleProgramResponse(response as dynamic)
         m.credential = invalid
         m.program = invalid
         m.stage = {}
-        AstrolabePublish({ kind: "message", title: "Pairing is required again", body: "Coordinator trust or receiver identity changed." })
+        AstrolabePublish({ kind: "message", title: "Pairing required again", body: "Trust or identity changed." })
     end if
 end sub
 
@@ -750,7 +806,7 @@ sub AstrolabeRun()
     m.transport = "connecting"
     bootstrap = AstrolabeReceiverBootstrap()
     if bootstrap = invalid
-        AstrolabePublish({ kind: "message", title: "Receiver setup refused", body: "The bundled coordinator bootstrap is invalid." })
+        AstrolabePublish({ kind: "message", title: "Setup refused", body: "Bootstrap is invalid." })
         return
     end if
     m.origin = bootstrap.origin
@@ -773,12 +829,12 @@ sub AstrolabeRun()
     m.lastHealth.Mark()
     AstrolabePublish({ kind: "booting" })
     if not AstrolabeConformanceCheck()
-        AstrolabePublish({ kind: "message", title: "Protocol self-check failed", body: "This package cannot reproduce Astrolabe Display protocol major 1." })
+        AstrolabePublish({ kind: "message", title: "Self-check failed", body: "" })
         return
     end if
     m.credential = AstrolabeLoadCredential()
     if m.credential <> invalid and m.credential.origin <> m.origin
-        AstrolabePublish({ kind: "message", title: "Coordinator changed", body: "Stored receiver identity belongs to a different origin." })
+        AstrolabePublish({ kind: "message", title: "Coordinator changed", body: "Stored identity belongs to another origin." })
         return
     end if
     if m.credential = invalid
@@ -791,5 +847,9 @@ sub AstrolabeRun()
     else if m.credential.mode = "enrolling"
         AstrolabeFinishEnrollment()
     end if
-    if m.credential.mode = "paired" then AstrolabeProgramLoop()
+    if m.credential.mode = "paired"
+        ' Enrolled, program not yet asked for: nothing to state but the chip.
+        AstrolabePublish({ kind: "message", title: "", body: "" })
+        AstrolabeProgramLoop()
+    end if
 end sub

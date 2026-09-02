@@ -43,12 +43,15 @@ test("receiver uses only closed authenticated coordinator routes", async () => {
   assert.doesNotMatch(task, /\/world|\/space|generic[^\n]+rpc|demo/i);
 });
 
-test("decoded frame remains hidden until dimensions match", async () => {
+test("decoded frame remains hidden until dimensions match, then is revealed", async () => {
   const scene = await read("components/AstrolabeScene.brs");
-  assert.match(scene, /loadStatus = "ready"/);
-  assert.match(scene, /bitmapWidth = m\.expectedWidth/);
-  assert.match(scene, /bitmapHeight = m\.expectedHeight/);
-  assert.match(scene, /m\.frame\.visible = true/);
+  assert.match(scene, /poster\.loadStatus = "ready"/);
+  assert.match(scene, /bitmapWidth = expectedWidth/);
+  assert.match(scene, /bitmapHeight = expectedHeight/);
+  // A verified still is brought to glass only through the reveal, which makes
+  // exactly one poster visible; a mismatch takes the refusal branch instead.
+  assert.match(scene, /AstrolabeRevealFrame\(index\)/);
+  assert.match(scene, /m\.posters\[index\]\.visible = true/);
 });
 
 test("Roku stages assignment-bound HLS and hands it to Video", async () => {

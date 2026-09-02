@@ -8,8 +8,10 @@ license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [dependencies]
+# Glyph rasterising for the frames receivers show: the console's face, set
+# with real metrics, bundled from ../fonts.
+ab_glyph = "0.2"
 anyhow = "1"
-font8x8 = "0.3.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 jiff = "0.2.35"
 mechanics = { path = "../../crates/mechanics" }

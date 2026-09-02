@@ -32,7 +32,10 @@ use crate::plane::stream_kind;
 use crate::poison::LockRecovering;
 
 /// This generation of the lait-owned media message vocabulary.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// 2: a frame header carries its composition offset, so a stream with
+/// B-frames travels in decode order and is presented in its own.
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Default cap offered by a publisher: a late join never waits longer for a keyframe.
 pub const DEFAULT_MAX_GROUP_DURATION_MS: u32 = 2_000;
 /// Default end-to-end delivery budget advertised by a Live session.
@@ -489,11 +492,17 @@ impl GroupHeader {
 /// WebCodecs-shaped metadata preceding one raw encoded access unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameHeader {
+    /// Decode time, in `timescale` units. Frames travel in decode order.
     pub timestamp: i64,
     pub duration: Option<u64>,
     pub timescale: u32,
     pub kind: FrameKind,
     pub payload_len: u32,
+    /// Presentation time minus decode time, in `timescale` units: zero for a
+    /// stream presented in the order it decodes, positive for a frame that
+    /// waits behind the B-frames that reference it. Packagers write it as
+    /// the sample's composition offset; nothing else reads it.
+    pub composition_offset: i32,
 }
 
 impl FrameHeader {
@@ -1932,6 +1941,7 @@ impl Session {
             timescale: CATALOG_TIMESCALE,
             kind: FrameKind::Key,
             payload_len: u32::try_from(payload.len()).map_err(|_| Invalid::TooLarge)?,
+            composition_offset: 0,
         };
         let sequence = header.group_sequence;
         let priority = i32::try_from(sequence).unwrap_or(i32::MAX);
@@ -2944,6 +2954,7 @@ mod tests {
                     timescale: CATALOG_TIMESCALE,
                     kind: FrameKind::Key,
                     payload_len: u32::try_from(payload.len()).expect("bounded"),
+                    composition_offset: 0,
                 },
                 payload,
             }],
@@ -3073,8 +3084,10 @@ mod tests {
         }
     }
 
+    /// Generation two: the frame header grew a composition offset, one
+    /// trailing varint, and the setup line says so.
     #[test]
-    fn generation_one_headers_have_frozen_encodings() {
+    fn generation_two_headers_have_frozen_encodings() {
         let setup = Control::Setup(Setup {
             protocol_version: PROTOCOL_VERSION,
             max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
@@ -3089,15 +3102,16 @@ mod tests {
             timescale: 90_000,
             kind: FrameKind::Key,
             payload_len: 15,
+            composition_offset: 0,
         }
         .encode()
         .expect("frame");
-        assert_eq!(hex(&setup), "0101d00fb817");
+        assert_eq!(hex(&setup), "0102d00fb817");
         assert_eq!(
             hex(&group),
             "070b73637265656e2f6d61696e002a80897a90bf05d00f"
         );
-        assert_eq!(hex(&frame), "a0fe0a01b81790bf05000f");
+        assert_eq!(hex(&frame), "a0fe0a01b81790bf05000f00");
     }
 
     #[test]
@@ -3496,6 +3510,7 @@ mod tests {
             timescale: 90_000,
             kind: FrameKind::Delta,
             payload_len: 1,
+            composition_offset: 0,
         };
         assert_eq!(
             validate_timestamp(Some(0), Some(170_000), &frame, 2_000),
@@ -3779,6 +3794,7 @@ mod tests {
                     timescale: 90_000,
                     kind: FrameKind::Key,
                     payload_len: 3,
+                    composition_offset: 0,
                 },
                 payload: b"key".to_vec(),
             },
@@ -3789,6 +3805,7 @@ mod tests {
                     timescale: 90_000,
                     kind: FrameKind::Delta,
                     payload_len: 5,
+                    composition_offset: 0,
                 },
                 payload: b"delta".to_vec(),
             },
@@ -4096,6 +4113,7 @@ mod tests {
                                 timescale: 90_000,
                                 kind: FrameKind::Key,
                                 payload_len: u32::try_from(payload.len()).expect("small"),
+                                composition_offset: 0,
                             },
                             payload,
                         )
@@ -4153,6 +4171,7 @@ mod tests {
                             timescale: 90_000,
                             kind: FrameKind::Key,
                             payload_len: 17,
+                            composition_offset: 0,
                         },
                         payload: b"fetched-media-key".to_vec(),
                     }];

@@ -41,6 +41,8 @@ export class ConfirmRequired extends Error {
 interface SpaceRow {
   id: string;
   name?: string;
+  /** `"up" | "idle" | "missing" | "unknown"` — `missing` means the registered store no longer exists. */
+  status?: string;
 }
 
 interface SpacesReply {
@@ -89,8 +91,20 @@ export function space(): Promise<string> {
       const reply = (await r.json()) as SpacesReply;
       // The head restating a fact about itself; the page has no other way to learn it.
       served = reply.world ?? DECLARED_MOUNT;
-      const first = reply.spaces[0];
-      if (!first) throw new LaitError('this head serves no Space yet', 404, 'not_found');
+      // Newest-first, but a row whose store is gone cannot answer anything:
+      // routing to it turns every call into an unexplained refusal. `missing`
+      // is the one status that is a measurement of absence rather than a
+      // probe that did not complete, so it is the one worth skipping on.
+      const first = reply.spaces.find((row) => row.status !== 'missing');
+      if (!first) {
+        throw new LaitError(
+          reply.spaces.length
+            ? 'every Space this head knows points at a store that is gone'
+            : 'this head serves no Space yet',
+          404,
+          'not_found',
+        );
+      }
       selectedSpace = first.id;
       return selectedSpace;
     })().catch((err: unknown) => {

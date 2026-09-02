@@ -21,7 +21,12 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MotionConfig, motion } from "motion/react";
+import {
+  MotionConfig,
+  motion,
+  useMotionValue,
+  useTransform,
+} from "motion/react";
 import { CalendarDays, MapPin, Radio, Tv, X } from "lucide-react";
 import { ComboSurface, haptic, useToast, type ChoiceItem } from "@/ds";
 import { useCitySearch } from "@/program-editor/fields/CityPicker";
@@ -35,6 +40,29 @@ type ChinKey = "tune" | "place" | "broadcast" | "schedule";
 const SPRING = { type: "spring", duration: 0.56, bounce: 0.2 } as const;
 
 const CLOSED_H = 60;
+const CORNER_R = 26;
+const FILLET_H = 18;
+const FILLET_SAFE_H = CLOSED_H + CORNER_R + FILLET_H;
+
+/**
+ * Share a short rise between the crown and its fillet. Their vertical radii
+ * always add up to the exposed rise, so the two curves meet without either
+ * disappearing from the entrance or crossing through the other.
+ */
+export function shapeAt(height: number): { crownY: number; filletY: number } {
+  const rise = Math.max(0, Math.min(CORNER_R + FILLET_H, height - CLOSED_H));
+  const scale = rise / (CORNER_R + FILLET_H);
+  return { crownY: CORNER_R * scale, filletY: FILLET_H * scale };
+}
+
+/** The shadow grows out of the hill's real rise, never a parallel clock. */
+export function shadeOpacityAt(height: number): number {
+  return progress(height, CLOSED_H, FILLET_SAFE_H);
+}
+
+function progress(value: number, from: number, to: number): number {
+  return Math.max(0, Math.min(1, (value - from) / (to - from)));
+}
 
 export function ScreenChin({
   screen,
@@ -59,6 +87,35 @@ export function ScreenChin({
   const [placeQuery, setPlaceQuery] = useState("");
   const morph = useRef<HTMLDivElement>(null);
   const view = useRef<HTMLDivElement>(null);
+  // Motion owns this value through the morph's `animate` prop. The shade and
+  // fillets subscribe to the value Motion actually paints, rather than a
+  // parallel spring or the destination height.
+  const hillHeight = useMotionValue(CLOSED_H);
+  const dragY = useMotionValue(0);
+
+  // Height and drag both change how much hill is actually exposed above the
+  // chin. Every dependent piece reads this value instead of running a second
+  // animation that can drift away from the spring.
+  const exposedHeight = useTransform(
+    [hillHeight, dragY],
+    ([height, y]) => Number(height) - Math.max(0, Number(y)),
+  );
+  const shadeHeight = useTransform(exposedHeight, (height) =>
+    Math.max(CLOSED_H, height),
+  );
+  const shadeOpacity = useTransform(exposedHeight, shadeOpacityAt);
+  const crownRadius = useTransform(exposedHeight, (height) => {
+    const { crownY } = shapeAt(height);
+    return `${CORNER_R}px ${crownY}px`;
+  });
+  const filletHeight = useTransform(exposedHeight, (height) => shapeAt(height).filletY);
+  const filletTop = useTransform(filletHeight, (height) => -height);
+  const beforeFillet = useTransform(filletHeight, (height) =>
+    filletBackground("top left", height),
+  );
+  const afterFillet = useTransform(filletHeight, (height) =>
+    filletBackground("top right", height),
+  );
 
   const press = (key: ChinKey) => setOpen(open === key ? null : key);
 
@@ -80,12 +137,6 @@ export function ScreenChin({
 
   // The view's measurement includes its own vertical breathing.
   const hillH = expanded ? Math.max(CLOSED_H, contentH) : CLOSED_H;
-
-  // The shade mirrors the hill, so the cast shadow sits at the edge the
-  // content actually reaches.
-  useEffect(() => {
-    morph.current?.parentElement?.style.setProperty("--chin-hill-h", `${hillH}px`);
-  }, [hillH]);
 
   // The island collapses the way it appeared: a press outside it, or Escape.
   useEffect(() => {
@@ -117,6 +168,12 @@ export function ScreenChin({
         <motion.div
           ref={morph}
           className="ds-chin-morph"
+          style={{
+            height: hillHeight,
+            y: dragY,
+            borderTopLeftRadius: crownRadius,
+            borderTopRightRadius: crownRadius,
+          }}
           initial={false}
           animate={{ height: hillH }}
           transition={SPRING}
@@ -178,7 +235,21 @@ export function ScreenChin({
             <div hidden={open !== "schedule"}>{schedule}</div>
           </motion.div>
         </motion.div>
-        <div className="ds-chin-shade" aria-hidden />
+        <motion.div
+          className="ds-chin-shade"
+          style={{ height: shadeHeight, opacity: shadeOpacity }}
+          aria-hidden
+        />
+        <motion.span
+          className="ds-chin-fillet is-before"
+          style={{ height: filletHeight, top: filletTop, background: beforeFillet }}
+          aria-hidden
+        />
+        <motion.span
+          className="ds-chin-fillet is-after"
+          style={{ height: filletHeight, top: filletTop, background: afterFillet }}
+          aria-hidden
+        />
         {/* The foundation: the flat chin the hill rises from behind. Keys at
             rest; the anchored constants when a panel is up, landing last. */}
         <div className="ds-chin-band">
@@ -240,6 +311,13 @@ export function ScreenChin({
       </div>
     </MotionConfig>
   );
+}
+
+function filletBackground(at: "top left" | "top right", height: number): string {
+  // A zero-height element paints nothing, but a non-zero gradient radius keeps
+  // the declaration valid for the first frame in which Motion grows it.
+  const verticalRadius = Math.max(0.01, height);
+  return `radial-gradient(ellipse 100% ${verticalRadius}px at ${at}, transparent calc(100% - 0.5px), var(--ds-surface) 100%)`;
 }
 
 function ChinButton({

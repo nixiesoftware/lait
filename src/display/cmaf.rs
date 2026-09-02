@@ -323,6 +323,7 @@ impl CmafTrackPackager {
                 duration,
                 size: frame.header.payload_len,
                 kind: frame.header.kind,
+                composition_offset: frame.header.composition_offset,
             });
             expected_timestamp = Some(
                 timestamp
@@ -354,6 +355,7 @@ struct Sample {
     duration: u32,
     size: u32,
     kind: FrameKind,
+    composition_offset: i32,
 }
 
 fn codec_sample_entry(track: &CatalogTrack) -> Result<Codec, Failure> {
@@ -563,7 +565,8 @@ fn media_segment(
             duration: Some(sample.duration),
             size: Some(sample.size),
             flags: Some(sample_flags(kind, sample.kind)),
-            cts: None,
+            // Written as a version 1 run, so a negative offset is legal too.
+            cts: Some(sample.composition_offset),
         })
         .collect();
     let mut moof = Moof {
@@ -754,6 +757,7 @@ mod tests {
                 timescale,
                 kind,
                 payload_len: u32::try_from(payload.len()).expect("bounded fixture"),
+                composition_offset: 0,
             },
             payload: payload.to_vec(),
         }

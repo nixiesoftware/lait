@@ -1,49 +1,153 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The television is the signage system's one dark object: a screen panel.
+  Tokens are the console's night set with the panel as the field.
+
+    field   #171A1D   panel-screen        surface #1D2126
+    ink     #F2F3F4   muted #A2A5A8       faint   #787B7E
+    accent  #3B96F2   accent-ink #06121F
+    positive #45D69E  miss #B8862B        alarm   #D8472E
+
+  One family, two weights: Inter Regular and Medium (OFL, fonts/LICENSE-Inter.txt),
+  the console's own fallback face. Sized for a room, not a desk: title 96,
+  words 72, body 48, chip 40, label 32.
+
+  Every node states a fact. Nothing restates what another node shows.
+  Uppercase is for the pairing phrase only. Chips are pills; state is a
+  dot in a pill. Chrome keeps to the 5% action-safe margin (96 x 54).
+-->
 <component name="AstrolabeScene" extends="Scene">
   <children>
-    <Rectangle width="1920" height="1080" color="0x0B1016FF"/>
-    <Poster id="programFrame" width="1920" height="1080" loadWidth="1920" loadHeight="1080" loadDisplayMode="scaleToFit" visible="false"/>
+    <Rectangle width="1920" height="1080" color="0xFF00FFFF"/>
+    <!-- The player sits beneath the still. A Video node paints black while it
+         buffers and again the moment it stops; with the still above it, the
+         still covers both edges and the cut lands on a picture each way. -->
     <Video id="programMedia" width="1920" height="1080" visible="false" enableUI="false"/>
-    <Rectangle id="headerBackground" width="1920" height="116" color="0x05080CF2"/>
-    <Poster uri="pkg:/images/icon.png" width="58" height="58" translation="[54,29]"/>
-    <Label text="Astrolabe" translation="[132,25]" width="500" height="45" color="0xF7F4EDFF">
-      <Font role="font" uri="font:MediumSystemFont" size="32"/>
-    </Label>
-    <Label text="Nixie Solutions LLC" translation="[132,67]" width="500" height="30" color="0xAEB8C4FF">
-      <Font role="font" uri="font:SmallSystemFont" size="19"/>
-    </Label>
-    <Label id="transportState" text="Connecting" translation="[1430,40]" width="190" height="42" horizAlign="center" color="0xFFD18CFF"/>
-    <Label id="sourceState" text="No source" translation="[1650,40]" width="190" height="42" horizAlign="center" color="0xC5CED8FF"/>
+    <!-- Two stills, double-buffered above the player. One shows what is on
+         glass; the other decodes the next behind it, and they swap only once
+         the next is verified — so nothing on the graphics plane is ever
+         cleared before its replacement is ready, and the video plane never
+         shows through as a black cut. Decoded at native size (noScale), so
+         bitmapWidth/Height are the dimensions the authenticated metadata is
+         checked against; each is scaled to the panel only after that passes. -->
+    <Poster id="frameA" loadDisplayMode="noScale" visible="false"/>
+    <Poster id="frameB" loadDisplayMode="noScale" visible="false"/>
+    <!-- A signage panel is never idle. Roku has no switch for the OS screensaver
+         on a still channel, so a hidden player loops two seconds of silence with
+         the suppression flag set, and yields whenever real media plays. -->
+    <Video id="keepAwake" visible="false" enableUI="false" disableScreenSaver="true" loop="true"/>
 
-    <Group id="statePanel" translation="[250,190]">
-      <Rectangle width="1420" height="760" color="0x0F161EF5"/>
-      <Label id="eyebrow" translation="[80,70]" width="1260" height="40" horizAlign="center" color="0x7FD7C6FF"/>
-      <Label id="title" translation="[80,125]" width="1260" height="105" horizAlign="center" vertAlign="center" wrap="true" color="0xF7F4EDFF">
-        <Font role="font" uri="font:LargeSystemFont" size="62"/>
+    <!-- Chrome: the mark, the name, one status chip. Retires while a program is on glass. -->
+    <Group id="chrome">
+      <Poster uri="pkg:/images/icon.png" width="56" height="56" translation="[96,54]"/>
+      <Label text="Astrolabe" translation="[168,54]" width="500" height="56" vertAlign="center" color="0xF2F3F4FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="44"/>
       </Label>
-      <Label id="body" translation="[180,255]" width="1060" height="115" horizAlign="center" vertAlign="center" wrap="true" color="0xBCC5CFFF">
-        <Font role="font" uri="font:MediumSystemFont" size="28"/>
-      </Label>
-      <Group id="phraseGroup" translation="[175,390]" visible="false">
-        <Label id="phrase0" translation="[0,0]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
-        <Label id="phrase1" translation="[370,0]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
-        <Label id="phrase2" translation="[740,0]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
-        <Label id="phrase3" translation="[0,100]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
-        <Label id="phrase4" translation="[370,100]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
-        <Label id="phrase5" translation="[740,100]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+      <Group id="statusChip" translation="[1424,44]">
+        <Poster id="statusPill" uri="pkg:/images/pill.9.png" width="400" height="76" blendColor="0x1D2126FF"/>
+        <Poster id="statusDot" uri="pkg:/images/dot.png" width="20" height="20" translation="[28,28]" blendColor="0x787B7EFF"/>
+        <Label id="statusLabel" text="Connecting…" translation="[64,0]" height="76" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="40"/>
+        </Label>
       </Group>
-      <Label id="fingerprint" translation="[120,590]" width="1180" height="50" horizAlign="center" color="0xEDF2F5FF">
-        <Font role="font" uri="font:SmallSystemFont" size="21"/>
+    </Group>
+
+    <!-- The stage: the one fact a screen with nothing to show draws, center-glass. -->
+    <Group id="stage">
+      <Label id="title" translation="[160,170]" width="1600" height="130" horizAlign="center" vertAlign="top" wrap="true" color="0xF2F3F4FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="96"/>
       </Label>
-      <Label id="action" translation="[260,660]" width="900" height="48" horizAlign="center" color="0x8EE2D1FF">
-        <Font role="font" uri="font:MediumSystemFont" size="25"/>
+      <Label id="body" translation="[310,300]" width="1300" height="140" horizAlign="center" vertAlign="top" wrap="true" color="0xA2A5A8FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="48"/>
+      </Label>
+
+      <!-- Six words, uppercase: the one exception. -->
+      <Group id="phraseGroup" translation="[148,330]" visible="false">
+        <Poster uri="pkg:/images/card.9.png" width="520" height="150" translation="[0,0]" blendColor="0x1D2126FF"/>
+        <Poster uri="pkg:/images/card.9.png" width="520" height="150" translation="[552,0]" blendColor="0x1D2126FF"/>
+        <Poster uri="pkg:/images/card.9.png" width="520" height="150" translation="[1104,0]" blendColor="0x1D2126FF"/>
+        <Poster uri="pkg:/images/card.9.png" width="520" height="150" translation="[0,174]" blendColor="0x1D2126FF"/>
+        <Poster uri="pkg:/images/card.9.png" width="520" height="150" translation="[552,174]" blendColor="0x1D2126FF"/>
+        <Poster uri="pkg:/images/card.9.png" width="520" height="150" translation="[1104,174]" blendColor="0x1D2126FF"/>
+        <Label id="phrase0" translation="[0,0]" width="520" height="150" horizAlign="center" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="72"/>
+        </Label>
+        <Label id="phrase1" translation="[552,0]" width="520" height="150" horizAlign="center" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="72"/>
+        </Label>
+        <Label id="phrase2" translation="[1104,0]" width="520" height="150" horizAlign="center" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="72"/>
+        </Label>
+        <Label id="phrase3" translation="[0,174]" width="520" height="150" horizAlign="center" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="72"/>
+        </Label>
+        <Label id="phrase4" translation="[552,174]" width="520" height="150" horizAlign="center" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="72"/>
+        </Label>
+        <Label id="phrase5" translation="[1104,174]" width="520" height="150" horizAlign="center" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="72"/>
+        </Label>
+      </Group>
+
+      <!-- A readout: label over value. -->
+      <Group id="readout" translation="[160,700]" visible="false">
+        <Label id="readoutLabel" translation="[0,0]" width="1600" height="40" horizAlign="center" vertAlign="center" color="0x787B7EFF">
+          <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="32"/>
+        </Label>
+        <Label id="readoutValue" translation="[0,44]" width="1600" height="120" horizAlign="center" vertAlign="top" wrap="true" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="44"/>
+        </Label>
+      </Group>
+
+      <!-- The one act on this surface wears the accent and names its key. -->
+      <Group id="action" translation="[760,860]" visible="false">
+        <Poster id="actionPill" uri="pkg:/images/pill.9.png" width="400" height="80" blendColor="0x3B96F2FF"/>
+        <Group id="actionKey" translation="[16,16]">
+          <Poster uri="pkg:/images/pill.9.png" width="84" height="48" blendColor="0x06121FFF" opacity="0.18"/>
+          <Label text="OK" translation="[0,0]" width="84" height="48" horizAlign="center" vertAlign="center" color="0x06121FFF">
+            <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="32"/>
+          </Label>
+        </Group>
+        <Label id="actionLabel" translation="[116,0]" height="80" vertAlign="center" color="0x06121FFF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="40"/>
+        </Label>
+      </Group>
+    </Group>
+
+    <!-- Info: the receiver's facts, in a card at the panel's edge. -->
+    <Group id="details" translation="[1224,800]" visible="false">
+      <Poster uri="pkg:/images/card.9.png" width="600" height="226" blendColor="0x1D2126FF"/>
+      <Label text="Source" translation="[32,28]" width="170" height="52" vertAlign="center" color="0x787B7EFF">
+        <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="32"/>
+      </Label>
+      <Label id="detailSource" translation="[208,28]" width="360" height="52" vertAlign="center" color="0xF2F3F4FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="40"/>
+      </Label>
+      <Label text="Delivery" translation="[32,88]" width="170" height="52" vertAlign="center" color="0x787B7EFF">
+        <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="32"/>
+      </Label>
+      <Label id="detailDelivery" translation="[208,88]" width="360" height="52" vertAlign="center" color="0xF2F3F4FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="40"/>
+      </Label>
+      <Label text="Protocol" translation="[32,148]" width="170" height="52" vertAlign="center" color="0x787B7EFF">
+        <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="32"/>
+      </Label>
+      <Label text="Astrolabe Display 1" translation="[208,148]" width="360" height="52" vertAlign="center" color="0xF2F3F4FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="40"/>
       </Label>
     </Group>
 
-    <Group id="details" translation="[1390,790]" visible="false">
-      <Rectangle width="470" height="220" color="0x060A0FF2"/>
-      <Label id="detailsText" translation="[28,28]" width="414" height="165" wrap="true" color="0xDCE4EBFF"/>
-    </Group>
+    <!-- The player is stopped a beat after it has been covered, off the cut. -->
+    <Timer id="mediaStop" duration="4" repeat="false"/>
+    <!-- The outgoing still is hidden a frame after the incoming one is shown,
+         so the swap never leaves a tick with neither on the graphics plane. -->
+    <Timer id="posterRetire" duration="0.2" repeat="false"/>
+
+    <!-- What is on glass right now breathes. It is the only motion. -->
+    <Animation id="breathe" duration="2.4" repeat="true" easeFunction="inOutQuadratic">
+      <FloatFieldInterpolator key="[0.0, 0.5, 1.0]" keyValue="[1.0, 0.35, 1.0]" fieldToInterp="statusDot.opacity"/>
+    </Animation>
+
     <AstrolabeReceiverTask id="receiverTask"/>
   </children>
   <script type="text/brightscript" uri="pkg:/components/AstrolabeScene.brs"/>

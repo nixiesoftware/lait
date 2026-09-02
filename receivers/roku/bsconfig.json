@@ -5,7 +5,9 @@
     "components/**/*",
     "manifest",
     "receiver-bootstrap.json",
-    "images/**/*"
+    "images/**/*",
+    "fonts/**/*",
+    "media/**/*"
   ],
   "createPackage": false,
   "retainStagingDir": false
