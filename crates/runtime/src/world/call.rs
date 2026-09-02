@@ -252,24 +252,41 @@ pub enum Code {
 }
 
 /// A failure to validate or host an application call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub code: Code,
+    diagnostic: String,
 }
 
 impl Failure {
-    pub fn new(code: Code, _diagnostic: impl Into<String>) -> Self {
-        Self { code }
+    pub fn new(code: Code, diagnostic: impl Into<String>) -> Self {
+        Self {
+            code,
+            diagnostic: diagnostic.into(),
+        }
     }
 
-    pub fn message(self) -> &'static str {
-        match self.code {
+    /// The stable label of a failure class, for a diagnostic that says nothing.
+    fn label(code: Code) -> &'static str {
+        match code {
             Code::InvalidCall => "invalid call",
             Code::UnsupportedOperation => "unsupported operation",
             Code::UnsupportedVersion => "unsupported version",
             Code::Denied => "denied",
             Code::Unavailable => "unavailable",
             Code::Internal => "internal failure",
+        }
+    }
+
+    /// The diagnostic the raising site wrote, or the class label when it wrote
+    /// none. Every raise site names what actually went wrong — an address
+    /// mismatch, a wrong World, an oversized payload — and collapsing them all
+    /// to the class label is what made every refusal read as `invalid call`.
+    pub fn message(&self) -> &str {
+        if self.diagnostic.is_empty() {
+            Self::label(self.code)
+        } else {
+            &self.diagnostic
         }
     }
 }
@@ -294,11 +311,13 @@ impl<'de> Deserialize<'de> for Failure {
         #[derive(Deserialize)]
         struct Wire {
             code: Code,
-            #[allow(dead_code)]
             message: String,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Ok(Self { code: wire.code })
+        Ok(Self {
+            code: wire.code,
+            diagnostic: wire.message,
+        })
     }
 }
 
