@@ -45,6 +45,9 @@ fn content_type(path: &str) -> &'static str {
         Some("webp") => "image/webp",
         Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
+        // A browser-native World's runner module is served same-origin as an
+        // asset; the streaming compiler needs the exact type or it declines.
+        Some("wasm") => "application/wasm",
         Some("map") => "application/json",
         _ => "application/octet-stream",
     }
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(content_type("app.js"), "text/javascript; charset=utf-8");
         assert_eq!(content_type("index.css"), "text/css; charset=utf-8");
         assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
+        assert_eq!(content_type("runner.wasm"), "application/wasm");
         // Unknown extensions must not be guessed into something executable.
         assert_eq!(content_type("weird.xyz"), "application/octet-stream");
         assert_eq!(content_type("noext"), "application/octet-stream");

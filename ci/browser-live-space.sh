@@ -221,3 +221,19 @@ touch "$root/wasm-probe/tests/dispatch.rs"
         --features probe-dispatch
 )
 echo "browser-live-space: a product world RPC crossed the dispatch seam."
+
+# --- the shippable packaging boundary: boot() + the handle ------------------
+# One `boot` call stands the whole engine up and returns the `#[wasm_bindgen]`
+# handle the viewer's Worker holds; it then answers frames as JSON strings and
+# installs a live re-pull. The settling proof that the engine PACKAGES — a
+# non-Send handle survives a return to JS and a later call back in.
+echo "== the packaging boundary boots the engine and answers a frame in the tab"
+touch "$root/wasm-probe/tests/handle.rs"
+(
+    cd "$root/wasm-probe"
+    LIVE_RELAY_URL="$relay" LIVE_SEED_HEX="$SEED_HEX" LIVE_TICKET="$LINK" \
+        ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --test handle \
+        --features probe-dispatch
+)
+echo "browser-live-space: the packaging boundary booted the engine in the tab."

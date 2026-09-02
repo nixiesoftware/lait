@@ -67,7 +67,7 @@ probe-engine = ["dep:runtime", "dep:world-sdk", "dep:lait-issues", "probe-runner
 # ClientAdapter/ClientHost seam (RemoteClient, never a named World), and the
 # control plane answers through the honest browser vocabulary. Needs the
 # pulled Space (probe-contact) to compose over.
-probe-dispatch = ["probe-engine", "probe-contact", "dep:world-interface", "dep:browser-control", "dep:futures-lite", "dep:serde_json", "dep:serde"]
+probe-dispatch = ["probe-engine", "probe-contact", "dep:world-interface", "dep:browser-control", "dep:futures-lite", "dep:serde_json", "dep:serde", "dep:wasm-bindgen-futures"]
 
 [dependencies]
 mechanics = { path = "../crates/mechanics", optional = true }
@@ -105,6 +105,9 @@ getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 postcard = { version = "1", features = ["use-std"] }
 wasm-bindgen = "0.2"
+# Async `#[wasm_bindgen]` exports (boot, repull) compile to JS Promises through
+# this glue; only the dispatch packaging surface needs it.
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
