@@ -82,6 +82,10 @@ fn start_and_try_carry_semantic_intent_not_ambient_coordinates() {
     let text = std::fs::read_to_string(path).expect("read Exec contract");
     let file = syn::parse_file(&text).expect("parse Exec contract");
 
+    // `target` is the directed-Start coordinate (run-event generation 2): the
+    // one Station a Start names to run it. It is a Station address, not a
+    // World's semantic intent — World-agnostic infrastructure — so it belongs
+    // beside `service`/`resources` and not inside `input`.
     assert_eq!(
         public_struct_fields(&file, "Start"),
         [
@@ -94,8 +98,11 @@ fn start_and_try_carry_semantic_intent_not_ambient_coordinates() {
             "resources",
             "limits",
             "queries",
+            "target",
         ]
     );
+    // `fence` is gone: the signed Leased event is the Attempt identity now, so
+    // the Fence counter it replaced is no longer a field.
     assert_eq!(
         public_struct_fields(&file, "Try"),
         [
@@ -107,7 +114,6 @@ fn start_and_try_carry_semantic_intent_not_ambient_coordinates() {
             "limits",
             "lease",
             "checkpoint",
-            "fence",
         ]
     );
 }
