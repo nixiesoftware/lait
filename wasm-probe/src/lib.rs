@@ -10,3 +10,6 @@
 //! OPFS-shaped backend behind the same seams before any of this holds data.
 //! What runs today, proven by the smoke tests: identity minting over JS
 //! entropy, and fabric's fork → concurrent edit → exchange → converge cycle.
+
+#[cfg(all(target_arch = "wasm32", feature = "probe-runner"))]
+pub mod runner;

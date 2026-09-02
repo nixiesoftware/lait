@@ -51,9 +51,17 @@ probe-replica = ["dep:replica"]
 probe-comms = ["dep:comms", "probe-mechanics"]
 # The Contact crossing: protocol + coordinates + the portable initiator.
 probe-contact = ["dep:contact", "probe-comms", "probe-replica"]
+# The runner crossing: a World runner module driven from the engine module in
+# a browser, through the same four-function ABI the native wasmtime host uses —
+# but with the browser's own WebAssembly and JS glue as the host, since
+# wasmtime does not target wasm32. Proves the ABI works when the host is the
+# browser, not a JIT.
+probe-runner = ["dep:world-runner", "dep:anyhow"]
 
 [dependencies]
 mechanics = { path = "../crates/mechanics", optional = true }
+world-runner = { path = "../crates/world-runner", optional = true }
+anyhow = { version = "1", optional = true }
 journal = { path = "../crates/journal", optional = true, features = ["opfs"] }
 fabric = { path = "../crates/fabric", optional = true }
 replica = { path = "../crates/replica", optional = true }
@@ -78,3 +86,7 @@ wasm-bindgen = "0.2"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# The runner test names the ABI types directly. It rides the `probe-runner`
+# optional dep when that feature is on; declaring it here keeps the test
+# resolving the crate by name.
+world-runner = { path = "../crates/world-runner" }

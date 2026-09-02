@@ -4947,6 +4947,7 @@ checksum = "33ff1c1b360982e93b6d8ea9c04836f71dba0817a16f91e229cf3a51bdd9d987"
 name = "wasm-probe"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "comms",
  "contact",
  "fabric",
@@ -4958,6 +4959,7 @@ dependencies = [
  "replica",
  "wasm-bindgen",
  "wasm-bindgen-test",
+ "world-runner",
 ]
 
 [[package]]
@@ -5289,6 +5291,21 @@ dependencies = [
  "thiserror 2.0.20",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "world-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "libc",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Does the engine reach the browser target? Five claims, checked in order:
+# Does the engine reach the browser target? Six claims, checked in order:
 #
 #   1. the store stack (mechanics, journal, fabric, replica) compiles for
 #      wasm32-unknown-unknown;
@@ -8,7 +8,9 @@
 #      converge — via wasm-pack's Node runner;
 #   4. the OPFS medium carries the store in a real headless Chrome worker;
 #   5. the World runner stack (runtime's guest carve, world-sdk, the Issues
-#      World and its runner binary) compiles for the same target.
+#      World and its runner binary) compiles for the same target;
+#   6. a World runner's four-function ABI RUNS in a real browser worker, with
+#      the browser's own WebAssembly as the host in place of wasmtime.
 #
 # Claims 2 and 5 need a C compiler that can emit wasm32 objects, because
 # iroh's TLS pulls `ring`, whose build compiles C. Apple clang has no wasm
@@ -87,4 +89,25 @@ if [ -n "$wasm_cc" ]; then
 else
     echo "wasm-probe: SKIPPED — no clang with a wasm backend found (see" >&2
     echo "wasm-probe: claim 2), so the runner-stack claim was not checked." >&2
+fi
+
+echo "== claim 6: a World runner ABI runs in a real browser, host = the browser"
+# The native wasmtime host proves the four-function ABI carries a request and a
+# host callback (claim 5's sibling, world-runner-wasm's proof test). This runs
+# the SAME proof-World in a headless-Chrome Worker, where the host that runs the
+# guest wasm is the browser's own WebAssembly and JS glue — no wasmtime. It is
+# the mechanism the in-browser engine uses to run a World runner. Needs a
+# wasm-capable clang (proof-world links world-runner, which does not pull ring,
+# but the probe crate's own graph might); guarded like claims 4/2.
+if ! command -v wasm-pack >/dev/null 2>&1; then
+    echo "wasm-probe: SKIPPED — wasm-pack is not installed (see claim 3)." >&2
+elif [ -z "${CHROME:-}" ] \
+    && ! command -v google-chrome >/dev/null 2>&1 \
+    && ! command -v chromium >/dev/null 2>&1 \
+    && [ ! -e "/Applications/Google Chrome.app" ]; then
+    echo "wasm-probe: SKIPPED — no Chrome found, so the browser-runner claim" >&2
+    echo "wasm-probe: was not checked. A skip is 'could not be asked', not a pass." >&2
+else
+    ${wasm_cc:+CC_wasm32_unknown_unknown="$wasm_cc"} \
+        wasm-pack test --headless --chrome --no-default-features --features probe-runner --test runner
 fi
