@@ -12,7 +12,11 @@
 #   6. a World runner's four-function ABI RUNS in a real browser worker, with
 #      the browser's own WebAssembly as the host in place of wasmtime;
 #   7. the REAL Issues runner (typst, CRDT — 39 MiB) instantiates under that
-#      browser WebAssembly: it compiles, fits, and its imports resolve.
+#      browser WebAssembly: it compiles, fits, and its imports resolve;
+#   8. a REAL Call crosses the REAL engine in a browser: the daemon's own
+#      Station/Session machinery (`runtime::browser`) docks and queries the
+#      Issues runner, whose semantic reads come back as context callbacks
+#      answered from a Worker-owned Replica.
 #
 # Claims 2 and 5 need a C compiler that can emit wasm32 objects, because
 # iroh's TLS pulls `ring`, whose build compiles C. Apple clang has no wasm
@@ -139,4 +143,28 @@ else
         --target wasm32-unknown-unknown -p lait-issues-runner
     CC_wasm32_unknown_unknown="$wasm_cc" ISSUES_RUNNER_WASM="$runner_wasm" \
         wasm-pack test --headless --chrome --no-default-features --features probe-runner --test issues_runner
+fi
+
+echo "== claim 8: a real Call crosses the real engine in a browser"
+# The whole read path, one Worker: `runtime::browser` composes the SAME
+# StationCore/Session/dock machinery the daemon runs (no parallel model) over
+# an empty in-memory Replica, registers the runner as its reviewed World, and
+# asks the real product question. Dock builds the publication with real
+# extract dispatches into the guest; the query dispatches into the guest; the
+# guest's semantic reads cross back as `context.read_body`/`context.find`
+# host callbacks answered by Runtime's Context from the Replica snapshot.
+# Reuses claim 7's runner build; guarded identically.
+if ! command -v wasm-pack >/dev/null 2>&1; then
+    echo "wasm-probe: SKIPPED — wasm-pack is not installed (see claim 3)." >&2
+elif [ -z "$wasm_cc" ]; then
+    echo "wasm-probe: SKIPPED — no wasm clang (see claim 2), so the engine" >&2
+    echo "wasm-probe: crossing was not checked." >&2
+elif [ -z "${CHROME:-}" ] \
+    && ! command -v google-chrome >/dev/null 2>&1 \
+    && ! command -v chromium >/dev/null 2>&1 \
+    && [ ! -e "/Applications/Google Chrome.app" ]; then
+    echo "wasm-probe: SKIPPED — no Chrome found, so the claim was not checked." >&2
+else
+    CC_wasm32_unknown_unknown="$wasm_cc" ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --no-default-features --features probe-engine --test call
 fi

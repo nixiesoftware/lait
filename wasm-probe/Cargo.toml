@@ -57,6 +57,11 @@ probe-contact = ["dep:contact", "probe-comms", "probe-replica"]
 # wasmtime does not target wasm32. Proves the ABI works when the host is the
 # browser, not a JIT.
 probe-runner = ["dep:world-runner", "dep:anyhow"]
+# The engine crossing: the daemon's own Station/Session machinery composed in
+# a browser (`runtime::browser`), querying a real World runner through the
+# runner crossing above. This is the whole read path — Session, publication,
+# Context, the `context.read_body` host callback — on the browser target.
+probe-engine = ["dep:runtime", "dep:world-sdk", "dep:lait-issues", "probe-runner", "probe-replica", "probe-journal", "probe-mechanics"]
 
 [dependencies]
 mechanics = { path = "../crates/mechanics", optional = true }
@@ -67,6 +72,12 @@ fabric = { path = "../crates/fabric", optional = true }
 replica = { path = "../crates/replica", optional = true }
 comms = { path = "../crates/comms", optional = true, default-features = false }
 contact = { path = "../crates/contact", optional = true, features = ["wire"] }
+runtime = { path = "../crates/runtime", optional = true }
+world-sdk = { path = "../crates/world-sdk", optional = true }
+# The query contract only — schema id, version, and the `IssueQuery` payload
+# grammar — so the engine test asks the real product question. The runner
+# module itself arrives as bytes, not as a dependency.
+lait-issues = { path = "../products/issues", optional = true }
 
 # The entropy door, opened toward JS.
 #
@@ -86,6 +97,7 @@ wasm-bindgen = "0.2"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+serde_json = "1"
 # The runner test names the ABI types directly. It rides the `probe-runner`
 # optional dep when that feature is on; declaring it here keeps the test
 # resolving the crate by name.

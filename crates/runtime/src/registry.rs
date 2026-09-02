@@ -257,6 +257,51 @@ impl Catalog {
     pub fn ids(&self) -> impl Iterator<Item = &WorldId> {
         self.worlds.keys()
     }
+
+    /// The registry's schemas as a Replica support declaration, so Convergence
+    /// can classify remote material as interpretable versus opaque. Exec truth
+    /// is Runtime-owned under each World, so the exec body schemas are
+    /// declared per World even though package composition forbids a World from
+    /// declaring or writing them itself. Every composition that opens a
+    /// Replica under this registry — the native Station and the browser one —
+    /// must declare the same set.
+    pub(crate) fn supported_schemas(&self) -> replica::body::SupportedSchemas {
+        fn model_of(mutation: &replica::body::MutationModel) -> u8 {
+            match mutation {
+                replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
+                replica::body::MutationModel::ImmutableAtomic => {
+                    replica::body::MUTATION_IMMUTABLE_ATOMIC
+                }
+                replica::body::MutationModel::Collaborative(_) => {
+                    replica::body::MUTATION_COLLABORATIVE
+                }
+            }
+        }
+        let mut supported = replica::body::SupportedSchemas::new();
+        for id in self.ids() {
+            for reg in self.descriptors(id) {
+                for schema in &reg.schemas {
+                    supported.declare(
+                        id.clone(),
+                        schema.id.clone(),
+                        schema.version,
+                        schema.encoding.clone(),
+                        model_of(&schema.mutation),
+                    );
+                }
+                for schema in crate::exec::body_schemas() {
+                    supported.declare(
+                        id.clone(),
+                        schema.id,
+                        schema.version,
+                        schema.encoding,
+                        model_of(&schema.mutation),
+                    );
+                }
+            }
+        }
+        supported
+    }
 }
 
 /// Accumulates World registrations, then validates and freezes them into an

@@ -43,7 +43,7 @@ use mechanics::{
 use crate::registry::{Builder, Catalog};
 use crate::session::Session;
 use crate::store::{OrbitStore, StoreLock};
-use crate::world::{AuthorityView, LocalIdentity, PrincipalFacts};
+use crate::world::{AuthorityView, LocalIdentity};
 use replica::body::BodyKeySource;
 use replica::body::WorldId;
 
@@ -132,6 +132,32 @@ pub enum Failure {
     /// publication build before allocating beyond its physical envelope.
     ReadCapacity,
     UnknownWorld(WorldId),
+}
+
+impl From<crate::session::DockRefusal> for Failure {
+    fn from(refusal: crate::session::DockRefusal) -> Self {
+        use crate::session::DockRefusal;
+        match refusal {
+            DockRefusal::StationDormant => Failure::StationDormant,
+            DockRefusal::PrincipalDenied => Failure::PrincipalDenied,
+            DockRefusal::AuthorityUnavailable(detail) => Failure::AuthorityUnavailable(detail),
+            DockRefusal::NoActiveImplementation(world) => Failure::NoActiveImplementation(world),
+            DockRefusal::ImplementationUnavailable {
+                world,
+                implementation,
+            } => Failure::ImplementationUnavailable {
+                world,
+                implementation,
+            },
+            DockRefusal::UnknownWorld(world) => Failure::UnknownWorld(world),
+            DockRefusal::InvalidExtractorSchema(invalid) => {
+                Failure::InvalidExtractorSchema(invalid)
+            }
+            DockRefusal::WorldPublicationUnavailable(world) => {
+                Failure::WorldPublicationUnavailable(world)
+            }
+        }
+    }
 }
 
 /// The durable invariant that failed validation.
@@ -623,53 +649,7 @@ impl Orbit {
                     _ => Failure::Persistence(Persistence::Replica),
                 }
             })?;
-        // Declare the registry's schemas so Convergence can classify remote
-        // material as interpretable versus opaque.
-        let mut supported = replica::body::SupportedSchemas::new();
-        for id in self.registry.ids() {
-            for reg in self.registry.descriptors(id) {
-                for schema in &reg.schemas {
-                    let model = match schema.mutation {
-                        replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
-                        replica::body::MutationModel::ImmutableAtomic => {
-                            replica::body::MUTATION_IMMUTABLE_ATOMIC
-                        }
-                        replica::body::MutationModel::Collaborative(_) => {
-                            replica::body::MUTATION_COLLABORATIVE
-                        }
-                    };
-                    supported.declare(
-                        id.clone(),
-                        schema.id.clone(),
-                        schema.version,
-                        schema.encoding.clone(),
-                        model,
-                    );
-                }
-                // Exec truth is Runtime-owned under each World, so these exact
-                // schemas are interpretable even though package composition
-                // forbids the World from declaring or writing them itself.
-                for schema in crate::exec::body_schemas() {
-                    let model = match schema.mutation {
-                        replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
-                        replica::body::MutationModel::ImmutableAtomic => {
-                            replica::body::MUTATION_IMMUTABLE_ATOMIC
-                        }
-                        replica::body::MutationModel::Collaborative(_) => {
-                            replica::body::MUTATION_COLLABORATIVE
-                        }
-                    };
-                    supported.declare(
-                        id.clone(),
-                        schema.id,
-                        schema.version,
-                        schema.encoding,
-                        model,
-                    );
-                }
-            }
-        }
-        replica.set_supported(supported);
+        replica.set_supported(self.registry.supported_schemas());
         let neighbor_registry = Arc::new(Mutex::new(
             crate::neighbors::NeighborRegistry::load(self.store.dir(), self.store.space())
                 .map_err(|_| Failure::Integrity(Integrity::NeighborRegistry))?,
@@ -1386,71 +1366,20 @@ impl Station {
     /// (local in-process sessions); plumbing the Station's own device identity
     /// through activation arrives with the daemon integration.
     pub fn dock(&self, world_id: &WorldId, identity: &LocalIdentity) -> Result<Session, Failure> {
-        if !self.alive.load(Ordering::SeqCst) {
-            return Err(Failure::StationDormant);
-        }
-        let resolution = self
-            .authority
-            .resolve(identity.device())
-            .ok_or(Failure::PrincipalDenied)?;
-        let station = Key::from_device(identity.device()).ok_or(Failure::PrincipalDenied)?;
-        let principal = PrincipalFacts {
-            actor: resolution.actor,
-            device: identity.device().clone(),
-            station,
-            space: self.space_id().clone(),
-            authority_frontier: resolution.authority_frontier,
-        };
-        let active_implementation = self
-            .authority
-            .active_implementation(world_id, &principal.authority_frontier)
-            .map_err(Failure::AuthorityUnavailable)?
-            .ok_or_else(|| Failure::NoActiveImplementation(world_id.clone()))?;
-        let world = self
-            .registry
-            .world_for(world_id, active_implementation)
-            .or_else(|| self.registry.unreviewed_world(world_id))
-            .ok_or_else(|| Failure::ImplementationUnavailable {
-                world: world_id.clone(),
-                implementation: active_implementation,
-            })?;
-        let registration = self
-            .registry
-            .descriptor_for(world_id, active_implementation)
-            .or_else(|| self.registry.unreviewed_descriptor(world_id))
-            .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
-        let extractor_schema_digest = crate::publication::ExtractorSchemaDigest::derive(
-            &registration.find_schemas,
-            &registration.find_extractors,
+        crate::session::dock_session(
+            crate::session::DockPoint {
+                space: self.store.space(),
+                core: &self.core,
+                authority: &self.authority,
+                registry: &self.registry,
+                epoch: self.epoch,
+                find_policy: self.find_policy,
+                alive: &self.alive,
+            },
+            world_id,
+            identity,
         )
-        .map_err(Failure::InvalidExtractorSchema)?;
-        self.core
-            .ensure_world_publication(
-                &world,
-                world_id,
-                active_implementation,
-                extractor_schema_digest,
-                &registration.find_schemas,
-                &registration.find_extractors,
-            )
-            .map_err(|_| Failure::WorldPublicationUnavailable(world_id.clone()))?;
-        Ok(Session::new(
-            self.store.space().clone(),
-            world_id.clone(),
-            world,
-            identity.clone(),
-            principal,
-            self.epoch,
-            registration.limits,
-            registration.schemas.clone(),
-            active_implementation,
-            extractor_schema_digest,
-            self.find_policy,
-            self.alive.clone(),
-            self.core.clone(),
-            self.authority.clone(),
-            self.registry.clone(),
-        ))
+        .map_err(Failure::from)
     }
 
     /// Where this Station's durable state lives.

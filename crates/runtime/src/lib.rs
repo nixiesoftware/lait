@@ -60,6 +60,11 @@ mod admission;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod beacon;
 pub(crate) mod body_image;
+/// The browser composition root: the same Station machinery, composed by the
+/// embedding Worker instead of the lifecycle. wasm32-only by design — on
+/// native, the lifecycle's custody chain is the only door to a store.
+#[cfg(target_arch = "wasm32")]
+pub mod browser;
 mod budget;
 pub mod change;
 #[cfg(not(target_arch = "wasm32"))]

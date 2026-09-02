@@ -8,8 +8,15 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    time::Instant,
 };
+
+// The meter's wall budget is a real measurement on every target: std's
+// `Instant::now` traps on wasm32-unknown-unknown, so the browser arm reads
+// the JS host's monotonic clock instead.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use replica::body::BodyKey;
 use serde::{Deserialize, Serialize};

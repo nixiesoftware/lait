@@ -65,6 +65,10 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # stays off the browser. `time` used to ride in transitively through comms;
 # with comms gated off wasm it must be named here.
 tokio = { version = "1", features = ["sync", "macros", "time"] }
+# The monotonic clock's browser arm: std `Instant::now` traps on
+# wasm32-unknown-unknown, and the Find meter's wall budget must stay a real
+# measurement there, not an unmeasured zero.
+web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # comms — gossip, presence dial, framed streams, ALPN adapters. The Station's

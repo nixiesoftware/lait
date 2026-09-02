@@ -835,7 +835,46 @@ impl ReadMemoryGovernor {
 
 struct CursorLease {
     publication: Arc<WorldPublication>,
-    expires: std::time::Instant,
+    expires: LeaseDeadline,
+}
+
+/// When a cursor lease lapses. Native leases expire by monotonic clock;
+/// wasm32-unknown-unknown has no monotonic clock (`Instant::now` traps), so
+/// there a lease never expires by time and [`MAX_CURSOR_LEASES`] plus the
+/// byte governor remain the only bounds — a browser Station is one caller,
+/// not a shared host.
+#[derive(Clone, Copy)]
+struct LeaseDeadline {
+    #[cfg(not(target_arch = "wasm32"))]
+    at: std::time::Instant,
+}
+
+impl LeaseDeadline {
+    fn one_ttl_ahead() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            at: std::time::Instant::now() + CURSOR_LEASE_TTL,
+        }
+    }
+
+    fn lapsed(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.at <= std::time::Instant::now()
+        }
+        #[cfg(target_arch = "wasm32")]
+        false
+    }
+
+    #[cfg(test)]
+    fn already_lapsed() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+        }
+    }
 }
 
 struct DeferredLeaseState {
@@ -1182,6 +1221,7 @@ struct CachedReadGeneration {
 /// bounds every uniquely retained publication. A full table refuses a new
 /// cursor rather than evicting one another request can still present.
 const MAX_CURSOR_LEASES: usize = 256;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const CURSOR_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 /// Conservative physical-retention ceiling for all distinct cursor-pinned
 /// publications. The release fixture pairs a million-node Corpus with a
@@ -1530,8 +1570,8 @@ impl CoreInner {
     }
 
     fn purge_cursor_leases(&mut self) {
-        let now = std::time::Instant::now();
-        self.cursor_leases.retain(|_, lease| lease.expires > now);
+        self.cursor_leases
+            .retain(|_, lease| !lease.expires.lapsed());
         self.trim_world_publications();
     }
 
@@ -1541,7 +1581,7 @@ impl CoreInner {
     ) -> Option<Arc<WorldPublication>> {
         self.purge_cursor_leases();
         let lease = self.cursor_leases.get_mut(key)?;
-        lease.expires = std::time::Instant::now() + CURSOR_LEASE_TTL;
+        lease.expires = LeaseDeadline::one_ttl_ahead();
         Some(lease.publication.clone())
     }
 
@@ -1577,7 +1617,7 @@ impl CoreInner {
         self.purge_cursor_leases();
         let key = (world, publication.id);
         if let Some(lease) = self.cursor_leases.get_mut(&key) {
-            lease.expires = std::time::Instant::now() + CURSOR_LEASE_TTL;
+            lease.expires = LeaseDeadline::one_ttl_ahead();
             lease.publication = publication;
             return Ok(());
         }
@@ -1591,7 +1631,7 @@ impl CoreInner {
             key,
             CursorLease {
                 publication,
-                expires: std::time::Instant::now() + CURSOR_LEASE_TTL,
+                expires: LeaseDeadline::one_ttl_ahead(),
             },
         );
         Ok(())
@@ -5944,6 +5984,117 @@ enum AmbientFailure {
     AuthorityUnavailable(String),
 }
 
+/// Why a dock was refused. Target-neutral so the native Station and the
+/// browser composition report through one vocabulary; the native
+/// `lifecycle::Failure` maps from it one-to-one.
+#[derive(Debug)]
+pub enum DockRefusal {
+    StationDormant,
+    PrincipalDenied,
+    /// The ledger could not answer — not "no activation exists".
+    AuthorityUnavailable(String),
+    NoActiveImplementation(WorldId),
+    ImplementationUnavailable {
+        world: WorldId,
+        implementation: [u8; 32],
+    },
+    UnknownWorld(WorldId),
+    InvalidExtractorSchema(crate::find::Invalid),
+    WorldPublicationUnavailable(WorldId),
+}
+
+/// Everything a dock needs from its composition root. The native Station and
+/// the browser composition both dock through [`dock_session`], so there is
+/// exactly one derivation of principal facts, one activation lookup, and one
+/// ensured publication — a second dock model is exactly the seam that has
+/// been wrong twice.
+pub(crate) struct DockPoint<'a> {
+    pub space: &'a mechanics::ids::SpaceId,
+    pub core: &'a Arc<StationCore>,
+    pub authority: &'a Arc<dyn AuthorityView>,
+    pub registry: &'a crate::registry::Catalog,
+    pub epoch: Epoch,
+    pub find_policy: crate::find::Policy,
+    pub alive: &'a Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Attach a local caller to a hosted World: resolve the principal through the
+/// authority (a caller cannot assert actor, membership, or frontier), look up
+/// the active implementation, ensure its publication, and mint the Session.
+pub(crate) fn dock_session(
+    point: DockPoint<'_>,
+    world_id: &WorldId,
+    identity: &crate::world::LocalIdentity,
+) -> Result<Session, DockRefusal> {
+    if !point.alive.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(DockRefusal::StationDormant);
+    }
+    let resolution = point
+        .authority
+        .resolve(identity.device())
+        .ok_or(DockRefusal::PrincipalDenied)?;
+    let station = mechanics::station::Key::from_device(identity.device())
+        .ok_or(DockRefusal::PrincipalDenied)?;
+    let principal = PrincipalFacts {
+        actor: resolution.actor,
+        device: identity.device().clone(),
+        station,
+        space: point.space.clone(),
+        authority_frontier: resolution.authority_frontier,
+    };
+    let active_implementation = point
+        .authority
+        .active_implementation(world_id, &principal.authority_frontier)
+        .map_err(DockRefusal::AuthorityUnavailable)?
+        .ok_or_else(|| DockRefusal::NoActiveImplementation(world_id.clone()))?;
+    let world = point
+        .registry
+        .world_for(world_id, active_implementation)
+        .or_else(|| point.registry.unreviewed_world(world_id))
+        .ok_or_else(|| DockRefusal::ImplementationUnavailable {
+            world: world_id.clone(),
+            implementation: active_implementation,
+        })?;
+    let registration = point
+        .registry
+        .descriptor_for(world_id, active_implementation)
+        .or_else(|| point.registry.unreviewed_descriptor(world_id))
+        .ok_or_else(|| DockRefusal::UnknownWorld(world_id.clone()))?;
+    let extractor_schema_digest = crate::publication::ExtractorSchemaDigest::derive(
+        &registration.find_schemas,
+        &registration.find_extractors,
+    )
+    .map_err(DockRefusal::InvalidExtractorSchema)?;
+    point
+        .core
+        .ensure_world_publication(
+            &world,
+            world_id,
+            active_implementation,
+            extractor_schema_digest,
+            &registration.find_schemas,
+            &registration.find_extractors,
+        )
+        .map_err(|_| DockRefusal::WorldPublicationUnavailable(world_id.clone()))?;
+    Ok(Session::new(
+        point.space.clone(),
+        world_id.clone(),
+        world,
+        identity.clone(),
+        principal,
+        point.epoch,
+        registration.limits,
+        registration.schemas.clone(),
+        active_implementation,
+        extractor_schema_digest,
+        point.find_policy,
+        point.alive.clone(),
+        point.core.clone(),
+        point.authority.clone(),
+        point.registry.clone(),
+    ))
+}
+
 /// A local caller's handle to a hosted World.
 pub struct Session {
     space: mechanics::ids::SpaceId,
@@ -9641,11 +9792,8 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn expire_cursor_leases_for_test(&self) {
         let mut inner = self.core.lock();
-        let expired = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(1))
-            .unwrap_or_else(std::time::Instant::now);
         for lease in inner.cursor_leases.values_mut() {
-            lease.expires = expired;
+            lease.expires = LeaseDeadline::already_lapsed();
         }
         inner.purge_cursor_leases();
     }
