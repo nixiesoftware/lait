@@ -20,10 +20,10 @@
  *   host, which knows whether its own event source is coherent; this side
  *   only relays. Until the first frame arrives the subscription reports
  *   "connecting", exactly what the user should be told.
- * - **Carry the session lane.** A `Socket` is a handle of functions and its
- *   errors are class instances — the one lane `link.ts` documents as owing a
- *   message-boundary adapter. Until that adapter exists, `session` refuses
- *   loudly rather than pretending presence works.
+ * - **Decode the session lane.** The session `Socket` is reconstructed by
+ *   [`workerSession`], its own module, because it is a stateful handle with a
+ *   class-instance error (`SocketMutationError`) to rehydrate — a different
+ *   problem from a one-shot RPC. `session` here just hands it this link's port.
  *
  * `AbortSignal`s are translated best-effort: an abort frame crosses, the
  * local promise rejects, and a late reply is dropped. Callers already must
@@ -38,6 +38,7 @@ import type {
   WorldRequest,
 } from "./types";
 import type { Socket, SocketEvent } from "./socket";
+import { workerSession } from "./workerSession";
 
 /** Frames this side sends. The engine host mirrors this union. */
 export type WorkerLinkRequest =
@@ -178,14 +179,10 @@ export function workerLink(port: LinkPort): EngineLink {
       };
     },
 
-    session(_onEvent: (event: SocketEvent) => void): Socket {
-      // The documented exception in `link.ts`: the session lane owes a
-      // message-boundary adapter (presence, progress, `mutate`'s rehydrated
-      // error class). Refusing here is honest; pretending would be a socket
-      // whose writes go nowhere.
-      throw new Error(
-        "the Worker engine link does not carry the session lane yet",
-      );
+    session(onEvent: (event: SocketEvent) => void): Socket {
+      // The session lane crosses the same port, reconstructed by its own
+      // adapter — see `workerSession`, and the header note above.
+      return workerSession(port, onEvent);
     },
   };
 }

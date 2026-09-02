@@ -190,8 +190,23 @@ describe("the boundary itself", () => {
     expect(await h.link.spaces()).toEqual(reply("ok"));
   });
 
-  it("refuses the session lane loudly until its adapter exists", () => {
-    const h = harness();
-    expect(() => h.link.session(() => {})).toThrowError(/session lane/);
+  it("hands the session lane to its adapter over the same port", async () => {
+    const opened: number[] = [];
+    const h = harness((frame) => {
+      const raw = frame as unknown as { lait?: string; sid?: number };
+      if (raw.lait === "session:open" && typeof raw.sid === "number") {
+        opened.push(raw.sid);
+      }
+    });
+    const events: string[] = [];
+    const socket = h.link.session((event) => {
+      if (event.kind === "liveness") events.push(event.liveness);
+    });
+    await delivered();
+    // The adapter opened one session on this link's port and reported the
+    // honest starting liveness — not a throw.
+    expect(opened).toHaveLength(1);
+    expect(events).toEqual(["connecting"]);
+    socket.close();
   });
 });
