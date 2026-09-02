@@ -551,6 +551,25 @@ impl PresentationResolution {
     }
 }
 
+/// Resolve a caller-local key beneath a root, refusing anything that is not a
+/// plain relative name: no absolute form, no `..`, no `.`, no empty. A key is
+/// a name the host stores under, never a route out of the root — the check
+/// runs on both the trait default and the SDK's own `FsLocalState`, because a
+/// sandboxed guest supplies keys from the untrusted side.
+pub fn caller_local_path(root: &Path, key: &str) -> Result<std::path::PathBuf, String> {
+    let candidate = Path::new(key);
+    let plain = !key.is_empty()
+        && candidate
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !plain {
+        return Err(format!(
+            "caller-local key '{key}' is not a plain relative name"
+        ));
+    }
+    Ok(root.join(candidate))
+}
+
 /// Facilities supplied by a trusted native client host to a World package.
 ///
 /// The package owns orchestration and product semantics. The implementation
@@ -558,6 +577,51 @@ impl PresentationResolution {
 /// authority. `local_root` is caller-local state, never replicated World state.
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
+    /// Read one caller-local record. Missing is `None`, never an error: this
+    /// state is a convenience the host keeps, not replicated truth.
+    ///
+    /// Packages reach caller-local state through these two verbs rather than
+    /// through [`Self::local_root`] — a path only means something to a package
+    /// running where the host's filesystem is, and a runner in a sandbox has
+    /// no such place. The default implementations keep every existing native
+    /// host working unchanged; a brokered host overrides them with its own
+    /// transport.
+    fn local_get(&self, key: &str) -> Option<Vec<u8>> {
+        std::fs::read(caller_local_path(self.local_root(), key).ok()?).ok()
+    }
+    /// Write one caller-local record, whole and atomically: a reader sees the
+    /// complete old bytes or the complete new bytes, never a tear. Last write
+    /// wins.
+    fn local_put(&self, key: &str, bytes: &[u8]) -> Result<(), Failure> {
+        let path = caller_local_path(self.local_root(), key).map_err(Failure::new)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| Failure::new(format!("caller-local write of '{key}': {error}")))?;
+        }
+        // A sibling temp name derived by appending, never by replacing the
+        // extension — keys `a.bin` and `a.txt` must not share one temp file.
+        let temporary = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("record")
+        ));
+        std::fs::write(&temporary, bytes)
+            .and_then(|()| std::fs::rename(&temporary, &path))
+            .map_err(|error| Failure::new(format!("caller-local write of '{key}': {error}")))
+    }
+    /// Write bytes to a path the person named — an export, not caller-local
+    /// state. The host owns the filesystem this lands on, and owes the
+    /// containment: a package hands over an already-chosen destination (the
+    /// Issues attachment path is passed through `destination_for`, which pins
+    /// a hostile name beside the working directory), and before a sandboxed
+    /// guest is trusted to name one, the host side of this op needs its own
+    /// consent gate. The native default writes where told, because the native
+    /// runner process could already write anywhere.
+    fn save_user_file(&self, destination: &str, bytes: &[u8]) -> Result<(), Failure> {
+        std::fs::write(destination, bytes)
+            .map_err(|error| Failure::new(format!("could not write {destination}: {error}")))
+    }
     fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
     /// Evaluate a package-compiled query through the host's authenticated
     /// Runtime Find path. Hosts that are intentionally limited to legacy World
@@ -1851,6 +1915,45 @@ fn validate_name(kind: &str, name: &str) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
+    use super::caller_local_path;
+    use std::path::Path;
+
+    /// The security seam of the caller-local plane: a key is a name the host
+    /// stores under, never a route out of the root. This runs on the untrusted
+    /// side once a guest is sandboxed, so every escape shape is refused.
+    #[test]
+    fn a_caller_local_key_that_escapes_its_root_is_refused() {
+        let root = Path::new("/orbit/store");
+        for hostile in [
+            "../secret",
+            "a/../../secret",
+            "/etc/passwd",
+            "",
+            ".",
+            "..",
+            "./x",
+        ] {
+            assert!(
+                caller_local_path(root, hostile).is_err(),
+                "{hostile:?} was not refused"
+            );
+        }
+    }
+
+    /// A plain relative name resolves beneath the root, nested keys included.
+    #[test]
+    fn a_plain_caller_local_key_resolves_beneath_the_root() {
+        let root = Path::new("/orbit/store");
+        assert_eq!(
+            caller_local_path(root, "sp_1/issues-bootstrap.bin").unwrap(),
+            Path::new("/orbit/store/sp_1/issues-bootstrap.bin"),
+        );
+        assert_eq!(
+            caller_local_path(root, "inbox-read.json").unwrap(),
+            Path::new("/orbit/store/inbox-read.json"),
+        );
+    }
+
     /// A World that says nothing is named by its mount and is *not* openable.
     /// The alternative — defaulting the entry path to `/` — produces a row
     /// whose button leads somewhere nobody chose, and nothing downstream can

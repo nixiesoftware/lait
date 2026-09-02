@@ -45,7 +45,18 @@ use world_runner::{
 };
 
 /// Protocol generation of the typed World service operations in this crate.
+///
+/// The major (`ABI_VERSION`) breaks compatibility; the minor (`ABI_MINOR`)
+/// grows it. A World that reaches for an operation added in a later minor
+/// requires that minor in its `world.json`, so an older host is refused at
+/// admission — the version story names the mismatch instead of failing
+/// mid-formation with an "unsupported callback" that points nowhere.
+///
+/// Minor 1 added caller-local state: `application.local.{get,put}` and
+/// `client.host.{local_get,local_put,save_file}`. A World that persists a
+/// bootstrap record, an inbox watermark, or exports a file requires `>=3.1`.
 pub const ABI_VERSION: u32 = 3;
+pub const ABI_MINOR: u32 = 1;
 
 const DESCRIBE: &str = "semantic.describe";
 const SUBMIT: &str = "semantic.submit";
@@ -58,6 +69,8 @@ const APPLICATION_FOUNDER_GRANTS: &str = "application.founder_grants";
 const APPLICATION_ADMISSION_EVIDENCE: &str = "application.admission_evidence";
 const APPLICATION_INITIAL_SCOPE: &str = "application.initial_scope";
 const APPLICATION_BOOTSTRAP: &str = "application.bootstrap";
+const APPLICATION_LOCAL_GET: &str = "application.local.get";
+const APPLICATION_LOCAL_PUT: &str = "application.local.put";
 const APPLICATION_ASSESS_UPGRADE: &str = "application.assess_upgrade";
 const APPLICATION_VERIFICATION_MIGRATOR: &str = "application.verification_migrator";
 const APPLICATION_UPGRADE_STEP: &str = "application.upgrade_step";
@@ -65,6 +78,9 @@ const APPLICATION_STATUS: &str = "application.status";
 const APPLICATION_START_PROJECTOR: &str = "application.projector.start";
 const APPLICATION_PROJECT: &str = "application.projector.project";
 const CLIENT_DESCRIBE: &str = "client.describe";
+const CLIENT_HOST_LOCAL_GET: &str = "client.host.local_get";
+const CLIENT_HOST_LOCAL_PUT: &str = "client.host.local_put";
+const CLIENT_HOST_SAVE_FILE: &str = "client.host.save_file";
 const CLIENT_TRANSIENT_BODY: &str = "client.transient_body";
 const CLIENT_PARSE_MCP: &str = "client.parse_mcp";
 const CLIENT_PARSE_WEB: &str = "client.parse_web";
@@ -299,11 +315,81 @@ pub struct StatusProjection {
     pub description: String,
 }
 
+/// Caller-local durable state the host keeps for a World: small records that
+/// survive restarts but are never replicated truth. Keys are relative names
+/// (`a/b.bin`); missing is `None`, never an error.
+///
+/// A World reaches this through the trait rather than through a path, because
+/// a path only means something to a process running where the host's
+/// filesystem is — and a runner in a sandbox has no such place. The host's
+/// implementation decides where the bytes live; the brokered implementation
+/// carries them over the callback channel.
+pub trait LocalState: Sync {
+    fn get(&self, key: &str) -> Option<Vec<u8>>;
+    /// Write one record, whole and atomically: a reader sees the complete old
+    /// bytes or the complete new bytes, never a tear.
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String>;
+}
+
+/// The host's own [`LocalState`]: one directory, one file per key, written
+/// through a temporary and renamed into place.
+pub struct FsLocalState {
+    root: std::path::PathBuf,
+}
+
+impl FsLocalState {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// A key is a plain relative name — the one validation, shared with the
+    /// trait default via `world_interface::caller_local_path`.
+    fn place(&self, key: &str) -> Result<std::path::PathBuf, String> {
+        world_interface::caller_local_path(&self.root, key)
+    }
+}
+
+impl LocalState for FsLocalState {
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.place(key).ok()?).ok()
+    }
+
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        let path = self.place(key)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        // Append the temp suffix, never replace the extension — keys `a.bin`
+        // and `a.txt` must land on different temp files.
+        let temporary = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("record")
+        ));
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
+            file.write_all(bytes).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    }
+}
+
 /// Resources supplied to a World's formation hook. Storage and authority stay
 /// with the host; the World sees only its private checkpoint root and bounded
 /// Runtime capabilities.
 pub struct BootstrapContext<'a> {
+    /// The compat spelling of [`Self::local`]: the path still crosses the wire
+    /// so a previously sealed runner keeps bootstrapping, but product code in
+    /// this tree reads and writes caller-local state through `local` only. Do
+    /// not reach for this — a path means nothing to a runner that has no
+    /// filesystem, which is the whole reason `local` exists.
     pub store_root: &'a Path,
+    /// Caller-local records for this formation — the bootstrap replay record
+    /// lives here, host-side, wherever the host is.
+    pub local: &'a dyn LocalState,
     pub space: &'a mechanics::ids::SpaceId,
     pub session: &'a dyn SessionAccess,
     pub identity: &'a dyn IdentityAccess,
@@ -1019,10 +1105,14 @@ impl<W: World> Service for WorldService<W> {
                     Arc::clone(&host),
                     request.context.principal.device.clone(),
                 );
+                let local = RemoteLocalState {
+                    host: Arc::clone(&host),
+                };
                 encode(
                     &application
                         .bootstrap(BootstrapContext {
                             store_root: &request.store_root,
+                            local: &local,
                             space: &request.space,
                             session: &session,
                             identity: &identity,
@@ -2064,6 +2154,30 @@ impl FindReader for RemoteLifecycleFindReader {
     }
 }
 
+/// The guest's [`LocalState`]: every record crosses the callback channel and
+/// lands wherever the host keeps caller-local state. The guest never sees a
+/// path.
+struct RemoteLocalState {
+    host: Arc<dyn Host>,
+}
+
+impl LocalState for RemoteLocalState {
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        host_call::<_, Option<Vec<u8>>>(self.host.as_ref(), APPLICATION_LOCAL_GET, &key.to_string())
+            .ok()
+            .flatten()
+    }
+
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        host_call::<_, Result<(), String>>(
+            self.host.as_ref(),
+            APPLICATION_LOCAL_PUT,
+            &(key.to_string(), bytes.to_vec()),
+        )
+        .map_err(|error| error.to_string())?
+    }
+}
+
 struct RemoteApplicationIdentity {
     host: Arc<dyn Host>,
     device: mechanics::ids::DeviceId,
@@ -2117,6 +2231,33 @@ impl RemoteClientHost {
 impl world_interface::ClientHost for RemoteClientHost {
     fn local_root(&self) -> &Path {
         &self.local_root
+    }
+
+    // Caller-local state crosses the callback channel rather than a path the
+    // guest opens itself — the trait's fs defaults are for hosts that ARE the
+    // filesystem's side.
+    fn local_get(&self, key: &str) -> Option<Vec<u8>> {
+        self.call::<_, Option<Vec<u8>>>(CLIENT_HOST_LOCAL_GET, &key.to_string())
+            .ok()
+            .flatten()
+    }
+
+    fn local_put(&self, key: &str, bytes: &[u8]) -> Result<(), world_interface::Failure> {
+        self.call::<_, Result<(), world_interface::Failure>>(
+            CLIENT_HOST_LOCAL_PUT,
+            &(key.to_string(), bytes.to_vec()),
+        )?
+    }
+
+    fn save_user_file(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+    ) -> Result<(), world_interface::Failure> {
+        self.call::<_, Result<(), world_interface::Failure>>(
+            CLIENT_HOST_SAVE_FILE,
+            &(destination.to_string(), bytes.to_vec()),
+        )?
     }
 
     fn call_world<'a>(
@@ -2778,9 +2919,13 @@ impl RemoteWorld {
         let mut client = self.client()?;
         let payload = encode(input).map_err(anyhow::Error::msg)?;
         let mut callback = |operation: &str, payload: &[u8]| match context {
-            Some(context) => {
-                application_callback(context.session, Some(context.identity), operation, payload)
-            }
+            Some(context) => application_callback(
+                context.session,
+                Some(context.identity),
+                None,
+                operation,
+                payload,
+            ),
             None => Err(format!(
                 "World called host operation {operation:?} without an application context"
             )),
@@ -2805,10 +2950,21 @@ impl RemoteWorld {
         session: &dyn SessionAccess,
         identity: Option<&dyn IdentityAccess>,
     ) -> Result<O> {
+        self.invoke_application_with_local(operation, input, session, identity, None)
+    }
+
+    fn invoke_application_with_local<I: Serialize, O: DeserializeOwned>(
+        &self,
+        operation: &str,
+        input: &I,
+        session: &dyn SessionAccess,
+        identity: Option<&dyn IdentityAccess>,
+        local: Option<&dyn LocalState>,
+    ) -> Result<O> {
         let mut client = self.client()?;
         let payload = encode(input).map_err(anyhow::Error::msg)?;
         let mut callback = |operation: &str, payload: &[u8]| {
-            application_callback(session, identity, operation, payload)
+            application_callback(session, identity, local, operation, payload)
         };
         let reply = client.request_with(
             Operation::Call {
@@ -3004,11 +3160,12 @@ impl WorldApplication for RemoteWorld {
             display_name: context.display_name.to_string(),
             initial_scope: context.initial_scope.cloned(),
         };
-        self.invoke_application_with_access::<_, Result<(), String>>(
+        self.invoke_application_with_local::<_, Result<(), String>>(
             APPLICATION_BOOTSTRAP,
             &request,
             context.session,
             Some(context.identity),
+            Some(context.local),
         )?
         .map_err(anyhow::Error::msg)
     }
@@ -3259,10 +3416,21 @@ fn lifecycle_callback(
 fn application_callback(
     session: &dyn SessionAccess,
     identity: Option<&dyn IdentityAccess>,
+    local: Option<&dyn LocalState>,
     operation: &str,
     payload: &[u8],
 ) -> Result<Vec<u8>, String> {
     match operation {
+        APPLICATION_LOCAL_GET => {
+            let key: String = decode(payload)?;
+            let local = local.ok_or("this operation carries no caller-local state")?;
+            encode(&local.get(&key))
+        }
+        APPLICATION_LOCAL_PUT => {
+            let (key, bytes): (String, Vec<u8>) = decode(payload)?;
+            let local = local.ok_or("this operation carries no caller-local state")?;
+            encode(&local.put(&key, &bytes))
+        }
         "application.session.submit" => {
             let action = decode(payload)?;
             encode(&session.submit(action))
@@ -3368,6 +3536,18 @@ async fn client_host_callback(
         "client.host.identity" => {
             let handles = decode(payload)?;
             encode(&host.call_identity(handles).await)
+        }
+        CLIENT_HOST_LOCAL_GET => {
+            let key: String = decode(payload)?;
+            encode(&host.local_get(&key))
+        }
+        CLIENT_HOST_LOCAL_PUT => {
+            let (key, bytes): (String, Vec<u8>) = decode(payload)?;
+            encode(&host.local_put(&key, &bytes))
+        }
+        CLIENT_HOST_SAVE_FILE => {
+            let (destination, bytes): (String, Vec<u8>) = decode(payload)?;
+            encode(&host.save_user_file(&destination, &bytes))
         }
         _ => Err(format!("unsupported World client callback {operation}")),
     }
@@ -3511,7 +3691,80 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use super::LocalState as _;
     use world_interface::ClientHost as _;
+
+    #[test]
+    fn fs_local_state_round_trips_and_survives_a_torn_sibling() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let local = super::FsLocalState::new(dir.path());
+        assert_eq!(local.get("sp/rec.bin"), None, "absent is None, never error");
+        local
+            .put("sp/rec.bin", b"first")
+            .expect("nested put creates dirs");
+        assert_eq!(local.get("sp/rec.bin").as_deref(), Some(&b"first"[..]));
+        // A sibling key that differs only by extension has its own temp file,
+        // so neither write tears the other.
+        local.put("sp/rec.txt", b"other").expect("sibling put");
+        local.put("sp/rec.bin", b"second").expect("overwrite");
+        assert_eq!(local.get("sp/rec.bin").as_deref(), Some(&b"second"[..]));
+        assert_eq!(local.get("sp/rec.txt").as_deref(), Some(&b"other"[..]));
+    }
+
+    #[test]
+    fn fs_local_state_refuses_a_key_that_escapes_its_root() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let local = super::FsLocalState::new(dir.path());
+        assert!(local.put("../escape", b"x").is_err());
+        assert_eq!(local.get("../escape"), None);
+    }
+
+    #[test]
+    fn remote_local_state_round_trips_through_the_host_channel() {
+        // The guest reaches caller-local state only over the callback channel:
+        // its `get`/`put` encode the op the way the host answers it, and read
+        // the answer back through one result layer.
+        struct LocalHost {
+            seen: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+        }
+        impl world_runner::Host for LocalHost {
+            fn call(&self, operation: &str, payload: &[u8]) -> Result<Vec<u8>, String> {
+                match operation {
+                    super::APPLICATION_LOCAL_PUT => {
+                        let (key, bytes): (String, Vec<u8>) = super::decode(payload)?;
+                        self.seen.lock().expect("lock").push((key, bytes));
+                        super::encode(&Ok::<(), String>(()))
+                    }
+                    super::APPLICATION_LOCAL_GET => {
+                        let key: String = super::decode(payload)?;
+                        let found = self
+                            .seen
+                            .lock()
+                            .expect("lock")
+                            .iter()
+                            .rev()
+                            .find(|(k, _)| k == &key)
+                            .map(|(_, v)| v.clone());
+                        super::encode(&found)
+                    }
+                    other => Err(format!("unexpected op {other}")),
+                }
+            }
+        }
+
+        let host: Arc<dyn world_runner::Host> = Arc::new(LocalHost {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let local = super::RemoteLocalState {
+            host: Arc::clone(&host),
+        };
+        assert_eq!(super::LocalState::get(&local, "k"), None);
+        super::LocalState::put(&local, "k", b"value").expect("put crosses the channel");
+        assert_eq!(
+            super::LocalState::get(&local, "k").as_deref(),
+            Some(&b"value"[..])
+        );
+    }
 
     #[test]
     fn runtime_codec_round_trips_json_values() {

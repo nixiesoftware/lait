@@ -79,7 +79,7 @@ impl WorldApplication for IssuesApplication {
             })
             .transpose()?;
         crate::lifecycle::bootstrap_tracker(
-            context.store_root,
+            context.local,
             context.space,
             context.session,
             context.identity,

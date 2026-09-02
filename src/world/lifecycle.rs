@@ -112,10 +112,12 @@ fn form_space_with_scopes(
                 .iter()
                 .find(|(candidate, _)| candidate == &world)
                 .map(|(_, scope)| scope);
+            let local = world_sdk::FsLocalState::new(&root);
             packages.bootstrap(
                 &world,
                 BootstrapContext {
                     store_root: &root,
+                    local: &local,
                     space: &mechanics.space(),
                     session: &session,
                     identity: &identity,
@@ -170,8 +172,9 @@ fn form_space_with_fault(
     let session = station
         .dock(&crate::world::contract::world_id(), &identity)
         .map_err(|error| anyhow::anyhow!("dock: {error:?}"))?;
+    let local = world_sdk::FsLocalState::new(&root);
     let bootstrap = issues_app::lifecycle::bootstrap_tracker_with_fault(
-        &root,
+        &local,
         &mechanics.space(),
         &session,
         &identity,
@@ -344,6 +347,10 @@ mod tests {
                 );
             }
             assert_eq!(snapshot_projects(&home, &mechanics), 1);
+            // The reopen is cold: the prior formation's ledger handle holds the
+            // store's owner lock, so drop it before opening the same store, or
+            // the successor open is refused as a second writer.
+            drop(mechanics);
             let (reopened, _) = form_space(
                 &crate::world::packages(),
                 &home,

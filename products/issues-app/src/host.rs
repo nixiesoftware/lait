@@ -119,18 +119,20 @@ pub struct AccessGrantPlan {
     pub definition_ref: Option<Vec<u8>>,
 }
 
+const INBOX_WATERMARK_KEY: &str = "inbox-read.json";
+
 /// Read the caller-local inbox watermark. Missing or malformed state simply
 /// means the inbox is unread; it is never replicated truth.
-pub fn read_inbox_watermark(home: &Path) -> u64 {
-    std::fs::read_to_string(home.join("inbox-read.json"))
-        .ok()
+pub fn read_inbox_watermark(host: &dyn ClientHost) -> u64 {
+    host.local_get(INBOX_WATERMARK_KEY)
+        .and_then(|bytes| String::from_utf8(bytes).ok())
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(0)
 }
 
 /// Advance the caller-local inbox watermark after a successful projection.
-pub fn write_inbox_watermark(home: &Path, timestamp: u64) -> std::io::Result<()> {
-    std::fs::write(home.join("inbox-read.json"), timestamp.to_string())
+pub fn write_inbox_watermark(host: &dyn ClientHost, timestamp: u64) -> Result<(), Failure> {
+    host.local_put(INBOX_WATERMARK_KEY, timestamp.to_string().as_bytes())
 }
 
 /// Unix seconds now. Delegates to `mechanics::wallclock` so tests can
@@ -541,14 +543,14 @@ async fn run_inbox(
     let response = call_issues(
         host,
         IssuesRequest::Inbox {
-            watermark: read_inbox_watermark(host.local_root()),
+            watermark: read_inbox_watermark(host),
             page,
             publication,
         },
     )
     .await?;
     if clear && matches!(&response, crate::IssuesResponse::Inbox { .. }) {
-        write_inbox_watermark(host.local_root(), now_seconds())
+        write_inbox_watermark(host, now_seconds())
             .map_err(|error| Failure::new(format!("advance Issues inbox watermark: {error}")))?;
     }
     Ok(issues_output(&response))
@@ -752,8 +754,7 @@ async fn run_attachment_get(
             let bytes = data_encoding::BASE64
                 .decode(data_b64.as_bytes())
                 .map_err(|_| Failure::new("stored attachment did not decode"))?;
-            std::fs::write(&destination, &bytes)
-                .map_err(|error| Failure::new(format!("could not write {destination}: {error}")))?;
+            host.save_user_file(&destination, &bytes)?;
             bytes.len() as u64
         }
         (None, None) => {

@@ -11,8 +11,7 @@
 //! during that lifecycle: reviewed implementation identity, founder grants,
 //! initial Catalog contents, and bootstrap persistence.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use issues::ids::{ProjectId, SpaceId, SystemUlidSource};
@@ -24,6 +23,7 @@ use runtime::{
     world::RequestId,
     world::SignedWorldAction,
 };
+use world_sdk::LocalState;
 
 const UPGRADE_RECORD_VERSION: u16 = 1;
 /// Host-side lifecycle storage enforces its own outer bound. This tighter
@@ -522,30 +522,38 @@ impl From<Fault> for Point {
     }
 }
 
-fn bootstrap_record_path(store_root: &Path, space: &SpaceId) -> PathBuf {
-    store_root.join(space.as_str()).join("issues-bootstrap.bin")
+/// The caller-local key the bootstrap replay record lives under, per Space.
+/// A relative name: the host decides where the bytes actually land.
+fn bootstrap_record_key(space: &SpaceId) -> String {
+    format!("{}/issues-bootstrap.bin", space.as_str())
 }
 
+/// Write the replay record through caller-local state — the host decides where
+/// the bytes land and guarantees the write is whole.
 fn write_bootstrap_record(
-    store_root: &Path,
+    local: &dyn LocalState,
     space: &SpaceId,
     record: &IssuesBootstrapRecord,
 ) -> Result<()> {
-    let path = bootstrap_record_path(store_root, space);
-    let temporary = path.with_extension("bin.tmp");
     let bytes = postcard::to_stdvec(record)?;
-    {
-        let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&temporary, &path)?;
-    Ok(())
+    local
+        .put(&bootstrap_record_key(space), &bytes)
+        .map_err(|error| anyhow!("write bootstrap record: {error}"))
 }
 
-/// Read the product bootstrap record beneath an orbital store root.
+/// Read the replay record from caller-local state.
+fn read_bootstrap_record_local(
+    local: &dyn LocalState,
+    space: &SpaceId,
+) -> Option<IssuesBootstrapRecord> {
+    postcard::from_bytes(&local.get(&bootstrap_record_key(space))?).ok()
+}
+
+/// Read the product bootstrap record beneath an orbital store root — the
+/// daemon's own read, which owns the filesystem the guest's `LocalState`
+/// writes onto, so the key resolves to this path.
 pub fn read_bootstrap_record(store_root: &Path, space: &SpaceId) -> Option<IssuesBootstrapRecord> {
-    let bytes = std::fs::read(bootstrap_record_path(store_root, space)).ok()?;
+    let bytes = std::fs::read(store_root.join(bootstrap_record_key(space))).ok()?;
     postcard::from_bytes(&bytes).ok()
 }
 
@@ -555,7 +563,7 @@ pub fn read_bootstrap_record(store_root: &Path, space: &SpaceId) -> Option<Issue
 /// and its replay record, which is the part a different World must replace.
 #[allow(clippy::too_many_arguments)]
 pub fn bootstrap_tracker(
-    store_root: &Path,
+    local: &dyn LocalState,
     space: &SpaceId,
     session: &dyn SessionAccess,
     identity: &dyn IdentityAccess,
@@ -564,7 +572,7 @@ pub fn bootstrap_tracker(
     initial_project: Option<InitialProject>,
 ) -> Result<()> {
     bootstrap_tracker_inner(
-        store_root,
+        local,
         space,
         session,
         identity,
@@ -578,7 +586,7 @@ pub fn bootstrap_tracker(
 #[cfg(feature = "fault-injection")]
 #[allow(clippy::too_many_arguments)]
 pub fn bootstrap_tracker_with_fault(
-    store_root: &Path,
+    local: &dyn LocalState,
     space: &SpaceId,
     session: &dyn SessionAccess,
     identity: &dyn IdentityAccess,
@@ -588,7 +596,7 @@ pub fn bootstrap_tracker_with_fault(
     fault: Fault,
 ) -> Result<()> {
     bootstrap_tracker_inner(
-        store_root,
+        local,
         space,
         session,
         identity,
@@ -601,7 +609,7 @@ pub fn bootstrap_tracker_with_fault(
 
 #[allow(clippy::too_many_arguments)]
 fn bootstrap_tracker_inner(
-    store_root: &Path,
+    local: &dyn LocalState,
     space: &SpaceId,
     session: &dyn SessionAccess,
     identity: &dyn IdentityAccess,
@@ -610,7 +618,7 @@ fn bootstrap_tracker_inner(
     initial_project: Option<InitialProject>,
     fault: Option<Point>,
 ) -> Result<()> {
-    let record = match read_bootstrap_record(store_root, space) {
+    let record = match read_bootstrap_record_local(local, space) {
         Some(record) => {
             if record.phase == BootstrapPhase::Complete {
                 return Ok(());
@@ -657,7 +665,7 @@ fn bootstrap_tracker_inner(
                 signed_action: postcard::to_stdvec(&action)?,
                 phase: BootstrapPhase::Recorded,
             };
-            write_bootstrap_record(store_root, space, &record)?;
+            write_bootstrap_record(local, space, &record)?;
             if fault == Some(Point::AfterRecord) {
                 return Err(anyhow!("injected fault: after record write"));
             }
@@ -679,7 +687,7 @@ fn bootstrap_tracker_inner(
 
     let mut complete = record;
     complete.phase = BootstrapPhase::Complete;
-    write_bootstrap_record(store_root, space, &complete)
+    write_bootstrap_record(local, space, &complete)
 }
 
 #[cfg(test)]

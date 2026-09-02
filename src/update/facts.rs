@@ -51,7 +51,11 @@ pub fn offered() -> BTreeMap<String, semver::Version> {
     );
     facts.insert(
         WORLD_ABI.to_string(),
-        semver::Version::new(u64::from(world_sdk::ABI_VERSION), 0, 0),
+        semver::Version::new(
+            u64::from(world_sdk::ABI_VERSION),
+            u64::from(world_sdk::ABI_MINOR),
+            0,
+        ),
     );
     facts
 }
@@ -86,6 +90,11 @@ mod tests {
             u64::from(world_runner::PROTOCOL_VERSION)
         );
         assert_eq!(facts[WORLD_ABI].major, u64::from(world_sdk::ABI_VERSION));
+        // The minor grows the ABI without breaking it: a World requiring a
+        // later minor is refused by a host that offers an earlier one, and a
+        // World requiring an earlier minor still runs on a host offering a
+        // later one.
+        assert_eq!(facts[WORLD_ABI].minor, u64::from(world_sdk::ABI_MINOR));
     }
 
     #[test]
