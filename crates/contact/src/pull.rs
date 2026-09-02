@@ -60,19 +60,32 @@ async fn step<F: std::future::Future>(
     timeout(budget, fut).await.map_err(|_| ())
 }
 
-/// Dial `responder` on `lait/contact/2`, pull the Space whole, validate the
-/// transcript, and incorporate it into `replica`. Returns what moved and how
-/// Convergence classified it.
+/// The transcript a [`pull_receive`] moved, staged for incorporation but not
+/// yet committed. Separating it from the commit is what lets a live re-pull
+/// install into an already-composed Station's Replica: the async receive runs
+/// with no Replica lock, then the caller commits the `staged` material inside
+/// the Station's own writer (`StationCore::with_replica_convergence`), exactly
+/// as the native Contact driver does.
+pub struct ReceivedContact {
+    pub staged: replica::convergence::StagedContactMaterial,
+    pub bytes_moved: u64,
+}
+
+/// Receive one Space's material over `lait/contact/2` and stage it — the async
+/// half of a pull, touching no Replica. `holdings_root` is the caller's
+/// current published root (the one-shot reads it from its own Replica; a live
+/// re-pull reads it from the composed core), sent in the signed Offer so the
+/// responder can diff against what this node already holds.
 #[allow(clippy::too_many_lines, reason = "one wire exchange, ported verbatim")]
-pub async fn pull_whole(
+pub async fn pull_receive(
     transport: &dyn comms::Transport,
     responder: &Key,
     space: &SpaceId,
     station_seed: &[u8; 32],
     authority: &Authority,
-    replica: &mut Replica,
+    holdings_root: [u8; 32],
     deadlines: Deadlines,
-) -> Result<Outcome, Failure> {
+) -> Result<ReceivedContact, Failure> {
     let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
         .map_err(|_| Failure::Protocol("space id is not 29 rendered bytes".into()))?;
     let initiator_station = mechanics::actor::device_from_seed(station_seed)
@@ -133,8 +146,8 @@ pub async fn pull_whole(
         ));
     }
 
-    // declare == false, always: holdings root only, empty declaration.
-    let holdings_root = replica.published_root().map(|r| r.0).unwrap_or([0u8; 32]);
+    // declare == false, always: holdings root only, empty declaration. The
+    // root is the caller's, so this half never touches a Replica.
     let hello = Offer::sign(
         opening.hash(),
         CONTACT_PROTOCOL,
@@ -207,8 +220,9 @@ pub async fn pull_whole(
     })?;
     drop(stream); // dialer close: we have the transcript
 
-    // Stage → validate (authority first, durable) → incorporate. TransferAck
-    // already went out — it acknowledged the transcript, not convergence.
+    // Stage the transcript. TransferAck already went out — it acknowledged the
+    // transcript, not convergence — so the commit is the caller's to run
+    // through its own Replica writer.
     let staged = replica::convergence::StagedContactMaterial {
         authority_records: received.authority_records,
         manifest_root_bytes: received.manifest_root_bytes,
@@ -219,6 +233,39 @@ pub async fn pull_whole(
             .map(|((tx, key), bytes)| (tx, key, bytes))
             .collect(),
     };
+    Ok(ReceivedContact {
+        staged,
+        bytes_moved,
+    })
+}
+
+/// The one-shot pull: receive over the wire, then validate and incorporate
+/// into a Replica this caller owns. The receive half is [`pull_receive`], so a
+/// live re-pull can reuse it and run the validate/incorporate inside a live
+/// Station's own writer — exactly as the native Contact driver does, which is
+/// why the commit is inlined here rather than factored out (its error type is
+/// the Replica's, unexported, and inlining keeps both callers identical to the
+/// driver).
+pub async fn pull_whole(
+    transport: &dyn comms::Transport,
+    responder: &Key,
+    space: &SpaceId,
+    station_seed: &[u8; 32],
+    authority: &Authority,
+    replica: &mut Replica,
+    deadlines: Deadlines,
+) -> Result<Outcome, Failure> {
+    let holdings_root = replica.published_root().map(|r| r.0).unwrap_or([0u8; 32]);
+    let received = pull_receive(
+        transport,
+        responder,
+        space,
+        station_seed,
+        authority,
+        holdings_root,
+        deadlines,
+    )
+    .await?;
     let frontier = (authority.frontier)();
     let signer = SeedSigner(station_seed);
     let commit_ctx = CommitContext {
@@ -231,14 +278,18 @@ pub async fn pull_whole(
         .lock()
         .map_err(|_| Failure::Convergence("the incorporator lock is poisoned".into()))?;
     let bundle = replica
-        .validate_contact(&staged, authority.source.as_ref(), &mut *incorporator)
+        .validate_contact(
+            &received.staged,
+            authority.source.as_ref(),
+            &mut *incorporator,
+        )
         .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
     let convergence = replica
         .incorporate_bundle(&commit_ctx, bundle, authority.source.as_ref())
         .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
 
     Ok(Outcome {
-        bytes_moved,
+        bytes_moved: received.bytes_moved,
         convergence,
     })
 }
