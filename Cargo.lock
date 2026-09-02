@@ -698,6 +698,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-control"
+version = "0.1.0"
+dependencies = [
+ "contact",
+ "data-encoding",
+ "journal",
+ "mechanics",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3926,6 +3938,7 @@ dependencies = [
  "async-trait",
  "axum",
  "blake3",
+ "browser-control",
  "bytes",
  "comms",
  "correspondence",

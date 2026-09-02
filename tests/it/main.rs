@@ -15,6 +15,7 @@ mod address_book;
 mod agent_experience;
 mod authority_history;
 mod beacon_convergence;
+mod browser_control_vocabulary;
 mod commit_cost_baseline;
 mod content_ipc;
 mod control_classification;

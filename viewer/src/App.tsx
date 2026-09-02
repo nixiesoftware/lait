@@ -113,8 +113,10 @@ import {
 } from "./projectStore";
 import {
   isReadOnly,
+  isServedSpace,
   type BoardPos,
   type BoardView,
+  type OrbitSpaceRow,
   type Row,
   type SpaceRow,
   type SpecKind,
@@ -781,7 +783,10 @@ export function App() {
    */
   const forgetSpace = useCallback(async (id: string) => {
     const row = spacesRef.current.find((space) => space.id === id);
-    if (!row) return;
+    // Forgetting is registry surgery on a store path — a daemon act. A served
+    // (browser) row has no registry entry and no path to name; its affordance
+    // is guarded off in the Sidebar, and this is the matching backstop.
+    if (!row || isServedSpace(row)) return;
     const confirmed = await ask.confirm({
       title: `Forget ${row.name || row.seen?.name || row.space}?`,
       body: `This removes the space from the list on this device. The encrypted store at ${row.path} is left exactly as it is, and no other device is affected.`,
@@ -800,7 +805,10 @@ export function App() {
 
   /** Drop every row whose store is gone — the one remedy for a `missing` row. */
   const pruneSpaces = useCallback(async () => {
-    const gone = spacesRef.current.filter((space) => space.status === "missing");
+    const gone = spacesRef.current.filter(
+      (space): space is OrbitSpaceRow =>
+        !isServedSpace(space) && space.status === "missing",
+    );
     if (gone.length === 0) return;
     const confirmed = await ask.confirm({
       title: gone.length === 1 ? "Remove 1 unavailable space?" : `Remove ${gone.length} unavailable spaces?`,

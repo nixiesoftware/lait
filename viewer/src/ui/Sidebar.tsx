@@ -26,7 +26,8 @@ import {
   type View,
 } from "../core/registry";
 import type { SavedView } from "../core/savedViews";
-import type { ProjectDto, SpaceRow, TeamDto } from "../types";
+import type { OrbitSpaceRow, ProjectDto, SpaceRow, TeamDto } from "../types";
+import { isServedSpace } from "../types";
 import { ungrouped } from "../core/teams";
 import { catalogColor } from "./colors";
 import { ProjectIcon } from "./icons";
@@ -377,12 +378,13 @@ function SpaceSwitcher({
   onPruneSpaces: () => void;
 }) {
   const selected = spaces.find((s) => s.id === current) ?? null;
-  const title = (currentName?.trim() || selected?.name || selected?.seen?.name)
+  const title = (currentName?.trim() || selected?.name || rowSeenName(selected))
     || selected?.space || "Choose a space";
   // A row whose store is gone. It has no remedy anywhere else in the app: the
   // registry is only ever *written* by founding and entering, so nothing else
-  // clears one and it sits in the switcher for good.
-  const unavailable = spaces.filter((s) => s.status === "missing").length;
+  // clears one and it sits in the switcher for good. A served (browser) row has
+  // no probe status and can never be "missing".
+  const unavailable = spaces.filter((s) => rowStatus(s) === "missing").length;
   return (
     <div className="flex min-w-0 flex-1 items-center gap-0.5">
       {/* One line, because it has to sit on the header's baseline.
@@ -476,13 +478,16 @@ function SpaceSwitcher({
                       <Folder className="size-icon-sm shrink-0" />
                     )
                   }
-                  label={space.name || space.seen?.name || space.space}
+                  label={space.name || rowSeenName(space) || space.space}
                   // An agent replica is a different *identity* on the same data,
                   // which is the only thing worth saying twice.
                   {...(space.identity.kind === "agent"
                     ? { description: space.identity.name }
                     : {})}
-                  endContent={<StatusDot status={space.status} />}
+                  // A served (browser) row has no probe status to draw.
+                  {...(isServedSpace(space)
+                    ? {}
+                    : { endContent: <StatusDot status={space.status} /> })}
                 />
               ))}
             </DropdownMenuSubMenu>
@@ -501,7 +506,7 @@ function SpaceSwitcher({
             store, which is what makes them safe to offer next to the verbs that
             create one. */}
         {(selected || unavailable > 0) && <Divider />}
-        {selected && (
+        {selected && !isServedSpace(selected) && (
           <DropdownMenuItem
             label="Forget this space"
             icon={<EyeOff className="size-icon-sm" />}
@@ -525,7 +530,7 @@ function SpaceSwitcher({
           name needs, the free space has to be claimed by the thing that wants
           to be at the far end. */}
       <span className="ml-auto flex shrink-0 items-center gap-0.5">
-        {selected && <StatusDot status={selected.status} />}
+        {selected && !isServedSpace(selected) && <StatusDot status={selected.status} />}
         <IconButton
           label="Search issues"
           onClick={onSearch}
@@ -757,12 +762,22 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
   );
 }
 
+/** The past-observation name, or undefined on a served (browser) row. */
+function rowSeenName(row: SpaceRow | null): string | undefined {
+  return row && !isServedSpace(row) ? row.seen?.name : undefined;
+}
+
+/** The probe status, or undefined on a served row — which has no probe. */
+function rowStatus(row: SpaceRow): OrbitSpaceRow["status"] | undefined {
+  return isServedSpace(row) ? undefined : row.status;
+}
+
 /**
  * `unknown` is deliberately not a fourth colour on the same scale. The other
  * three are readings; that one is the absence of one, so it draws hollow — a
  * filled dot in any colour would say this device looked and found something.
  */
-function StatusDot({ status }: { status: SpaceRow["status"] }) {
+function StatusDot({ status }: { status: OrbitSpaceRow["status"] }) {
   const cls = {
     up: "bg-ok",
     idle: "bg-mute",

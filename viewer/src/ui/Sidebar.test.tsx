@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ProjectDto, SpaceRow } from "../types";
+import type { OrbitSpaceRow, ProjectDto, SpaceRow } from "../types";
 import { Sidebar } from "./Sidebar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -310,7 +310,7 @@ describe("a space this device has not opened since its daemon started", () => {
   });
 
   it("is named by what the device last saw, not by its id", () => {
-    const seen: SpaceRow = {
+    const seen: OrbitSpaceRow = {
       ...space,
       id: "seen-hash",
       space: "ws_4GGTOVHSB6KOK9FKFB7AAM21FF",
@@ -355,7 +355,7 @@ describe("a space this device has not opened since its daemon started", () => {
   });
 
   it("lists it by that name in the switcher, and a live row by its live name", () => {
-    const seen: SpaceRow = {
+    const seen: OrbitSpaceRow = {
       ...space,
       id: "seen-hash",
       space: "ws_4GGTOVHSB6KOK9FKFB7AAM21FF",
@@ -365,7 +365,7 @@ describe("a space this device has not opened since its daemon started", () => {
       seen: { name: "Kas", observed_at: Math.floor(Date.now() / 1000) - 7200 },
     };
     // A live row that also carries a reading draws the live name, unmarked.
-    const live: SpaceRow = { ...space, seen: { name: "Old name", observed_at: 1 } };
+    const live: OrbitSpaceRow = { ...space, seen: { name: "Old name", observed_at: 1 } };
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -417,7 +417,7 @@ describe("a space this device has not opened since its daemon started", () => {
   });
 });
 
-const space: SpaceRow = {
+const space: OrbitSpaceRow = {
   id: "local-hash",
   space: "ws_test",
   name: "Test space",

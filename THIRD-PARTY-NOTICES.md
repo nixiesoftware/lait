@@ -4,22 +4,23 @@ lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crate
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-810 crates, under 42 distinct licence expressions.
+847 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 380 |
+| `MIT OR Apache-2.0` | 383 |
 | `MIT` | 149 |
-| `Apache-2.0 OR MIT` | 75 |
-| `MIT/Apache-2.0` | 39 |
+| `Apache-2.0 OR MIT` | 76 |
+| `MIT/Apache-2.0` | 40 |
+| `Apache-2.0 WITH LLVM-exception` | 28 |
 | `Unicode-3.0` | 25 |
 | `Apache-2.0` | 23 |
-| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 16 |
+| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 19 |
+| `Unlicense OR MIT` | 11 |
 | `Zlib OR Apache-2.0 OR MIT` | 11 |
 | `MPL-2.0` | 10 |
-| `Unlicense OR MIT` | 10 |
 | `BSD-3-Clause` | 8 |
 | `MPL-2.0+` | 6 |
 | `BSD-2-Clause` | 4 |
@@ -45,7 +46,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | `Apache-2.0 / MIT` | 1 |
 | `Apache-2.0 AND ISC` | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 |
-| `Apache-2.0 WITH LLVM-exception` | 1 |
+| `BSD-2-Clause OR MIT OR Apache-2.0` | 1 |
 | `BSL-1.0` | 1 |
 | `CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception` | 1 |
 | `CC0-1.0 OR MIT-0 OR Apache-2.0` | 1 |
@@ -57,6 +58,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 
 | Crate | Version | Licence | Source |
 | --- | --- | --- | --- |
+| addr2line | 0.26.1 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/addr2line> |
 | adler2 | 2.0.1 | `0BSD OR MIT OR Apache-2.0` | <https://github.com/oyvindln/adler2> |
 | aead | 0.5.2 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
 | aes | 0.8.4 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/block-ciphers> |
@@ -70,7 +72,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | anstyle-parse | 1.0.0 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/anstyle.git> |
 | anstyle-query | 1.1.5 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/anstyle.git> |
 | anstyle-wincon | 3.0.11 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/anstyle.git> |
-| anyhow | 1.0.102 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/anyhow> |
+| anyhow | 1.0.104 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/anyhow> |
 | append-only-bytes | 0.1.12 | `MIT` | <https://github.com/zxch3n/append-only-bytes> |
 | approx | 0.5.1 | `Apache-2.0` | <https://github.com/brendanzab/approx> |
 | ar_archive_writer | 0.5.3 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/rust-lang/ar_archive_writer> |
@@ -163,8 +165,22 @@ Listed here is every crate reachable from this workspace through normal and buil
 | core-foundation | 0.9.4 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
 | core-foundation-sys | 0.8.7 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
 | core_maths | 0.1.1 | `MIT` | <https://github.com/robertbastian/core_maths> |
+| cpp_demangle | 0.4.5 | `MIT OR Apache-2.0` | <https://github.com/gimli-rs/cpp_demangle> |
 | cpufeatures | 0.2.17 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
 | cpufeatures | 0.3.0 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
+| cranelift-assembler-x64 | 0.133.3 | `Apache-2.0 WITH LLVM-exception` | — |
+| cranelift-assembler-x64-meta | 0.133.3 | `Apache-2.0 WITH LLVM-exception` | — |
+| cranelift-bforest | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-bitset | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-codegen | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-codegen-meta | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-codegen-shared | 0.133.3 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-control | 0.133.3 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-entity | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-frontend | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-isle | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime/tree/main/cranelift/isle> |
+| cranelift-native | 0.133.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| cranelift-srcgen | 0.133.3 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
 | crc32fast | 1.5.0 | `MIT OR Apache-2.0` | <https://github.com/srijs/rust-crc32fast> |
 | critical-section | 1.2.0 | `MIT OR Apache-2.0` | <https://github.com/rust-embedded/critical-section> |
 | crossbeam-channel | 0.5.15 | `MIT OR Apache-2.0` | <https://github.com/crossbeam-rs/crossbeam> |
@@ -279,6 +295,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | getrandom | 0.4.2 | `MIT OR Apache-2.0` | <https://github.com/rust-random/getrandom> |
 | ghash | 0.5.1 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | gif | 0.14.2 | `MIT OR Apache-2.0` | <https://github.com/image-rs/image-gif> |
+| gimli | 0.33.0 | `MIT OR Apache-2.0` | <https://github.com/gimli-rs/gimli> |
 | glidesort | 0.1.2 | `MIT OR Apache-2.0` | <https://github.com/orlp/glidesort> |
 | glifo | 0.1.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
 | glob | 0.3.4 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/glob> |
@@ -412,10 +429,12 @@ Listed here is every crate reachable from this workspace through normal and buil
 | lru-slab | 0.1.2 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/Ralith/lru-slab> |
 | lz4_flex | 0.11.6 | `MIT` | <https://github.com/pseitz/lz4_flex> |
 | mac-addr | 0.3.0 | `MIT` | <https://github.com/shellrow/mac-addr> |
+| mach2 | 0.6.0 | `BSD-2-Clause OR MIT OR Apache-2.0` | <https://github.com/JohnTitor/mach2> |
 | matchers | 0.2.0 | `MIT` | <https://github.com/hawkw/matchers> |
 | matchit | 0.8.4 | `MIT AND BSD-3-Clause` | <https://github.com/ibraheemdev/matchit> |
 | md5 | 0.7.0 | `Apache-2.0/MIT` | <https://github.com/stainless-steel/md5> |
 | memchr | 2.8.1 | `Unlicense OR MIT` | <https://github.com/BurntSushi/memchr> |
+| memfd | 0.6.6 | `MIT OR Apache-2.0` | <https://github.com/lucab/memfd-rs> |
 | mime | 0.3.17 | `MIT OR Apache-2.0` | <https://github.com/hyperium/mime> |
 | minimal-lexical | 0.2.1 | `MIT/Apache-2.0` | <https://github.com/Alexhuszagh/minimal-lexical> |
 | miniz_oxide | 0.8.9 | `MIT OR Zlib OR Apache-2.0` | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
@@ -519,6 +538,8 @@ Listed here is every crate reachable from this workspace through normal and buil
 | proc-macro-hack | 0.5.20+deprecated | `MIT OR Apache-2.0` | <https://github.com/dtolnay/proc-macro-hack> |
 | proc-macro2 | 1.0.106 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/proc-macro2> |
 | psm | 0.1.32 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/stacker/> |
+| pulley-interpreter | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime/tree/main/pulley> |
+| pulley-macros | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime/tree/main/pulley/macros> |
 | pxfm | 0.1.30 | `BSD-3-Clause OR Apache-2.0` | <https://github.com/awxkee/pxfm> |
 | quick-error | 2.0.1 | `MIT/Apache-2.0` | <http://github.com/tailhook/quick-error> |
 | quick-xml | 0.38.4 | `MIT` | <https://github.com/tafia/quick-xml> |
@@ -547,6 +568,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | redox_users | 0.4.6 | `MIT` | <https://gitlab.redox-os.org/redox-os/users> |
 | ref-cast | 1.0.25 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/ref-cast> |
 | ref-cast-impl | 1.0.25 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/ref-cast> |
+| regalloc2 | 0.15.2 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/regalloc2> |
 | regex | 1.13.1 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/regex> |
 | regex-automata | 0.4.16 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/regex> |
 | regex-syntax | 0.8.11 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/regex> |
@@ -560,6 +582,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | roman-numerals-rs | 3.1.0 | `0BSD OR CC0-1.0` | <https://github.com/AA-Turner/roman-numerals/> |
 | roxmltree | 0.21.1 | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/roxmltree> |
 | rust_decimal | 1.42.1 | `MIT` | <https://github.com/paupino/rust-decimal> |
+| rustc-demangle | 0.1.28 | `MIT/Apache-2.0` | <https://github.com/rust-lang/rustc-demangle> |
 | rustc-hash | 2.1.2 | `Apache-2.0 OR MIT` | <https://github.com/rust-lang/rustc-hash> |
 | rustc_version | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/djc/rustc-version-rs> |
 | rusticata-macros | 4.1.0 | `MIT/Apache-2.0` | <https://github.com/rusticata/rusticata-macros.git> |
@@ -658,7 +681,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | system-configuration-sys | 0.6.0 | `MIT OR Apache-2.0` | <https://github.com/mullvad/system-configuration-rs> |
 | tagptr | 0.2.0 | `MIT/Apache-2.0` | <https://github.com/oliver-giersch/tagptr.git> |
 | tar | 0.4.46 | `MIT OR Apache-2.0` | <https://github.com/composefs/tar-rs> |
+| target-lexicon | 0.13.5 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/target-lexicon> |
 | tempfile | 3.27.0 | `MIT OR Apache-2.0` | <https://github.com/Stebalien/tempfile> |
+| termcolor | 1.4.1 | `Unlicense OR MIT` | <https://github.com/BurntSushi/termcolor> |
 | textcode | 0.3.1 | `MIT` | <https://github.com/cesbo/textcode> |
 | textwrap | 0.16.2 | `MIT` | <https://github.com/mgeisler/textwrap> |
 | thin-vec | 0.2.19 | `MIT OR Apache-2.0` | <https://github.com/mozilla/thin-vec> |
@@ -774,6 +799,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | wasm-bindgen-macro-support | 0.2.122 | `MIT OR Apache-2.0` | <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support> |
 | wasm-bindgen-shared | 0.2.122 | `MIT OR Apache-2.0` | <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared> |
 | wasm-encoder | 0.244.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder> |
+| wasm-encoder | 0.251.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder> |
 | wasm-metadata | 0.244.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-metadata> |
 | wasm-streams | 0.5.0 | `MIT OR Apache-2.0` | <https://github.com/MattiasBuelens/wasm-streams/> |
 | wasmi | 1.1.0 | `MIT/Apache-2.0` | <https://github.com/wasmi-labs/wasmi> |
@@ -782,6 +808,18 @@ Listed here is every crate reachable from this workspace through normal and buil
 | wasmi_ir | 1.1.0 | `MIT/Apache-2.0` | <https://github.com/wasmi-labs/wasmi> |
 | wasmparser | 0.239.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser> |
 | wasmparser | 0.244.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser> |
+| wasmparser | 0.251.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser> |
+| wasmprinter | 0.251.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmprinter> |
+| wasmtime | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-environ | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-component-util | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-core | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | — |
+| wasmtime-internal-cranelift | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-fiber | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-jit-debug | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-jit-icache-coherence | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-unwinder | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
+| wasmtime-internal-versioned-export-macros | 46.0.0 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/bytecodealliance/wasmtime> |
 | web-sys | 0.3.99 | `MIT OR Apache-2.0` | <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys> |
 | web-time | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/daxpedda/web-time> |
 | webpki-root-certs | 1.0.7 | `CDLA-Permissive-2.0` | <https://github.com/rustls/webpki-roots> |

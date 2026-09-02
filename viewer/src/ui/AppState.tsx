@@ -314,6 +314,7 @@ export type FailureKind =
   | "rejected"
   | "pending-sync"
   | "authority-unavailable"
+  | "not-hosted"
   | "unknown";
 
 export function classifyFailure(message: string): FailureKind {
@@ -325,6 +326,10 @@ export function classifyFailure(message: string): FailureKind {
     case "denied": return "authorization";
     case "not_found": return "invalid-reference";
     case "retry": return "conflict";
+    // A browser backend's "no daemon here" refusal. Typed, so its wording
+    // never matters — and never read as a reconnectable outage, which the
+    // `daemon`/`connect` regex below would otherwise do.
+    case "not_hosted": return "not-hosted";
   }
   if (/read.?only/i.test(message)) return "read-only";
   if (/could not evaluate authority state|ledger problem/i.test(message)) return "authority-unavailable";
@@ -360,6 +365,7 @@ export function recoveryForError(message: string): {
     case "rejected": return { title: "Change rejected", retryLabel: "Retry" };
     case "pending-sync": return { title: "Change is pending", retryLabel: "Refresh" };
     case "authority-unavailable": return { title: "Authority state unavailable", retryLabel: "Retry" };
+    case "not-hosted": return { title: "Not available in this browser session", retryLabel: "Refresh" };
     default: return { title: "Something didn’t finish", retryLabel: "Retry" };
   }
 }

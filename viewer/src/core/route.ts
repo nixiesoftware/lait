@@ -245,9 +245,12 @@ export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {
  * both our actor and an agent hold the space, portable links open as us. */
 export function resolveLocalSpace(canonical: string | null, spaces: SpaceRow[]): SpaceRow | null {
   if (!canonical) return null;
+  // A served (browser) row carries no `last_opened` reading; treat its order
+  // as 0 — a browser answers one Space, so the tie-break never matters there.
+  const openedAt = (row: SpaceRow) => ("last_opened" in row ? row.last_opened : 0);
   const newestFirst = spaces
     .filter((space) => space.space === canonical)
-    .sort((a, b) => b.last_opened - a.last_opened || a.id.localeCompare(b.id));
+    .sort((a, b) => openedAt(b) - openedAt(a) || a.id.localeCompare(b.id));
   return newestFirst.find((space) => !isReadOnly(space)) ?? newestFirst[0] ?? null;
 }
 

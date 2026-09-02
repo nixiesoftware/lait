@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/browser-control",
     "crates/display-protocol",
     "crates/install-layout",
     "crates/journal",
@@ -336,6 +337,11 @@ issues-app = { package = "lait-issues-app", path = "products/issues-app", featur
 issues = { package = "lait-issues", path = "products/issues" }
 signage = { package = "lait-signage", path = "products/signage" }
 signage-app = { package = "lait-signage-app", path = "products/signage-app" }
+# The browser control vocabulary, pinned against this crate's wire enum: the
+# completeness test that holds it whole lives here, where both the wire
+# (`control::Request`) and the classification are visible. A dev-dependency
+# only — the daemon never depends on the browser backend's vocabulary.
+browser-control = { path = "crates/browser-control" }
 # A zero-wiring test entrypoint: a `#[cfg(test)] #[ctor]` scrubs ambient `LAIT_*`
 # env at unit-test process load, *before* any test runs, so a developer's
 # inherited `$LAIT_HOME`/`$LAIT_STORE` can never silently redirect store/identity

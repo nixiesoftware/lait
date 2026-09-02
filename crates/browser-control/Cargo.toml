@@ -1,0 +1,33 @@
+# The honest browser control vocabulary: what a browser-composed backend
+# (`runtime::browser` behind a Worker) answers on the control plane, what it
+# refuses, and the exact words it refuses with.
+#
+# Its own crate — not `runtime::browser`, not the root crate — for one
+# decisive reason: the completeness test that holds the classification whole
+# must run under plain `cargo test`, and the root crate (which owns the wire
+# enum) is native-only while `runtime::browser` is wasm-only. This crate
+# compiles both ways; the root crate pins it against the wire in
+# `tests/browser_control_vocabulary.rs` as a dev-dependency, and the daemon
+# never depends on it — its reply types are named `Served*`, not `SpaceRow`,
+# so the two vocabularies cannot be confused.
+[package]
+name = "browser-control"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "The control-plane vocabulary of a browser-composed lait backend: dispositions, served-space replies, honest refusals"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2"
+mechanics = { path = "../mechanics" }
+contact = { path = "../contact" }
+
+[dev-dependencies]
+journal = { path = "../journal" }

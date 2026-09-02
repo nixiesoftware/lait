@@ -1029,7 +1029,26 @@ export interface ProjectBrief {
   name: string;
 }
 
-export interface SpaceRow {
+/**
+ * One row of the spaces picker. Two shapes behind one union, split by `kind`:
+ *
+ * - The **daemon row** (`kind` absent, or `"orbit"`) is what a native head's
+ *   supervisor answers — probe `status`, registry `path`/`origin`, the
+ *   `unnamed`/`seen` observation taxonomy. Its fields are readings the daemon
+ *   took.
+ * - The **served row** (`kind: "served"`) is what a browser-composed backend
+ *   answers for the single Space its Worker serves. It states only what it
+ *   honestly holds — id, space, a live catalog `name`, whose key it signs
+ *   with — and has NO `path`, `origin`, probe `status`, `unnamed`, or `seen`.
+ *   "Served" is a construction fact, not a probe, and the missing fields are
+ *   what keep the daemon-only affordances (StatusDot, Forget, Prune) from
+ *   rendering against it — TypeScript refuses `row.status`/`row.path` on it.
+ */
+export type SpaceRow = OrbitSpaceRow | ServedSpaceRow;
+
+export interface OrbitSpaceRow {
+  /** Absent on a native head's rows; `"orbit"` when stated explicitly. */
+  kind?: "orbit";
   id: string;
   space: string;
   /**
@@ -1053,6 +1072,25 @@ export interface SpaceRow {
    * a reading, never a fourth degree of down. */
   status: "up" | "idle" | "missing" | "unknown";
   identity: SpaceIdentity;
+}
+
+/** The single Space a browser-composed backend serves. See {@link SpaceRow}. */
+export interface ServedSpaceRow {
+  kind: "served";
+  id: string;
+  space: string;
+  /**
+   * The Catalog name, read live from the composed Session's own World.
+   * `null` before the World docks; no remembered fallback, no probe taxonomy.
+   */
+  name: string | null;
+  /** Whose key this backend signs with — what it constructed, not a probe. */
+  identity: SpaceIdentity;
+}
+
+/** Narrow a row to the browser-served shape. */
+export function isServedSpace(row: SpaceRow): row is ServedSpaceRow {
+  return row.kind === "served";
 }
 
 export interface SpacesReply {
@@ -1929,7 +1967,21 @@ type ResponseBody =
   | {
       kind: "error";
       message: string;
-      error_kind: "error" | "invalid" | "not_found" | "denied" | "retry" | "indeterminate";
+      /**
+       * `not_hosted` is a browser backend's refusal: the request is the local
+       * lait service's act by nature (or a reading not answered in a browser
+       * session), and there is no daemon here. It is deliberately neither
+       * `not_found` (which would replay as a wrong-mount refresh) nor an
+       * outage: `AppState` classifies it to its own recovery copy.
+       */
+      error_kind:
+        | "error"
+        | "invalid"
+        | "not_found"
+        | "denied"
+        | "retry"
+        | "indeterminate"
+        | "not_hosted";
     };
 
 /** Application responses are unwrapped from the on-wire operation envelope,
