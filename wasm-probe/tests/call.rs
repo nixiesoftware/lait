@@ -79,9 +79,10 @@ impl replica::body::BodyKeySource for NoKeys {
     }
 }
 
-#[wasm_bindgen_test]
-fn a_real_query_crosses_the_engine_and_the_runner_in_a_browser() {
-    // The guest: the real 39 MiB Issues runner, up under browser WebAssembly.
+/// Compose the daemon's own registry/StationCore/Session machinery over an
+/// empty in-memory Replica with the real Issues runner, and dock a caller —
+/// the shared setup both crossings stand on.
+fn dock_over_empty_replica() -> (runtime::Session, replica::body::WorldId) {
     let instance = WebInstance::launch(
         ISSUES_RUNNER,
         GuestInit {
@@ -97,8 +98,6 @@ fn a_real_query_crosses_the_engine_and_the_runner_in_a_browser() {
     assert_ne!(implementation, [0; 32], "the runner declares its review");
     let world_id = remote.descriptor().id.clone();
 
-    // The engine: the daemon's own registry/StationCore/Session machinery,
-    // composed by this Worker over an empty in-memory Replica.
     let registry = Builder::new()
         .register_reviewed(Arc::new(remote), implementation)
         .build()
@@ -120,6 +119,12 @@ fn a_real_query_crosses_the_engine_and_the_runner_in_a_browser() {
     let session = station
         .dock(&world_id, &identity)
         .expect("a browser caller docks");
+    (session, world_id)
+}
+
+#[wasm_bindgen_test]
+fn a_real_query_crosses_the_engine_and_the_runner_in_a_browser() {
+    let (session, _world_id) = dock_over_empty_replica();
 
     // The Call: the real product question, dispatched into the guest, whose
     // semantic reads come back as context callbacks answered from the
@@ -149,4 +154,65 @@ fn a_real_query_crosses_the_engine_and_the_runner_in_a_browser() {
         serde_json::from_slice(&projection.bytes).expect("the projects page is JSON");
     let items = page["items"].as_array().expect("the page names its items");
     assert!(items.is_empty(), "an empty Space projects no projects");
+}
+
+#[wasm_bindgen_test]
+fn a_deferred_lease_query_completes_in_a_browser_with_no_pump() {
+    // IssueQuery::Geometry is the one product path that acquires a deferred
+    // Find lease (implementation.rs `deferred_find`) — natively its build runs
+    // on a worker pool and issues find.query_detached AFTER the reply, serviced
+    // by the runtime's post-Complete callback thread. On wasm the guest is
+    // single-threaded: the GeometryExecutor runs the build INLINE, draining the
+    // lease through synchronous callbacks before wr_handle returns. So the
+    // whole path completes with no detached handler and no wr_pump export —
+    // the point of S7.7.
+    //
+    // The build result is cached, not returned: the first query kicks the
+    // build (which, inline, runs to completion within the call) and returns
+    // the `pending` placeholder; a second query for the same key finds the
+    // cached artifact READY. That the second poll is Ready is the proof the
+    // build finished in-request — natively without the post-Complete callback
+    // thread this would still be building; a path that truly needed a
+    // post-return callback would never reach Ready with no detached handler.
+    let (session, _world_id) = dock_over_empty_replica();
+
+    let ask_geometry = || {
+        let projection = session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: IssueQuery::Geometry {
+                    project: "prj_00000000000000000000000000".into(),
+                    roots: Vec::new(),
+                    page: None,
+                }
+                .to_json(),
+                publication: None,
+            })
+            .expect("the Geometry query crosses the deferred-lease path and answers");
+        let view: serde_json::Value =
+            serde_json::from_slice(&projection.bytes).expect("the geometry projection is JSON");
+        view["readiness"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // First poll: the inline build runs and caches; the reply is the pending
+    // placeholder.
+    assert_eq!(
+        ask_geometry(),
+        "pending",
+        "the first poll kicks the inline build"
+    );
+    // Second poll: the build reached a TERMINAL state and cached it — the lease
+    // drained in-request. Terminal (not still "pending") is the proof, whatever
+    // the empty-project geometry resolves to; a path that truly needed a
+    // post-return callback would be stuck pending here with no detached
+    // handler wired.
+    let second = ask_geometry();
+    assert_ne!(
+        second, "pending",
+        "the inline build completed and cached — no pump needed (got {second})",
+    );
 }

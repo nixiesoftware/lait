@@ -24,8 +24,16 @@
 //! store for its whole duration, because the guest's host callbacks are
 //! synchronous nested calls (the guest calls the imported `host_call`, the host
 //! answers it without re-entering the guest). The retained-Find-lease case,
-//! where the host would call *into* the guest after the reply, is not served
-//! here — a single guest instance cannot emit callbacks after it returns.
+//! where a native World's background thread issues `find.query_detached` after
+//! the reply, does not arise here: a single guest instance is idle once
+//! `wr_handle` returns, so it emits no post-return callback. The only
+//! first-party path that retains a lease — the Issues Geometry projection —
+//! runs its build inline on wasm (`products/issues` `GeometryExecutor` is a
+//! cfg-split unit struct there), draining the lease through synchronous
+//! callbacks before `wr_handle` returns. So the detached handler is correctly
+//! dead on wasm, and no fifth "pump" export is owed — the "re-model detached
+//! as in-request" that a thread-pool host would need is already the wasm
+//! executor's behavior. The proof is `a_deferred_lease_drains_inline_on_wasm`.
 
 use std::sync::{Arc, Mutex};
 
@@ -184,13 +192,14 @@ impl Conversation for WasmConversation {
         &mut self,
         operation: Operation,
         callback: &mut dyn FnMut(&str, &[u8]) -> std::result::Result<Vec<u8>, String>,
-        // Deliberately dropped: a detached handler services callbacks a
-        // retained Find lease raises AFTER the reply, and a single guest
-        // instance cannot emit them (it is idle once `handle` returns). The
-        // native backend spawns a thread for this; the wasm analog is a second
-        // guest export the host pumps, which the Issues wasm path needs before
-        // it is functionally complete and which the next slice owes. Until
-        // then a wasm runner that retains a lease drops those callbacks.
+        // Deliberately dropped, and correctly: a detached handler services
+        // callbacks a retained Find lease raises AFTER the reply, and a single
+        // guest instance is idle once `wr_handle` returns, so it emits none.
+        // The native backend spawns a thread because its build runs after the
+        // reply; the wasm build runs INLINE (the Issues `GeometryExecutor` is a
+        // cfg-split unit struct on wasm), draining the lease through
+        // synchronous callbacks before the reply. No pump export is owed — see
+        // the module doc and `a_deferred_lease_drains_inline_on_wasm`.
         _detached: Arc<dyn CallbackHandler>,
     ) -> Result<Reply> {
         let request_frame = world_runner::wasm_abi::encode(&world_runner::Request {

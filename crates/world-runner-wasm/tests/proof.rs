@@ -5,10 +5,11 @@
 
 #![cfg(proof_world_wasm)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use world_runner::wasm_abi::GuestInit;
-use world_runner::{no_detached_callbacks, HostedRunner, Operation, Reply};
+use world_runner::{no_detached_callbacks, CallbackHandler, HostedRunner, Operation, Reply};
 use world_runner_wasm::{Limits, WasmInstance};
 
 fn proof_world() -> Vec<u8> {
@@ -44,6 +45,17 @@ fn no_callback(_: &str, _: &[u8]) -> Result<Vec<u8>, String> {
     Err("the World raised an unexpected callback".to_string())
 }
 
+/// A detached handler that must never be reached on wasm: a single guest
+/// instance is idle once `wr_handle` returns, so it emits no post-reply
+/// callback. Any call here is the very defect S7.7 established cannot happen.
+struct PanicIfDetached;
+
+impl CallbackHandler for PanicIfDetached {
+    fn call(&self, operation: &str, _payload: &[u8]) -> Result<Vec<u8>, String> {
+        panic!("a wasm guest reached the detached handler with {operation:?} — it must not");
+    }
+}
+
 #[test]
 fn describe_returns_the_guests_own_service_identity() {
     let mut instance = launch();
@@ -66,6 +78,55 @@ fn describe_returns_the_guests_own_service_identity() {
     };
     assert_eq!(descriptor.world, "com.lait.proof");
     assert_eq!(descriptor.implementation_version, 1);
+}
+
+#[test]
+fn a_deferred_lease_drains_inline_on_wasm() {
+    // The retained-Find-lease shape — the only first-party path (Issues
+    // Geometry) that outlives its query() natively. On wasm the build runs
+    // inline, so the whole acquire → query_detached×N → release sequence
+    // crosses the SYNCHRONOUS in-request callback and the detached handler is
+    // never reached. That is why no `wr_pump` export is owed. If a wasm guest
+    // ever emitted a post-reply callback, `PanicIfDetached` would fire.
+    let mut instance = launch();
+    let mut inline_ops: Vec<String> = Vec::new();
+    let reply = {
+        let mut callback = |operation: &str, _payload: &[u8]| -> Result<Vec<u8>, String> {
+            inline_ops.push(operation.to_string());
+            Ok(Vec::new())
+        };
+        instance
+            .open()
+            .unwrap()
+            .dispatch(
+                Operation::Call {
+                    operation: "drain".into(),
+                    payload: Vec::new(),
+                },
+                &mut callback,
+                Arc::new(PanicIfDetached),
+            )
+            .expect("drain answers")
+    };
+    // Every find.* callback was answered inline, before the reply.
+    assert!(inline_ops.iter().any(|op| op == "find.acquire_deferred"));
+    assert_eq!(
+        inline_ops
+            .iter()
+            .filter(|op| *op == "find.query_detached")
+            .count(),
+        3,
+        "all three detached queries drained in-request"
+    );
+    assert!(inline_ops.iter().any(|op| op == "find.release"));
+    let Reply::Call { payload } = reply else {
+        panic!("drain did not return a call reply");
+    };
+    assert_eq!(
+        payload,
+        3u32.to_le_bytes(),
+        "the guest drained three queries"
+    );
 }
 
 #[test]

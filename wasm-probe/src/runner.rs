@@ -13,7 +13,9 @@
 //! because the whole chain runs in a Worker, where the ledger's OPFS I/O is a
 //! synchronous access handle. Single-threaded and nested-synchronous — simpler
 //! than the native path, which juggles a second connection and a supervision
-//! lock.
+//! lock. The native path's post-reply detached-callback thread has no analog
+//! here and needs none: the one first-party lease-holder (Issues Geometry)
+//! runs its build inline on wasm, draining the lease before the guest returns.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -158,6 +160,9 @@ impl Conversation for WebConversation {
         &mut self,
         operation: Operation,
         callback: &mut dyn FnMut(&str, &[u8]) -> std::result::Result<Vec<u8>, String>,
+        // Dropped, and correctly: a wasm guest emits no callback after it
+        // returns, and the only lease-holding World path drains inline (see the
+        // module note). No pump is owed.
         _detached: Arc<dyn CallbackHandler>,
     ) -> Result<Reply> {
         let frame = encode(&Request {

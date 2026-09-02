@@ -17,7 +17,12 @@ impl Service for ProofWorld {
         self.descriptor.clone()
     }
 
-    fn call(&self, operation: &str, payload: &[u8], host: Arc<dyn Host>) -> Result<Vec<u8>, String> {
+    fn call(
+        &self,
+        operation: &str,
+        payload: &[u8],
+        host: Arc<dyn Host>,
+    ) -> Result<Vec<u8>, String> {
         match operation {
             // Proves a synchronous host callback round-trips: ask the host to
             // "ping", then return the host's answer with the payload appended.
@@ -31,11 +36,30 @@ impl Service for ProofWorld {
             "trap" => {
                 unreachable!("proof-world was asked to trap");
             }
+            // Proves a retained Find lease drains INLINE on wasm: acquire a
+            // deferred lease, issue its detached queries, and release it — all
+            // within `call`, every callback answered synchronously by the
+            // host's in-request handler. This is the shape of the Issues
+            // Geometry projection under its wasm executor. The host's DETACHED
+            // handler must never be reached, because the guest is idle once it
+            // returns; the test proves that by handing a detached handler that
+            // panics if touched. Returns the number of detached queries drained.
+            "drain" => {
+                let token = host.call("find.acquire_deferred", payload)?;
+                let mut drained = 0u32;
+                for _ in 0..3 {
+                    let _ = host.call("find.query_detached", &token)?;
+                    drained += 1;
+                }
+                host.call("find.release", &token)?;
+                Ok(drained.to_le_bytes().to_vec())
+            }
             // Proves a large payload crosses linear memory intact.
             "len" => Ok((payload.len() as u64).to_le_bytes().to_vec()),
             // Proves the request deadline bites: loop until the host's epoch
             // interruption traps this guest.
-            "spin" => {
+            "spin" =>
+            {
                 #[allow(clippy::empty_loop)]
                 loop {}
             }

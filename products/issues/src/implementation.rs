@@ -326,6 +326,16 @@ impl IssuesWorld {
         let artifact = if let Some(artifact) = self.geometry.get(&request.key()) {
             artifact
         } else {
+            // The one deferred Find lease in this product, and the only path
+            // that can outlive its query() natively — the build runs on the
+            // Geometry worker pool and issues find.query_detached after the
+            // reply, which the runtime's post-Complete callback thread
+            // services. INVARIANT for wasm: this build MUST route through the
+            // `GeometryExecutor`, whose wasm arm runs inline and drains the
+            // lease before the guest returns (a wasm guest emits no callback
+            // once it has returned). A new deferred_find caller that built any
+            // other way would drop its callbacks in a browser — route it
+            // through the inline-on-wasm executor too.
             let find = ctx.deferred_find()?.ok_or(Rejection::ContractViolation)?;
             let worker_request = request.clone();
             self.geometry.materialize_cached_with_memory(
