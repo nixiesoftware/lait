@@ -26,9 +26,11 @@
 
 use std::sync::Arc;
 
-use lait_issues::contract::{self, IssueQuery, PageRequest};
+use lait_issues::contract::{
+    self, ChangeOperation, ChangeProject, IssueIntent, IssueQuery, PageRequest,
+};
 use mechanics::station::Epoch;
-use runtime::world::{Builder, Query, World};
+use runtime::world::{Builder, Intent, Query, RequestId, World};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 use wasm_probe::runner::WebInstance;
 use wasm_probe::space_pull::{pull_space, unhex32};
@@ -61,7 +63,7 @@ fn ask(session: &runtime::Session, query: IssueQuery) -> serde_json::Value {
 }
 
 #[wasm_bindgen_test]
-async fn the_engine_in_a_tab_answers_real_queries_from_a_pulled_space() {
+async fn the_engine_in_a_tab_reads_and_writes_a_pulled_space() {
     let relay = option_env!("LIVE_RELAY_URL").expect("harness sets LIVE_RELAY_URL");
     let seed = unhex32(option_env!("LIVE_SEED_HEX").expect("harness sets LIVE_SEED_HEX"));
     let ticket = option_env!("LIVE_TICKET").expect("harness sets LIVE_TICKET");
@@ -145,5 +147,94 @@ async fn the_engine_in_a_tab_answers_real_queries_from_a_pulled_space() {
     assert!(
         titles.contains(&"the tab pulls this issue") && titles.contains(&"and this one"),
         "alice's issues crossed whole: {titles:?}"
+    );
+
+    // Slice 8.2: bob WRITES, in the tab. A durable mutation over the pulled
+    // Space — the daemon's own Session::submit runs on wasm: bob signs an
+    // Issues ChangeSet with his docked device, the runner validates and stages
+    // it, Runtime seals the bodies with the space key the pull replicated,
+    // mints the receipt through the pulled ledger (bob's contributor grant
+    // carries write standing), commits to OPFS, and publishes one invalidation
+    // record — drained here through the wasm try_next. Nothing is a fixture:
+    // real member, real key, real grant, real store.
+    let mut stream = session.observe(None);
+    let reset = stream
+        .try_next()
+        .expect("the stream lives")
+        .expect("a first record");
+    assert!(reset.reset, "observe rebaselines first");
+
+    let action = identity
+        .sign_action(
+            &session,
+            RequestId::mint(),
+            Intent {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: IssueIntent::ChangeSet {
+                    operations: vec![ChangeOperation::IssueCreate {
+                        project: ChangeProject::Existing {
+                            project: "ENG".into(),
+                        },
+                        title: "written from a tab".into(),
+                        priority: "none".into(),
+                        status: None,
+                        parent: None,
+                        assignees: Vec::new(),
+                        labels: Vec::new(),
+                        body: None,
+                        due: None,
+                        estimate: None,
+                    }],
+                    ts: 1_700_000_000_001,
+                }
+                .to_json(),
+            },
+        )
+        .expect("bob signs the write with his docked device");
+    let committed = session
+        .submit(action)
+        .expect("bob's write commits durably in the tab, sealed by the pulled key");
+    assert!(
+        !committed.bodies.is_empty(),
+        "the commit wrote issue bodies"
+    );
+
+    // The commit published exactly one record, drained through the wasm
+    // try_next — its publication is the one bob committed.
+    let record = stream
+        .try_next()
+        .expect("the stream lives")
+        .expect("the commit published a record");
+    assert!(!record.reset, "a durable commit is not a reset");
+    assert_eq!(
+        record.publications[0].publication, committed.publication,
+        "the observed record names bob's committed read image",
+    );
+
+    // And bob's issue reads back beside alice's, in the same tab.
+    let after = ask(
+        &session,
+        IssueQuery::List {
+            project: None,
+            label: None,
+            status: None,
+            milestone: None,
+            mine: None,
+            all: false,
+            me: None,
+            facets: Default::default(),
+            page: PageRequest::default(),
+        },
+    );
+    let after_titles: Vec<&str> = after["items"]
+        .as_array()
+        .expect("an issues page")
+        .iter()
+        .filter_map(|r| r["title"].as_str())
+        .collect();
+    assert!(
+        after_titles.contains(&"written from a tab"),
+        "bob's issue, written in the tab, reads back: {after_titles:?}",
     );
 }

@@ -2122,6 +2122,13 @@ impl ObservationStream {
 
     /// The next record, waiting up to `timeout`. `Ok(None)` on timeout;
     /// [`Interruption::StationDormant`] once the Station closed.
+    ///
+    /// Native only: it reads a monotonic clock (which traps on
+    /// wasm32-unknown-unknown) and blocks the calling thread on a Condvar.
+    /// A browser Worker is single-threaded and drains observations on its own
+    /// event-loop turns through the non-blocking [`Self::try_next`]; there is
+    /// no thread to park, so there is no timed wait to offer.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn next_timeout(
         &mut self,
         timeout: std::time::Duration,
@@ -2163,8 +2170,32 @@ impl ObservationStream {
     }
 
     /// The next already-published record without waiting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn try_next(&mut self) -> Result<Option<Observation>, Interruption> {
         self.next_timeout(std::time::Duration::ZERO)
+    }
+
+    /// The next already-published record without waiting.
+    ///
+    /// The wasm arm of [`Self::try_next`]: the zero-timeout path with no clock
+    /// read and no Condvar wait, because a single-threaded Worker has no thread
+    /// to park and `Instant::now` traps here. It is exactly the native
+    /// `next_timeout(ZERO)` reduced to its non-blocking core — lock the
+    /// broadcast state, refuse a dormant Station, and pull at most one record.
+    #[cfg(target_arch = "wasm32")]
+    pub fn try_next(&mut self) -> Result<Option<Observation>, Interruption> {
+        let broadcaster = self.broadcaster.clone();
+        let state = broadcaster.state.lock_recovering();
+        if state.closed {
+            return Err(Interruption::StationDormant);
+        }
+        match self.pull(&state) {
+            Some(record) => {
+                self.position = Some(record.sequence);
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
     }
 }
 
