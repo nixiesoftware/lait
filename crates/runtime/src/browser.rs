@@ -148,6 +148,60 @@ impl Station {
     {
         self.core.with_replica_convergence(f)
     }
+
+    /// Build this tab's outbound excess — the transfer it PUSHES to a responder
+    /// under symmetric convergence so its writes converge OUT (nothing dials a
+    /// tab, so it pushes on the dial it makes). Mirrors the native driver's
+    /// `build_outbound`: read the composed core once, export the authorized
+    /// manifest and Bodies, prefixed by the authority records the `authority`
+    /// exposes. A tab holds no mechanics records to serve
+    /// (`SharedLedgerAuthority`'s export is empty), so its WRITES ride the
+    /// material; the `advertise` gate is `signer_can_write`, which a contributor
+    /// device passes. An unadmitted joiner exports authority-only.
+    pub fn export_excess(
+        &self,
+        seed: &[u8; 32],
+        authority: &contact::Authority,
+    ) -> Result<contact::OutboundTransfer, String> {
+        let signer = LocalIdentity::from_seed(seed);
+        let station_key = mechanics::actor::device_from_seed(seed)
+            .key_bytes()
+            .ok_or_else(|| "the tab's station device key is unavailable".to_string())?;
+        let frontier = (authority.frontier)();
+        let advertise = authority.source.signer_authorized(&station_key, &frontier);
+        let held = std::collections::BTreeSet::new();
+        let (material, manifest) = if advertise {
+            self.core
+                .with_replica_read(|replica| {
+                    let commit_ctx = replica::transaction::CommitContext {
+                        space: &self.space,
+                        signer: &signer,
+                        authority_frontier: frontier.clone(),
+                    };
+                    let material = replica.export_material_excluding(&held)?;
+                    let manifest = replica.export_manifest(&commit_ctx)?;
+                    Ok((material, manifest))
+                })
+                .map_err(|e| format!("the tab could not export its excess: {e:?}"))?
+        } else {
+            (Vec::new(), (Vec::new(), Vec::new()))
+        };
+        let mut authority_records = (authority.export)();
+        let mut bodies = Vec::new();
+        for (tx, closures) in &material {
+            authority_records.push(tx.encode());
+            for (key, artifact_pack) in closures {
+                bodies.push((tx.id(), key.clone(), artifact_pack.clone()));
+            }
+        }
+        Ok(contact::OutboundTransfer {
+            authority_frontier: frontier.as_bytes().to_vec(),
+            authority_records,
+            manifest_root_bytes: manifest.0,
+            manifest_nodes: manifest.1,
+            bodies,
+        })
+    }
 }
 
 /// The pulled ledger as the Session's authority: every answer delegates to

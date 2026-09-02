@@ -102,14 +102,21 @@ impl BrowserEngineHandle {
         }
     }
 
-    /// Re-receive over the same transport and install the converged material
-    /// into the live core through the Station's own writer — the exact seam the
-    /// native Contact driver installs through, and the one reactivity is built
-    /// on. Idempotent by convergence: nothing new is a no-op that leaves the
-    /// live core intact. Returns the bytes moved, so the caller can tell a
-    /// quiet poll from one that landed a peer's write.
+    /// Converge with the responder over the same transport: pull its material
+    /// AND push this tab's own excess on the same connection (symmetric
+    /// convergence), then install what arrived into the live core through the
+    /// Station's own writer. The push is what carries a tab's write OUT —
+    /// nothing dials a tab, so it pushes on the dial it makes; an old responder
+    /// without `RECIPROCAL_CONVERGE` never receives it and this is a plain pull.
+    /// Idempotent by convergence. Called both on a poll and right after a local
+    /// write (push-at-commit). Returns the bytes moved.
     pub async fn repull(&self) -> Result<u32, JsValue> {
         let holdings = self.station.published_root();
+        // Build this tab's excess to push alongside the pull.
+        let excess = self
+            .station
+            .export_excess(&self.seed, &self.authority.bundle())
+            .map_err(|e| js_err("the tab could not build its push", e))?;
         let received = pull_receive(
             self.transport.as_ref(),
             &self.responder,
@@ -117,10 +124,11 @@ impl BrowserEngineHandle {
             &self.seed,
             &self.authority.bundle(),
             holdings,
+            Some(excess),
             Deadlines::default(),
         )
         .await
-        .map_err(|e| js_err("the live re-receive failed", format!("{e:?}")))?;
+        .map_err(|e| js_err("the live converge failed", format!("{e:?}")))?;
         let bundle = self.authority.bundle();
         let signer = SeedSigner(&self.seed);
         self.station

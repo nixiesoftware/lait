@@ -238,27 +238,35 @@ async fn the_engine_in_a_tab_reads_and_writes_a_pulled_space() {
         "bob's issue, written in the tab, reads back: {after_titles:?}",
     );
 
-    // Slice 8.5: a LIVE re-pull installs into the already-composed core. The
-    // browser re-receives over the same transport (contact::pull_receive, no
-    // Replica lock) and commits the staged material through the Station's OWN
-    // writer (with_replica_convergence) — the exact seam the native Contact
-    // driver installs through, and the one reactivity is built on. Here the
-    // material is idempotent (alice holds nothing bob lacks), so this proves
-    // the install path executes end to end in a browser and leaves the live
-    // core intact; new material takes the identical path, and the write above
-    // already proved a durable commit rings the doorbell (its try_next drain).
+    // Slice 8.x: bob's tab PUSHES its write OUT to alice's daemon — symmetric
+    // convergence, the parity claim. Nothing dials a tab, so it pushes on the
+    // dial it makes: `export_excess` builds bob's committed "written from a tab"
+    // issue from the composed core, and `pull_receive` with `Some(excess)` both
+    // pulls alice's material AND serves bob's on the same connection. Alice's
+    // daemon (RECIPROCAL_CONVERGE granted) reverse-incorporates it — and the
+    // harness then asserts alice holds bob's write, no dial from alice. The
+    // pulled half installs into the live core through its own writer as before.
     let holdings = station.published_root();
+    let push_bundle = pulled.authority.bundle();
+    let excess = station
+        .export_excess(&pulled.seed, &push_bundle)
+        .expect("the tab builds its excess to push");
+    assert!(
+        !excess.bodies.is_empty() || !excess.authority_records.is_empty(),
+        "bob's tab has a write to push"
+    );
     let received = contact::pull::pull_receive(
         pulled.transport.as_ref(),
         &pulled.responder,
         &pulled.space,
         &pulled.seed,
-        &pulled.authority.bundle(),
+        &push_bundle,
         holdings,
+        Some(excess),
         contact::pull::Deadlines::default(),
     )
     .await
-    .expect("the live re-receive completes over the same transport");
+    .expect("the converge (pull + push) completes over the same transport");
     let bundle = pulled.authority.bundle();
     let signer = replica::transaction::SeedSigner(&pulled.seed);
     station

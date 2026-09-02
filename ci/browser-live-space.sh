@@ -207,6 +207,28 @@ touch "$root/wasm-probe/tests/space_call.rs"
 )
 echo "browser-live-space: the engine in the tab answered from the pulled Space."
 
+# --- the tab's write converges OUT to alice's daemon (symmetric Contact) -----
+# space_call.rs had bob's tab PUSH its write on the dial it made. Alice's daemon
+# never dials the tab; the only way it can hold bob's issue is the reverse
+# incorporate. Poll alice until it appears — the responder incorporates
+# asynchronously after acking receipt.
+echo "== the tab's write converged OUT to alice's daemon"
+seen_push=""
+for _ in $(seq 1 30); do
+    issues="$(post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/worlds/issues/rpc" \
+        '{"cmd":"list","page":{}}')" || true
+    case "$issues" in
+        *"written from a tab"*) seen_push=yes; break ;;
+    esac
+    sleep 1
+done
+[ -n "$seen_push" ] || {
+    echo "::error::alice's daemon never received the tab's pushed write:"
+    echo "$issues"
+    exit 1
+}
+echo "browser-live-space: the tab's write converged OUT to alice's daemon."
+
 # --- a product world RPC crosses the world-agnostic dispatch seam -----------
 # parse_web → execute → the runner's callbacks → the composed Session, naming
 # no World — and the runner re-enters itself through call_world. The settling

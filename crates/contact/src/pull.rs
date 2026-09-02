@@ -23,10 +23,11 @@ use n0_future::time::{timeout, Duration, Instant};
 use replica::transaction::{CommitContext, SeedSigner};
 use replica::Replica;
 
-use crate::admission::{Accept, Open, Plane, Refusal};
+use crate::admission::{feature, Accept, Open, Plane, Refusal};
 use crate::{
-    Authority, ContactId, Failure, InitiatorReceiver, Offer, Outcome, Progress, Proof,
-    CONTACT_ALPN, CONTACT_PROTOCOL, MAX_FRAME,
+    build_transfer_frames, AccepterEvent, AccepterValidator, Authority, ContactFrame, ContactId,
+    Failure, InitiatorReceiver, Offer, OutboundTransfer, Outcome, Progress, Proof, CONTACT_ALPN,
+    CONTACT_PROTOCOL, MAX_FRAME,
 };
 
 /// The two deadlines every step runs under: the whole Contact, and forward
@@ -84,6 +85,7 @@ pub async fn pull_receive(
     station_seed: &[u8; 32],
     authority: &Authority,
     holdings_root: [u8; 32],
+    reverse: Option<OutboundTransfer>,
     deadlines: Deadlines,
 ) -> Result<ReceivedContact, Failure> {
     let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
@@ -109,7 +111,15 @@ pub async fn pull_receive(
     let opening = Open {
         plane: Plane::Contact,
         protocol_version: CONTACT_PROTOCOL,
-        features: 0,
+        // Offer symmetric convergence only when we have something to push: the
+        // responder then grants it back and receives our excess after serving.
+        // Offering it with nothing to push would leave the responder waiting for
+        // a reverse transfer that never comes.
+        features: if reverse.is_some() {
+            feature::RECIPROCAL_CONVERGE
+        } else {
+            0
+        },
         space: space_bytes,
         initiator_station,
         responder_station: responder.key_bytes(),
@@ -145,6 +155,9 @@ pub async fn pull_receive(
             "the accept did not echo this connection".into(),
         ));
     }
+    // Push only if the responder granted it back — an old responder never
+    // echoes the bit and we do a plain one-way pull, no regression.
+    let granted = accept.capability.features & feature::RECIPROCAL_CONVERGE != 0;
 
     // declare == false, always: holdings root only, empty declaration. The
     // root is the caller's, so this half never touches a Replica.
@@ -207,6 +220,57 @@ pub async fn pull_receive(
                         Failure::Deadline("transfer-ack: no progress within the deadline".into())
                     })?
                     .map_err(|e| Failure::Transport(format!("transfer-ack: {e:#}")))?;
+                // The reverse phase: PUSH our excess on this same stream so a
+                // dialer that cannot be dialed back — a browser tab — still gets
+                // its writes out. Serve the caller-built transfer and drive the
+                // AccepterValidator to the responder's reverse TransferAck, then
+                // finish. Only reached when we offered the bit AND it was granted.
+                if granted {
+                    if let Some(transfer) = reverse.as_ref() {
+                        let frames = build_transfer_frames(&contact, transfer);
+                        let mut validator = AccepterValidator::new(contact);
+                        for frame in &frames {
+                            validator.record_sent(frame);
+                            bytes_moved += frame.len() as u64;
+                            step(deadline, progress, stream.send(frame))
+                                .await
+                                .map_err(|_| {
+                                    Failure::Deadline(
+                                        "push: no progress within the deadline".into(),
+                                    )
+                                })?
+                                .map_err(|e| Failure::Transport(format!("push: {e:#}")))?;
+                        }
+                        loop {
+                            let frame = step(deadline, progress, stream.recv())
+                                .await
+                                .map_err(|_| {
+                                    Failure::Deadline(
+                                        "push-ack: no reply within the deadline".into(),
+                                    )
+                                })?
+                                .map_err(|e| Failure::Transport(format!("push-ack: {e:#}")))?
+                                .ok_or_else(|| {
+                                    Failure::Protocol(
+                                        "push: the responder closed before acking".into(),
+                                    )
+                                })?;
+                            match validator.on_frame(&frame) {
+                                Ok(AccepterEvent::Acked { .. }) => break,
+                                Ok(AccepterEvent::PeerAborted(code)) => {
+                                    return Err(Failure::PeerAborted(code))
+                                }
+                                Ok(_) => {}
+                                Err(code) => {
+                                    let _ = stream
+                                        .send(&ContactFrame::Abort { code }.encode(&contact))
+                                        .await;
+                                    return Err(Failure::PeerAborted(code));
+                                }
+                            }
+                        }
+                    }
+                }
                 let _ = step(deadline, progress, stream.finish()).await;
                 break;
             }
@@ -263,6 +327,7 @@ pub async fn pull_whole(
         station_seed,
         authority,
         holdings_root,
+        None,
         deadlines,
     )
     .await?;
