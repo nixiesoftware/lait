@@ -51,6 +51,11 @@ export function instantiate_guest(wasm, hostCall) {
           crypto.getRandomValues(view.subarray(off, Math.min(off + 65536, len)));
         }
       },
+      log: (ptr, len) => {
+        const view = new Uint8Array(guests.get(id).exports.memory.buffer, ptr, len);
+        // eslint-disable-next-line no-console
+        console.log("[guest]", new TextDecoder().decode(view));
+      },
     },
   };
   const module = new WebAssembly.Module(wasm);

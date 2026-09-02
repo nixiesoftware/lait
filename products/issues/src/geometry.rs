@@ -1090,6 +1090,14 @@ struct GeometryRegistryShared {
     state: Mutex<GeometryRegistryState>,
 }
 
+/// A browser guest is single-threaded, so it has no worker pool: the unit
+/// struct's `execute` runs each build inline. The `queued_builds` bound and
+/// the saturation path exist only for the native pool.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct GeometryExecutor;
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct GeometryExecutor {
     sender: std::sync::mpsc::SyncSender<Box<dyn FnOnce() + Send + 'static>>,
@@ -1102,6 +1110,12 @@ impl std::fmt::Debug for GeometryExecutor {
 }
 
 impl GeometryExecutor {
+    #[cfg(target_arch = "wasm32")]
+    fn new(_workers: usize, _queued_builds: usize) -> Self {
+        GeometryExecutor
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     fn new(workers: usize, queued_builds: usize) -> Self {
         let (sender, receiver) =
@@ -1124,6 +1138,20 @@ impl GeometryExecutor {
                 .expect("spawn bounded Geometry worker");
         }
         Self { sender }
+    }
+
+    /// Submit one build job. The native pool queues it, refusing when the
+    /// bounded queue is full; a wasm guest runs it inline on the caller's
+    /// thread (the caller has already released the registry lock).
+    #[cfg(target_arch = "wasm32")]
+    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> Result<(), ()> {
+        job();
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> Result<(), ()> {
+        self.sender.try_send(job).map_err(|_| ())
     }
 }
 
@@ -1278,7 +1306,7 @@ impl GeometryRegistry {
             request.roots.clone(),
             GeometryBudget::default(),
         );
-        let schedule = self.executor.sender.try_send(Box::new(move || {
+        let schedule = self.executor.submit(Box::new(move || {
             let artifact = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| facts()))
                 .map(|result| match result {
                     Ok(facts) => Arc::new(materialize(&worker_request, &facts)),

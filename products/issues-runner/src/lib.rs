@@ -47,6 +47,7 @@ pub fn build_service(
 // runner is the reviewed implementation.
 #[cfg(target_arch = "wasm32")]
 world_runner::export_world_runner!(|init: world_runner::wasm_abi::GuestInit| {
+    entropy::install_panic_hook();
     let service = build_service(init.version, false)
         .expect("the Issues client package is embedded in this build");
     Arc::new(service) as Arc<dyn world_runner::Service>
@@ -62,6 +63,18 @@ mod entropy {
     extern "C" {
         /// Fill `len` bytes at `ptr` with host entropy.
         fn random(ptr: *mut u8, len: usize);
+        /// Report a diagnostic line to the host — a pure guest has no console.
+        fn log(ptr: *const u8, len: usize);
+    }
+
+    /// Route a panic message to the host before the guest aborts, so an
+    /// otherwise silent wasm trap says why.
+    pub fn install_panic_hook() {
+        std::panic::set_hook(Box::new(|info| {
+            let message = format!("{info}");
+            // SAFETY: `log` reads exactly this range from guest memory.
+            unsafe { log(message.as_ptr(), message.len()) };
+        }));
     }
 
     /// getrandom 0.3 and 0.4 both import this exact symbol.
