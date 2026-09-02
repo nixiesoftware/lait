@@ -338,3 +338,79 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     let _ = std::fs::remove_dir_all(&root_j);
     let _ = std::fs::remove_dir_all(&root_s);
 }
+
+#[test]
+fn a_joiners_own_dial_pushes_its_admission_and_the_founder_redeems() {
+    // The admission courier for a peer nothing can dial — a browser tab. The
+    // joiner's OWN dial pushes its pending admission request on the symmetric
+    // reverse phase (an unadmitted signer builds an authority-only transfer),
+    // and the founder's incorporator redeems it. Gossip is off and the founder
+    // NEVER dials the joiner, so the reverse push is the only way the request
+    // can travel.
+    let net = comms::mem::MemNet::new();
+    let t_founder: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&FOUNDER_SEED)));
+    let t_joiner: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&JOINER_SEED)));
+
+    let root_f = temp_root("push-founder");
+    let (mech_f, coords) =
+        SpaceAuthority::form(&root_f, &FOUNDER_SEED, "Pushed Space", vec![]).unwrap();
+    crate::world_fixture::seed_founder_policy(&mech_f).unwrap();
+    let (_rt_f, _station_f) = activate(&root_f, FOUNDER_SEED, &mech_f, &coords, t_founder);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let admission = mech_f
+        .mint_admission(
+            &FOUNDER_SEED,
+            3600,
+            true,
+            now,
+            crate::world_fixture::role_evidence("contributor", [0u8; 32]),
+        )
+        .unwrap();
+    let invite = mech_f
+        .mint_coordinates(&FOUNDER_SEED, "Pushed Space", vec![], Some(admission))
+        .unwrap();
+
+    let root_j = temp_root("push-joiner");
+    let mech_j = SpaceAuthority::enter(&root_j, &JOINER_SEED, &invite).unwrap();
+    assert!(!mech_j.am_i_member(), "entry holds the admission pending");
+    let (_rt_j, station_j) = activate(&root_j, JOINER_SEED, &mech_j, &invite, t_joiner);
+
+    // The joiner dials ONCE. The forward pull retains the founder's material;
+    // the reverse phase pushes the joiner's pending admission request.
+    station_j.contact(&station_id(&FOUNDER_SEED)).unwrap();
+
+    // The responder incorporates the push after acking receipt, so the
+    // founder's ledger admits the joiner a beat later — poll for it.
+    let joiner_device = mechanics::actor::device_from_seed(&JOINER_SEED);
+    let mut admitted = false;
+    for _ in 0..100 {
+        use runtime::world::AuthorityView;
+        if mech_f.resolve(&joiner_device).is_some() {
+            admitted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        admitted,
+        "the founder redeemed the admission the joiner's own dial pushed"
+    );
+
+    // The joiner's NEXT dial imports its membership + sealed keys — the loop a
+    // tab's await-admission runs.
+    station_j.contact(&station_id(&FOUNDER_SEED)).unwrap();
+    assert!(
+        mech_j.am_i_member(),
+        "the joiner holds standing after re-pulling the redeemed admission"
+    );
+
+    let _ = station_j.vacate();
+    let _ = std::fs::remove_dir_all(&root_f);
+    let _ = std::fs::remove_dir_all(&root_j);
+}
