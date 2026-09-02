@@ -7,9 +7,10 @@ use mechanics::{ids::SpaceId, station::Key};
 use replica::body::ContentCommitment;
 use replica::body::{BodyId, BodyKey, WorldId};
 use runtime::plane::contact::{
-    abort, authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
-    manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
-    InitiatorReceiver, InitiatorState, Invalid, Offer, Progress, Proof, CONTACT_PROTOCOL,
+    abort, authority_record_hash, authority_set_hash, body_chunk_hash, build_transfer_frames,
+    manifest_node_hash, manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame,
+    ContactId, InitiatorReceiver, InitiatorState, Invalid, Offer, OutboundTransfer, Progress,
+    Proof, CONTACT_PROTOCOL,
 };
 
 const INITIATOR_SEED: [u8; 32] = [71u8; 32];
@@ -386,6 +387,70 @@ fn a_complete_transfer_stages_acks_and_yields_the_material() {
     assert_eq!(
         material.bodies[&([2u8; 32], body_key())],
         b"protected-body-payload"
+    );
+}
+
+#[test]
+fn build_transfer_frames_round_trips_through_the_receiver() {
+    // Slice: bidirectional convergence, step 1 — the reverse-grammar proof.
+    // Whatever a peer BUILDS from its own excess material with
+    // `build_transfer_frames`, the far peer's `InitiatorReceiver` receives
+    // byte-for-byte and the `AccepterValidator` acks exactly once. The transfer
+    // machines are role-agnostic: this is the same twelve-frame grammar the
+    // forward pull uses, driven from an `OutboundTransfer` rather than
+    // hand-built frames — which is exactly what lets symmetric convergence (the
+    // responder incorporating the dialer's material) reuse them UNCHANGED. The
+    // forward `happy_frames` test hand-builds its frames; this pins that the
+    // production builder a reverse-serve will call produces a receivable
+    // transcript, before any wiring depends on it.
+    let transfer = OutboundTransfer {
+        authority_frontier: vec![0xAB],
+        authority_records: vec![b"rev-rec-0".to_vec(), b"rev-rec-1".to_vec()],
+        manifest_root_bytes: b"reverse-manifest-root".to_vec(),
+        manifest_nodes: vec![b"reverse-node".to_vec()],
+        bodies: vec![([7u8; 32], body_key(), b"the tab's written body".to_vec())],
+    };
+    let frames = build_transfer_frames(&contact(), &transfer);
+
+    let mut rx = InitiatorReceiver::new(contact());
+    let mut accepter = AccepterValidator::new(contact());
+    let last = frames.len() - 1;
+    for (i, raw) in frames.iter().enumerate() {
+        accepter.record_sent(raw);
+        let progress = rx.on_frame(raw).unwrap();
+        if i == last {
+            let Progress::SendAck(ack) = progress else {
+                panic!("TransferEnd must yield an ack");
+            };
+            // The builder's transcript is exactly what the accepter recorded:
+            // the ack validates once, and a replay is wrong-state.
+            let raw_ack = ack.encode(&contact());
+            assert!(matches!(
+                accepter.on_frame(&raw_ack).unwrap(),
+                AccepterEvent::Acked { .. }
+            ));
+            assert_eq!(accepter.on_frame(&raw_ack), Err(abort::WRONG_STATE));
+        } else {
+            assert_eq!(progress, Progress::Continue);
+        }
+    }
+
+    let material = rx
+        .into_received()
+        .expect("the reverse transfer yields the built material");
+    assert_eq!(material.authority_frontier, vec![0xAB]);
+    assert_eq!(
+        material.authority_records,
+        vec![b"rev-rec-0".to_vec(), b"rev-rec-1".to_vec()]
+    );
+    assert_eq!(material.manifest_root_bytes, b"reverse-manifest-root");
+    assert_eq!(
+        material.manifest_nodes.values().next().unwrap(),
+        b"reverse-node"
+    );
+    assert_eq!(
+        material.bodies[&([7u8; 32], body_key())],
+        b"the tab's written body"
     );
 }
 
