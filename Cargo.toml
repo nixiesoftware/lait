@@ -21,6 +21,7 @@ members = [
     "crates/schedule",
     "crates/world-interface",
     "crates/world-runner",
+    "crates/world-runner-wasm",
     "crates/world-sdk",
     "products/issues",
     "products/issues-app",
@@ -60,7 +61,7 @@ members = [
 #
 # Excluding both means `cargo build`, `cargo test`, `cargo clippy` and the MSRV
 # job never encounter either.
-exclude = ["fuzz", "sim", "wasm-probe"]
+exclude = ["fuzz", "sim", "wasm-probe", "crates/world-runner-wasm/tests/proof-world"]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
 # depends on it, and must not silently regress to v1 if this ever becomes a
@@ -148,6 +149,7 @@ runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
 world-interface = { path = "crates/world-interface" }
 world-runner = { path = "crates/world-runner" }
+world-runner-wasm = { path = "crates/world-runner-wasm" }
 world-sdk = { path = "crates/world-sdk" }
 display-protocol = { path = "crates/display-protocol" }
 mediabox = { path = "crates/mediabox" }

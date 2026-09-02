@@ -10,29 +10,8 @@ use anyhow::{Context, Result};
 use crate::protocol::{
     read_frame, write_frame, CallbackResponse, Operation, Ready, Reply, Request, Response,
 };
+use crate::service::{Host, Service};
 use crate::PROTOCOL_VERSION;
-
-pub trait Service: Send + Sync + 'static {
-    fn descriptor(&self) -> crate::ServiceDescriptor;
-
-    fn call(
-        &self,
-        operation: &str,
-        payload: &[u8],
-        host: Arc<dyn Host>,
-    ) -> Result<Vec<u8>, String> {
-        let _ = (operation, payload, host);
-        Err("unsupported World operation".to_string())
-    }
-}
-
-/// The only route from a World process back into its supervising host.
-///
-/// Operations and payloads are package-defined, while framing, correlation,
-/// authentication, and bounds remain runner-owned.
-pub trait Host: Send + Sync + 'static {
-    fn call(&self, operation: &str, payload: &[u8]) -> Result<Vec<u8>, String>;
-}
 
 /// Serve one World process until its runner asks it to stop.
 pub fn serve(

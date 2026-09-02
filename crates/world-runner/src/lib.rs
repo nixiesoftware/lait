@@ -20,14 +20,23 @@
 //! addressed through a bounded loopback protocol and is stopped only through
 //! the owned process handle retained here.
 
+pub mod wasm_abi;
+
+#[cfg(target_arch = "wasm32")]
+pub mod guest;
+
 mod protocol;
+#[cfg(not(target_arch = "wasm32"))]
 mod server;
+mod service;
 
 pub use protocol::{
     decode_frame, encode_frame, read_frame, write_frame, Operation, Ready, Reply, Request,
     ServiceDescriptor, MAX_FRAME_BYTES, PROTOCOL_VERSION,
 };
-pub use server::{serve, Host, Service};
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::serve;
+pub use service::{Host, Service};
 
 use std::fs;
 use std::net::TcpStream;

@@ -1,0 +1,34 @@
+[package]
+name = "world-runner-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "The native wasmtime host that runs a World runner compiled to WebAssembly, behind the world-runner supervision seam."
+license = "PolyForm-Noncommercial-1.0.0"
+# Not published — an internal boundary. And native-only by construction:
+# wasmtime is a JIT that does not target wasm32, so this crate is the one place
+# the daemon reaches a wasm guest, and nothing aimed at the browser depends on
+# it. The guest stack (world-runner's guest module, world-sdk, the products)
+# never names this crate.
+publish = false
+
+[dependencies]
+anyhow = "1"
+postcard = { version = "1", features = ["use-std"] }
+world-runner = { path = "../world-runner" }
+# The reference host. Core wasm only: no component model, no async, no WASI —
+# the guest is a plain wasm32-unknown-unknown module speaking the four-function
+# ABI, and Cranelift keeps typst/CRDT at native-ish throughput (an interpreter
+# would be a 10-50x regression on exactly the hot code).
+wasmtime = { version = "=46.0.0", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+] }
+
+[dev-dependencies]
+postcard = { version = "1", features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

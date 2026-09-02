@@ -1,0 +1,24 @@
+[package]
+name = "proof-world"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# The smallest real World runner: it exercises the wasm ABI through the actual
+# Service/Host traits and the real postcard frames, proving the boundary
+# carries the contract rather than a toy shim. Compiled to wasm32 by the host
+# crate's build script; it links only world-runner, so it needs no wasm C
+# toolchain.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+world-runner = { path = "../../../world-runner" }
+
+# Its own workspace root, not merely excluded from the parent: it is only ever
+# built for wasm32 by the host crate's harness, never as part of the native
+# workspace.
+[workspace]
+
+[profile.release]
+opt-level = "s"

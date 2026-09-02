@@ -71,10 +71,14 @@ fi
 echo "== claim 5: the World runner stack compiles for wasm32-unknown-unknown"
 # The guest carve: runtime's contract surface (world/exec/find/publication and
 # what they stand on), the SDK's typed operations, the Issues World, and the
-# runner binary itself all reach the browser target. Compiles, not runs — the
-# native serve loop's sockets are std stubs on wasm, and the in-Worker
-# execution door is a later slice — but a dependency regression that knocks
-# the runner off the target fails here, not in that slice.
+# runner binary itself all reach the browser target — the runner's wasm entry
+# is the four-function guest ABI (`world_runner::export_world_runner!`). This
+# claim proves it COMPILES; that the ABI actually carries a request and a host
+# callback is proven natively by `world-runner-wasm`'s proof test, which runs a
+# proof-World module under wasmtime in the ordinary engine suite. The in-Worker
+# execution of the REAL Issues runner (typst, CRDT, under real limits) is a
+# later slice; a dependency regression that knocks the runner off the target
+# fails here, not there.
 if [ -n "$wasm_cc" ]; then
     CC_wasm32_unknown_unknown="$wasm_cc" \
         RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
