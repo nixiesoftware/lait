@@ -74,6 +74,27 @@ pub struct LedgerAuthority {
     pub seed: [u8; 32],
     pub me: DeviceId,
     pub keyring: BTreeMap<[u8; 16], SpaceKey>,
+    /// A joiner's PENDING admission request, self-incepted but not yet redeemed
+    /// by an admin. While set and this device is not yet a member, [`export`]
+    /// serves it as an `AuthorityRecord::Admission` — the request an admin's
+    /// incorporator redeems. Byte-exact and reused across reloads (the single-
+    /// use nonce burns if a re-incept changes the actor), so these are the
+    /// already-encoded records, not re-derived. Cleared implicitly once
+    /// admitted: `export` stops serving them when membership resolves.
+    pub pending_admission: Option<PendingAdmission>,
+}
+
+/// The already-encoded material a joiner serves to request admission — the
+/// portable mirror of the daemon's `pending_admission`/`inception`/`proof`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingAdmission {
+    /// Postcard `mechanics`-minted `AdmissionCapability`.
+    pub admission: Vec<u8>,
+    /// Postcard joiner `actor::SignedEvent` inception.
+    pub inception: Vec<u8>,
+    /// Postcard `InvitationAcceptanceProof`.
+    pub proof: Vec<u8>,
+    pub coordinates_digest: [u8; 32],
 }
 
 impl LedgerAuthority {
@@ -85,9 +106,50 @@ impl LedgerAuthority {
             seed,
             me,
             keyring: BTreeMap::new(),
+            pending_admission: None,
         };
         this.refresh_keyring();
         this
+    }
+
+    /// Stash a self-incepted admission request to serve until an admin redeems
+    /// it. The caller (the joiner's pull setup) mints the inception + acceptance
+    /// proof once, persists them durably, and reuses them byte-for-byte — a
+    /// re-incept would mint a different actor and burn the single-use nonce.
+    pub fn stash_admission(&mut self, pending: PendingAdmission) {
+        self.pending_admission = Some(pending);
+    }
+
+    /// This device's admitted actor, if the ledger now carries it — the signal
+    /// that a pending admission has been redeemed and need no longer be served.
+    fn admitted(&mut self) -> bool {
+        let Some(actor) = self.ledger.actor_plane().actor_of_device(&self.me).cloned() else {
+            return false;
+        };
+        self.ledger
+            .acl_state()
+            .map(|state| state.is_member(&actor))
+            .unwrap_or(false)
+    }
+
+    /// The authority records this peer serves over Contact. A pulling member
+    /// serves nothing; an unadmitted joiner serves exactly its pending admission
+    /// request, and stops the moment membership resolves — the portable mirror
+    /// of the daemon's `export_records` admission branch.
+    pub fn export_records(&mut self) -> Vec<Vec<u8>> {
+        if self.admitted() {
+            return Vec::new();
+        }
+        match &self.pending_admission {
+            Some(pending) => vec![AuthorityRecord::Admission {
+                admission: pending.admission.clone(),
+                inception: pending.inception.clone(),
+                proof: pending.proof.clone(),
+                coordinates_digest: pending.coordinates_digest,
+            }
+            .encode()],
+            None => Vec::new(),
+        }
     }
 
     pub fn frontier(&self) -> AuthorityFrontier {
@@ -150,15 +212,18 @@ impl SharedLedgerAuthority {
         }
     }
 
-    /// The bundle the pull takes. The export closure is empty on purpose: a
-    /// pulling peer serves nothing.
+    /// The bundle the pull takes. The export closure serves this peer's
+    /// authority records: nothing for an admitted member, and an unadmitted
+    /// joiner's pending admission REQUEST — carried out on the symmetric-Contact
+    /// push so a tab can join without a daemon on its device.
     pub fn bundle(&self) -> Authority {
         let source = self.clone();
         let frontier = self.clone();
+        let export = self.clone();
         Authority {
             source: Arc::new(source),
             incorporator: Arc::new(Mutex::new(self.clone())),
-            export: Arc::new(Vec::new),
+            export: Arc::new(move || export.lock().export_records()),
             frontier: Arc::new(move || frontier.lock().frontier()),
         }
     }
