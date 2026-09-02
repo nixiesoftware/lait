@@ -47,6 +47,35 @@ async fn boot_packages_the_engine_and_a_frame_crosses() {
     .await
     .expect("the engine boots in a tab from one packaging call");
 
+    // The events lane: the first drain is the reset that rebaselines, in the
+    // viewer's own SpaceDoorbell wire shape — space, epoch, seq, and the three
+    // *_advanced flags. Then the stream is caught up (a read publishes nothing).
+    let ring = handle
+        .drain_ring()
+        .expect("the ring drains")
+        .expect("a first reset ring is pending after boot");
+    assert!(
+        ring.contains("\"reset\":true"),
+        "the first ring rebaselines: {ring}"
+    );
+    assert!(
+        ring.contains("\"invalidations\":[]"),
+        "a tab ring carries no per-scope routing: {ring}"
+    );
+    assert!(
+        ring.contains("\"authority_advanced\"")
+            && ring.contains("\"activity_advanced\"")
+            && ring.contains("\"presence_advanced\""),
+        "the ring is the full SpaceDoorbell shape: {ring}"
+    );
+    assert!(
+        handle
+            .drain_ring()
+            .expect("the ring drains again")
+            .is_none(),
+        "the stream is caught up after the reset"
+    );
+
     // A world frame crosses the whole seam and answers, as a JSON string — the
     // Worker relays exactly this. alice's ENG project comes back.
     let world = handle

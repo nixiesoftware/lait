@@ -137,6 +137,7 @@ pub use lifecycle::{
     RemovalConfirmation, Runtime, Station, StorageReading,
 };
 pub use session::{
-    DurableOperationReceipt, LifecycleSourceStatus, OperationPublication, OperationStatus, Session,
-    WorldGeneration, WorldSnapshotId,
+    AffectedWorldPublication, DurableOperationReceipt, LifecycleSourceStatus, Observation,
+    ObservationStream, OperationPublication, OperationStatus, Session, WorldGeneration,
+    WorldSnapshotId,
 };

@@ -13,6 +13,7 @@
 //! (`com.lait.issues`) reach `boot` the same way, differing only in the strings
 //! the caller passes.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use comms::Transport;
@@ -23,6 +24,7 @@ use mechanics::ids::SpaceId;
 use mechanics::station::{Epoch, Key};
 use replica::transaction::{CommitContext, SeedSigner};
 use runtime::world::{AuthorityView, Builder, World};
+use runtime::{AffectedWorldPublication, ObservationStream};
 use wasm_bindgen::prelude::*;
 use world_runner::wasm_abi::GuestInit;
 use world_sdk::{RemoteClient, RemoteWorld};
@@ -45,12 +47,40 @@ pub struct BrowserEngineHandle {
     seed: [u8; 32],
     authority: SharedLedgerAuthority,
     space: SpaceId,
+    /// The observe stream this engine's docked Session was opened on, drained
+    /// one record at a time by the events lane. `RefCell` because `try_next`
+    /// mutates the cursor and JS holds the handle by shared reference — sound
+    /// on a single-threaded Worker, where no two calls overlap.
+    ring: RefCell<ObservationStream>,
 }
 
 /// Fold any error into a `JsValue` the Worker sees as a rejected Promise or a
 /// thrown value — the browser's own failure channel, not a Rust panic.
 fn js_err(context: &str, error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
+}
+
+/// One doorbell frame in the viewer's own `SpaceDoorbell` wire shape
+/// (`viewer/src/types.ts`), built from an [`runtime::Observation`]. A ring is a
+/// dirty flag, never state: the consumer re-reads on any ring. `publications`
+/// and `change` are the daemon's own wire types, so serializing them here is
+/// byte-identical to what the head sends — no second grammar to drift.
+#[derive(serde::Serialize)]
+struct BrowserRing<'a> {
+    space: &'a str,
+    epoch: u64,
+    seq: u64,
+    reset: bool,
+    /// Always empty in a tab. The per-scope routing that fills this is a
+    /// hosted-World projection the daemon owns; the doorbell consumer
+    /// (`doorbell.ts`) re-reads on any ring regardless — invalidations only
+    /// retire optimistic guesses — so an empty set is honest, just coarser.
+    invalidations: [(); 0],
+    publications: &'a [AffectedWorldPublication],
+    change: &'a runtime::change::DurableChange,
+    authority_advanced: bool,
+    activity_advanced: bool,
+    presence_advanced: bool,
 }
 
 #[wasm_bindgen]
@@ -113,6 +143,43 @@ impl BrowserEngineHandle {
             })
             .map_err(|e| js_err("the live install failed", format!("{e:?}")))?;
         Ok(received.bytes_moved as u32)
+    }
+
+    /// Drain the next doorbell frame, non-blocking: a JSON `SpaceDoorbell`
+    /// string when a record is pending, `undefined` when the stream is caught
+    /// up. The events lane polls this — after a `repull` that moved bytes, and
+    /// after a local write — and the Worker relays each frame as a `ring` to
+    /// the viewer's `workerLink`. A ring is a dirty flag; the consumer re-reads.
+    /// The first drain after boot is a `reset` record, which rebaselines.
+    #[wasm_bindgen(js_name = drainRing)]
+    pub fn drain_ring(&self) -> Result<Option<String>, JsValue> {
+        let next = self
+            .ring
+            .borrow_mut()
+            .try_next()
+            .map_err(|e| js_err("the observe stream went dormant", format!("{e:?}")))?;
+        match next {
+            Some(observation) => {
+                let ring = BrowserRing {
+                    space: self.space.as_str(),
+                    epoch: observation.epoch.as_u64(),
+                    seq: observation.sequence,
+                    reset: observation.reset,
+                    invalidations: [],
+                    publications: &observation.publications,
+                    change: &observation.change,
+                    authority_advanced: observation.authority,
+                    // No activity/presence plane in a tab, and the consumer
+                    // reads neither; authority news is the one true flag.
+                    activity_advanced: false,
+                    presence_advanced: observation.authority,
+                };
+                serde_json::to_string(&ring)
+                    .map(Some)
+                    .map_err(|e| js_err("the ring does not encode", e))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -201,6 +268,11 @@ pub async fn boot(
         .dock(&world_id, &identity)
         .map_err(|e| js_err("the member does not dock", format!("{e:?}")))?;
 
+    // Open the observe stream on the docked Session before it moves into the
+    // engine — the stream holds its own Arc to the broadcaster, so it outlives
+    // this borrow and sees every later commit and re-pull convergence.
+    let ring = RefCell::new(session.observe(None));
+
     // A client DESCRIBE settles the client instance before it backs the adapter.
     let _ = RemoteClient::connect(client_runner.clone())
         .map_err(|e| js_err("the client runner does not answer DESCRIBE", e))?;
@@ -226,5 +298,6 @@ pub async fn boot(
         seed,
         authority: ledger,
         space,
+        ring,
     })
 }
