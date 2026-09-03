@@ -28,6 +28,21 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 const ISSUES_RUNNER: &[u8] = include_bytes!(env!("ISSUES_RUNNER_WASM"));
 
+/// The first `reff` string anywhere in a value — how the test names an issue
+/// without pinning the list projection's shape.
+fn first_reff(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(reff)) = map.get("reff") {
+                return Some(reff.clone());
+            }
+            map.values().find_map(first_reff)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(first_reff),
+        _ => None,
+    }
+}
+
 #[wasm_bindgen_test]
 async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
     let relay = option_env!("LIVE_RELAY_URL").expect("harness sets LIVE_RELAY_URL");
@@ -126,6 +141,27 @@ async fn a_product_world_rpc_crosses_the_dispatch_seam_in_a_browser() {
     assert!(
         text.contains("ENG"),
         "alice's ENG project crossed the dispatch seam: {text}",
+    );
+
+    // A BODY-READING read, the durable guard for the callback-stack discipline
+    // in the browser runner: `issue_view` reads an issue's collaborative body,
+    // which makes the client issue a SECOND callback AFTER its nested world
+    // call — the exact re-entrant path a single shared callback slot would
+    // strand ("a callback outside a live request"). `project_list` never
+    // exercises it (no post-nested callback), so this read is what turns a
+    // regression in `runner.rs`'s save/restore red at the dispatch level,
+    // independent of the whole session-lane scaffolding.
+    let list = engine
+        .world_rpc(serde_json::json!({ "cmd": "list", "page": {} }))
+        .expect("the issue list crosses");
+    let reff = first_reff(&list).expect("alice's issues carry a reff");
+    let viewed = engine
+        .world_rpc(serde_json::json!({ "cmd": "issue_view", "reff": reff }))
+        .expect("a body-reading read crosses the dispatch seam without stranding a callback");
+    assert_eq!(
+        viewed.get("kind").and_then(serde_json::Value::as_str),
+        Some("issue"),
+        "issue_view resolved the issue body through the nested callback: {viewed}",
     );
 
     // The spaces verb: one served row, honestly shaped (no daemon probe fields).

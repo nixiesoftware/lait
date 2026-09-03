@@ -111,18 +111,21 @@ async fn the_session_lane_answers_the_editor_frames_in_a_tab() {
 
     // The anti-clobber splice verb crosses the lane and the World adjudicates
     // it: a splice whose `base_len` disagrees with what the World holds is the
-    // concurrent-edit fence, refused as a conflict — its diagnostic crossing as
-    // clone-safe data proves the splice reaches the World through the session
-    // lane (a successful splice needs an editable document; that path is
-    // exercised in the World's own tests).
+    // concurrent-edit fence. It is a World BUSINESS refusal, which the daemon
+    // carries on a SUCCESSFUL frame (HTTP 200, ok:true) with the error in the
+    // body — the client resolves and the editor re-reads to self-heal a drifted
+    // splice. The tab must mirror that exactly, so the reply is ok:true with a
+    // `kind:"error"` body, NOT a hard ok:false rejection (a successful splice
+    // needs an editable document; that merge path is the slice-4 e2e's).
     let fenced = handle
         .handle_session(&format!(
             r#"{{"lait":"session:mutate","sid":7,"rid":3,"space":"s","request":{{"cmd":"issue_text_splice","reff":"{reff}","index":0,"delete":0,"insert":"x","base_len":999999}}}}"#
         ))
         .expect("the fenced splice answers");
     assert!(
-        fenced.contains(r#""ok":false"#) && fenced.contains(r#""errorKind""#),
-        "a base_len-fenced splice refuses clone-safe through the lane: {fenced}"
+        fenced.contains(r#""ok":true"#) && fenced.contains(r#""kind":"error""#),
+        "a base_len-fenced splice crosses as a World refusal body on a successful \
+         frame, mirroring the daemon: {fenced}"
     );
 
     // The allowlist holds: a non-editor request refuses 403 in the clone-safe

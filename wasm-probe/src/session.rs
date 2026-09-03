@@ -101,26 +101,6 @@ pub struct MutationError {
     pub error_kind: Option<String>,
 }
 
-/// A World reply that is actually a refusal, unpacked into its message and
-/// error kind. The Issues `Response` is internally tagged on `kind`, and an
-/// error is `{"kind":"error","message":…,"error_kind":…}` — the same body the
-/// rpc lane's client inspects to rehydrate a `LaitError`.
-fn world_error(body: &serde_json::Value) -> Option<(String, Option<String>)> {
-    if body.get("kind").and_then(serde_json::Value::as_str) != Some("error") {
-        return None;
-    }
-    let message = body
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("the World refused the call")
-        .to_string();
-    let error_kind = body
-        .get("error_kind")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    Some((message, error_kind))
-}
-
 impl MutationOutcome {
     fn accepted(status: u16, response: serde_json::Value) -> Self {
         Self::Ok {
@@ -226,21 +206,18 @@ pub fn mutate_reply(
         MutationOutcome::refused(403, "the session socket accepts editor requests only")
     } else {
         match engine.world_rpc(request) {
-            // A World signals a REFUSAL in the reply body (`kind:"error"`),
-            // not as a Rust `Err` — the daemon's socket distinguishes the two
-            // by HTTP status; over the engine seam there is no status, so the
-            // body's own tag is the discriminator. A refusal body mapped to
-            // `ok:true` would tell the client a rejected edit succeeded, so it
-            // is translated to the clone-safe error shape the client rehydrates
-            // `SocketMutationError` from.
-            Ok(body) => match world_error(&body) {
-                Some((message, error_kind)) => MutationOutcome::Refused {
-                    ok: false,
-                    status: 400,
-                    error: MutationError { message, error_kind },
-                },
-                None => MutationOutcome::accepted(200, body),
-            },
+            // A World signals a business REFUSAL — a conflict, a drifted splice,
+            // an invalid request — in the reply BODY (`kind:"error"`), not as a
+            // Rust `Err`, and the daemon carries it on a SUCCESSFUL frame:
+            // `socket_editor_rpc` returns HTTP 200 for any executed reply, so
+            // its socket sets `ok: status.is_success()` = true with the error
+            // body inside (src/serve/socket.rs run_mutations, src/serve/mod.rs
+            // world_rpc). The client resolves and inspects the body (the editor
+            // re-reads and self-heals a drifted splice), so the tab MUST mirror
+            // that: an executed reply is `ok:true`, whatever its body says. Only
+            // an execution FAILURE (`Err`) is `ok:false` — the allowlist 403 is
+            // the other, refused above before the World ran at all.
+            Ok(body) => MutationOutcome::accepted(200, body),
             Err(failure) => MutationOutcome::refused(
                 400,
                 failure.diagnostic().unwrap_or("the World refused the call"),
