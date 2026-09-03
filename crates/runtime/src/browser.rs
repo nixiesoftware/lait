@@ -236,6 +236,16 @@ impl Station {
         self.core.with_replica_convergence(f)
     }
 
+    /// Read this live Station's Replica — the capture side of a daemon-less
+    /// snapshot. The Worker owns both ends of the pull, so it also owns the
+    /// export that persists the pulled Space to a bucket.
+    pub fn with_replica_read<T>(
+        &self,
+        f: impl FnOnce(&replica::Replica) -> Result<T, replica::transaction::commit::Failure>,
+    ) -> Result<T, replica::transaction::commit::Failure> {
+        self.core.with_replica_read(f)
+    }
+
     /// Ring the doorbell for material a Contact re-pull just converged, so the
     /// docked Session's viewer re-reads. `with_replica_convergence` only
     /// incorporates the material and rebuilds publications — emitting the ring is

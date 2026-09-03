@@ -588,6 +588,50 @@ impl BrowserEngineHandle {
             None => Ok(None),
         }
     }
+
+    /// Capture the whole live Space — ledger and World — as a portable snapshot
+    /// the Worker can persist to a bucket: the durability half of daemon-less
+    /// hosting. Composes over the real pulled Space, so the ledger's sealed
+    /// epoch keys ride along and a cold restore decrypts. The authority section
+    /// is the FULL export every time; the store's own retention keeps the World
+    /// half compact.
+    pub fn snapshot(&self) -> Result<Vec<u8>, JsValue> {
+        let guard = self.authority.0.lock().unwrap_or_else(|p| p.into_inner());
+        let ledger = &guard.ledger;
+        let genesis = ledger.genesis().clone();
+        let frontier =
+            replica::frontier::AuthorityFrontier::from_canonical_bytes(ledger.frontier());
+        let founding = genesis
+            .founding_actors
+            .first()
+            .cloned()
+            .ok_or_else(|| js_err("snapshot", "the ledger names no founding actor"))?;
+        let founder = ledger
+            .actor_events()
+            .into_iter()
+            .find(|e| mechanics::ids::ActorId::from_incept_hash(&e.hash()) == founding)
+            .ok_or_else(|| js_err("snapshot", "the founder inception is not on the ledger"))?;
+        let founder_bytes =
+            postcard::to_stdvec(&founder).map_err(|e| js_err("founder inception encode", e))?;
+        let snapshot = self
+            .station
+            .with_replica_read(|replica| {
+                contact::snapshot::capture(
+                    &self.space,
+                    &self.seed,
+                    genesis.clone(),
+                    founder_bytes.clone(),
+                    ledger,
+                    frontier.clone(),
+                    replica,
+                )
+                .map_err(|f| {
+                    replica::transaction::commit::Failure::Illegitimate(format!("{f:?}").into())
+                })
+            })
+            .map_err(|e| js_err("capture snapshot", format!("{e:?}")))?;
+        Ok(snapshot.encode())
+    }
 }
 
 /// Stand the whole engine up in the Worker: compile the runner once, instantiate
