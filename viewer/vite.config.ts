@@ -1,6 +1,12 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+
+/** Absolute path to a file in the built `porthole` wasm-pack package. */
+const porthole = (file: string) =>
+  fileURLToPath(new URL(`../crates/porthole/pkg/${file}`, import.meta.url));
 
 /**
  * The client builds straight into `products/issues-app/assets/web`, which is
@@ -17,6 +23,27 @@ import tailwindcss from "@tailwindcss/vite";
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Resolve the shippable in-tab engine's small JS glue (`crates/porthole`,
+  // built by wasm-pack --target web) for `import init, { boot } from "porthole"`.
+  // Only the glue is bundled; the 14 MiB engine wasm and the 39 MiB runner are
+  // BOTH fetched at runtime (same-origin in dev, the signed channel in a
+  // release), so neither weighs down the committed bundle.
+  resolve: {
+    alias: [{ find: /^porthole$/, replacement: porthole("porthole.js") }],
+  },
+  // The engine Worker is spawned as an ES module (`new Worker(url, {type:
+  // "module"})`); flat, unhashed chunk names keep it inside the release's
+  // committed, CI-diffed naming scheme instead of a hashed assets/ path.
+  worker: {
+    format: "es",
+    rollupOptions: {
+      output: {
+        entryFileNames: "[name].js",
+        chunkFileNames: "[name].js",
+        assetFileNames: "[name][extname]",
+      },
+    },
+  },
   build: {
     outDir: "../products/issues-app/assets/web",
     emptyOutDir: true,

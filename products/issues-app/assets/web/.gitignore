@@ -1,0 +1,3 @@
+# The engine wasm is fetched (channel in ship, same-origin in dev), never
+# committed: the build emits it here for dev serving, git ignores it.
+/porthole_bg.wasm

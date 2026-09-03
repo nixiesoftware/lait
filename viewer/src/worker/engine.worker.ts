@@ -18,7 +18,6 @@
  */
 
 import init, { boot } from "porthole";
-import wasmUrl from "porthole/porthole_bg.wasm?url";
 
 import { engineRouter } from "./engineRouter";
 
@@ -27,8 +26,11 @@ interface BootMessage {
   type: "boot";
   relay: string;
   ticket: string;
-  /** Where the 39 MiB runner wasm is served (same-origin in dev, the signed
-   *  channel in a release). Fetched as bytes, never linked. */
+  /** Where the engine wasm (porthole_bg.wasm, ~14 MiB) is served — same-origin
+   *  in dev, the signed channel in a release. Only the small JS glue is
+   *  bundled; the wasm itself is fetched and pinned, like the runner. */
+  engineWasmUrl: string;
+  /** Where the 39 MiB World runner wasm is served. Fetched as bytes, not linked. */
   runnerUrl: string;
   world: string;
   version: string;
@@ -72,7 +74,7 @@ async function deviceSeed(): Promise<string> {
 }
 
 async function stand(message: BootMessage): Promise<void> {
-  await init(wasmUrl);
+  await init(message.engineWasmUrl);
   const seedHex = await deviceSeed();
   const runner = new Uint8Array(
     await (await fetch(message.runnerUrl)).arrayBuffer(),

@@ -44,8 +44,12 @@ const ISSUES = {
   version: "0.9.5",
   release: "release",
   mount: "issues",
-  /** Same-origin in dev and in the viewer's own release bundle; the signed
-   *  channel URL when a client fetches a pinned release. Bytes, never linked. */
+  /** The engine wasm (~14 MiB) — fetched, not bundled (only its small JS glue
+   *  is). Same-origin in dev; the signed channel, pinned by digest, in a
+   *  release. */
+  engineWasmUrl: "/porthole_bg.wasm",
+  /** The 39 MiB World runner, fetched as bytes. Same-origin in dev; the signed
+   *  channel in a release. */
   runnerUrl: "/lait_issues_runner.wasm",
 };
 
