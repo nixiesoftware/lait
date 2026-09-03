@@ -628,6 +628,29 @@ impl GossipReceiver for IrohGossipReceiver {
     }
 }
 
+impl IrohTransport {
+    /// Register an inbound peer as reachable at our relay, so a later dial back
+    /// resolves through the [`PeerBook`] instead of failing.
+    ///
+    /// iroh learns a peer's path from the connection it arrives on, but that
+    /// knowledge is per-connection: once the inbound connection cycles, a fresh
+    /// dial by bare id goes through lait's address lookup — which, for a peer
+    /// lait never registered, answers "Address Lookup failed" and the peer is
+    /// unreachable. A peer with a dialable direct address survives this (iroh
+    /// still holepunches to it), but a **relay-only peer — a browser** — does
+    /// not: reciprocation / convergence-out to it dies the moment the first
+    /// connection closes. Recording that any peer which reached us inbound is
+    /// reachable at our own relay closes that gap. A no-op under `Public`
+    /// (discovery resolves ids) and `Isolated` (no relay); idempotent under
+    /// `Local`.
+    fn learn_inbound(&self, from: &PeerId) {
+        match endpoint_id(from) {
+            Ok(id) => self.peers.learn(id),
+            Err(e) => tracing::warn!("cannot learn inbound peer id: {e:#}"),
+        }
+    }
+}
+
 #[async_trait]
 impl Transport for IrohTransport {
     fn my_id(&self) -> PeerId {
@@ -697,10 +720,14 @@ impl Transport for IrohTransport {
             return None;
         }
         let mut rx = self.incoming_sessions.lock().await;
-        tokio::select! {
+        let inc = tokio::select! {
             inc = rx.recv() => inc,
             _ = shutdown.wait_for(|s| *s) => None,
+        };
+        if let Some(inc) = &inc {
+            self.learn_inbound(&inc.from);
         }
+        inc
     }
 
     /// The Router does the real accepting; this drains what the handlers
@@ -712,10 +739,14 @@ impl Transport for IrohTransport {
             return None;
         }
         let mut rx = self.incoming.lock().await;
-        tokio::select! {
+        let inc = tokio::select! {
             inc = rx.recv() => inc,
             _ = shutdown.wait_for(|s| *s) => None,
+        };
+        if let Some(inc) = &inc {
+            self.learn_inbound(&inc.from);
         }
+        inc
     }
 
     fn advertised_addrs(&self) -> Vec<SocketAddr> {
