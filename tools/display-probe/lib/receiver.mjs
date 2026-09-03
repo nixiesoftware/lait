@@ -253,8 +253,10 @@ export class Stats {
  * checked for transport-stream shape and dropped.
  */
 export class HlsSession {
-  constructor({ origin, endpoint, transport, stats, log, prefetchMs, onFailure }) {
+  constructor({ origin, endpoint, transport, stats, log, prefetchMs, dumpDir = null, onFailure }) {
     this.masterUrl = `${origin}${endpoint}`;
+    this.dumpDir = dumpDir;
+    this.dumped = 0;
     this.transport = transport;
     this.stats = stats;
     this.log = log;
@@ -336,6 +338,7 @@ export class HlsSession {
         this.scheduleReload(delayMs);
         return;
       }
+      this.dump(`playlist-${String(this.dumped).padStart(4, "0")}.m3u8`, fetched.text);
       this.stats.playlistReloads += 1;
       this.stats.mark("media_playlist");
       this.stats.windowSegments.push(playlist.segments.length);
@@ -361,6 +364,14 @@ export class HlsSession {
       if (playlist.endlist) return;
     }
     this.scheduleReload(delayMs);
+  }
+
+  /** Keep the bytes for the desk: ffprobe answers what a play clock cannot. */
+  dump(name, body) {
+    if (!this.dumpDir) return;
+    fs.mkdirSync(this.dumpDir, { recursive: true });
+    fs.writeFileSync(path.join(this.dumpDir, name), body);
+    this.dumped += 1;
   }
 
   scheduleReload(delayMs) {
@@ -433,6 +444,7 @@ export class HlsSession {
     for (const violation of checkTransportStream(response.body)) {
       this.stats.violation({ ...violation, sequence });
     }
+    this.dump(`${String(sequence).padStart(6, "0")}.ts`, response.body);
     this.model.markFetched(sequence);
     this.stats.segmentFetched({ sequence, latencyMs: response.latencyMs, bytes: response.body.length, status: response.status });
     this.tick();
@@ -509,8 +521,9 @@ export class ProbeUi {
 }
 
 export class ProbeReceiver extends DisplayReceiverClient {
-  constructor({ bootstrap, capabilities, ui, vault, transport, stats, log, prefetchMs }) {
+  constructor({ bootstrap, capabilities, ui, vault, transport, stats, log, prefetchMs, dumpDir = null }) {
     super({ bootstrap, capabilities, ui, vaultFactory: async () => vault });
+    this.dumpDir = dumpDir;
     this.transport = transport;
     this.stats = stats;
     this.log = log;
@@ -644,6 +657,7 @@ export class ProbeReceiver extends DisplayReceiverClient {
       stats: this.stats,
       log: this.log,
       prefetchMs: this.prefetchMs,
+      dumpDir: this.dumpDir,
       onFailure: (error) => {
         entry.lastError = error;
         this.recoverSoon();

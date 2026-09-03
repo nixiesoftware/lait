@@ -50,6 +50,10 @@ node --test tools/display-probe/probe.test.mjs        # the pure parts
 | `coordinator` | instance, label, identity, certificate digest, the daemon build from the socket handshake, and any comment lines the master playlist carried. |
 | `samples` | one row per second: play sequence, listed end sequence, runway, stalled. |
 
+`--dump DIR` keeps every playlist reload (`playlist-NNNN.m3u8`) and every
+segment fetched (`NNNNNN.ts`, by media sequence) so the desk can put ffprobe
+and the conformance walker on the bytes a receiver actually got.
+
 Invariants, checked on every playlist reload and segment:
 
 - `media_sequence_decreased` — `EXT-X-MEDIA-SEQUENCE` went backwards.

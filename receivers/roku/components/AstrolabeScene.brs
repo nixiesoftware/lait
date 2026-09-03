@@ -177,8 +177,15 @@ sub AstrolabePipelineSample()
         buffering: underflow or state = "buffering"
     }
     m.task.pipeline = sample
-    print "[astrolabe] pipeline state="; sample.state; " pos_ms="; sample.position_ms; " rendered="; sample.frames_rendered; " dropped="; sample.frames_dropped; " repeated="; sample.frames_repeated; " errors="; sample.stream_errors; " seq="; sequence; " buffering="; sample.buffering
+    print "[astrolabe] pipeline up_ms="; AstrolabeUpMs(); " state="; sample.state; " pos_ms="; sample.position_ms; " rendered="; sample.frames_rendered; " dropped="; sample.frames_dropped; " repeated="; sample.frames_repeated; " errors="; sample.stream_errors; " seq="; sequence; " buffering="; sample.buffering
 end sub
+
+' Milliseconds since the device booted: the one clock every console line can
+' share, so a reader at the desk can rate position against time without
+' trusting when the telnet stream handed the line over.
+function AstrolabeUpMs() as integer
+    return Int(UpTime(0) * 1000)
+end function
 
 function AstrolabeCount(value as dynamic) as integer
     if value = invalid then return 0
@@ -436,6 +443,11 @@ end sub
 ' picture rather than the black the player paints as it drains, then move the
 ' program on.
 sub AstrolabeMediaPositionChanged()
+    ' The clock the desk cannot see otherwise: the player's own position at every
+    ' notification, stamped with device uptime. A clip whose position advances in
+    ' even 250 ms steps judders only on the panel's cadence; one that advances in
+    ' jerks is the player's clock, and the two need different fixes.
+    print "[astrolabe] clock up_ms="; AstrolabeUpMs(); " pos_ms="; Int(m.media.position * 1000); " state="; m.media.state
     if m.loopInPlace then return
     if m.mediaEnding or m.media.state <> "playing" then return
     if m.media.duration <= 0 or m.media.position < m.media.duration - 0.6 then return
@@ -455,6 +467,7 @@ sub AstrolabeMediaStopDue()
 end sub
 
 sub AstrolabeMediaStateChanged()
+    print "[astrolabe] media up_ms="; AstrolabeUpMs(); " state="; m.media.state; " pos_ms="; Int(m.media.position * 1000)
     if m.media.state = "playing"
         ' A real picture is up; the still that covered the buffering can go.
         ' The preloaded next still (m.ready) is a different poster and is left

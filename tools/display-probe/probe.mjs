@@ -30,6 +30,7 @@ function usage(message) {
   --seconds N         run length after start (default: 60)
   --viewport WxH      the screen size this receiver declares (default: 1280x720)
   --prefetch-ms N     fetch a segment this far before it is needed (default: one target duration)
+  --dump DIR          write every playlist reload and segment fetched to DIR (sequence-named)
   --stale-after-ms N  freshness pinned on the probe's assignment (default: 120000)
   --state DIR         credential + device state (default: tools/display-probe/.state)
   --fresh             discard the stored credential and pair again
@@ -46,6 +47,7 @@ function parseArgs(argv) {
     assignment: null,
     seconds: 60,
     prefetchMs: null,
+    dump: null,
     staleAfterMs: 120_000,
     state: path.join(HERE, ".state"),
     fresh: false,
@@ -72,6 +74,7 @@ function parseArgs(argv) {
         break;
       }
       case "--prefetch-ms": options.prefetchMs = Number(next()); break;
+      case "--dump": options.dump = path.resolve(next()); break;
       case "--stale-after-ms": options.staleAfterMs = Number(next()); break;
       case "--state": options.state = path.resolve(next()); break;
       case "--fresh": options.fresh = true; break;
@@ -275,6 +278,7 @@ async function main() {
     // `null` means one target duration, which a session learns from its
     // first playlist.
     prefetchMs: options.prefetchMs,
+    dumpDir: options.dump,
   });
 
   say(`display-probe: ${reusedCredential ? "resuming" : "pairing"} against ${origin} for ${options.seconds} s (assignment ${source.assignment}, ${source.world})`);

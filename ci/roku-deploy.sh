@@ -158,7 +158,7 @@ restore() {
     git checkout -- "${TRACKED[@]}"
   fi
   for file in "${GENERATED[@]}"; do
-    case " ${TRACKED[*]} ${UNTRACKED_BEFORE[*]} " in
+    case " ${TRACKED[*]:-} ${UNTRACKED_BEFORE[*]:-} " in
       *" $file "*) continue ;;
     esac
     if [ -e "$file" ]; then
@@ -169,7 +169,7 @@ restore() {
   # Build.brs that was already there untracked (before the stamp script is
   # committed) is put back to its default by the stamp script's own restore,
   # which is what git would have done for a tracked one.
-  case " ${UNTRACKED_BEFORE[*]} " in
+  case " ${UNTRACKED_BEFORE[*]:-} " in
     *" source/Build.brs "*)
       if [ -f scripts/stamp.mjs ]; then
         node scripts/stamp.mjs --restore >/dev/null && echo "restored source/Build.brs to its default"
@@ -183,11 +183,11 @@ restore() {
     fi
   done
   if [ -z "$left" ]; then
-    echo "restored from git: ${TRACKED[*]} — the tree is clean of generated files"
+    echo "restored from git: ${TRACKED[*]:-} — the tree is clean of generated files"
   else
     echo "generated files still differ from git:$left"
     if [ "${#UNTRACKED_BEFORE[@]}" -gt 0 ]; then
-      echo "(untracked before this run and left alone: ${UNTRACKED_BEFORE[*]})"
+      echo "(untracked before this run and left alone: ${UNTRACKED_BEFORE[*]:-})"
     fi
   fi
   exit "$status"
