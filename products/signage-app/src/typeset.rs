@@ -69,6 +69,9 @@ fn face(weight: Weight) -> &'static FontRef<'static> {
         Weight::Regular => (&REGULAR, REGULAR_BYTES),
         Weight::Medium => (&MEDIUM, MEDIUM_BYTES),
     };
+    // The bytes are compiled in; a face that does not parse is a broken build,
+    // not a condition a running World can meet or answer.
+    #[allow(clippy::expect_used)]
     cell.get_or_init(|| {
         FontRef::try_from_slice(bytes).expect("the bundled Inter face is a valid font")
     })

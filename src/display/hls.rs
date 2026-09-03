@@ -17,6 +17,9 @@ const VIDEO_PID: u16 = 0x101;
 const AUDIO_PID: u16 = 0x102;
 const PMT_PID: u16 = 0x100;
 const TS_PACKET_BYTES: usize = 188;
+/// Where a timeline's clock begins: ten seconds, as segmenters conventionally
+/// start, so a PCR written behind the first DTS is never negative.
+const CLOCK_BASE_90K: u64 = 900_000;
 const DRAIN_PACKETS: usize = 512;
 const MAX_HLS_SEGMENT_BYTES: usize = MAX_MEDIA_GROUP_BYTES * 2;
 
@@ -83,6 +86,9 @@ struct Rendition {
     tracks: BTreeSet<String>,
     pending: BTreeMap<u64, BTreeMap<String, ReceivedGroup>>,
     last_sequence: Option<u64>,
+    /// The last continuity counter written per PID, carried across
+    /// segments — see [`continue_counters`].
+    continuity: BTreeMap<u16, u8>,
 }
 
 /// Catalog-bound, bounded MPEG-TS segmenter. Tracks that share an opaque HLS
@@ -126,6 +132,7 @@ impl HlsCatalogPackager {
                     tracks: BTreeSet::new(),
                     pending: BTreeMap::new(),
                     last_sequence: None,
+                    continuity: BTreeMap::new(),
                 })
                 .tracks
                 .insert(catalog_track.track.clone());
@@ -200,13 +207,18 @@ impl HlsCatalogPackager {
         let discontinuity = rendition
             .last_sequence
             .is_some_and(|last| last.checked_add(1) != Some(sequence));
-        let segment = mux_segment(
+        let mut segment = mux_segment(
             &rendition_name,
             sequence,
             discontinuity,
             &groups,
             &self.tracks,
         )?;
+        if discontinuity {
+            // A gap is a new timeline; the counters may start over with it.
+            rendition.continuity.clear();
+        }
+        continue_counters(&mut segment.bytes, &mut rendition.continuity);
         rendition.last_sequence = Some(sequence);
         Ok(Some(segment))
     }
@@ -298,6 +310,37 @@ fn description(
     })
 }
 
+/// Carry each PID's continuity counter on from the segment before.
+///
+/// Every segment is muxed by a multiplexer of its own, so on its own every
+/// segment's counters begin at zero. Played back to back that is a counter
+/// jump at each boundary, which a demuxer reads as packet loss: it drops the
+/// packet in flight, and with it a frame. A still at one frame a second hid
+/// it; a clip at twenty-five stuttered at every segment. The packets are
+/// restamped so the counters run on across a rendition's segments, exactly
+/// as one long multiplexer would have written them.
+fn continue_counters(bytes: &mut [u8], continuity: &mut BTreeMap<u16, u8>) {
+    for packet in bytes.chunks_exact_mut(TS_PACKET_BYTES) {
+        let (Some(&sync), Some(&high), Some(&low)) = (packet.first(), packet.get(1), packet.get(2))
+        else {
+            continue;
+        };
+        let Some(control) = packet.get_mut(3) else {
+            continue;
+        };
+        if sync != 0x47 {
+            continue;
+        }
+        let pid = (u16::from(high & 0x1f) << 8) | u16::from(low);
+        let has_payload = *control & 0x10 != 0;
+        let counter = continuity.entry(pid).or_insert(0x0f);
+        if has_payload {
+            *counter = counter.wrapping_add(1) & 0x0f;
+        }
+        *control = (*control & 0xf0) | *counter;
+    }
+}
+
 fn mux_segment(
     rendition: &str,
     sequence: u64,
@@ -360,13 +403,27 @@ fn mux_segment(
                     .ok_or(Failure::TimestampOutOfRange)?,
                 track.catalog.timescale,
             )?;
+            // Every part's timeline begins at zero, and the multiplexer writes
+            // the PCR a fraction of a second behind the DTS — so the first
+            // frames of a part carried a *negative* clock, wrapped to the top
+            // of the 33-bit range, and a player pacing on it saw 26 hours pass
+            // inside one segment: it raced, then froze. Start the clock where
+            // a segmenter conventionally starts it, well clear of zero.
+            let dts = dts
+                .checked_add(CLOCK_BASE_90K)
+                .ok_or(Failure::TimestampOutOfRange)?;
+            let pts = pts
+                .checked_add(CLOCK_BASE_90K)
+                .ok_or(Failure::TimestampOutOfRange)?;
             let duration = frame.header.duration.ok_or(Failure::InvalidGroup)?;
             let end = frame
                 .header
                 .timestamp
                 .checked_add(i64::try_from(duration).map_err(|_| Failure::TimestampOutOfRange)?)
                 .ok_or(Failure::TimestampOutOfRange)?;
-            let end = clock_90k(end, track.catalog.timescale)?;
+            let end = clock_90k(end, track.catalog.timescale)?
+                .checked_add(CLOCK_BASE_90K)
+                .ok_or(Failure::TimestampOutOfRange)?;
             earliest = Some(earliest.map_or(pts, |current: u64| current.min(pts)));
             latest = Some(latest.map_or(end, |current: u64| current.max(end)));
             let data = match track.catalog.kind {
@@ -664,6 +721,45 @@ mod tests {
         assert!(!first.discontinuity);
         let skipped = packager.push_group(&group(3)).unwrap().unwrap();
         assert!(skipped.discontinuity);
+    }
+
+    /// Consecutive segments of one rendition read as one transport stream:
+    /// each PID's continuity counter carries on from where the segment
+    /// before left it. A fresh multiplexer per segment restarted them, and a
+    /// demuxer took the jump for packet loss and dropped a frame per seam.
+    #[test]
+    fn continuity_counters_run_on_across_a_renditions_segments() {
+        fn counters(bytes: &[u8]) -> BTreeMap<u16, Vec<u8>> {
+            let mut out: BTreeMap<u16, Vec<u8>> = BTreeMap::new();
+            for packet in bytes.chunks_exact(TS_PACKET_BYTES) {
+                let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+                if packet[3] & 0x10 != 0 {
+                    out.entry(pid).or_default().push(packet[3] & 0x0f);
+                }
+            }
+            out
+        }
+        let mut packager = HlsCatalogPackager::new(&catalog()).unwrap();
+        let first = packager.push_group(&group(1)).unwrap().unwrap();
+        let second = packager.push_group(&group(2)).unwrap().unwrap();
+        let (before, after) = (counters(&first.bytes), counters(&second.bytes));
+        assert!(before.len() >= 2, "PAT and the video PID at least");
+        for (pid, run) in &before {
+            for pair in run.windows(2) {
+                assert_eq!(
+                    pair[1],
+                    (pair[0] + 1) & 0x0f,
+                    "PID {pid:#x} counts on within a segment"
+                );
+            }
+            let last = *run.last().unwrap();
+            let next = after[pid][0];
+            assert_eq!(
+                next,
+                (last + 1) & 0x0f,
+                "PID {pid:#x} carries on across the seam"
+            );
+        }
     }
 
     #[test]

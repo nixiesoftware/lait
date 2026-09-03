@@ -2,7 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -18,7 +19,7 @@ use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use world_interface::display::{
     BlankReason, DisplayChoice, DisplayProjection, DisplayRequest, DisplaySurfaceId,
     FrameMediaType, RenderedFrame, RenderedScene, StoredFrame, MAX_RENDERED_ASSET_BYTES,
@@ -32,6 +33,7 @@ use world_interface::{
 use crate::control::{ControlRoute, Request};
 use crate::orbits::Router;
 
+use super::producer::{self, ClipReader, ReadFuture, Splice, StillCache, Timeline};
 use super::{
     AssignmentRecord, CompiledProgram, CoordinatorPolicy, CoordinatorStore, PlaybackAlignment,
     ProgramCompiler,
@@ -81,19 +83,35 @@ pub struct DisplayCoordinator {
     compiler: ProgramCompiler,
     local_root: PathBuf,
     compiled: Mutex<BTreeMap<String, Arc<CompiledProgram>>>,
-    /// The composed program stream is expensive — it reads whole clips and
-    /// encodes stills — and the program is re-derived on every change poll. This
-    /// remembers, per program resource, the signature of the projection last
-    /// composed and the stream's duration, so an unchanged program is not
-    /// recomposed on every poll (which read whole clips repeatedly and could
-    /// outrun the poll's own deadline, so the stream never finished installing).
-    composed: Mutex<BTreeMap<String, (u64, u32)>>,
+    /// One producer per assignment a native-HLS receiver is playing: the
+    /// schedule behind its stream, edited at the live edge and never rebuilt.
+    producers: Mutex<BTreeMap<String, Arc<Producer>>>,
     assignment_changes: broadcast::Sender<()>,
     live: LiveMediaHub,
     live_tickets: Mutex<BTreeMap<String, LiveTicket>>,
+    /// What each assignment's stream must remember across a restart, by
+    /// assignment id: the epoch it counts from, and the discontinuities its
+    /// window has dropped. Persisted beside the tickets so a restarted daemon
+    /// continues the same numbering in both playlist headers, and a receiver
+    /// that kept its URL never sees either go backwards.
+    producer_epochs: Mutex<BTreeMap<String, ProducerMemory>>,
 }
 
-#[derive(Clone)]
+/// What a stream remembers across restarts.
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct ProducerMemory {
+    epoch_unix_ms: u64,
+    #[serde(default)]
+    discontinuities_dropped: u64,
+}
+
+/// Where tickets and epochs are kept across restarts: beside the package
+/// state, as plain JSON. A ticket is a bearer secret for one stream; the
+/// file is owner-readable like everything else under the display root.
+const TICKETS_FILE: &str = "live-tickets.json";
+const EPOCHS_FILE: &str = "producer-epochs.json";
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct LiveTicket {
     device: DisplayDeviceId,
     assignment: DisplayAssignmentId,
@@ -126,6 +144,427 @@ pub struct DisplayChangeSubscriptions {
     worlds: broadcast::Receiver<crate::orbits::OrbitDoorbell>,
 }
 
+/// The content plane as a producer reads it: bytes by content id and range,
+/// through the daemon's own channel, fetched from a peer when this Station
+/// lacks them.
+struct ContentReads {
+    home: PathBuf,
+    route: ControlRoute,
+}
+
+impl ClipReader for ContentReads {
+    fn size<'a>(&'a self, resource: &'a str) -> ReadFuture<'a, u64> {
+        Box::pin(async move {
+            match crate::control::content_call(
+                &self.home,
+                &crate::control::content_request(
+                    self.route.clone(),
+                    crate::control::ContentCall::Stat {
+                        content: resource.to_string(),
+                    },
+                ),
+            )
+            .await
+            {
+                Ok((crate::control::ContentReply::ContentStatus { plaintext_len, .. }, _)) => {
+                    Ok(plaintext_len)
+                }
+                Ok((reply, _)) => Err(anyhow!("clip stat refused: {reply:?}")),
+                Err(error) => Err(error).context("stat clip"),
+            }
+        })
+    }
+
+    fn read<'a>(&'a self, resource: &'a str, offset: u64, len: u64) -> ReadFuture<'a, Vec<u8>> {
+        Box::pin(read_stored(&self.home, &self.route, resource, offset, len))
+    }
+}
+
+/// The stream one receiver holds for the life of its assignment, and the
+/// task that keeps it made. See [`super::producer`] for the schedule.
+pub(crate) struct Producer {
+    assignment: AssignmentRecord,
+    capabilities: ReceiverCapabilities,
+    orbit_key: String,
+    resource: String,
+    reads: ContentReads,
+    started_at_unix_ms: u64,
+    /// The epoch this assignment's stream counted from before this process,
+    /// if it ran before; a restart continues it.
+    stored_epoch_unix_ms: Option<u64>,
+    /// The discontinuities the window had dropped before this process.
+    resumed_discontinuities_dropped: u64,
+    state: tokio::sync::Mutex<ProducerState>,
+    running: AtomicBool,
+    /// Cleared when the program stops being one stream, or the producer is
+    /// replaced; the task sees it and leaves.
+    active: AtomicBool,
+    wake: Notify,
+}
+
+struct ProducerState {
+    timeline: Option<Timeline>,
+    cache: StillCache,
+    /// When the producer next renders on its own: the World's refresh
+    /// cadence, or never, when the program only changes on a doorbell.
+    next_render_unix_ms: u64,
+}
+
+impl Producer {
+    /// A screen nobody has asked a segment from for this long is off; the
+    /// producer stops making segments and keeps its place, so a fetch that
+    /// comes back continues the same sequence.
+    const IDLE_STOP_MS: u64 = 90_000;
+    /// A render that failed keeps the last schedule playing and is retried
+    /// after this long.
+    const RENDER_RETRY_MS: u64 = 5_000;
+    /// The floor on a World's render cadence.
+    const RENDER_FLOOR_MS: u64 = 250;
+    /// How long the task waits with nothing due, so a stopped screen is
+    /// noticed and a lost doorbell costs no more than this.
+    const IDLE_CHECK_MS: u64 = 5_000;
+
+    fn serves(&self, assignment: &AssignmentRecord, capabilities: &ReceiverCapabilities) -> bool {
+        self.assignment.id == assignment.id
+            && self.assignment.program == assignment.program
+            && self.assignment.theme == assignment.theme
+            && self.assignment.source.input == assignment.source.input
+            && self.capabilities.viewport == capabilities.viewport
+            && self.capabilities.locale == capabilities.locale
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    fn retire(&self) {
+        self.active.store(false, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    /// The epoch the timeline counts from: the sync group's, so members place
+    /// the same edge at the same instant, or this producer's first start.
+    fn epoch(&self, now_unix_ms: u64) -> u64 {
+        self.assignment.sync.as_ref().map_or(
+            self.stored_epoch_unix_ms.unwrap_or(now_unix_ms),
+            |sync| {
+                sync.epoch_unix_ms
+                    .saturating_add_signed(i64::from(sync.static_delay_ms))
+            },
+        )
+    }
+
+    fn surface_render(&self, now_unix_ms: u64) -> Result<SurfaceRender> {
+        let world = WorldId::parse(&self.assignment.source.world)
+            .ok_or_else(|| anyhow!("display assignment pins an invalid World"))?;
+        Ok(SurfaceRender {
+            orbit: self.assignment.orbit.clone(),
+            space: Some(self.assignment.space.clone()),
+            world,
+            surface: self.assignment.source.surface.clone(),
+            input: self.assignment.source.input.clone(),
+            theme: self.assignment.theme,
+            width: self.capabilities.viewport.width,
+            height: self.capabilities.viewport.height,
+            scale_milli: self.capabilities.viewport.scale_milli,
+            locale: self.capabilities.locale.clone(),
+            horizon_ms: self.capabilities.max_staging_horizon_ms,
+            now_unix_ms,
+        })
+    }
+
+    /// Take a rendered program: build its lap and lay it on the timeline —
+    /// opening the timeline if this is the first — then make the window
+    /// through the edge so a receiver has something to play at once.
+    ///
+    /// The lap is built outside the state lock, because building it decodes
+    /// and encodes pictures — seconds, in a debug build — and the keeper
+    /// making segments must not wait on that.
+    async fn feed(
+        &self,
+        live: &LiveMediaHub,
+        projection: &DisplayProjection,
+        now_unix_ms: u64,
+    ) -> Result<()> {
+        let viewport = (
+            self.capabilities.viewport.width,
+            self.capabilities.viewport.height,
+        );
+        let mut cache = self.state.lock().await.cache.clone();
+        let started = std::time::Instant::now();
+        let lap = producer::build_lap(projection, &mut cache, &self.reads, viewport).await?;
+        tracing::debug!(
+            resource = %self.resource,
+            elapsed_ms = started.elapsed().as_millis(),
+            "program lap built"
+        );
+        let mut state = self.state.lock().await;
+        state.cache = cache;
+        match state.timeline.as_mut() {
+            Some(timeline) => match timeline.offer(lap) {
+                Splice::InPlace => {
+                    tracing::debug!(resource = %self.resource, "program pictures swapped in place");
+                }
+                Splice::Era { at } => {
+                    tracing::debug!(resource = %self.resource, at, "program spliced at the edge");
+                }
+            },
+            None => {
+                let epoch = self.epoch(now_unix_ms);
+                state.timeline = Some(Timeline::new(&self.resource, lap, epoch, now_unix_ms));
+            }
+        }
+        state.next_render_unix_ms = projection
+            .program
+            .refresh_after_ms
+            .map_or(u64::MAX, |refresh| {
+                now_unix_ms.saturating_add(u64::from(refresh).max(Self::RENDER_FLOOR_MS))
+            });
+        self.ensure_window_locked(live, &mut state, now_unix_ms)
+            .await
+    }
+
+    /// Make sure the presentation exists and the window through the edge is
+    /// made, for a producer that was idle or is being asked for the first
+    /// time since it was fed.
+    async fn ensure_window(&self, live: &LiveMediaHub, now_unix_ms: u64) -> Result<()> {
+        let mut state = self.state.lock().await;
+        self.ensure_window_locked(live, &mut state, now_unix_ms)
+            .await
+    }
+
+    async fn ensure_window_locked(
+        &self,
+        live: &LiveMediaHub,
+        state: &mut ProducerState,
+        now_unix_ms: u64,
+    ) -> Result<()> {
+        let timeline = state
+            .timeline
+            .as_mut()
+            .ok_or_else(|| anyhow!("producer has no program yet"))?;
+        if !live.has_resource(&self.orbit_key, &self.resource, LiveTransport::Hls)
+            && live.fetched_at(&self.orbit_key, &self.resource).is_none()
+        {
+            let description = timeline.description(
+                self.capabilities.viewport.width,
+                self.capabilities.viewport.height,
+            );
+            live.install_rolling(
+                &self.orbit_key,
+                &self.resource,
+                description,
+                producer::WINDOW,
+                self.resumed_discontinuities_dropped,
+            )?;
+            live.touch(&self.orbit_key, &self.resource, now_unix_ms);
+        }
+        timeline.catch_up(now_unix_ms);
+        let target = timeline.target_through(now_unix_ms);
+        while timeline.next() <= target {
+            let started = std::time::Instant::now();
+            let segment = timeline.materialise_next(&self.reads).await?;
+            tracing::debug!(
+                resource = %self.resource,
+                sequence = segment.group_sequence,
+                discontinuity = segment.discontinuity,
+                bytes = segment.bytes.len(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "program segment made"
+            );
+            // A desk aid: with `LAIT_DISPLAY_DUMP_DIR` set, every segment made
+            // is written where ffprobe can read it.
+            if let Ok(dir) = std::env::var("LAIT_DISPLAY_DUMP_DIR") {
+                let path = std::path::Path::new(&dir)
+                    .join(format!("{}-{}.ts", self.resource, segment.group_sequence));
+                if let Err(error) = std::fs::write(&path, &segment.bytes) {
+                    tracing::debug!(error = %error, "segment dump failed");
+                }
+            }
+            live.push_hls_segment(&self.orbit_key, &self.resource, segment)?;
+        }
+        Ok(())
+    }
+}
+
+impl DisplayCoordinator {
+    /// Remember a stream's dropped-discontinuity count when it changed, so a
+    /// restart resumes the playlist header where it was.
+    fn remember_discontinuities(&self, producer: &Producer) {
+        let Some(dropped) = self
+            .live
+            .discontinuities_dropped(&producer.orbit_key, &producer.resource)
+        else {
+            return;
+        };
+        let changed = self
+            .producer_epochs
+            .lock()
+            .ok()
+            .and_then(|mut epochs| {
+                let memory = epochs.get_mut(producer.assignment.id.as_str())?;
+                (memory.discontinuities_dropped != dropped).then(|| {
+                    memory.discontinuities_dropped = dropped;
+                })
+            })
+            .is_some();
+        if changed {
+            self.persist_epochs();
+        }
+    }
+}
+
+/// The keeper: keeps the window made ahead of the clock, and stops when the
+/// screen does. It never renders — a render is seconds in a debug build and
+/// the segment the player is about to ask for cannot wait on it — so the
+/// renderer is a task of its own and the two meet at the state lock, briefly.
+async fn run_keeper(coordinator: Weak<DisplayCoordinator>, producer: Arc<Producer>) {
+    tracing::debug!(resource = %producer.resource, "program producer running");
+    loop {
+        let Some(coordinator) = coordinator.upgrade() else {
+            break;
+        };
+        if !producer.is_active() {
+            break;
+        }
+        let now = mechanics::wallclock::now_millis();
+        let alive = coordinator
+            .active_assignment_for_device(&producer.assignment.device, now)
+            .ok()
+            .flatten()
+            .is_some_and(|assignment| assignment.id == producer.assignment.id);
+        if !alive {
+            coordinator
+                .live
+                .remove_stored(&producer.orbit_key, &producer.resource);
+            coordinator.retire_producer(&producer.assignment.id);
+            break;
+        }
+        let fetched = coordinator
+            .live
+            .fetched_at(&producer.orbit_key, &producer.resource)
+            .unwrap_or(0)
+            .max(producer.started_at_unix_ms);
+        if now.saturating_sub(fetched) > Producer::IDLE_STOP_MS {
+            // Off, or unreachable. The presentation goes; the timeline stays,
+            // so the next poll continues the same sequence from the clock.
+            coordinator
+                .live
+                .remove_stored(&producer.orbit_key, &producer.resource);
+            tracing::debug!(resource = %producer.resource, "program producer idle; stopping");
+            break;
+        }
+        let segment_due = {
+            let mut state = producer.state.lock().await;
+            if let Err(error) = producer
+                .ensure_window_locked(&coordinator.live, &mut state, now)
+                .await
+            {
+                tracing::warn!(resource = %producer.resource, error = %format_args!("{error:#}"), "program segment could not be made");
+            }
+            coordinator.remember_discontinuities(&producer);
+            state.timeline.as_ref().map_or(
+                now.saturating_add(Producer::IDLE_CHECK_MS),
+                |timeline| {
+                    timeline
+                        .start_ms(timeline.next())
+                        .saturating_sub(producer::LEAD_MS)
+                },
+            )
+        };
+        drop(coordinator);
+        let wait = segment_due
+            .min(now.saturating_add(Producer::IDLE_CHECK_MS))
+            .saturating_sub(now)
+            .clamp(50, Producer::IDLE_CHECK_MS);
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(wait)) => {}
+            () = producer.wake.notified() => {}
+        }
+    }
+    tracing::debug!(resource = %producer.resource, "program producer stopped");
+    producer.running.store(false, Ordering::SeqCst);
+    producer.wake.notify_waiters();
+}
+
+/// The renderer: renders on the World's cadence and on its doorbell, and
+/// feeds what it rendered to the timeline. It leaves when the keeper does.
+async fn run_renderer(coordinator: Weak<DisplayCoordinator>, producer: Arc<Producer>) {
+    loop {
+        let Some(coordinator) = coordinator.upgrade() else {
+            break;
+        };
+        if !producer.is_active() || !producer.running.load(Ordering::SeqCst) {
+            break;
+        }
+        let now = mechanics::wallclock::now_millis();
+        let next_render = producer.state.lock().await.next_render_unix_ms;
+        if next_render <= now {
+            // Render for the slot being made, not for now: the segment this
+            // picture lands in begins a lead ahead of the clock.
+            let started = std::time::Instant::now();
+            let rendered = match producer.surface_render(now.saturating_add(producer::LEAD_MS)) {
+                Ok(want) => {
+                    coordinator
+                        .render_surface(&want, Some(&producer.assignment))
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            tracing::debug!(
+                resource = %producer.resource,
+                elapsed_ms = started.elapsed().as_millis(),
+                ok = rendered.is_ok(),
+                "program rendered"
+            );
+            match rendered {
+                Ok(projection) => {
+                    if let Some(reason) = producer::unstreamable(&projection) {
+                        // The program stopped being one stream. The receiver
+                        // is told through its poll and gets the per-item
+                        // program; this producer is done.
+                        tracing::info!(resource = %producer.resource, reason, "program left the stream path");
+                        coordinator
+                            .live
+                            .remove_stored(&producer.orbit_key, &producer.resource);
+                        coordinator.retire_producer(&producer.assignment.id);
+                        coordinator.notify_assignment_change();
+                        break;
+                    }
+                    if let Err(error) = producer.feed(&coordinator.live, &projection, now).await {
+                        tracing::warn!(resource = %producer.resource, error = %format_args!("{error:#}"), "program render could not be scheduled; the last one plays on");
+                        producer.state.lock().await.next_render_unix_ms =
+                            now.saturating_add(Producer::RENDER_RETRY_MS);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(resource = %producer.resource, error = %format_args!("{error:#}"), "program render failed; the last one plays on");
+                    producer.state.lock().await.next_render_unix_ms =
+                        now.saturating_add(Producer::RENDER_RETRY_MS);
+                }
+            }
+            continue;
+        }
+        let wait = next_render
+            .min(now.saturating_add(Producer::IDLE_CHECK_MS))
+            .saturating_sub(now)
+            .clamp(50, Producer::IDLE_CHECK_MS);
+        let subscriptions = coordinator.subscribe_changes();
+        tokio::select! {
+            changed = coordinator.wait_for_change(
+                &producer.assignment,
+                subscriptions,
+                Duration::from_millis(wait),
+            ) => {
+                if changed {
+                    producer.state.lock().await.next_render_unix_ms = 0;
+                }
+            }
+            () = producer.wake.notified() => {}
+        }
+    }
+}
+
 impl DisplayCoordinator {
     pub fn new(
         store: Arc<CoordinatorStore>,
@@ -134,6 +573,8 @@ impl DisplayCoordinator {
         local_root: PathBuf,
     ) -> Result<Self> {
         let identifier_key = store.identifier_key()?;
+        let tickets: BTreeMap<String, LiveTicket> = load_json(&local_root.join(TICKETS_FILE));
+        let epochs: BTreeMap<String, ProducerMemory> = load_json(&local_root.join(EPOCHS_FILE));
         let (assignment_changes, _) = broadcast::channel(64);
         Ok(Self {
             store,
@@ -142,10 +583,49 @@ impl DisplayCoordinator {
             compiler: ProgramCompiler::new(identifier_key)?,
             local_root,
             compiled: Mutex::new(BTreeMap::new()),
-            composed: Mutex::new(BTreeMap::new()),
+            producers: Mutex::new(BTreeMap::new()),
             assignment_changes,
             live: LiveMediaHub::default(),
-            live_tickets: Mutex::new(BTreeMap::new()),
+            live_tickets: Mutex::new(tickets),
+            producer_epochs: Mutex::new(epochs),
+        })
+    }
+
+    /// Write the ticket table, so a restart does not invalidate every
+    /// receiver's stream URL — the failure that had a screen hammering a
+    /// dead ticket eighty times a second until its poll got through.
+    fn persist_tickets(&self) {
+        if let Ok(tickets) = self.live_tickets.lock() {
+            save_json(&self.local_root.join(TICKETS_FILE), &*tickets);
+        }
+    }
+
+    fn persist_epochs(&self) {
+        if let Ok(epochs) = self.producer_epochs.lock() {
+            save_json(&self.local_root.join(EPOCHS_FILE), &*epochs);
+        }
+    }
+
+    /// The device a ticket names, without authorising it — so a request
+    /// arriving before this process has compiled that device's program can
+    /// compile it first.
+    pub(crate) fn ticket_device(&self, token: &str) -> Option<DisplayDeviceId> {
+        self.live_tickets
+            .lock()
+            .ok()
+            .and_then(|tickets| tickets.get(token).map(|ticket| ticket.device.clone()))
+    }
+
+    /// The capabilities an enrolled device declared.
+    pub(crate) fn device_capabilities(
+        &self,
+        device: &DisplayDeviceId,
+    ) -> Option<ReceiverCapabilities> {
+        self.store.snapshot().ok().and_then(|state| {
+            state
+                .devices
+                .get(device.as_str())
+                .map(|record| record.capabilities.clone())
         })
     }
 
@@ -451,152 +931,151 @@ impl DisplayCoordinator {
         self.render_surface(want, None).await
     }
 
-    /// Resolve, query, render, validate, and freeze the current assignment for
-    /// one enrolled receiver. `now_unix_ms` is supplied by the lifecycle so
-    /// expiry and the rendered time window share one clock reading.
     /// The hub resource a device's whole-program stream lives under. Stable
-    /// per assignment, so re-composition overwrites in place.
+    /// per assignment: the receiver's URL names it for as long as the
+    /// assignment lasts.
     fn program_resource(assignment: &AssignmentRecord) -> String {
         format!("prog-{}", assignment.id.as_str())
     }
 
-    /// Read a stored clip into a program part: its catalog and every group,
-    /// materialised through the content plane. Short signage clips only —
-    /// this reads the whole clip, which a film would not tolerate.
-    async fn clip_part(
-        &self,
-        home: &std::path::Path,
-        route: &ControlRoute,
-        resource: &str,
-    ) -> Result<(
-        runtime::plane::live::media::Catalog,
-        Vec<runtime::plane::live::media::ReceivedGroup>,
-    )> {
-        let total = match crate::control::content_call(
-            home,
-            &crate::control::content_request(
-                route.clone(),
-                crate::control::ContentCall::Stat {
-                    content: resource.to_string(),
-                },
-            ),
-        )
-        .await
-        {
-            Ok((crate::control::ContentReply::ContentStatus { plaintext_len, .. }, _)) => {
-                plaintext_len
-            }
-            Ok((reply, _)) => return Err(anyhow!("clip stat refused: {reply:?}")),
-            Err(error) => return Err(error).context("stat clip"),
-        };
-        let moov = self.fetch_moov(home, route, resource, total).await?;
-        let policy = mediabox::CatalogPolicy {
-            max_group_duration_ms: runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS,
-            target_latency_ms: runtime::plane::live::media::DEFAULT_MAX_LATENCY_MS,
-            jitter_hint_ms: 50,
-            rendition: resource.to_string(),
-        };
-        let plan = mediabox::StoredPlan::from_moov(&moov, &policy)
-            .map_err(|error| anyhow!("clip would not plan: {error}"))?;
-        let mut groups = Vec::new();
-        for sequence in 0..plan.group_count() {
-            let segment = plan
-                .plan(sequence)
-                .ok_or_else(|| anyhow!("clip segment plan is missing"))?;
-            let mut byteses = Vec::with_capacity(segment.ranges.len());
-            for (offset, size) in segment.ranges {
-                byteses.push(
-                    self.read_stored(home, route, resource, offset, u64::from(size))
-                        .await?,
-                );
-            }
-            let mut built = plan
-                .build(sequence, &byteses)
-                .map_err(|error| anyhow!("clip group {sequence} would not build: {error}"))?;
-            groups.append(&mut built);
-        }
-        Ok((plan.catalog.clone(), groups))
+    fn producer_for(&self, assignment: &DisplayAssignmentId) -> Option<Arc<Producer>> {
+        self.producers
+            .lock()
+            .ok()
+            .and_then(|producers| producers.get(assignment.as_str()).cloned())
     }
 
-    /// Compose the whole per-device program into one HLS stream the receiver
-    /// plays on a single player. `Ok(None)` means the program cannot be a
-    /// stream (a live source, a non-PNG frame, a read it could not make), and
-    /// the caller falls back to the per-item program that still works.
-    async fn compose_program_stream(
+    fn retire_producer(&self, assignment: &DisplayAssignmentId) {
+        if let Some(producer) = self
+            .producers
+            .lock()
+            .ok()
+            .and_then(|mut producers| producers.remove(assignment.as_str()))
+        {
+            producer.retire();
+        }
+    }
+
+    /// Where local World registrations live for this identity.
+    pub(crate) fn identity_root(&self) -> PathBuf {
+        self.router.catalog().identity().to_path_buf()
+    }
+
+    /// The state of every producer, by assignment id: `running`, `idle` (a
+    /// screen nobody fetched from; resumes on its next poll) or `retired`.
+    pub(crate) fn producer_states(&self) -> Vec<(String, &'static str)> {
+        self.producers
+            .lock()
+            .map(|producers| {
+                producers
+                    .iter()
+                    .map(|(assignment, producer)| {
+                        let state = if !producer.is_active() {
+                            "retired"
+                        } else if producer.running.load(Ordering::SeqCst) {
+                            "running"
+                        } else {
+                            "idle"
+                        };
+                        (assignment.clone(), state)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// When an assignment's stream was last asked for by any receiver, or
+    /// `None` when its presentation does not exist in this process.
+    pub(crate) fn stream_served_at(&self, assignment: &AssignmentRecord) -> Option<u64> {
+        let orbit = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
+        self.live
+            .fetched_at(&orbit, &Self::program_resource(assignment))
+            .filter(|&at| at > 0)
+    }
+
+    /// The producer for this assignment on this receiver, made if there is
+    /// none or the one there serves a different shape of screen.
+    fn producer_for_receiver(
         &self,
         assignment: &AssignmentRecord,
-        projection: &DisplayProjection,
+        capabilities: &ReceiverCapabilities,
         now_unix_ms: u64,
-    ) -> Result<Option<u32>> {
-        const DEFAULT_ITEM_MS: u32 = 10_000;
-        let resolved = self.router.resolve(&assignment.orbit)?;
-        let home = resolved.home.clone();
-        let content_route = ControlRoute::Orbit {
-            address: resolved.address.clone(),
-        };
-        let orbit = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
-        let program_resource = Self::program_resource(assignment);
-        let mut parts = Vec::new();
-        let mut total_ms: u32 = 0;
-        for item in &projection.program.items {
-            let duration = item.duration_ms.unwrap_or(DEFAULT_ITEM_MS).max(1);
-            total_ms = total_ms.saturating_add(duration);
-            match &item.scene {
-                RenderedScene::Frame(frame) => {
-                    // A rendered card is a PNG; a stored image slide resolves to
-                    // a frame in its own format (JPEG/WebP/PNG). Both decode to
-                    // pixels and encode as a still part, so either is one part
-                    // of the single stream rather than a surface switch.
-                    let part = match frame.media_type {
-                        FrameMediaType::Png => {
-                            self.live
-                                .still_part_png(&program_resource, &frame.bytes, duration)?
-                        }
-                        FrameMediaType::Jpeg | FrameMediaType::WebP => {
-                            self.live
-                                .still_part_image(&program_resource, &frame.bytes, duration)?
-                        }
-                    };
-                    parts.push(part);
-                }
-                RenderedScene::Media(media) => match &media.origin {
-                    world_interface::display::MediaOrigin::Stored(content) => {
-                        let resource = data_encoding::HEXLOWER.encode(content.as_bytes());
-                        parts.push(self.clip_part(&home, &content_route, &resource).await?);
-                    }
-                    // A live source has no finite bytes to lay into a VOD.
-                    world_interface::display::MediaOrigin::Live(_) => return Ok(None),
-                },
-                // Resolved to a Frame before compiling; if one is still here the
-                // program is not one this path can stream.
-                RenderedScene::StoredFrame(_) => return Ok(None),
-                RenderedScene::Blank(_) => {
-                    // A black card holds the slot so the stream stays continuous.
-                    let (width, height) = (1280u32, 720u32);
-                    let mut black = vec![0u8; (width * height * 4) as usize];
-                    for pixel in black.chunks_exact_mut(4) {
-                        pixel[3] = 255;
-                    }
-                    parts.push(self.live.still_part(
-                        &program_resource,
-                        &black,
-                        width,
-                        height,
-                        duration,
-                    )?);
-                }
+    ) -> Result<Arc<Producer>> {
+        if let Some(producer) = self.producer_for(&assignment.id) {
+            if producer.serves(assignment, capabilities) && producer.is_active() {
+                return Ok(producer);
             }
+            self.retire_producer(&assignment.id);
         }
-        if parts.is_empty() {
-            return Ok(None);
-        }
-        self.live
-            .install_program(&orbit, &program_resource, parts, now_unix_ms)?;
-        Ok(Some(total_ms))
+        let resolved = self.router.resolve(&assignment.orbit)?;
+        let memory = {
+            let mut epochs = self
+                .producer_epochs
+                .lock()
+                .map_err(|_| anyhow!("display producer epoch lock was poisoned"))?;
+            *epochs
+                .entry(assignment.id.as_str().to_string())
+                .or_insert(ProducerMemory {
+                    epoch_unix_ms: now_unix_ms,
+                    discontinuities_dropped: 0,
+                })
+        };
+        self.persist_epochs();
+        let stored_epoch_unix_ms = Some(memory.epoch_unix_ms);
+        let producer = Arc::new(Producer {
+            assignment: assignment.clone(),
+            capabilities: capabilities.clone(),
+            orbit_key: super::live::assignment_orbit_key(&assignment.space, &assignment.orbit),
+            resource: Self::program_resource(assignment),
+            reads: ContentReads {
+                home: resolved.home.clone(),
+                route: ControlRoute::Orbit {
+                    address: resolved.address,
+                },
+            },
+            started_at_unix_ms: now_unix_ms,
+            stored_epoch_unix_ms,
+            resumed_discontinuities_dropped: memory.discontinuities_dropped,
+            state: tokio::sync::Mutex::new(ProducerState {
+                timeline: None,
+                cache: StillCache::default(),
+                next_render_unix_ms: u64::MAX,
+            }),
+            running: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            wake: Notify::new(),
+        });
+        self.producers
+            .lock()
+            .map_err(|_| anyhow!("display producer lock was poisoned"))?
+            .insert(assignment.id.as_str().to_string(), producer.clone());
+        Ok(producer)
     }
 
+    /// Have the producer's task running, if it is not.
+    fn start_producer(self: &Arc<Self>, producer: &Arc<Producer>) {
+        if producer
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            tokio::spawn(run_keeper(Arc::downgrade(self), producer.clone()));
+            tokio::spawn(run_renderer(Arc::downgrade(self), producer.clone()));
+        }
+    }
+
+    /// Resolve, query, render, validate, and freeze the current assignment for
+    /// one enrolled receiver. `now_unix_ms` is supplied by the lifecycle so
+    /// expiry and the rendered time window share one clock reading.
+    ///
+    /// A native-HLS receiver plays the whole program as one endless stream a
+    /// producer keeps made at the live edge; its program on the wire is one
+    /// open-ended item that never changes, so this compiles it without
+    /// rendering once the producer is up. The producer renders on the World's
+    /// own cadence and doorbell. A program that cannot be one stream — a live
+    /// source — compiles to the per-item program, which still works.
     pub async fn compile_for_device(
-        &self,
+        self: &Arc<Self>,
         device: &DisplayDeviceId,
         capabilities: &ReceiverCapabilities,
         now_unix_ms: u64,
@@ -620,112 +1099,111 @@ impl DisplayCoordinator {
             .ok_or_else(|| anyhow!("display device has no active assignment"))?;
         validate_assignment(&assignment, now_unix_ms)?;
 
-        let world = WorldId::parse(&assignment.source.world)
-            .ok_or_else(|| anyhow!("display assignment pins an invalid World"))?;
-        let want = SurfaceRender {
-            orbit: assignment.orbit.clone(),
-            space: Some(assignment.space.clone()),
-            world,
-            surface: assignment.source.surface.clone(),
-            input: assignment.source.input.clone(),
-            theme: assignment.theme,
-            width: capabilities.viewport.width,
-            height: capabilities.viewport.height,
-            scale_milli: capabilities.viewport.scale_milli,
-            locale: capabilities.locale.clone(),
-            horizon_ms: capabilities.max_staging_horizon_ms,
-            now_unix_ms,
-        };
-        let projection = self.render_surface(&want, Some(&assignment)).await?;
-        let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
+        let native_hls = matches!(
+            capabilities.playback.tier,
+            PlaybackTier::NativeHls | PlaybackTier::NativeFull
+        );
         tracing::debug!(
             device = %device,
             assignment = %assignment.id,
             tier = ?capabilities.playback.tier,
             "compiling display program"
         );
-        // A native-HLS receiver plays the whole program as one composed stream,
-        // so it never switches surfaces mid-program. If the program cannot be a
-        // single stream — a live source, an unusual frame, a read that failed —
-        // fall back to the per-item program, which still works.
-        let native_hls = matches!(
-            capabilities.playback.tier,
-            PlaybackTier::NativeHls | PlaybackTier::NativeFull
-        );
         let program_resource = Self::program_resource(&assignment);
-        let orbit_key = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
-        let signature = projection_signature(&projection);
-        let streamed = if native_hls {
-            // Recompose only when the rendered program actually changed, and the
-            // stream it produced is still installed. Composition reads whole
-            // clips and encodes stills — seconds of work — so redoing it on
-            // every change poll both wasted the work and risked outrunning the
-            // poll's deadline, aborting the install before it finished.
-            let reusable = self
-                .composed
-                .lock()
-                .ok()
-                .and_then(|cache| cache.get(&program_resource).copied())
-                .filter(|(cached, _)| *cached == signature)
-                .filter(|_| {
-                    self.live
-                        .has_resource(&orbit_key, &program_resource, LiveTransport::Hls)
-                })
-                .map(|(_, total)| total);
-            if let Some(total) = reusable {
-                Some(total)
-            } else {
-                match self
-                    .compose_program_stream(&assignment, &projection, now_unix_ms)
-                    .await
-                {
-                    Ok(Some(total)) => {
-                        if let Ok(mut cache) = self.composed.lock() {
-                            cache.insert(program_resource.clone(), (signature, total));
-                        }
-                        Some(total)
-                    }
-                    Ok(None) => {
-                        if let Ok(mut cache) = self.composed.lock() {
-                            cache.remove(&program_resource);
-                        }
-                        None
-                    }
-                    Err(error) => {
-                        if let Ok(mut cache) = self.composed.lock() {
-                            cache.remove(&program_resource);
-                        }
-                        tracing::warn!(
-                            device = %device,
-                            error = %format_args!("{error:#}"),
-                            "program stream composition failed; serving the per-item program"
-                        );
-                        None
-                    }
-                }
-            }
-        } else {
-            None
-        };
-        let compiled = Arc::new(if let Some(total_ms) = streamed {
+        let stream = |refresh_after_ms: Option<u32>| -> Result<CompiledProgram> {
             self.compiler.compile_stream(
                 &assignment.id,
                 &assignment.program,
                 assignment.freshness.clone(),
                 &program_resource,
-                total_ms,
-                projection.program.refresh_after_ms,
-            )?
+                refresh_after_ms,
+            )
+        };
+        let streaming = self
+            .producer_for(&assignment.id)
+            .filter(|producer| native_hls && producer.serves(&assignment, capabilities))
+            .filter(|producer| producer.is_active());
+        let compiled = if let Some(producer) = streaming {
+            producer.ensure_window(&self.live, now_unix_ms).await?;
+            self.start_producer(&producer);
+            stream(None)?
         } else {
-            self.compiler.compile(
-                &assignment.id,
-                &assignment.program,
-                assignment.freshness,
-                projection,
-                alignment.as_ref(),
-                capabilities.playback.tier,
-            )?
-        });
+            let world = WorldId::parse(&assignment.source.world)
+                .ok_or_else(|| anyhow!("display assignment pins an invalid World"))?;
+            let want = SurfaceRender {
+                orbit: assignment.orbit.clone(),
+                space: Some(assignment.space.clone()),
+                world,
+                surface: assignment.source.surface.clone(),
+                input: assignment.source.input.clone(),
+                theme: assignment.theme,
+                width: capabilities.viewport.width,
+                height: capabilities.viewport.height,
+                scale_milli: capabilities.viewport.scale_milli,
+                locale: capabilities.locale.clone(),
+                horizon_ms: capabilities.max_staging_horizon_ms,
+                now_unix_ms,
+            };
+            let projection = self.render_surface(&want, Some(&assignment)).await?;
+            let unstreamable = if native_hls {
+                producer::unstreamable(&projection)
+            } else {
+                Some("receiver plays no native HLS")
+            };
+            match unstreamable {
+                None => {
+                    let producer =
+                        self.producer_for_receiver(&assignment, capabilities, now_unix_ms)?;
+                    match producer.feed(&self.live, &projection, now_unix_ms).await {
+                        Ok(()) => {
+                            self.start_producer(&producer);
+                            stream(None)?
+                        }
+                        Err(error) => {
+                            // A schedule that could not be made — a clip that
+                            // would not read, a still that would not encode —
+                            // is the per-item program for now, and said.
+                            tracing::warn!(
+                                device = %device,
+                                error = %format_args!("{error:#}"),
+                                "program stream could not be scheduled; serving the per-item program"
+                            );
+                            self.retire_producer(&assignment.id);
+                            self.live.remove_stored(
+                                &super::live::assignment_orbit_key(
+                                    &assignment.space,
+                                    &assignment.orbit,
+                                ),
+                                &program_resource,
+                            );
+                            let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
+                            self.compiler.compile(
+                                &assignment.id,
+                                &assignment.program,
+                                assignment.freshness.clone(),
+                                projection,
+                                alignment.as_ref(),
+                                capabilities.playback.tier,
+                            )?
+                        }
+                    }
+                }
+                Some(reason) => {
+                    tracing::debug!(device = %device, reason, "serving the per-item program");
+                    self.retire_producer(&assignment.id);
+                    let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
+                    self.compiler.compile(
+                        &assignment.id,
+                        &assignment.program,
+                        assignment.freshness.clone(),
+                        projection,
+                        alignment.as_ref(),
+                        capabilities.playback.tier,
+                    )?
+                }
+            }
+        };
+        let compiled = Arc::new(compiled);
         validate_receiver_fit(compiled.as_ref(), capabilities)?;
         self.compiled
             .lock()
@@ -952,12 +1430,8 @@ impl DisplayCoordinator {
                 .await
                 .with_context(|| format!("stored media {resource} would not install"))?;
         }
-        let lifetime = match transport {
-            LiveTransport::Mse => MSE_TICKET_LIFETIME_MS,
-            LiveTransport::Hls => HLS_TICKET_LIFETIME_MS,
-        };
         let expires_at_unix_ms = now_unix_ms
-            .checked_add(lifetime)
+            .checked_add(ticket_lifetime_ms(transport))
             .ok_or_else(|| anyhow!("live ticket expiry overflowed"))?;
         let token = random_token()?;
         let mut tickets = self
@@ -994,6 +1468,8 @@ impl DisplayCoordinator {
                 expires_at_unix_ms,
             },
         );
+        drop(tickets);
+        self.persist_tickets();
         Ok(LiveTicketGrant {
             token,
             expires_at_unix_ms,
@@ -1012,22 +1488,33 @@ impl DisplayCoordinator {
                 .live_tickets
                 .lock()
                 .map_err(|_| anyhow!("display live ticket lock was poisoned"))?;
-            tickets.retain(|_, ticket| ticket.expires_at_unix_ms > now_unix_ms);
-            let ticket = tickets
-                .get(token)
-                .filter(|ticket| ticket.transport == transport)
-                .cloned()
-                .ok_or_else(|| anyhow!("live ticket is invalid or expired"))?;
-            if consume {
-                tickets.remove(token);
-            }
-            ticket
+            take_ticket(&mut tickets, token, transport, consume, now_unix_ms)?
         };
         self.validate_live_stream(&ticket, now_unix_ms)?;
         Ok(AuthorizedLiveStream {
             orbit: ticket.orbit.clone(),
             resource: ticket.resource.clone(),
             ticket,
+        })
+    }
+
+    /// Whether this receiver holds an unexpired ticket for a native-HLS
+    /// stream. Tickets live in memory, so after a daemon restart a receiver
+    /// playing a stream program still holds a URL nothing will answer — and
+    /// because the stream program's revision is stable, its poll would say
+    /// "no change" forever while its player hammers a dead ticket. The poll
+    /// checks this and answers with a restart reset instead.
+    pub(crate) fn device_holds_hls_ticket(
+        &self,
+        device: &DisplayDeviceId,
+        now_unix_ms: u64,
+    ) -> bool {
+        self.live_tickets.lock().ok().is_some_and(|tickets| {
+            tickets.values().any(|ticket| {
+                &ticket.device == device
+                    && ticket.transport == LiveTransport::Hls
+                    && ticket.expires_at_unix_ms > now_unix_ms
+            })
         })
     }
 
@@ -1152,28 +1639,11 @@ impl DisplayCoordinator {
         resource: &str,
         total: u64,
     ) -> Result<Vec<u8>> {
-        const HEADER: u32 = 16;
-        /// A `moov` is a table of contents; bound it like one.
-        const MAX_MOOV: u64 = 8 * 1024 * 1024;
-
-        let mut at = 0u64;
-        while at < total {
-            let header = self
-                .read_stored(home, route, resource, at, u64::from(HEADER))
-                .await?;
-            let (size, kind, _) = mediabox::box_header(&header, total, at)
-                .map_err(|error| anyhow!("stored container refused: {error}"))?;
-            if &kind == b"moov" {
-                if size > MAX_MOOV {
-                    return Err(anyhow!("stored moov exceeds its bound"));
-                }
-                return self.read_stored(home, route, resource, at, size).await;
-            }
-            at = at
-                .checked_add(size)
-                .ok_or_else(|| anyhow!("stored container box overflows"))?;
-        }
-        Err(anyhow!("stored content has no moov"))
+        let reads = ContentReads {
+            home: home.to_path_buf(),
+            route: route.clone(),
+        };
+        producer::fetch_moov(&reads, resource, total).await
     }
 
     /// One bounded stored read, looped over the channel's range ceiling.
@@ -1185,41 +1655,7 @@ impl DisplayCoordinator {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>> {
-        /// How long one stored range may spend fetching bytes a peer holds.
-        const STORED_READ_PATIENCE_MS: u32 = 5_000;
-        let ceiling =
-            u64::try_from(runtime::plane::freight::content::MAX_RANGE_BYTES).unwrap_or(u64::MAX);
-        let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or_default());
-        let mut at = offset;
-        let mut left = len;
-        while left > 0 {
-            let want = left.min(ceiling);
-            let (reply, bytes) = crate::control::content_call(
-                home,
-                &crate::control::content_request(
-                    route.clone(),
-                    crate::control::ContentCall::Read {
-                        content: resource.to_string(),
-                        offset: at,
-                        len: want,
-                        patience_ms: STORED_READ_PATIENCE_MS,
-                    },
-                ),
-            )
-            .await
-            .context("read stored content")?;
-            match reply {
-                crate::control::ContentReply::ContentStream { .. } if !bytes.is_empty() => {
-                    let landed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                    at = at.saturating_add(landed);
-                    left = left.saturating_sub(landed);
-                    out.extend_from_slice(&bytes);
-                }
-                crate::control::ContentReply::ContentStream { .. } => break,
-                other => return Err(anyhow!("stored read refused: {other:?}")),
-            }
-        }
-        Ok(out)
+        read_stored(home, route, resource, offset, len).await
     }
 
     /// One HLS segment, from wherever this presentation keeps it.
@@ -1229,12 +1665,53 @@ impl DisplayCoordinator {
     /// the hub lock, read here — fetching from a peer if this Station lacks
     /// them — and packaged by a fresh muxer. The film is never resident as
     /// segments; each one exists for the life of one response.
+    /// Make sure the program a ticket names is compiled and, for a stream,
+    /// producing — for a ticket minted by a previous run of this daemon.
+    /// The receiver kept its URL across the restart; this is what makes the
+    /// URL answer again without the receiver having to notice.
+    pub(crate) async fn revive_ticket(self: &Arc<Self>, token: &str, now_unix_ms: u64) {
+        let Some(device) = self.ticket_device(token) else {
+            return;
+        };
+        let compiled = self
+            .compiled
+            .lock()
+            .ok()
+            .is_some_and(|compiled| compiled.contains_key(device.as_str()));
+        let streaming = self
+            .active_assignment_for_device(&device, now_unix_ms)
+            .ok()
+            .flatten()
+            .is_some_and(|assignment| {
+                let orbit = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
+                self.live.has_resource(
+                    &orbit,
+                    &Self::program_resource(&assignment),
+                    LiveTransport::Hls,
+                )
+            });
+        if compiled && streaming {
+            return;
+        }
+        let Some(capabilities) = self.device_capabilities(&device) else {
+            return;
+        };
+        if let Err(error) = self
+            .compile_for_device(&device, &capabilities, now_unix_ms)
+            .await
+        {
+            tracing::debug!(device = %device, error = %format_args!("{error:#}"), "a ticket from before this process could not be revived");
+        }
+    }
+
     pub(crate) async fn hls_segment(
         &self,
         stream: &AuthorizedLiveStream,
         sequence: u64,
         now_unix_ms: u64,
     ) -> Result<Vec<u8>> {
+        self.live
+            .touch(&stream.orbit, &stream.resource, now_unix_ms);
         if let Ok(bytes) =
             self.live
                 .hls_segment(&stream.orbit, &stream.resource, &stream.resource, sequence)
@@ -1371,41 +1848,45 @@ fn playback_alignment(
     }))
 }
 
-/// A fingerprint of a rendered program, so the composed stream is rebuilt only
-/// when the program a receiver would see actually changed. Frame bytes are
-/// hashed directly; a media item is named by its origin, never re-read here.
-fn projection_signature(projection: &DisplayProjection) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    projection.program.items.len().hash(&mut hasher);
-    for item in &projection.program.items {
-        item.duration_ms.hash(&mut hasher);
-        match &item.scene {
-            RenderedScene::Frame(frame) => {
-                0u8.hash(&mut hasher);
-                (frame.media_type as u8).hash(&mut hasher);
-                frame.width.hash(&mut hasher);
-                frame.height.hash(&mut hasher);
-                frame.bytes.hash(&mut hasher);
-            }
-            RenderedScene::Media(media) => {
-                1u8.hash(&mut hasher);
-                format!("{:?}", media.origin).hash(&mut hasher);
-            }
-            RenderedScene::StoredFrame(stored) => {
-                2u8.hash(&mut hasher);
-                stored.content.as_bytes().hash(&mut hasher);
-                (stored.media_type as u8).hash(&mut hasher);
-                stored.width.hash(&mut hasher);
-                stored.height.hash(&mut hasher);
-            }
-            RenderedScene::Blank(reason) => {
-                3u8.hash(&mut hasher);
-                format!("{reason:?}").hash(&mut hasher);
-            }
-        }
+/// The lifetime a ticket on this transport is granted, and re-granted.
+const fn ticket_lifetime_ms(transport: LiveTransport) -> u64 {
+    match transport {
+        LiveTransport::Mse => MSE_TICKET_LIFETIME_MS,
+        LiveTransport::Hls => HLS_TICKET_LIFETIME_MS,
     }
-    hasher.finish()
+}
+
+/// Find the ticket a request presents, dropping every expired one on the way.
+///
+/// A ticket that is used **slides**: each authorised use re-grants the full
+/// lifetime from now. The receiver holds one stream URL for the life of its
+/// assignment and never re-mints while it is playing, so a fixed expiry would
+/// 403 a healthy screen a day after it was switched on, for no reason a person
+/// could see. What bounds a ticket is the assignment it names — revocation and
+/// replacement are re-checked on every request by the caller — and a screen
+/// that stops fetching lets its ticket lapse on its own. A consumed ticket
+/// (the MSE socket, which answers exactly once) is removed rather than slid.
+fn take_ticket(
+    tickets: &mut BTreeMap<String, LiveTicket>,
+    token: &str,
+    transport: LiveTransport,
+    consume: bool,
+    now_unix_ms: u64,
+) -> Result<LiveTicket> {
+    tickets.retain(|_, ticket| ticket.expires_at_unix_ms > now_unix_ms);
+    let ticket = tickets
+        .get_mut(token)
+        .filter(|ticket| ticket.transport == transport)
+        .ok_or_else(|| anyhow!("live ticket is invalid or expired"))?;
+    if consume {
+        let ticket = ticket.clone();
+        tickets.remove(token);
+        return Ok(ticket);
+    }
+    ticket.expires_at_unix_ms = now_unix_ms
+        .checked_add(ticket_lifetime_ms(transport))
+        .ok_or_else(|| anyhow!("live ticket expiry overflowed"))?;
+    Ok(ticket.clone())
 }
 
 fn validate_assignment(assignment: &AssignmentRecord, now_unix_ms: u64) -> Result<()> {
@@ -1437,6 +1918,76 @@ fn validate_source_pin(
         ));
     }
     Ok(())
+}
+
+/// A JSON file's contents, or the default when it is absent or unreadable.
+fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Write a JSON file atomically; a failure is logged, never fatal — the
+/// state it holds is a convenience across restarts, not the authority.
+fn save_json<T: serde::Serialize>(path: &Path, value: &T) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let temp = path.with_extension("json.tmp");
+    let written = serde_json::to_vec_pretty(value)
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| std::fs::write(&temp, bytes).map_err(anyhow::Error::from))
+        .and_then(|()| std::fs::rename(&temp, path).map_err(anyhow::Error::from));
+    if let Err(error) = written {
+        tracing::debug!(path = %path.display(), %error, "display state was not persisted");
+    }
+}
+
+/// One bounded stored read, looped over the channel's range ceiling.
+async fn read_stored(
+    home: &std::path::Path,
+    route: &crate::control::ControlRoute,
+    resource: &str,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>> {
+    /// How long one stored range may spend fetching bytes a peer holds.
+    const STORED_READ_PATIENCE_MS: u32 = 5_000;
+    let ceiling =
+        u64::try_from(runtime::plane::freight::content::MAX_RANGE_BYTES).unwrap_or(u64::MAX);
+    let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or_default());
+    let mut at = offset;
+    let mut left = len;
+    while left > 0 {
+        let want = left.min(ceiling);
+        let (reply, bytes) = crate::control::content_call(
+            home,
+            &crate::control::content_request(
+                route.clone(),
+                crate::control::ContentCall::Read {
+                    content: resource.to_string(),
+                    offset: at,
+                    len: want,
+                    patience_ms: STORED_READ_PATIENCE_MS,
+                },
+            ),
+        )
+        .await
+        .context("read stored content")?;
+        match reply {
+            crate::control::ContentReply::ContentStream { .. } if !bytes.is_empty() => {
+                let landed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                at = at.saturating_add(landed);
+                left = left.saturating_sub(landed);
+                out.extend_from_slice(&bytes);
+            }
+            crate::control::ContentReply::ContentStream { .. } => break,
+            other => return Err(anyhow!("stored read refused: {other:?}")),
+        }
+    }
+    Ok(out)
 }
 
 fn validate_receiver_fit(
@@ -1499,20 +2050,17 @@ fn sniff_still(bytes: &[u8]) -> Option<FrameMediaType> {
 /// The pixel dimensions a still's header declares — what a decoder will
 /// report, read without decoding.
 fn still_dimensions(kind: FrameMediaType, bytes: &[u8]) -> Option<(u32, u32)> {
-    let be32 = |at: usize| {
-        bytes
-            .get(at..at + 4)
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    let be32 = |at: usize| -> Option<u32> {
+        let window = bytes.get(at..at.checked_add(4)?)?;
+        Some(u32::from_be_bytes(window.try_into().ok()?))
     };
-    let le24 = |at: usize| {
-        bytes
-            .get(at..at + 3)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], 0]))
+    let le24 = |at: usize| -> Option<u32> {
+        let [low, mid, high] = <[u8; 3]>::try_from(bytes.get(at..at.checked_add(3)?)?).ok()?;
+        Some(u32::from_le_bytes([low, mid, high, 0]))
     };
-    let le16 = |at: usize| {
-        bytes
-            .get(at..at + 2)
-            .map(|b| u32::from_le_bytes([b[0], b[1], 0, 0]))
+    let le16 = |at: usize| -> Option<u32> {
+        let [low, high] = <[u8; 2]>::try_from(bytes.get(at..at.checked_add(2)?)?).ok()?;
+        Some(u32::from_le_bytes([low, high, 0, 0]))
     };
     let nonzero = |width: u32, height: u32| (width > 0 && height > 0).then_some((width, height));
     match kind {
@@ -1525,42 +2073,47 @@ fn still_dimensions(kind: FrameMediaType, bytes: &[u8]) -> Option<(u32, u32)> {
         }
         // Walk the marker segments to the first start-of-frame.
         FrameMediaType::Jpeg => {
-            let mut at = 2;
-            while let Some(&[0xFF, marker]) = bytes.get(at..at + 2).map(|m| [m[0], m[1]]).as_ref() {
+            let mut at = 2usize;
+            loop {
+                let &[0xFF, marker] = bytes.get(at..at.checked_add(2)?)? else {
+                    return None;
+                };
                 if marker == 0xFF {
-                    at += 1;
+                    at = at.checked_add(1)?;
                     continue;
                 }
                 if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
-                    at += 2;
+                    at = at.checked_add(2)?;
                     continue;
                 }
                 let length = usize::from(u16::from_be_bytes([
-                    *bytes.get(at + 2)?,
-                    *bytes.get(at + 3)?,
+                    *bytes.get(at.checked_add(2)?)?,
+                    *bytes.get(at.checked_add(3)?)?,
                 ]));
                 let is_sof = matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
                 if is_sof {
                     let height = u32::from(u16::from_be_bytes([
-                        *bytes.get(at + 5)?,
-                        *bytes.get(at + 6)?,
+                        *bytes.get(at.checked_add(5)?)?,
+                        *bytes.get(at.checked_add(6)?)?,
                     ]));
                     let width = u32::from(u16::from_be_bytes([
-                        *bytes.get(at + 7)?,
-                        *bytes.get(at + 8)?,
+                        *bytes.get(at.checked_add(7)?)?,
+                        *bytes.get(at.checked_add(8)?)?,
                     ]));
                     return nonzero(width, height);
                 }
-                at += 2 + length;
+                at = at.checked_add(2)?.checked_add(length)?;
             }
-            None
         }
         // The first chunk after the RIFF header names the bitstream form.
         FrameMediaType::WebP => match bytes.get(12..16)? {
-            b"VP8X" => nonzero(le24(24)? + 1, le24(27)? + 1),
+            b"VP8X" => nonzero(le24(24)?.checked_add(1)?, le24(27)?.checked_add(1)?),
             b"VP8L" => {
                 let bits = be32(21).map(u32::swap_bytes)?;
-                nonzero((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+                nonzero(
+                    (bits & 0x3FFF).checked_add(1)?,
+                    ((bits >> 14) & 0x3FFF).checked_add(1)?,
+                )
             }
             b"VP8 " => nonzero(le16(26)? & 0x3FFF, le16(28)? & 0x3FFF),
             _ => None,
@@ -1752,6 +2305,54 @@ mod tests {
         let mut drifted = assignment;
         drifted.source.surface_contract_version = 2;
         assert!(validate_source_pin(&drifted, &surface).is_err());
+    }
+
+    fn ticket(transport: LiveTransport, expires_at_unix_ms: u64) -> LiveTicket {
+        LiveTicket {
+            device: DisplayDeviceId::parse("22".repeat(16)).unwrap(),
+            assignment: DisplayAssignmentId::parse("11".repeat(16)).unwrap(),
+            program: DisplayProgramId::parse("33".repeat(16)).unwrap(),
+            revision: ProgramRevision::parse("0".repeat(64)).unwrap(),
+            current_item: DisplayProgramItemId::parse("44".repeat(32)).unwrap(),
+            manifest: DisplayAssetId::parse("55".repeat(32)).unwrap(),
+            orbit: "space/orbit".into(),
+            resource: "prog-1111".into(),
+            transport,
+            expires_at_unix_ms,
+        }
+    }
+
+    /// A receiver holds one stream URL for the life of its assignment and
+    /// never re-mints while playing, so the ticket behind it must outlive any
+    /// fixed lifetime as long as it is in use: every authorised fetch re-grants
+    /// the full lifetime from now. One that stops being used lapses on its
+    /// own, and a consumed ticket (the socket's one answer) is gone, not slid.
+    #[test]
+    fn a_used_ticket_slides_its_expiry_and_an_unused_one_lapses() {
+        let mut tickets = BTreeMap::new();
+        tickets.insert("playing".to_string(), ticket(LiveTransport::Hls, 1_000));
+        tickets.insert("idle".to_string(), ticket(LiveTransport::Hls, 1_000));
+        tickets.insert("socket".to_string(), ticket(LiveTransport::Mse, 1_000));
+
+        let used = take_ticket(&mut tickets, "playing", LiveTransport::Hls, false, 900).unwrap();
+        assert_eq!(used.expires_at_unix_ms, 900 + HLS_TICKET_LIFETIME_MS);
+        assert_eq!(
+            tickets["playing"].expires_at_unix_ms,
+            900 + HLS_TICKET_LIFETIME_MS,
+            "the slide is recorded, not just reported"
+        );
+        // The wrong transport is not this ticket.
+        assert!(take_ticket(&mut tickets, "playing", LiveTransport::Mse, false, 900).is_err());
+
+        // The socket's ticket answers once and is gone.
+        take_ticket(&mut tickets, "socket", LiveTransport::Mse, true, 900).unwrap();
+        assert!(!tickets.contains_key("socket"));
+
+        // Past the original lifetime, the idle ticket has lapsed and the one in
+        // use has not.
+        assert!(take_ticket(&mut tickets, "idle", LiveTransport::Hls, false, 5_000).is_err());
+        assert!(!tickets.contains_key("idle"));
+        take_ticket(&mut tickets, "playing", LiveTransport::Hls, false, 5_000).unwrap();
     }
 
     struct UnusedRenderer;

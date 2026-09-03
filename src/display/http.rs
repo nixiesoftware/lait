@@ -151,6 +151,38 @@ fn display_routes() -> Router<DisplayHttpState> {
             "/head/v1/health",
             post(health).layer(DefaultBodyLimit::max(MAX_HEALTH_BODY_BYTES)),
         )
+        .layer(axum::middleware::from_fn(trace_request))
+}
+
+/// One debug line per request, so a receiver's behaviour can be read off the
+/// coordinator's log: which routes, how often, and what they were answered.
+/// A ticket in the path is a bearer secret and is not written.
+async fn trace_request(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    let method = request.method().clone();
+    let path = request
+        .uri()
+        .path()
+        .split('/')
+        .map(|segment| {
+            if valid_ticket_token(segment) {
+                "[ticket]"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let response = next.run(request).await;
+    tracing::debug!(
+        %method,
+        path,
+        status = response.status().as_u16(),
+        "display request"
+    );
+    response
 }
 
 /// Serve the closed receiver router over the coordinator's pinned certificate.
@@ -486,6 +518,35 @@ async fn program_changes(
             );
         }
     };
+    // A receiver on a native-HLS stream whose ticket this process never
+    // minted is playing a URL from before a restart. Its revision still
+    // matches — the stream program is stable by design — so a plain answer
+    // would leave it hammering a dead ticket. Send it back for a fresh stage.
+    let holds_hls_media = compiled.program.items.iter().any(|item| {
+        matches!(
+            &item.scene,
+            DisplayScene::Media {
+                protocol: display_protocol::program::MediaProtocol::Hls,
+                ..
+            }
+        )
+    });
+    if parsed.revision.as_ref() == Some(&compiled.program.revision)
+        && holds_hls_media
+        && !state
+            .coordinator
+            .device_holds_hls_ticket(&authorized.record.device, now())
+    {
+        return with_challenge(
+            json(
+                StatusCode::OK,
+                &ProgramChange::Reset {
+                    reason: display_protocol::program::ResetReason::ServerRestart,
+                },
+            ),
+            authorized.next_challenge,
+        );
+    }
     let mut aligned_playback = None;
     if parsed.revision.as_ref() == Some(&compiled.program.revision) {
         let requested_wait = parsed.wait_ms.unwrap_or(1);
@@ -756,18 +817,31 @@ async fn health(
     };
     let health = match decode::<ReceiverHealth>(&body) {
         Ok(health) => health,
-        Err(_) => {
+        Err(error) => {
+            tracing::debug!(
+                device = %authorized.record.device,
+                error = %format_args!("{error:#}"),
+                "display health report would not decode"
+            );
             return consumed_refusal(
                 ApiRefusalCode::InvalidRequest,
                 authorized.next_challenge,
                 StatusCode::BAD_REQUEST,
-            )
+            );
         }
     };
     if parsed.revision.as_ref() != Some(&health.revision)
         || parsed.current_item.as_ref() != Some(&health.current_item)
         || parsed.elapsed_ms != Some(health.elapsed_ms)
     {
+        tracing::debug!(
+            device = %authorized.record.device,
+            header_elapsed = ?parsed.elapsed_ms,
+            body_elapsed = health.elapsed_ms,
+            item_matches = parsed.current_item.as_ref() == Some(&health.current_item),
+            revision_matches = parsed.revision.as_ref() == Some(&health.revision),
+            "display health report disagrees with its headers"
+        );
         return consumed_refusal(
             ApiRefusalCode::InvalidRequest,
             authorized.next_challenge,
@@ -1184,6 +1258,12 @@ async fn hls_master(
     State(state): State<DisplayHttpState>,
     Path(ticket): Path<String>,
 ) -> Response<Body> {
+    if valid_ticket_token(&ticket) {
+        // A ticket minted by a previous run of this daemon: compile and
+        // produce for it before judging it, so a receiver that kept its URL
+        // across the restart is answered rather than turned away.
+        state.coordinator.revive_ticket(&ticket, now()).await;
+    }
     let Some(stream) = hls_authorization(&state, &ticket) else {
         return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
     };
@@ -1229,6 +1309,12 @@ async fn hls_media_playlist(
     let Some(rendition) = rendition_name(&rendition_file) else {
         return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
     };
+    if valid_ticket_token(&ticket) {
+        // A ticket minted by a previous run of this daemon: compile and
+        // produce for it before judging it, so a receiver that kept its URL
+        // across the restart is answered rather than turned away.
+        state.coordinator.revive_ticket(&ticket, now()).await;
+    }
     let Some(stream) = hls_authorization(&state, &ticket) else {
         return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
     };
@@ -1251,6 +1337,12 @@ async fn hls_segment(
     let Some(sequence) = segment_sequence(&sequence_file) else {
         return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
     };
+    if valid_ticket_token(&ticket) {
+        // A ticket minted by a previous run of this daemon: compile and
+        // produce for it before judging it, so a receiver that kept its URL
+        // across the restart is answered rather than turned away.
+        state.coordinator.revive_ticket(&ticket, now()).await;
+    }
     let Some(stream) = hls_authorization(&state, &ticket) else {
         return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
     };

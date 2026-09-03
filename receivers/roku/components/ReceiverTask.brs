@@ -70,6 +70,10 @@ function AstrolabeTransfer(path as string, method as string, body as string, hea
         if event <> invalid and Type(event) = "roUrlEvent" and event.GetSourceIdentity() = transfer.GetIdentity()
             result = { status: event.GetResponseCode(), event: event, body: "" }
             if targetFile = invalid then result.body = event.GetString()
+            ' A refused or failed transfer is said on the console, with the
+            ' coordinator's reason, so a receiver that is being turned away is
+            ' a line to read rather than a guess.
+            if result.status < 200 or result.status >= 300 then print "[astrolabe] transfer "; method; " "; path; " -> "; result.status; " "; event.GetFailureReason()
             return result
         end if
     end while
@@ -111,7 +115,7 @@ function AstrolabeCapabilities() as object
     return {
         protocol_major: 1,
         platform: "roku",
-        build: "astrolabe-roku/0.1.0",
+        build: AstrolabeBuild(),
         viewport: { width: width, height: height, scale_milli: 1000 },
         image_types: ["image_jpeg", "image_png", "image_webp"],
         max_asset_bytes: 16777216,
@@ -607,7 +611,7 @@ sub AstrolabeRenderCurrent()
             uri: entry.uri,
             certificates: entry.certificates,
             nextFrame: nextFrame,
-            loopInPlace: (m.program.items.Count() = 1 and m.program.playback.cycle = "loop"),
+            loopInPlace: AstrolabeStreamsInPlace(),
             spokenSummary: item.spoken_summary,
             source: source,
             stale: stale
@@ -617,15 +621,28 @@ sub AstrolabeRenderCurrent()
     end if
 end sub
 
+' Whether the program is one stream the player holds for as long as the
+' assignment lasts: a single media item that either loops or has no end. The
+' coordinator's whole-program stream is the second — an open-ended item under a
+' program that holds its last, because the stream is endless and its length is
+' not a fact the wire should carry. Either way the receiver never advances past
+' it, never cuts it early, and never swaps the player's content.
+function AstrolabeStreamsInPlace() as boolean
+    if m.program = invalid or m.program.items.Count() <> 1 then return false
+    item = m.program.items[0]
+    if item.scene.kind <> "media" then return false
+    return m.program.playback.cycle = "loop" or item.duration_ms = invalid
+end function
+
 sub AstrolabeTickPlayback()
     if m.program = invalid then return
     staleNow = m.lastProgramDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
     if m.lastRenderedStale = invalid or staleNow <> m.lastRenderedStale then AstrolabeRenderCurrent()
     item = m.program.items[m.program.playback.current_index]
-    ' A single media item that loops is looped by the player in place. Advancing
+    ' A program that is one stream is played by the player in place. Advancing
     ' the program here would swap the player's content and paint black at the
     ' seam, so the tick clears any spurious finish and lets the stream run.
-    if item.scene.kind = "media" and m.program.items.Count() = 1 and m.program.playback.cycle = "loop"
+    if AstrolabeStreamsInPlace()
         if Left(m.top.command, 15) = "media_finished:" then m.top.command = ""
         return
     end if
@@ -729,10 +746,12 @@ sub AstrolabeReportHealth()
     end for
     playbackState = "blank"
     if item.scene.kind = "frame" or item.scene.kind = "media" then playbackState = "displaying"
+    ' The header and the body must say the same elapsed time; computing it
+    ' twice put them milliseconds apart and every report was refused.
     response = AstrolabeAuthorizedJson("health", "POST", "/head/v1/health", {
         protocol_major: 1,
         platform: "roku",
-        build: "astrolabe-roku/0.1.0",
+        build: AstrolabeBuild(),
         revision: m.program.revision,
         current_item: item.id,
         elapsed_ms: playback.elapsedMs,
@@ -747,7 +766,7 @@ sub AstrolabeReportHealth()
         drift_residual_ms: m.lastSyncResidualMs,
         correction_events: m.correctionEvents,
         pipeline_unobservable: true
-    })
+    }, { currentItem: item.id, elapsedMs: playback.elapsedMs })
     if response <> invalid and response.status >= 200 and response.status < 300
         m.lastHealth.Mark()
     end if
@@ -812,6 +831,9 @@ sub AstrolabeProgramLoop()
 end sub
 
 sub AstrolabeRun()
+    ' The first thing the console says, so "which receiver is this" is a
+    ' string to read, never a line number to trust.
+    print "[astrolabe] build "; AstrolabeBuild()
     m.port = CreateObject("roMessagePort")
     m.transport = "connecting"
     bootstrap = AstrolabeReceiverBootstrap()

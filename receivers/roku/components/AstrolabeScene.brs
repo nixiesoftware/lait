@@ -30,6 +30,7 @@ sub init()
     ' One media item that loops is looped by the player in place, with no
     ' teardown between passes; the whole-program stream is exactly that.
     m.loopInPlace = false
+    m.playingUri = invalid
     ' The last liveness state the chip announced, so a run of identical degraded
     ' polls does not keep re-lighting the HUD.
     m.statusState = ""
@@ -347,6 +348,16 @@ sub AstrolabeViewChanged()
         if model.nextFrame <> invalid
             AstrolabeLoadFrame(model.nextFrame.uri, model.nextFrame.expectedWidth, model.nextFrame.expectedHeight, "hold")
         end if
+        ' The view model is republished on every poll answer, and a whole-
+        ' program stream keeps one URL for the life of the assignment. Handing
+        ' the player the content it is already playing would reload it — a
+        ' rebuffer every 25 s on a stream that never changed — so an unchanged
+        ' URL on a playing player is left alone.
+        if m.playingUri = model.uri and m.media.visible and (m.media.state = "playing" or m.media.state = "buffering")
+            m.loopInPlace = (model.loopInPlace = true)
+            m.media.loop = m.loopInPlace
+            return
+        end if
         content = CreateObject("roSGNode", "ContentNode")
         content.url = model.uri
         content.streamFormat = "hls"
@@ -359,6 +370,7 @@ sub AstrolabeViewChanged()
         ' no teardown, no re-buffer, no black at the wrap.
         m.loopInPlace = (model.loopInPlace = true)
         m.media.loop = m.loopInPlace
+        m.playingUri = model.uri
         m.media.content = content
         m.media.visible = true
         m.media.control = "play"
@@ -396,6 +408,7 @@ end sub
 sub AstrolabeMediaStopDue()
     if m.model.kind = "media" then return ' a new clip took the player back
     m.media.control = "stop"
+    m.playingUri = invalid
 end sub
 
 sub AstrolabeMediaStateChanged()

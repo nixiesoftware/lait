@@ -205,6 +205,8 @@ pub struct DisplayRuntime {
     /// half of what a television is told: the site resolves the coordinator,
     /// the code proves the person at the controller meant this one.
     site: Option<String>,
+    /// When this runtime opened, for provenance.
+    started_at_unix_ms: u64,
 }
 
 impl DisplayRuntime {
@@ -285,6 +287,7 @@ impl DisplayRuntime {
             registry,
             profile,
             site,
+            started_at_unix_ms: mechanics::wallclock::now_millis(),
         })
     }
 
@@ -417,6 +420,9 @@ impl DisplayRuntime {
 
         let result = match request {
             Request::DisplayStatus => self.status().map(|view| Response::Display(Box::new(view))),
+            Request::DisplayProvenance => self
+                .provenance()
+                .map(|view| Response::DisplayProvenance(Box::new(view))),
             Request::DisplayPairingApprove { pairing, label } => self
                 .approve_pairing(pairing, label)
                 .map(|device| Response::DisplayDevice {
@@ -717,6 +723,80 @@ impl DisplayRuntime {
                 params: mechanics::authorization::custody::Argon2Params::default(),
             },
         )
+    }
+
+    /// Which code runs at every layer, measured now. See
+    /// [`crate::control::DisplayProvenanceView`].
+    fn provenance(&self) -> Result<crate::control::DisplayProvenanceView> {
+        use crate::control::{
+            DisplayDeviceProvenanceView, DisplayProvenanceView, DisplayWorldProvenanceView,
+        };
+        let now = mechanics::wallclock::now_millis();
+        let executable = std::env::current_exe().ok();
+        let daemon_executable_modified_unix_ms = executable
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        let worlds = crate::world::local::list(&self.coordinator.identity_root())
+            .into_iter()
+            .map(|local| DisplayWorldProvenanceView {
+                key: local.key.clone(),
+                dir: local.dir.display().to_string(),
+                world: local.manifest.as_ref().map(|manifest| manifest.id.clone()),
+                version: local
+                    .manifest
+                    .as_ref()
+                    .map(|manifest| manifest.version.clone()),
+                sameness: match local.sameness {
+                    crate::world::local::Sameness::Unchanged => "unchanged",
+                    crate::world::local::Sameness::Changed => "changed",
+                    crate::world::local::Sameness::Unrecorded => "unrecorded",
+                }
+                .to_string(),
+            })
+            .collect();
+        let state = self.store.snapshot()?;
+        let producers: std::collections::BTreeMap<String, &'static str> =
+            self.coordinator.producer_states().into_iter().collect();
+        let devices = state
+            .devices
+            .values()
+            .map(|device| {
+                let reported = self.pairing.health(&device.device).ok().flatten();
+                let assignment = state.assignments.values().find(|assignment| {
+                    assignment.device == device.device && assignment.revoked_at_unix_ms.is_none()
+                });
+                DisplayDeviceProvenanceView {
+                    device: device.device.as_str().to_string(),
+                    label: device.label.clone(),
+                    platform: wire_name(&device.capabilities.platform),
+                    revoked_at_unix_ms: device.revoked_at_unix_ms,
+                    enrolled_build: device.capabilities.build.clone(),
+                    reported_build: reported.as_ref().map(|report| report.health.build.clone()),
+                    reported_at_unix_ms: reported.as_ref().map(|report| report.reported_at_unix_ms),
+                    assignment: assignment.map(|assignment| assignment.id.as_str().to_string()),
+                    holds_hls_ticket: self
+                        .coordinator
+                        .device_holds_hls_ticket(&device.device, now),
+                    stream_served_at_unix_ms: assignment
+                        .and_then(|assignment| self.coordinator.stream_served_at(assignment)),
+                    producer: assignment
+                        .and_then(|assignment| producers.get(assignment.id.as_str()))
+                        .map(|state| (*state).to_string()),
+                }
+            })
+            .collect();
+        Ok(DisplayProvenanceView {
+            daemon_version: crate::VERSION.to_string(),
+            daemon_pid: std::process::id(),
+            daemon_executable: executable.map(|path| path.display().to_string()),
+            daemon_executable_modified_unix_ms,
+            daemon_started_unix_ms: self.started_at_unix_ms,
+            worlds,
+            devices,
+        })
     }
 
     fn status(&self) -> Result<crate::control::DisplayCoordinatorView> {

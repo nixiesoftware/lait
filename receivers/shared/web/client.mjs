@@ -1370,6 +1370,10 @@ export class DisplayReceiverClient {
       route: "health",
       method: "POST",
       path: "/head/v1/health",
+      // The header and the body must say the same elapsed time; the context
+      // computing its own put them a millisecond apart and every report was
+      // refused.
+      overrides: { currentItem: item.id, elapsedMs: playback.elapsedMs },
       body: {
         protocol_major: PROTOCOL_MAJOR,
         platform: this.capabilities.platform,

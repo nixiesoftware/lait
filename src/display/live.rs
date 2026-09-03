@@ -123,15 +123,14 @@ struct Presentation {
     hls_renditions: Vec<HlsRenditionDescription>,
     hls_segments: BTreeMap<String, VecDeque<HlsSegment>>,
     retention: Retention,
-    /// When set, this presentation is a whole program served as an **endless
-    /// looping live stream** from this wall-clock epoch. Its media playlist
-    /// advances with the clock and never carries `EXT-X-ENDLIST`, so the
-    /// receiver plays it as live and never reaches an end to tear down and
-    /// rebuffer at — which is the black frame a looping VOD paints at its wrap.
-    /// The finite base segments are laid out once; a lap past the first is the
-    /// same bytes behind an `EXT-X-DISCONTINUITY`, exactly as a part seam is.
-    /// `None` is a finite VOD or a live edge.
-    loop_started_unix_ms: Option<u64>,
+    /// Discontinuities that have slid off the front of a rolling window,
+    /// which is what `EXT-X-DISCONTINUITY-SEQUENCE` counts. A player keeps
+    /// its discontinuity timeline by this number; a window that emitted
+    /// `EXT-X-DISCONTINUITY` without it drifted as segments aged out.
+    discontinuities_dropped: u64,
+    /// When a playlist or segment was last asked for, so a producer can tell
+    /// a screen that is playing from one that is off.
+    fetched_at_unix_ms: u64,
     /// For a planned presentation: the table a segment is built from on demand.
     ///
     /// `install_whole` materialises every segment, which is right for a clip
@@ -217,96 +216,38 @@ impl LiveMediaHub {
         self.install_whole(orbit, resource, &catalog, groups)
     }
 
-    /// Compose a program from ordered parts into one HLS presentation, so a
-    /// receiver plays the whole thing on a single player and never switches
-    /// surfaces mid-program. Each part is packaged on its own — a part is a
-    /// still or a clip, with its own codec parameters — and the parts are laid
-    /// end to end, an `EXT-X-DISCONTINUITY` at every seam because the stream's
-    /// parameters change there. Segments are renumbered into one sequence, so
-    /// the playlist reads as one timeline.
-    ///
-    /// Served as an **endless looping live stream** from `started_unix_ms`: the
-    /// media playlist advances with the wall clock and never carries
-    /// `EXT-X-ENDLIST`, so the receiver plays it as live and never reaches an
-    /// end. A looping VOD, by contrast, tears the decode pipeline down and
-    /// rebuffers from the first segment at every wrap — the black frame at the
-    /// seam. Here the second lap onward is the same base bytes served again
-    /// behind an `EXT-X-DISCONTINUITY`, exactly as a part seam within one lap
-    /// is, so the wrap costs a decoder reset and not a full restart. A revision
-    /// change re-composes and the receiver picks up the new program on its
-    /// change poll.
-    pub fn install_program(
+    /// Open an empty rolling presentation a producer will fill at the live
+    /// edge, one segment at a time. The producer owns the schedule; the hub
+    /// serves the window it has made.
+    pub fn install_rolling(
         &self,
         orbit: &str,
         resource: &str,
-        parts: Vec<(Catalog, Vec<ReceivedGroup>)>,
-        started_unix_ms: u64,
+        description: HlsRenditionDescription,
+        window: usize,
+        discontinuities_dropped: u64,
     ) -> Result<()> {
-        if parts.is_empty() {
-            return Err(anyhow!("a program stream needs at least one part"));
-        }
-        let mut segments: VecDeque<HlsSegment> = VecDeque::new();
-        let mut description: Option<HlsRenditionDescription> = None;
-        let mut next_sequence = 0u64;
-        for (part_index, (catalog, groups)) in parts.into_iter().enumerate() {
-            let mut hls = HlsCatalogPackager::new(&catalog)
-                .map_err(|error| anyhow!("program part {part_index} cannot be HLS: {error}"))?;
-            if description.is_none() {
-                description = hls.descriptions().first().cloned();
-            }
-            let mut first_of_part = true;
-            for group in &groups {
-                let Some(mut segment) = hls
-                    .push_group(group)
-                    .map_err(|error| anyhow!("program part {part_index} group refused: {error}"))?
-                else {
-                    continue;
-                };
-                segment.rendition = resource.to_string();
-                segment.group_sequence = next_sequence;
-                // A seam between parts is a parameter change; mark it so a
-                // player resets its decoder rather than tearing.
-                segment.discontinuity = (part_index > 0 && first_of_part) || segment.discontinuity;
-                segments.push_back(segment);
-                next_sequence += 1;
-                first_of_part = false;
-            }
-        }
-        if segments.is_empty() {
-            return Err(anyhow!("no program part produced a segment"));
-        }
-        let mut description =
-            description.ok_or_else(|| anyhow!("program stream has no rendition"))?;
-        description.rendition = resource.to_string();
         let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
-        let key = PresentationKey {
-            orbit: orbit.to_string(),
-            peer: STORED_SOURCE.into(),
-            connection: resource.to_string(),
-        };
         let mut state = lock(&self.inner)?;
-        // The program recompiles on every change poll, but unchanged content
-        // must keep its loop epoch — restamping it would jump the live edge
-        // back to the start of the lap on every poll, a stutter every few
-        // seconds. Only genuinely new bytes reset the clock.
-        let started_unix_ms = state
-            .presentations
-            .get(&key)
-            .and_then(|existing| {
-                let unchanged = existing.hls_segments.get(resource).map(program_signature)
-                    == Some(program_signature(&segments));
-                existing.loop_started_unix_ms.filter(|_| unchanged)
-            })
-            .unwrap_or(started_unix_ms);
         state.presentations.insert(
-            key,
+            PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            },
             Presentation {
                 cmaf_tracks: Vec::new(),
                 cmaf_fragments: BTreeMap::new(),
                 hls_renditions: vec![description],
-                hls_segments: BTreeMap::from([(resource.to_string(), segments)]),
-                retention: Retention::Whole { complete: true },
-                loop_started_unix_ms: Some(started_unix_ms),
+                hls_segments: BTreeMap::new(),
+                retention: Retention::Rolling(window),
+                // Carried in from before this process, when the stream is
+                // resuming: `EXT-X-DISCONTINUITY-SEQUENCE` must never go
+                // backwards against a media sequence that went on, or a
+                // player stops asking for segments while it keeps reloading
+                // the playlist it no longer believes.
+                discontinuities_dropped,
+                fetched_at_unix_ms: 0,
                 plan: None,
                 updates,
             },
@@ -314,38 +255,70 @@ impl LiveMediaHub {
         Ok(())
     }
 
-    /// Build the catalog and one-second segment groups for a still, the unit a
-    /// program stream is composed from. Public so the compiler can assemble a
-    /// program's parts without going through a full install per still.
-    pub fn still_part(
-        &self,
-        resource: &str,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-        duration_ms: u32,
-    ) -> Result<(Catalog, Vec<ReceivedGroup>)> {
-        still_part(resource, rgba, width, height, duration_ms)
+    /// How many discontinuities have slid off a presentation's window.
+    pub fn discontinuities_dropped(&self, orbit: &str, resource: &str) -> Option<u64> {
+        let state = lock(&self.inner).ok()?;
+        state
+            .presentations
+            .get(&PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            })
+            .map(|presentation| presentation.discontinuities_dropped)
     }
 
-    /// A still program part from a rendered PNG frame asset.
-    pub fn still_part_png(
-        &self,
-        resource: &str,
-        png_bytes: &[u8],
-        duration_ms: u32,
-    ) -> Result<(Catalog, Vec<ReceivedGroup>)> {
-        still_part_png(resource, png_bytes, duration_ms)
+    /// Append one segment to a rolling presentation the producer made.
+    pub fn push_hls_segment(&self, orbit: &str, resource: &str, segment: HlsSegment) -> Result<()> {
+        let mut state = lock(&self.inner)?;
+        let presentation = state
+            .presentations
+            .get_mut(&PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            })
+            .ok_or_else(|| anyhow!("program presentation is not installed"))?;
+        retain_hls(presentation, segment);
+        Ok(())
     }
 
-    /// A still program part from a stored image slide (JPEG, WebP, or PNG).
-    pub fn still_part_image(
-        &self,
-        resource: &str,
-        image_bytes: &[u8],
-        duration_ms: u32,
-    ) -> Result<(Catalog, Vec<ReceivedGroup>)> {
-        still_part_image(resource, image_bytes, duration_ms)
+    /// Forget a stored or produced presentation.
+    pub fn remove_stored(&self, orbit: &str, resource: &str) {
+        if let Ok(mut state) = lock(&self.inner) {
+            state.presentations.remove(&PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            });
+        }
+    }
+
+    /// Note that a receiver asked for this presentation now.
+    pub fn touch(&self, orbit: &str, resource: &str, now_unix_ms: u64) {
+        if let Ok(mut state) = lock(&self.inner) {
+            if let Some(presentation) = state.presentations.get_mut(&PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            }) {
+                presentation.fetched_at_unix_ms = presentation.fetched_at_unix_ms.max(now_unix_ms);
+            }
+        }
+    }
+
+    /// When a receiver last asked for this presentation; `None` when it is
+    /// not installed, and `Some(0)` when nobody has asked yet.
+    pub fn fetched_at(&self, orbit: &str, resource: &str) -> Option<u64> {
+        let state = lock(&self.inner).ok()?;
+        state
+            .presentations
+            .get(&PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            })
+            .map(|presentation| presentation.fetched_at_unix_ms)
     }
 
     /// Install a presentation from a finite, already-written sequence of groups.
@@ -426,7 +399,8 @@ impl LiveMediaHub {
                 hls_segments,
                 // Every group is already in, so this is complete on arrival.
                 retention: Retention::Whole { complete: true },
-                loop_started_unix_ms: None,
+                discontinuities_dropped: 0,
+                fetched_at_unix_ms: 0,
                 plan: None,
                 updates,
             },
@@ -490,7 +464,8 @@ impl LiveMediaHub {
                     .unwrap_or_default(),
                 hls_segments: BTreeMap::new(),
                 retention: Retention::Whole { complete: true },
-                loop_started_unix_ms: None,
+                discontinuities_dropped: 0,
+                fetched_at_unix_ms: 0,
                 plan: Some(Arc::new(plan)),
                 updates,
             },
@@ -660,7 +635,9 @@ impl LiveMediaHub {
         if renditions.is_empty() {
             return Err(anyhow!("live HLS resource is unavailable"));
         }
-        let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
+        // A comment names the coordinator that wrote this, so a captured
+        // playlist says which build served it. Players ignore it.
+        let mut playlist = format!("#EXTM3U\n# lait {}\n#EXT-X-VERSION:3\n", crate::VERSION);
         for rendition in renditions {
             playlist.push_str("#EXT-X-STREAM-INF:BANDWIDTH=");
             playlist.push_str(&rendition.bitrate_bps.to_string());
@@ -693,30 +670,21 @@ impl LiveMediaHub {
         if resource != rendition {
             return Err(anyhow!("HLS rendition is not assignment-bound"));
         }
-        let state = lock(&self.inner)?;
-        let (_, presentation) = unique_presentation(&state, orbit, resource, LiveTransport::Hls)?;
+        let mut state = lock(&self.inner)?;
+        let (key, _) = unique_presentation(&state, orbit, resource, LiveTransport::Hls)?;
+        let key = key.clone();
+        if let Some(presentation) = state.presentations.get_mut(&key) {
+            presentation.fetched_at_unix_ms = presentation.fetched_at_unix_ms.max(now_unix_ms);
+        }
+        let presentation = state
+            .presentations
+            .get(&key)
+            .ok_or_else(|| anyhow!("live HLS resource is unavailable"))?;
         let description = presentation
             .hls_renditions
             .iter()
             .find(|candidate| candidate.rendition == rendition)
             .ok_or_else(|| anyhow!("HLS rendition is unavailable"))?;
-        // An endless looping program is served as a live playlist that advances
-        // with the wall clock and never ends, so the receiver never tears the
-        // player down at a wrap. The finite base segments are its one lap.
-        if let Some(started_unix_ms) = presentation.loop_started_unix_ms {
-            let segments = presentation
-                .hls_segments
-                .get(rendition)
-                .filter(|segments| !segments.is_empty())
-                .ok_or_else(|| anyhow!("HLS looping program has no segments"))?;
-            return Ok(looping_media_playlist(
-                segments,
-                description,
-                base,
-                started_unix_ms,
-                now_unix_ms,
-            ));
-        }
         if let Some(plan) = &presentation.plan {
             // A planned presentation lists every group from its table; no
             // segment has to exist for the playlist to be complete.
@@ -774,6 +742,13 @@ impl LiveMediaHub {
         );
         if presentation.retention.is_complete() {
             playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        } else {
+            // A live window slides discontinuities off its front; the player
+            // keeps its place in the discontinuity timeline by this count.
+            playlist.push_str(&format!(
+                "#EXT-X-DISCONTINUITY-SEQUENCE:{}\n",
+                presentation.discontinuities_dropped
+            ));
         }
         for segment in segments {
             if segment.discontinuity {
@@ -803,21 +778,6 @@ impl LiveMediaHub {
         }
         let state = lock(&self.inner)?;
         let (_, presentation) = unique_presentation(&state, orbit, resource, LiveTransport::Hls)?;
-        // A looping program's playlist counts a logical sequence that runs past
-        // the base lap forever; the bytes for logical `n` are base segment
-        // `n mod K`, served again unchanged behind the wrap discontinuity.
-        if presentation.loop_started_unix_ms.is_some() {
-            let segments = presentation
-                .hls_segments
-                .get(rendition)
-                .filter(|segments| !segments.is_empty())
-                .ok_or_else(|| anyhow!("HLS looping program has no segments"))?;
-            let index = (sequence % segments.len() as u64) as usize;
-            return segments
-                .get(index)
-                .map(|segment| segment.bytes.clone())
-                .ok_or_else(|| anyhow!("HLS looping segment is not in this program"));
-        }
         presentation
             .hls_segments
             .get(rendition)
@@ -1060,7 +1020,8 @@ async fn install_catalog(
                 hls_renditions,
                 hls_segments: BTreeMap::new(),
                 retention: Retention::Rolling(RETAINED_SEGMENTS),
-                loop_started_unix_ms: None,
+                discontinuities_dropped: 0,
+                fetched_at_unix_ms: 0,
                 plan: None,
                 updates,
             },
@@ -1132,13 +1093,28 @@ fn publish_hls(
     else {
         return;
     };
+    retain_hls(presentation, segment);
+}
+
+/// Keep one more HLS segment, letting the window drop what it must and
+/// counting the discontinuities that fall off its front.
+fn retain_hls(presentation: &mut Presentation, segment: HlsSegment) {
     let retention = presentation.retention;
     let retained = presentation
         .hls_segments
         .entry(segment.rendition.clone())
         .or_default();
     retained.push_back(segment);
-    retention.trim(retained);
+    if let Retention::Rolling(depth) = retention {
+        while retained.len() > depth {
+            if let Some(dropped) = retained.pop_front() {
+                if dropped.discontinuity {
+                    presentation.discontinuities_dropped =
+                        presentation.discontinuities_dropped.saturating_add(1);
+                }
+            }
+        }
+    }
 }
 
 /// The receiver-facing track descriptions a planned presentation holds.
@@ -1150,108 +1126,6 @@ fn planned_track_descriptions(
     _resource: &str,
 ) -> Vec<CmafTrackDescription> {
     packager.descriptions().to_vec()
-}
-
-/// A deterministic fingerprint of a program's segments, so a recompile can tell
-/// unchanged content (keep the loop epoch) from a genuine revision (reset it).
-fn program_signature(segments: &VecDeque<HlsSegment>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    segments.len().hash(&mut hasher);
-    for segment in segments {
-        segment.duration_ms.hash(&mut hasher);
-        segment.discontinuity.hash(&mut hasher);
-        segment.bytes.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-/// Render the live media playlist for an endless looping program.
-///
-/// The base segments are one lap. The playlist is a live window that advances
-/// with the wall clock: at `now`, the lap and the position within it place the
-/// live edge, and a short window straddles it — a few laps' worth of lead so
-/// the player buffers across the wrap, a few behind for jitter. There is no
-/// `EXT-X-ENDLIST`, so the player treats it as live and never reaches an end to
-/// rebuffer at. A logical sequence past the first lap is served as the same
-/// base bytes behind an `EXT-X-DISCONTINUITY` — the wrap costs a decoder reset,
-/// the same as a part seam within one lap, and never a full restart.
-fn looping_media_playlist(
-    segments: &VecDeque<HlsSegment>,
-    description: &HlsRenditionDescription,
-    base: &str,
-    started_unix_ms: u64,
-    now_unix_ms: u64,
-) -> String {
-    // Lead the wall-clock edge by this many segments so the player always has
-    // buffered runway across the wrap; trail it so a slightly late reload still
-    // finds the segment it wants.
-    const LEAD: u64 = 3;
-    const TRAIL: u64 = 3;
-
-    let base_count = segments.len() as u64;
-    let durations: Vec<u32> = segments.iter().map(|segment| segment.duration_ms).collect();
-    let discontinuities: Vec<bool> = segments
-        .iter()
-        .map(|segment| segment.discontinuity)
-        .collect();
-    let lap_ms: u64 = durations.iter().map(|&d| u64::from(d)).sum::<u64>().max(1);
-
-    // Place the live edge: which lap, and which base segment within it.
-    let elapsed = now_unix_ms.saturating_sub(started_unix_ms);
-    let lap = elapsed / lap_ms;
-    let mut position = elapsed % lap_ms;
-    let mut edge_index = 0u64;
-    for (index, &duration) in durations.iter().enumerate() {
-        edge_index = index as u64;
-        let span = u64::from(duration).max(1);
-        if position < span {
-            break;
-        }
-        position -= span;
-    }
-    let edge_logical = lap * base_count + edge_index;
-    let first_logical = edge_logical.saturating_sub(TRAIL);
-    let last_logical = edge_logical + LEAD;
-
-    // A logical sequence is a wrap when it opens a lap past the first; within a
-    // lap, a base segment keeps its own part-seam discontinuity.
-    let is_discontinuity = |logical: u64| -> bool {
-        let index = (logical % base_count) as usize;
-        (index == 0 && logical >= base_count)
-            || discontinuities.get(index).copied().unwrap_or(false)
-    };
-    // Discontinuities strictly before the first listed sequence, so a player
-    // that reloads mid-stream keeps a stable discontinuity timeline.
-    let discontinuity_sequence: u64 = (0..first_logical)
-        .filter(|&logical| is_discontinuity(logical))
-        .count() as u64;
-
-    let longest_ms = durations.iter().copied().max().unwrap_or(0);
-    let target_seconds = description
-        .target_duration_ms
-        .max(longest_ms)
-        .checked_add(999)
-        .and_then(|value| value.checked_div(1_000))
-        .unwrap_or(1)
-        .max(1);
-
-    let mut playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_seconds}\n#EXT-X-MEDIA-SEQUENCE:{first_logical}\n#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}\n",
-    );
-    for logical in first_logical..=last_logical {
-        let index = (logical % base_count) as usize;
-        let duration = durations.get(index).copied().unwrap_or(1);
-        if is_discontinuity(logical) {
-            playlist.push_str("#EXT-X-DISCONTINUITY\n");
-        }
-        playlist.push_str(&format!(
-            "#EXTINF:{:.3},\n{base}/segments/{logical}.ts\n",
-            f64::from(duration) / 1_000.0,
-        ));
-    }
-    // No EXT-X-ENDLIST: this stream never ends, and that is the whole point.
-    playlist
 }
 
 /// A still as a program part: its catalog and one-second single-IDR segment
@@ -1268,54 +1142,38 @@ fn still_part(
     still_groups(resource, &still, duration_ms)
 }
 
-/// The same, from a rendered still delivered as a PNG (a frame asset).
-pub fn still_part_png(
-    resource: &str,
-    png_bytes: &[u8],
-    duration_ms: u32,
-) -> Result<(Catalog, Vec<ReceivedGroup>)> {
-    let still = mediabox::h264still::encode_still_png(png_bytes)
-        .map_err(|error| anyhow!("still PNG could not be encoded for the stream: {error:?}"))?;
-    still_groups(resource, &still, duration_ms)
-}
-
-/// The same, from a stored image slide in any decoder-supported format (JPEG,
-/// WebP, or PNG), so an uploaded image is one part of the program stream.
-pub fn still_part_image(
-    resource: &str,
-    image_bytes: &[u8],
-    duration_ms: u32,
-) -> Result<(Catalog, Vec<ReceivedGroup>)> {
-    let still = mediabox::h264still::encode_still_image(image_bytes)
-        .map_err(|error| anyhow!("still image could not be encoded for the stream: {error:?}"))?;
-    still_groups(resource, &still, duration_ms)
-}
-
 fn still_groups(
     resource: &str,
     still: &mediabox::h264still::StillH264,
     duration_ms: u32,
 ) -> Result<(Catalog, Vec<ReceivedGroup>)> {
-    let width = still.width;
-    let height = still.height;
-    const SEGMENT_MS: u32 = 1_000;
-    const TIMESCALE: u32 = 90_000;
-    let segments = duration_ms.div_ceil(SEGMENT_MS).max(1);
+    let segments = duration_ms.div_ceil(STILL_SEGMENT_MS).max(1);
+    let groups = (0..segments)
+        .map(|sequence| still_group(resource, still, usize::try_from(sequence).unwrap_or(0)))
+        .collect();
+    Ok((still_catalog(resource, still), groups))
+}
+
+const STILL_SEGMENT_MS: u32 = 1_000;
+const STILL_TIMESCALE: u32 = 90_000;
+
+/// The one-track catalog a still is packaged under.
+pub(crate) fn still_catalog(resource: &str, still: &mediabox::h264still::StillH264) -> Catalog {
     let frame_bytes = still.access_unit.len();
-    let catalog = Catalog {
+    Catalog {
         version: CATALOG_VERSION,
         jitter_hint_ms: 0,
         tracks: vec![CatalogTrack {
             track: resource.to_string(),
             kind: TrackKind::Video,
             codec: still.codec.clone(),
-            timescale: TIMESCALE,
+            timescale: STILL_TIMESCALE,
             decoder_config_hex: data_encoding::HEXLOWER.encode(&still.avcc),
-            max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
+            max_group_duration_ms: STILL_SEGMENT_MS.saturating_mul(2),
             target_latency_ms: DEFAULT_MAX_LATENCY_MS,
             bitrate_bps: u32::try_from(frame_bytes.saturating_mul(8)).unwrap_or(u32::MAX),
-            width: Some(width),
-            height: Some(height),
+            width: Some(still.width),
+            height: Some(still.height),
             frame_rate_milli: Some(1_000),
             sample_rate: None,
             channels: None,
@@ -1323,32 +1181,42 @@ fn still_groups(
             cmaf_rendition: None,
             hls_v3_rendition: Some(resource.to_string()),
         }],
-    };
-    let groups = (0..segments)
-        .map(|sequence| ReceivedGroup {
-            header: GroupHeader {
-                subscription_id: FIRST_MEDIA_SUBSCRIPTION_ID,
-                track: resource.to_string(),
-                track_kind: TrackKind::Video,
-                group_sequence: u64::from(sequence),
-                published_at_micros: 0,
-                timescale: TIMESCALE,
-                max_group_duration_ms: SEGMENT_MS.saturating_mul(2),
+    }
+}
+
+/// One one-second group of a still: a single IDR at local sequence
+/// `sequence`, timestamped to run on from the group before it.
+pub(crate) fn still_group(
+    resource: &str,
+    still: &mediabox::h264still::StillH264,
+    sequence: usize,
+) -> ReceivedGroup {
+    let sequence = u64::try_from(sequence).unwrap_or(u64::MAX);
+    let frame_bytes = still.access_unit.len();
+    ReceivedGroup {
+        header: GroupHeader {
+            subscription_id: FIRST_MEDIA_SUBSCRIPTION_ID,
+            track: resource.to_string(),
+            track_kind: TrackKind::Video,
+            group_sequence: sequence,
+            published_at_micros: 0,
+            timescale: STILL_TIMESCALE,
+            max_group_duration_ms: STILL_SEGMENT_MS.saturating_mul(2),
+        },
+        frames: vec![Frame {
+            header: FrameHeader {
+                timestamp: i64::try_from(sequence)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(i64::from(STILL_TIMESCALE)),
+                duration: Some(u64::from(STILL_TIMESCALE)),
+                timescale: STILL_TIMESCALE,
+                kind: FrameKind::Key,
+                payload_len: u32::try_from(frame_bytes).unwrap_or(u32::MAX),
+                composition_offset: 0,
             },
-            frames: vec![Frame {
-                header: FrameHeader {
-                    timestamp: i64::from(sequence).saturating_mul(i64::from(TIMESCALE)),
-                    duration: Some(u64::from(TIMESCALE)),
-                    timescale: TIMESCALE,
-                    kind: FrameKind::Key,
-                    payload_len: u32::try_from(frame_bytes).unwrap_or(u32::MAX),
-                    composition_offset: 0,
-                },
-                payload: still.access_unit.clone(),
-            }],
-        })
-        .collect();
-    Ok((catalog, groups))
+            payload: still.access_unit.clone(),
+        }],
+    }
 }
 
 fn unique_presentation<'a>(
@@ -1782,67 +1650,6 @@ mod tests {
         assert_eq!(segment.first(), Some(&0x47));
     }
 
-    #[test]
-    fn a_program_is_served_as_an_endless_looping_live_stream() {
-        let hub = LiveMediaHub::default();
-        let a = hub
-            .still_part("prog", &still_rgba(320, 240), 320, 240, 2_000)
-            .unwrap();
-        let b = hub
-            .still_part("prog", &still_rgba(160, 240), 160, 240, 3_000)
-            .unwrap();
-        // Five one-second base segments (two seconds then three), one part seam
-        // between them. The epoch is 10s so the maths below reads plainly.
-        hub.install_program("space/orbit", "prog", vec![a, b], 10_000)
-            .expect("a program composes");
-
-        // At the epoch the live window opens on the first lap. It is a live
-        // stream, not a VOD: no PLAYLIST-TYPE:VOD and, crucially, no ENDLIST —
-        // the player never reaches an end to tear down and rebuffer at.
-        let playlist = hub
-            .hls_media_playlist("space/orbit", "prog", "prog", "..", 10_000)
-            .expect("the program serves one playlist");
-        assert!(
-            !playlist.contains("#EXT-X-ENDLIST"),
-            "an endless stream never ends"
-        );
-        assert!(
-            !playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"),
-            "it is live, not a VOD"
-        );
-        assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0"));
-        assert!(playlist.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"));
-        assert!(
-            playlist.contains("#EXT-X-DISCONTINUITY"),
-            "the part seam within the lap is a discontinuity"
-        );
-
-        // A whole lap later (5s), the window has advanced past the base lap.
-        // The second lap opens at logical sequence 5.
-        let wrapped = hub
-            .hls_media_playlist("space/orbit", "prog", "prog", "..", 15_000)
-            .expect("the program still serves after a lap");
-        assert!(
-            wrapped.contains("segments/5.ts"),
-            "the second lap is logical sequence 5, not a restart at 0"
-        );
-        assert!(
-            !wrapped.contains("#EXT-X-ENDLIST"),
-            "still endless a lap in"
-        );
-
-        // The bytes for a lap past the first are the same base segment served
-        // again — the wrap is a re-list behind a discontinuity, not new media.
-        let base0 = hub
-            .hls_segment("space/orbit", "prog", "prog", 0)
-            .expect("base segment zero");
-        let lap_two = hub
-            .hls_segment("space/orbit", "prog", "prog", 5)
-            .expect("logical five wraps to base zero");
-        assert_eq!(base0, lap_two, "a lap past the first is the same bytes");
-        assert_eq!(base0.len() % 188, 0, "a real transport stream");
-    }
-
     /// The still, all the way through the coordinator's packager and back out a
     /// real decoder: install it, pull segment zero, and have ffmpeg decode the
     /// transport stream to the still's dimensions. Ignored (shells ffmpeg).
@@ -2025,7 +1832,8 @@ mod tests {
         let (updates, _) = broadcast::channel(RECEIVER_QUEUE);
         Presentation {
             retention,
-            loop_started_unix_ms: None,
+            discontinuities_dropped: 0,
+            fetched_at_unix_ms: 0,
             plan: None,
             cmaf_tracks: Vec::new(),
             cmaf_fragments: BTreeMap::new(),

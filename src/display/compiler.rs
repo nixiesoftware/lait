@@ -208,13 +208,23 @@ impl ProgramCompiler {
     /// the receiver plays the whole program on one player and never switches
     /// surfaces. The stills and clips live inside the stream; the receiver
     /// stages nothing per item.
+    /// Compile the whole-program stream: one open-ended media item the
+    /// receiver holds for the life of the assignment.
+    ///
+    /// The item carries no duration and the program holds its last item, so
+    /// the revision is a function of the assignment, the program id, the
+    /// freshness policy and the stream resource — none of which a program edit
+    /// touches. It used to carry the program's total length, which made every
+    /// edit that changed the length a new revision: the receiver re-staged,
+    /// minted a new ticket and reloaded its player for a stream whose URL had
+    /// no reason to change. The stream itself is endless (a live playlist
+    /// with no `EXT-X-ENDLIST`), so a length on the wire was never true.
     pub fn compile_stream(
         &self,
         assignment: &DisplayAssignmentId,
         program: &DisplayProgramId,
         freshness: FreshnessPolicy,
         program_resource: &str,
-        total_duration_ms: u32,
         refresh_after_ms: Option<u32>,
     ) -> Result<CompiledProgram> {
         let media_type = DisplayAssetMediaType::HlsManifest;
@@ -248,7 +258,10 @@ impl ProgramCompiler {
             .context("derive program stream item id")?;
         let item = DisplayProgramItem {
             id: item_id,
-            duration_ms: Some(total_duration_ms.max(1)),
+            // Open-ended: the stream never ends, and its length is not a fact
+            // about the assignment. The protocol allows this only on the last
+            // item of a program that holds its last, which this is.
+            duration_ms: None,
             source_state: SourceState::Current,
             scene: DisplayScene::Media {
                 manifest,
@@ -272,7 +285,7 @@ impl ProgramCompiler {
             playback: DisplayPlayback {
                 current_index: 0,
                 elapsed_ms: 0,
-                cycle: ProgramCycle::Loop,
+                cycle: ProgramCycle::HoldLast,
                 sync: None,
             },
             items: vec![item],
@@ -494,6 +507,52 @@ mod tests {
         DisplayProjection, DisplayResourceId, FrameMediaType, MediaProtocol as SourceMediaProtocol,
         RenderedFrame, RenderedMedia, RenderedProgram, RenderedProgramItem,
     };
+
+    /// The stream program is the one thing a receiver holds for the life of
+    /// an assignment, so nothing a program edit changes may reach its
+    /// revision. A different refresh hint (a live card ticking, a schedule
+    /// boundary moving) compiles to the same bytes on the wire, and the item
+    /// is open-ended under a program that holds it — the only shape the
+    /// protocol allows without a duration, and the only honest one for a
+    /// stream that never ends.
+    #[test]
+    fn a_program_stream_revision_is_invariant_under_program_edits() {
+        let compiler = ProgramCompiler::new([5; 32]).unwrap();
+        let assignment = DisplayAssignmentId::parse("aa".repeat(16)).unwrap();
+        let program = DisplayProgramId::parse("bb".repeat(16)).unwrap();
+        let freshness = FreshnessPolicy {
+            stale_after_ms: 60_000,
+            on_stale: StaleAction::KeepWithNativeBanner,
+        };
+        let first = compiler
+            .compile_stream(
+                &assignment,
+                &program,
+                freshness.clone(),
+                "prog-aa",
+                Some(1_000),
+            )
+            .unwrap();
+        let second = compiler
+            .compile_stream(&assignment, &program, freshness, "prog-aa", None)
+            .unwrap();
+        assert_eq!(first.program.revision, second.program.revision);
+        assert_eq!(first.program.items.len(), 1);
+        let item = &first.program.items[0];
+        assert_eq!(item.duration_ms, None, "a stream has no length on the wire");
+        assert_eq!(first.program.playback.cycle, ProgramCycle::HoldLast);
+        assert!(matches!(
+            item.scene,
+            DisplayScene::Media {
+                protocol: display_protocol::program::MediaProtocol::Hls,
+                live: false,
+                ..
+            }
+        ));
+        // The hint still reaches the poll's scheduling, off the wire.
+        assert_eq!(first.refresh_after_ms, Some(1_000));
+        assert_eq!(second.refresh_after_ms, None);
+    }
 
     #[test]
     fn compilation_binds_assets_and_revision_to_the_assignment() {

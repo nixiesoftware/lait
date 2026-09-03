@@ -6,6 +6,8 @@
 
 mod cmaf;
 mod compiler;
+#[cfg(test)]
+mod conformance;
 mod coordinator;
 mod hls;
 mod http;
@@ -20,6 +22,7 @@ pub(crate) use http::{bind_display, is_port_taken};
 mod live;
 pub mod overlay;
 pub(crate) mod pairing;
+mod producer;
 mod publish;
 mod runtime;
 mod store;
