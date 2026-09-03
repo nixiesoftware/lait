@@ -144,10 +144,12 @@ impl LiveClient {
                 subscribed: std::cell::RefCell::new(std::collections::BTreeSet::new()),
                 seq: std::cell::Cell::new(0),
             }),
-            Err(_) => Err(LiveError::Refused(match Refusal::decode_canonical(&answer) {
-                Ok(refusal) => format!("{refusal:?}"),
-                Err(_) => "unintelligible answer".into(),
-            })),
+            Err(_) => Err(LiveError::Refused(
+                match Refusal::decode_canonical(&answer) {
+                    Ok(refusal) => format!("{refusal:?}"),
+                    Err(_) => "unintelligible answer".into(),
+                },
+            )),
         }
     }
 

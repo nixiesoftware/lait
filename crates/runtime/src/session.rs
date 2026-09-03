@@ -2064,6 +2064,43 @@ impl Broadcaster {
         self.wake.notify_all();
     }
 
+    /// Publish an explicit reset record: a coarse "something converged, re-read
+    /// what is active" doorbell that carries no per-scope routing. The native
+    /// host never needs this — it projects an Observation into precise
+    /// invalidations through the hosted World's own vocabulary — but a browser
+    /// tab holds the World only as an opaque runner and cannot run that
+    /// projection, so a remote Contact convergence rings this instead. The
+    /// consumer's reset path re-reads its active resources, which is correct if
+    /// coarser than the routed form.
+    ///
+    /// wasm-only: the sole caller is `browser::Station::publish_convergence`. The
+    /// native host projects routed invalidations instead and never rings this.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn publish_reset(&self, frontier: ReplicaFrontier, authority: bool) {
+        let mut state = self.state.lock_recovering();
+        if state.closed {
+            return;
+        }
+        let sequence = state.next_seq;
+        state.next_seq += 1;
+        state.last_frontier = frontier;
+        let record = Observation {
+            epoch: self.epoch,
+            sequence,
+            reset: true,
+            bodies: Vec::new(),
+            authority,
+            frontier,
+            publications: Vec::new(),
+            change: crate::change::DurableChange::dirty(Vec::new()),
+        };
+        if state.ring.len() == state.capacity {
+            state.ring.pop_front();
+        }
+        state.ring.push_back(record);
+        self.wake.notify_all();
+    }
+
     fn close(&self) {
         let mut state = self.state.lock_recovering();
         state.closed = true;

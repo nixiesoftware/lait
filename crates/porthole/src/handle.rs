@@ -62,6 +62,12 @@ pub struct BrowserEngineHandle {
     live: Option<crate::live_client::LiveClient>,
     /// The World identity, for building the `BodyKey` a caret anchor names.
     world_id: replica::body::WorldId,
+    /// The serving mount — the id the viewer keys its selected Space on
+    /// (`ServedSpaceRow.id`), and therefore the id a doorbell ring must carry so
+    /// the viewer routes it to the current Space. The daemon carries its orbit id
+    /// here for the same reason; the tab's analog is the mount, NOT the raw
+    /// `SpaceId` (`self.space`), which the viewer never uses as a selection key.
+    mount: String,
 }
 
 /// Fold any error into a `JsValue` the Worker sees as a rejected Promise or a
@@ -129,7 +135,12 @@ impl BrowserEngineHandle {
         let responses = match accepted {
             crate::session::Accepted::Respond(responses) => responses,
             crate::session::Accepted::Mutate { sid, rid, request } => {
-                vec![crate::session::mutate_reply(&self.engine, sid, rid, request)]
+                vec![crate::session::mutate_reply(
+                    &self.engine,
+                    sid,
+                    rid,
+                    request,
+                )]
             }
         };
         serde_json::to_string(&responses)
@@ -269,8 +280,12 @@ impl BrowserEngineHandle {
             return Ok(None);
         };
         let (kind, caret, focus) = match &item.payload {
-            TransientPayload::Presence => ("presence", serde_json::Value::Null, serde_json::Value::Null),
-            TransientPayload::Typing => ("typing", serde_json::Value::Null, serde_json::Value::Null),
+            TransientPayload::Presence => {
+                ("presence", serde_json::Value::Null, serde_json::Value::Null)
+            }
+            TransientPayload::Typing => {
+                ("typing", serde_json::Value::Null, serde_json::Value::Null)
+            }
             TransientPayload::Caret { anchor } => (
                 "caret",
                 self.caret_position(&item.scope, anchor),
@@ -362,7 +377,12 @@ impl BrowserEngineHandle {
         .map_err(|e| js_err("the live converge failed", format!("{e:?}")))?;
         let bundle = self.authority.bundle();
         let signer = SeedSigner(&self.seed);
-        self.station
+        // Authority can advance INSIDE convergence (validate_contact incorporates
+        // a revocation/admission that arrived over Contact), so measure the
+        // frontier around the whole call, exactly as the native driver does.
+        let authority_before = (bundle.frontier)();
+        let outcome = self
+            .station
             .with_replica_convergence(|replica| {
                 let ctx = CommitContext {
                     space: &self.space,
@@ -381,6 +401,14 @@ impl BrowserEngineHandle {
                 replica.incorporate_bundle(&ctx, validated, bundle.source.as_ref())
             })
             .map_err(|e| js_err("the live install failed", format!("{e:?}")))?;
+        // Ring the doorbell for what arrived. `with_replica_convergence` only
+        // incorporates and rebuilds publications; publishing the Observation is
+        // the caller's job (the native Contact driver does it too), and without
+        // it a pulled peer edit reaches the Replica but the viewer never re-reads
+        // — the change stays invisible until the next boot.
+        let authority_advanced = (self.authority.bundle().frontier)() != authority_before;
+        self.station
+            .publish_convergence(&outcome, authority_advanced);
         Ok(received.bytes_moved as u32)
     }
 
@@ -400,7 +428,11 @@ impl BrowserEngineHandle {
         match next {
             Some(observation) => {
                 let ring = BrowserRing {
-                    space: self.space.as_str(),
+                    // The mount, not the raw SpaceId: the viewer keys its
+                    // selected Space on `ServedSpaceRow.id` (= the mount), and its
+                    // doorbell drops any ring whose `space` is not that key. The
+                    // daemon carries its orbit id here for the same reason.
+                    space: self.mount.as_str(),
                     epoch: observation.epoch.as_u64(),
                     seq: observation.sequence,
                     reset: observation.reset,
@@ -525,7 +557,7 @@ pub async fn boot(
         device.as_str().to_string(),
         ledger.clone(),
         space.as_str().to_string(),
-        mount,
+        mount.clone(),
     )
     .map_err(|e| js_err("the browser engine does not compose", format!("{e:?}")))?;
 
@@ -555,6 +587,7 @@ pub async fn boot(
         sessions: RefCell::new(crate::session::SessionHost::default()),
         live,
         world_id,
+        mount,
     })
 }
 
@@ -568,9 +601,9 @@ fn render_body(body: &[u8; 16]) -> String {
 fn scope_field(scope: &runtime::transient::Target) -> Option<&str> {
     use runtime::transient::Target;
     match scope {
-        Target::Field { field, .. } | Target::Preview { field, .. } | Target::Typing { field, .. } => {
-            Some(field)
-        }
+        Target::Field { field, .. }
+        | Target::Preview { field, .. }
+        | Target::Typing { field, .. } => Some(field),
         _ => None,
     }
 }

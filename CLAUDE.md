@@ -285,7 +285,9 @@ window.dispatchEvent(new CustomEvent("lait:nav", { detail: { view: "settings" } 
 `detail` fields:
 - `{ view }` — `overview | list | board | calendar | timeline | projects | inbox | my-issues | activity | specs | settings`
   (the union lives in `viewer/src/core/registry.ts`)
-- `{ project }` / `{ issue }` — select a project (KEY) or issue (ref)
+- `{ project }` / `{ issue }` — select a project (KEY), or OPEN an issue (ref):
+  a ref mounts the issue's detail (its read, editor, and live session); `null`
+  clears the selection
 - `{ milestone }` — scope the issue surfaces to a `mls_` id; `""` is the
   No-milestone bucket and `null` clears the scope. Applied *after* `project`, so
   `{ project: "ENG", milestone: "mls_x" }` in one detail scopes ENG. Stays on the

@@ -1620,12 +1620,19 @@ export function App() {
         // After `project`, so `{ project, milestone }` in one detail scopes the
         // project it just named rather than the one you were on.
         if ("milestone" in detail) api.gotoMilestone(detail.project ?? null, detail.milestone ?? null);
-        if ("issue" in detail) api.select(detail.issue ?? null);
+        // A ref OPENS the issue (mounts its detail — the read, the editor, the
+        // live session), not merely moves the list cursor: navigating to an
+        // issue means reading it, the same as following a deep link to one. A
+        // null clears the selection.
+        if ("issue" in detail) {
+          if (detail.issue) openIssue(detail.issue);
+          else api.select(null);
+        }
       }, 0);
     };
     window.addEventListener("lait:nav", onNav as EventListener);
     return () => window.removeEventListener("lait:nav", onNav as EventListener);
-  }, [api]);
+  }, [api, openIssue]);
 
   const ctx: Ctx = useMemo(
     () => ({

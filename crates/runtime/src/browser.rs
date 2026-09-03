@@ -236,6 +236,39 @@ impl Station {
         self.core.with_replica_convergence(f)
     }
 
+    /// Ring the doorbell for material a Contact re-pull just converged, so the
+    /// docked Session's viewer re-reads. `with_replica_convergence` only
+    /// incorporates the material and rebuilds publications — emitting the ring is
+    /// the CALLER's job (the native Contact driver does it too), and on wasm the
+    /// caller is the Worker's `repull`. Without it a pulled peer edit reaches the
+    /// Replica but nothing tells the UI to re-read, so the edit lands invisibly
+    /// until the next boot.
+    ///
+    /// The native host rings a *routed* invalidation: it projects the Observation
+    /// through the hosted World's own container/plane vocabulary so only the
+    /// touched rows re-read. A browser tab holds the World as an opaque runner
+    /// and cannot run that projection, so a convergence that changed anything
+    /// rings a single coarse RESET instead — the viewer re-reads its active
+    /// resources, correct if broader than the routed form. Nothing rings when the
+    /// pull converged nothing (a poll that moved only already-held material, or a
+    /// tab's own just-pushed write echoing back), so steady-state polling is
+    /// silent.
+    pub fn publish_convergence(
+        &self,
+        outcome: &replica::convergence::ConvergenceOutcome,
+        authority_advanced: bool,
+    ) {
+        let changed = !outcome.bodies.is_empty() || !outcome.changes.is_empty();
+        if changed || authority_advanced {
+            self.core
+                .broadcaster
+                .publish_reset(outcome.current, authority_advanced);
+        }
+        if authority_advanced {
+            self.core.note_authority_advanced();
+        }
+    }
+
     /// Build this tab's outbound excess — the transfer it PUSHES to a responder
     /// under symmetric convergence so its writes converge OUT (nothing dials a
     /// tab, so it pushes on the dial it makes). Mirrors the native driver's
