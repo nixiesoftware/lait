@@ -1,0 +1,24 @@
+# What `gcloud builds submit` uploads as the build context for the Foundation
+# service images (packaging/foundation/Dockerfile.*). Without this file gcloud
+# derives the ignore set from .gitignore alone, which still uploaded ~3.1 GiB /
+# 67k files — enough that a transient network blip aborts the resumable upload.
+#
+# The images build one Rust binary out of the workspace (`cargo build -p
+# lait-<post|feed-notify|relay>`), so the context needs every workspace member's
+# Cargo.toml + sources and the lockfile — and nothing else. We start from the
+# git ignores (drops all `target/`, `node_modules/`, etc.) and additionally drop
+# the large trees that are NOT cargo workspace members and no Rust build reads.
+# Keep in sync with Cargo.toml [workspace].members: never exclude a member.
+# (gitignore syntax: patterns only, no trailing inline comments.)
+#!include:.gitignore
+
+.git/
+
+# astrolabe-web (src-tauri is outside the workspace) + deprecated Flutter (~2.8 GiB)
+apps/
+# the React viewer (TypeScript); its wasm/bundle are fetched at runtime, not built here
+viewer/
+# prose only
+docs/
+# BrightScript + card/pill/media assets; receivers/reference (Rust) stays
+receivers/roku/

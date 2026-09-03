@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+#
+# The rendezvous image the Foundation platform runs: `lait-relay`, the server
+# half of `LAIT_NETWORK=local` fronted by a name (`relay.foundation.pub`). It is
+# what a daemon-less browser tab reaches to find the inviter — a shared
+# `foundation.pub/i#join=<ticket>` link defaults to this relay — and what the
+# consensus-supporter presence fanout rides. Built by this repository (the wire
+# it speaks lives here), deployed by NixieSoftware/foundation which owns where
+# and how it runs. Cloud Build builds it — there is no local Docker in the
+# authoring environment — so the context is whatever `.gcloudignore` admits.
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Pinned to the crate MSRV (`rust-version` in crates/relay/Cargo.toml). The
+# transport stack is pure Rust; the only C need is a linker and ring's perl/cc,
+# from build-essential.
+FROM rust:1.92-slim-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config perl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The whole workspace, then one binary out of it — no stub cache-warm; the
+# single-crate trick does not survive a workspace, and Cloud Build has no layer
+# cache across submissions anyway.
+COPY . .
+RUN cargo build --release --locked -p lait-relay
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+# Slim runtime; ca-certificates is enough for the relay's own outbound TLS. It
+# holds no keys — relay traffic stays end-to-end encrypted and unreadable to it —
+# and TLS termination is the platform's (Cloud Run fronts it), so the relay
+# itself serves plain HTTP on $PORT and is told its public name with --advertise.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 lait
+
+COPY --from=build /src/target/release/lait-relay /usr/local/bin/lait-relay
+
+# An image is a distribution like any other: whoever receives it gets the terms
+# and the account of what it is built from.
+COPY LICENSE /usr/share/doc/lait/LICENSE
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/lait/THIRD-PARTY-NOTICES.md
+
+USER lait
+EXPOSE 8080
+
+# No args baked in: the platform passes --http 0.0.0.0:8080 (Cloud Run's $PORT)
+# and --advertise https://relay.foundation.pub. Running with none binds
+# 0.0.0.0:80 and serves plain HTTP — the honest default, not a Cloud Run deploy.
+ENTRYPOINT ["lait-relay"]
