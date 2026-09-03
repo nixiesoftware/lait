@@ -95,6 +95,24 @@ pub struct DisplayCoordinator {
     /// continues the same numbering in both playlist headers, and a receiver
     /// that kept its URL never sees either go backwards.
     producer_epochs: Mutex<BTreeMap<String, ProducerMemory>>,
+    /// When each device's compiled program last changed revision. A ticket
+    /// minted for the revision before is honoured for a grace after that,
+    /// so a receiver re-staging for a new stream is never refused the old
+    /// one mid-reload — that refusal was the "decode failed" a person saw at
+    /// every deliberate re-stage.
+    revision_changes: Mutex<BTreeMap<String, u64>>,
+}
+
+/// How long a ticket outlives the revision it was minted for.
+const RESTAGE_GRACE_MS: u64 = 15_000;
+
+/// Whether a ticket whose program was revised is still to be honoured:
+/// within the grace after the change, yes.
+const fn within_restage_grace(changed_at_unix_ms: Option<u64>, now_unix_ms: u64) -> bool {
+    match changed_at_unix_ms {
+        Some(changed) => now_unix_ms.saturating_sub(changed) <= RESTAGE_GRACE_MS,
+        None => false,
+    }
 }
 
 /// What a stream remembers across restarts.
@@ -649,6 +667,7 @@ impl DisplayCoordinator {
             live: LiveMediaHub::default(),
             live_tickets: Mutex::new(tickets),
             producer_epochs: Mutex::new(epochs),
+            revision_changes: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -1272,10 +1291,16 @@ impl DisplayCoordinator {
         };
         let compiled = Arc::new(compiled);
         validate_receiver_fit(compiled.as_ref(), capabilities)?;
-        self.compiled
+        let previous = self
+            .compiled
             .lock()
             .map_err(|_| anyhow!("display program cache lock was poisoned"))?
             .insert(device.as_str().to_string(), compiled.clone());
+        if previous.is_some_and(|previous| previous.program.revision != compiled.program.revision) {
+            if let Ok(mut changes) = self.revision_changes.lock() {
+                changes.insert(device.as_str().to_string(), now_unix_ms);
+            }
+        }
         Ok(compiled)
     }
 
@@ -1626,18 +1651,26 @@ impl DisplayCoordinator {
         // every request is that the program has not been revised out from under
         // it. Requiring `live: true` here would refuse a stored ticket on its
         // first segment for a reason that has nothing to do with the program.
-        if compiled.program.revision != ticket.revision
-            || !compiled.program.items.iter().any(|item| {
+        let current = compiled.program.revision == ticket.revision
+            && compiled.program.items.iter().any(|item| {
                 item.id == ticket.current_item
                     && matches!(
                         &item.scene,
                         DisplayScene::Media { manifest, .. } if manifest.id == ticket.manifest
                     )
-            })
-        {
-            return Err(anyhow!("media program was revised"));
+            });
+        if current {
+            return Ok(());
         }
-        Ok(())
+        let changed_at = self
+            .revision_changes
+            .lock()
+            .ok()
+            .and_then(|changes| changes.get(ticket.device.as_str()).copied());
+        if within_restage_grace(changed_at, now_unix_ms) {
+            return Ok(());
+        }
+        Err(anyhow!("media program was revised"))
     }
 
     /// Install a stored content as a planned presentation.
@@ -2404,6 +2437,17 @@ mod tests {
             transport,
             expires_at_unix_ms,
         }
+    }
+
+    /// A ticket for the revision before is honoured through the grace and
+    /// refused after it, so a receiver mid-re-stage is never turned away
+    /// and a receiver that never re-staged does not keep an old stream.
+    #[test]
+    fn a_revised_tickets_grace_is_short_and_bounded() {
+        assert!(!within_restage_grace(None, 1_000));
+        assert!(within_restage_grace(Some(1_000), 1_000));
+        assert!(within_restage_grace(Some(1_000), 1_000 + RESTAGE_GRACE_MS));
+        assert!(!within_restage_grace(Some(1_000), 1_001 + RESTAGE_GRACE_MS));
     }
 
     /// A receiver holds one stream URL for the life of its assignment and
