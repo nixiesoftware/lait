@@ -35,18 +35,19 @@ pub struct StillH264 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StillError {
-    /// A dimension is zero, not a multiple of 16, or beyond the level's bound.
+    /// A dimension is smaller than the 2x2 a croppable frame needs, or the
+    /// buffer size overflowed.
     Dimensions,
     /// The pixel buffer is not `width * height * 4` bytes of RGBA.
     PixelCount,
-    /// The PNG bytes could not be decoded.
+    /// The image bytes (PNG, JPEG, or WebP) could not be decoded.
     Png,
 }
 
 /// Encode a rendered still, delivered as a PNG (what the World produces and
 /// the coordinator holds as a frame asset), into one H.264 IDR frame. The PNG
-/// is decoded to RGBA and handed to [`encode_still`]; its dimensions must be
-/// multiples of 16, which a panel-sized render already is.
+/// is decoded to RGBA and handed to [`encode_still`], which accepts any size —
+/// a panel-sized card and an arbitrary uploaded image alike.
 pub fn encode_still_png(png_bytes: &[u8]) -> Result<StillH264, StillError> {
     let decoder = png::Decoder::new(png_bytes);
     let mut reader = decoder.read_info().map_err(|_| StillError::Png)?;
@@ -72,14 +73,27 @@ pub fn encode_still_png(png_bytes: &[u8]) -> Result<StillH264, StillError> {
     encode_still(&rgba, info.width, info.height)
 }
 
+/// Encode a stored image slide — JPEG, WebP, or PNG, whatever a person uploaded
+/// to a signage program — into one H.264 IDR frame, so it plays as one part of
+/// the single program stream. Decoded to RGBA at its own size; the encoder pads
+/// and crops any dimensions.
+pub fn encode_still_image(bytes: &[u8]) -> Result<StillH264, StillError> {
+    let decoded = image::load_from_memory(bytes).map_err(|_| StillError::Png)?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    encode_still(&rgba, width, height)
+}
+
 const PROFILE_IDC: u8 = 66; // Constrained Baseline
 const LEVEL_IDC: u8 = 40; // 4.0 — comfortably covers 1080p stills
 const MB: u32 = 16;
 
 /// Encode an RGBA still (`width * height * 4` bytes, row-major, no padding)
-/// into one H.264 IDR frame. Dimensions must be multiples of 16.
+/// into one H.264 IDR frame. Any dimensions are accepted: a television image
+/// is whatever size it is, so the coded frame is padded up to the 16x16
+/// macroblock grid and the real (even) display size is carried in the SPS crop.
 pub fn encode_still(rgba: &[u8], width: u32, height: u32) -> Result<StillH264, StillError> {
-    if width == 0 || height == 0 || width % MB != 0 || height % MB != 0 {
+    if width < 2 || height < 2 {
         return Err(StillError::Dimensions);
     }
     let expected = (width as usize)
@@ -90,11 +104,21 @@ pub fn encode_still(rgba: &[u8], width: u32, height: u32) -> Result<StillH264, S
         return Err(StillError::PixelCount);
     }
 
-    let (y_plane, cb_plane, cr_plane) = rgba_to_yuv420(rgba, width, height);
+    // Code on the macroblock grid; crop back to the real, even display size.
+    // Edge pixels are replicated into the padding so it never bleeds a hard
+    // line into chroma near the crop. The player shows exactly the cropped
+    // rectangle and discards the padded remainder.
+    let coded_width = width.div_ceil(MB) * MB;
+    let coded_height = height.div_ceil(MB) * MB;
+    let display_width = width & !1;
+    let display_height = height & !1;
+    let padded = pad_rgba(rgba, width, height, coded_width, coded_height);
 
-    let sps = sequence_parameter_set(width, height);
+    let (y_plane, cb_plane, cr_plane) = rgba_to_yuv420(&padded, coded_width, coded_height);
+
+    let sps = sequence_parameter_set(coded_width, coded_height, display_width, display_height);
     let pps = picture_parameter_set();
-    let slice = idr_slice(&y_plane, &cb_plane, &cr_plane, width, height);
+    let slice = idr_slice(&y_plane, &cb_plane, &cr_plane, coded_width, coded_height);
 
     let codec = format!("avc1.{PROFILE_IDC:02x}00{LEVEL_IDC:02x}");
     let avcc = avc_decoder_config(&sps, &pps);
@@ -104,9 +128,30 @@ pub fn encode_still(rgba: &[u8], width: u32, height: u32) -> Result<StillH264, S
         codec,
         avcc,
         access_unit,
-        width,
-        height,
+        width: display_width,
+        height: display_height,
     })
+}
+
+/// Copy an RGBA image into a larger coded frame, replicating the right and
+/// bottom edges into the padding.
+fn pad_rgba(rgba: &[u8], width: u32, height: u32, coded_width: u32, coded_height: u32) -> Vec<u8> {
+    if width == coded_width && height == coded_height {
+        return rgba.to_vec();
+    }
+    let (sw, sh) = (width as usize, height as usize);
+    let (cw, ch) = (coded_width as usize, coded_height as usize);
+    let mut out = vec![0u8; cw * ch * 4];
+    for row in 0..ch {
+        let src_row = row.min(sh - 1);
+        for col in 0..cw {
+            let src_col = col.min(sw - 1);
+            let si = (src_row * sw + src_col) * 4;
+            let di = (row * cw + col) * 4;
+            out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+        }
+    }
+    out
 }
 
 // ---- colour ---------------------------------------------------------------
@@ -253,7 +298,12 @@ impl BitWriter {
     }
 }
 
-fn sequence_parameter_set(width: u32, height: u32) -> Vec<u8> {
+fn sequence_parameter_set(
+    coded_width: u32,
+    coded_height: u32,
+    display_width: u32,
+    display_height: u32,
+) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.put_bits(u32::from(PROFILE_IDC), 8);
     // constraint_set0..5 flags + 2 reserved zero bits. Constrained Baseline
@@ -266,11 +316,24 @@ fn sequence_parameter_set(width: u32, height: u32) -> Vec<u8> {
     w.ue(0); // log2_max_pic_order_cnt_lsb_minus4 -> poc_lsb is 4 bits
     w.ue(0); // max_num_ref_frames
     w.put_bit(0); // gaps_in_frame_num_value_allowed_flag
-    w.ue(width / MB - 1); // pic_width_in_mbs_minus1
-    w.ue(height / MB - 1); // pic_height_in_map_units_minus1
+    w.ue(coded_width / MB - 1); // pic_width_in_mbs_minus1
+    w.ue(coded_height / MB - 1); // pic_height_in_map_units_minus1
     w.put_bit(1); // frame_mbs_only_flag
     w.put_bit(0); // direct_8x8_inference_flag
-    w.put_bit(0); // frame_cropping_flag (dimensions are 16-aligned)
+                  // Crop the coded macroblock grid back to the display size. For 4:2:0 with
+                  // frame_mbs_only_flag, both crop units are 2 luma samples, so the offsets
+                  // are half the padding in each axis.
+    let crop_right = (coded_width - display_width) / 2;
+    let crop_bottom = (coded_height - display_height) / 2;
+    if crop_right == 0 && crop_bottom == 0 {
+        w.put_bit(0); // frame_cropping_flag
+    } else {
+        w.put_bit(1); // frame_cropping_flag
+        w.ue(0); // frame_crop_left_offset
+        w.ue(crop_right); // frame_crop_right_offset
+        w.ue(0); // frame_crop_top_offset
+        w.ue(crop_bottom); // frame_crop_bottom_offset
+    }
     w.put_bit(0); // vui_parameters_present_flag
     w.trailing_bits();
     w.finish()
@@ -405,9 +468,17 @@ mod tests {
     }
 
     #[test]
-    fn dimensions_must_be_macroblock_aligned() {
+    fn any_dimensions_are_padded_and_cropped() {
+        // Not macroblock-aligned: coded on the 16-grid (32x16), cropped to the
+        // even display size (16x16). A television image is any size.
+        let still = encode_still(&solid(17, 16, [0, 0, 0]), 17, 16).expect("padded");
+        assert_eq!((still.width, still.height), (16, 16));
+        // An odd height crops down by the one row that cannot be halved.
+        let odd = encode_still(&solid(1920, 1080, [0, 0, 0]), 1920, 1080).expect("1080 padded");
+        assert_eq!((odd.width, odd.height), (1920, 1080));
+        // Too small to carry a croppable frame.
         assert_eq!(
-            encode_still(&solid(17, 16, [0, 0, 0]), 17, 16).unwrap_err(),
+            encode_still(&solid(1, 1, [0, 0, 0]), 1, 1).unwrap_err(),
             StillError::Dimensions
         );
         assert_eq!(

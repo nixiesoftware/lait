@@ -1237,6 +1237,7 @@ async fn hls_media_playlist(
         &stream.resource,
         rendition,
         "..",
+        now(),
     ) {
         Ok(playlist) => media_response("application/vnd.apple.mpegurl", playlist.into_bytes()),
         Err(_) => public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest),

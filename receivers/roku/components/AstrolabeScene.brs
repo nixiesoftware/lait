@@ -11,6 +11,7 @@ sub init()
     m.loadTarget = -1
     m.loadMode = "show"
     m.chrome = m.top.FindNode("chrome")
+    m.brand = m.top.FindNode("brand")
     m.stage = m.top.FindNode("stage")
     m.title = m.top.FindNode("title")
     m.body = m.top.FindNode("body")
@@ -26,6 +27,12 @@ sub init()
     m.sequence = 0
     m.mediaEnding = false
     m.frameThenYield = false
+    ' One media item that loops is looped by the player in place, with no
+    ' teardown between passes; the whole-program stream is exactly that.
+    m.loopInPlace = false
+    ' The last liveness state the chip announced, so a run of identical degraded
+    ' polls does not keep re-lighting the HUD.
+    m.statusState = ""
     ' Scene units per panel pixel: 1.5 on a 720p panel, 1 on a 1080p one.
     m.sceneRatio = 1.0
     display = CreateObject("roDeviceInfo").GetDisplaySize()
@@ -40,6 +47,9 @@ sub init()
     m.mediaStop.ObserveField("fire", "AstrolabeMediaStopDue")
     m.posterRetire = m.top.FindNode("posterRetire")
     m.posterRetire.ObserveField("fire", "AstrolabePosterRetireDue")
+    m.statusHud = m.top.FindNode("statusHud")
+    m.statusHud.ObserveField("fire", "AstrolabeStatusHudDue")
+    m.top.FindNode("statusChip").visible = false
     m.keepAwake = m.top.FindNode("keepAwake")
     silence = CreateObject("roSGNode", "ContentNode")
     silence.url = "pkg:/media/silence.wav"
@@ -90,28 +100,51 @@ function AstrolabeBlankTitle(reason as string) as string
     return AstrolabeSentence(reason.Replace("_", " "))
 end function
 
+' The liveness chip is a HUD, not a fixture. A healthy screen says nothing; a
+' change of state names itself once, then the chip retires so nothing burns
+' into the glass. The full chrome still carries a state that has no program to
+' play behind it, so retiring the chip never hides an unrecoverable screen.
 sub AstrolabeStatus(transport as string, stale as boolean)
+    chip = m.top.FindNode("statusChip")
+    if transport = "online" and not stale
+        m.breathe.control = "stop"
+        m.statusHud.control = "stop"
+        chip.visible = false
+        m.statusState = "online-fresh"
+        return
+    end if
+    ' Only reveal — and restart the retire countdown — when the state actually
+    ' changes, so a run of degraded polls does not keep the chip lit.
+    state = transport
+    if stale then state = "stale"
+    reveal = (m.statusState <> state)
+    m.statusState = state
     if stale
         m.statusLabel.text = "Stale"
     else
         m.statusLabel.text = AstrolabeTransportLabel(transport)
     end if
-    ' The chip hugs its words and keeps to the safe margin.
     pill = m.top.FindNode("statusPill")
     pill.width = 64 + m.statusLabel.localBoundingRect().width + 32
-    m.top.FindNode("statusChip").translation = [1824 - pill.width, 44]
-    if transport = "online" and not stale
-        m.statusDot.blendColor = AstrolabeTone("positive")
-        if m.breathe.state <> "running" then m.breathe.control = "start"
+    chip.translation = [1824 - pill.width, 44]
+    m.breathe.control = "stop"
+    m.statusDot.opacity = 1.0
+    if transport = "offline" or stale
+        m.statusDot.blendColor = AstrolabeTone("miss")
     else
-        m.breathe.control = "stop"
-        m.statusDot.opacity = 1.0
-        if transport = "offline" or stale
-            m.statusDot.blendColor = AstrolabeTone("miss")
-        else
-            m.statusDot.blendColor = AstrolabeTone("faint")
-        end if
+        m.statusDot.blendColor = AstrolabeTone("faint")
     end if
+    if reveal
+        chip.visible = true
+        m.statusHud.control = "stop"
+        m.statusHud.control = "start"
+    end if
+end sub
+
+' The chip has had its moment. Retire it; a further change re-reveals it, and a
+' screen with nothing to play keeps its chrome regardless.
+sub AstrolabeStatusHudDue()
+    m.top.FindNode("statusChip").visible = false
 end sub
 
 function AstrolabeSentence(word as string) as string
@@ -168,7 +201,7 @@ end sub
 
 ' Chrome and stage return for any fact worth stating; the program layers go dark.
 sub AstrolabeShowStage(raised as boolean)
-    m.chrome.visible = true
+    m.brand.visible = true
     m.stage.visible = true
     AstrolabeHideFrames()
     m.media.control = "stop"
@@ -184,7 +217,10 @@ end sub
 ' The chrome retires once a program is on the glass and nothing is wrong;
 ' it returns for a transport that is not connected or a delivery gone stale.
 sub AstrolabeRetireChrome(model as object)
-    m.chrome.visible = model.transport <> "online" or model.stale
+    ' A program is on glass: the brand steps off it entirely. A transport or
+    ' freshness problem is carried by the liveness HUD, which is its own layer
+    ' now, so it can flash over the picture without the brand returning.
+    m.brand.visible = false
     m.stage.visible = false
     m.details.visible = false
 end sub
@@ -318,6 +354,11 @@ sub AstrolabeViewChanged()
         ' The coordinator's certificate is pinned for API calls; the player
         ' verifies its own connection, so it is handed the same file.
         if model.certificates <> invalid then content.HttpCertificatesFile = model.certificates
+        ' A whole-program stream loops in the player itself, so the seam back to
+        ' the first slide is a decoder rewind rather than a fresh content load —
+        ' no teardown, no re-buffer, no black at the wrap.
+        m.loopInPlace = (model.loopInPlace = true)
+        m.media.loop = m.loopInPlace
         m.media.content = content
         m.media.visible = true
         m.media.control = "play"
@@ -340,6 +381,7 @@ end sub
 ' picture rather than the black the player paints as it drains, then move the
 ' program on.
 sub AstrolabeMediaPositionChanged()
+    if m.loopInPlace then return
     if m.mediaEnding or m.media.state <> "playing" then return
     if m.media.duration <= 0 or m.media.position < m.media.duration - 0.6 then return
     m.mediaEnding = true
@@ -365,7 +407,7 @@ sub AstrolabeMediaStateChanged()
             m.posters[m.shown].visible = false
             m.shown = -1
         end if
-    else if m.media.state = "finished" and not m.mediaEnding
+    else if m.media.state = "finished" and not m.mediaEnding and not m.loopInPlace
         ' The clip ran dry before its clock crossed the early-cut line. If the
         ' next still is verified, reveal it now so the player's end-of-stream
         ' black lands behind a picture; then move on.

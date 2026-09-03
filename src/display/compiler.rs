@@ -202,6 +202,91 @@ impl ProgramCompiler {
             media_resources,
         })
     }
+
+    /// Compile a program the coordinator has already composed into one HLS
+    /// stream: a single looping media item pointing at `program_resource`, so
+    /// the receiver plays the whole program on one player and never switches
+    /// surfaces. The stills and clips live inside the stream; the receiver
+    /// stages nothing per item.
+    pub fn compile_stream(
+        &self,
+        assignment: &DisplayAssignmentId,
+        program: &DisplayProgramId,
+        freshness: FreshnessPolicy,
+        program_resource: &str,
+        total_duration_ms: u32,
+        refresh_after_ms: Option<u32>,
+    ) -> Result<CompiledProgram> {
+        let media_type = DisplayAssetMediaType::HlsManifest;
+        let bytes = serde_json::to_vec(&LiveManifest {
+            version: 1,
+            origin: "stored",
+            resource: program_resource,
+        })
+        .context("encode program stream manifest")?;
+        let encoded_len = u32::try_from(bytes.len()).context("program manifest is too large")?;
+        let digest = sha256(&bytes).context("digest program stream manifest")?;
+        let asset_id = derive_asset_id(
+            &self.identifier_key,
+            assignment,
+            media_type,
+            encoded_len,
+            &digest,
+            None,
+            None,
+        )
+        .context("derive program stream manifest id")?;
+        let manifest = DisplayAsset {
+            id: asset_id.clone(),
+            media_type,
+            encoded_len,
+            sha256: digest,
+            width: None,
+            height: None,
+        };
+        let item_id = derive_program_item_id(&self.identifier_key, assignment, "program-stream")
+            .context("derive program stream item id")?;
+        let item = DisplayProgramItem {
+            id: item_id,
+            duration_ms: Some(total_duration_ms.max(1)),
+            source_state: SourceState::Current,
+            scene: DisplayScene::Media {
+                manifest,
+                protocol: display_protocol::program::MediaProtocol::Hls,
+                live: false,
+            },
+            spoken_summary: None,
+        };
+        let mut assets = BTreeMap::new();
+        assets.insert(asset_id.clone(), bytes);
+        let mut media_resources = BTreeMap::new();
+        media_resources.insert(asset_id, program_resource.to_string());
+        let mut wire = DisplayProgram {
+            protocol_major: display_protocol::PROTOCOL_MAJOR,
+            assignment: assignment.clone(),
+            program: program.clone(),
+            revision: ProgramRevision::parse("0".repeat(64))
+                .context("construct program revision placeholder")?,
+            program_state: SourceState::Current,
+            freshness,
+            playback: DisplayPlayback {
+                current_index: 0,
+                elapsed_ms: 0,
+                cycle: ProgramCycle::Loop,
+                sync: None,
+            },
+            items: vec![item],
+        };
+        wire.revision = canonical_program_revision(&wire).context("revise program stream")?;
+        validate_program(&wire).context("validate program stream")?;
+        Ok(CompiledProgram {
+            program: wire,
+            source_refresh_after_ms: refresh_after_ms,
+            refresh_after_ms,
+            assets,
+            media_resources,
+        })
+    }
 }
 
 #[derive(serde::Serialize)]

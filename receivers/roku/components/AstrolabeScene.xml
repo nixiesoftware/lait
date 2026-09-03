@@ -18,7 +18,7 @@
 -->
 <component name="AstrolabeScene" extends="Scene">
   <children>
-    <Rectangle width="1920" height="1080" color="0xFF00FFFF"/>
+    <Rectangle width="1920" height="1080" color="0x171A1DFF"/>
     <!-- The player sits beneath the still. A Video node paints black while it
          buffers and again the moment it stops; with the still above it, the
          still covers both edges and the cut lands on a picture each way. -->
@@ -37,17 +37,13 @@
          the suppression flag set, and yields whenever real media plays. -->
     <Video id="keepAwake" visible="false" enableUI="false" disableScreenSaver="true" loop="true"/>
 
-    <!-- Chrome: the mark, the name, one status chip. Retires while a program is on glass. -->
+    <!-- Chrome: the mark and the name. Retires whole while a program is on
+         glass, so the brand never sits on top of the picture. -->
     <Group id="chrome">
-      <Poster uri="pkg:/images/icon.png" width="56" height="56" translation="[96,54]"/>
-      <Label text="Astrolabe" translation="[168,54]" width="500" height="56" vertAlign="center" color="0xF2F3F4FF">
-        <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="44"/>
-      </Label>
-      <Group id="statusChip" translation="[1424,44]">
-        <Poster id="statusPill" uri="pkg:/images/pill.9.png" width="400" height="76" blendColor="0x1D2126FF"/>
-        <Poster id="statusDot" uri="pkg:/images/dot.png" width="20" height="20" translation="[28,28]" blendColor="0x787B7EFF"/>
-        <Label id="statusLabel" text="Connecting…" translation="[64,0]" height="76" vertAlign="center" color="0xF2F3F4FF">
-          <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="40"/>
+      <Group id="brand">
+        <Poster uri="pkg:/images/icon.png" width="56" height="56" translation="[96,54]"/>
+        <Label text="Astrolabe" translation="[168,54]" width="500" height="56" vertAlign="center" color="0xF2F3F4FF">
+          <Font role="font" uri="pkg:/fonts/Inter-Medium.ttf" size="44"/>
         </Label>
       </Group>
     </Group>
@@ -137,11 +133,25 @@
       </Label>
     </Group>
 
+    <!-- Liveness HUD: its own top layer, above the program, so it can flash a
+         state change over a playing picture and retire on its own without the
+         brand chrome. Hidden whenever the screen is healthy. -->
+    <Group id="statusChip" translation="[1424,44]" visible="false">
+      <Poster id="statusPill" uri="pkg:/images/pill.9.png" width="400" height="76" blendColor="0x1D2126FF"/>
+      <Poster id="statusDot" uri="pkg:/images/dot.png" width="20" height="20" translation="[28,28]" blendColor="0x787B7EFF"/>
+      <Label id="statusLabel" text="Connecting…" translation="[64,0]" height="76" vertAlign="center" color="0xF2F3F4FF">
+        <Font role="font" uri="pkg:/fonts/Inter-Regular.ttf" size="40"/>
+      </Label>
+    </Group>
+
     <!-- The player is stopped a beat after it has been covered, off the cut. -->
     <Timer id="mediaStop" duration="4" repeat="false"/>
     <!-- The outgoing still is hidden a frame after the incoming one is shown,
          so the swap never leaves a tick with neither on the graphics plane. -->
     <Timer id="posterRetire" duration="0.2" repeat="false"/>
+    <!-- A liveness change announces itself, then the chip retires so it never
+         burns into the glass. Healthy shows nothing at all. -->
+    <Timer id="statusHud" duration="6" repeat="false"/>
 
     <!-- What is on glass right now breathes. It is the only motion. -->
     <Animation id="breathe" duration="2.4" repeat="true" easeFunction="inOutQuadratic">

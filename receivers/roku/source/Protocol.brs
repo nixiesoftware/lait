@@ -325,12 +325,19 @@ function AstrolabeEncodeAsset(bytes as object, asset as dynamic) as boolean
     if not AstrolabeExactFields(asset, ["id", "media_type", "encoded_len", "sha256", "width", "height"]) then return false
     if not AstrolabeIsHex(asset.id, 64) or not AstrolabeIsHex(asset.sha256, 64) then return false
     if not AstrolabeIsString(asset.media_type) then return false
-    if not AstrolabeIntegerIn(asset.encoded_len, 1, 16777216) then return false
     isImage = asset.media_type = "image_jpeg" or asset.media_type = "image_png" or asset.media_type = "image_webp"
     if isImage
+        ' A frame is downloaded whole and held, so its length is a hard buffer
+        ' bound.
+        if not AstrolabeIntegerIn(asset.encoded_len, 1, 16777216) then return false
         if not AstrolabeIntegerIn(asset.width, 1, 4096) or not AstrolabeIntegerIn(asset.height, 1, 2160) then return false
         if asset.width * asset.height > 8847360 then return false
     else if asset.media_type = "hls_manifest"
+        ' A manifest is streamed segment by segment, never downloaded whole, so
+        ' its length is the program's total size, not a buffer bound — a
+        ' whole-program stream is large by construction. Only a positive,
+        ' in-range integer is required.
+        if not AstrolabeIntegerIn(asset.encoded_len, 1, 2147483647) then return false
         if asset.width <> invalid or asset.height <> invalid then return false
     else
         return false

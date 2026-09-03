@@ -53,7 +53,7 @@ fn a_whole_file_reads_from_its_bytes_and_serves() {
     hub.install_whole("space/orbit", "film", &media.catalog, groups)
         .expect("what ingest read is what serve packages");
     let playlist = hub
-        .hls_media_playlist("space/orbit", "film", "film", "..")
+        .hls_media_playlist("space/orbit", "film", "film", "..", 0)
         .unwrap();
     assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
     assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
@@ -77,7 +77,7 @@ fn a_built_catalog_packages() {
     hub.install_whole("space/orbit", "film", &built, groups)
         .expect("a catalog derived at ingest packages at serve");
     assert!(hub
-        .hls_media_playlist("space/orbit", "film", "film", "..")
+        .hls_media_playlist("space/orbit", "film", "film", "..", 0)
         .unwrap()
         .contains("#EXT-X-ENDLIST"));
 }
@@ -110,7 +110,7 @@ fn the_groups_a_track_produces_package_into_real_segments() {
     hub.install_whole("space/orbit", "film", &demuxed_catalog(), groups)
         .expect("demuxed groups install through the real packagers");
     let playlist = hub
-        .hls_media_playlist("space/orbit", "film", "film", "..")
+        .hls_media_playlist("space/orbit", "film", "film", "..", 0)
         .unwrap();
     assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));
     assert!(hub.hls_segment("space/orbit", "film", "film", 0).is_ok());
@@ -214,7 +214,7 @@ fn a_stored_origin_plans_installs_and_serves_on_demand() {
 
     // The playlist lists every group and ends.
     let playlist = hub
-        .hls_media_playlist("space/orbit", &resource, &resource, "..")
+        .hls_media_playlist("space/orbit", &resource, &resource, "..", 0)
         .unwrap();
     assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
     assert!(playlist.trim_end().ends_with("#EXT-X-ENDLIST"));

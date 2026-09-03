@@ -4,13 +4,13 @@ lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crate
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-850 crates, under 43 distinct licence expressions.
+851 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 383 |
+| `MIT OR Apache-2.0` | 384 |
 | `MIT` | 149 |
 | `Apache-2.0 OR MIT` | 76 |
 | `MIT/Apache-2.0` | 40 |
@@ -522,6 +522,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | pkcs8 | 0.11.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | plain | 0.2.3 | `MIT/Apache-2.0` | <https://github.com/randomites/plain> |
 | plist | 1.9.0 | `MIT` | <https://github.com/ebarnard/rust-plist/> |
+| png | 0.17.16 | `MIT OR Apache-2.0` | <https://github.com/image-rs/image-png> |
 | png | 0.18.1 | `MIT OR Apache-2.0` | <https://github.com/image-rs/image-png> |
 | poly1305 | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | polycool | 0.4.0 | `MIT OR Apache-2.0` | <https://github.com/linebender/kurbo> |

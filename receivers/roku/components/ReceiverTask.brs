@@ -510,8 +510,10 @@ function AstrolabeStageProgram(program as object) as dynamic
             if entry = invalid then return invalid
             stage[item.scene.asset.id] = entry
         else if item.scene.kind = "media" and not stage.DoesExist(item.scene.manifest.id)
-            stagedBytes = stagedBytes + item.scene.manifest.encoded_len
-            if stagedBytes > 50331648 then return invalid
+            ' A media manifest is streamed by the player segment by segment, not
+            ' downloaded whole into memory, so its length is not staged bytes and
+            ' does not count against the download cap. A whole-program stream is
+            ' large by construction; capping it here is what refused it.
             entry = AstrolabeAuthorizedLive(item, program)
             if entry = invalid then return invalid
             stage[item.scene.manifest.id] = entry
@@ -605,6 +607,7 @@ sub AstrolabeRenderCurrent()
             uri: entry.uri,
             certificates: entry.certificates,
             nextFrame: nextFrame,
+            loopInPlace: (m.program.items.Count() = 1 and m.program.playback.cycle = "loop"),
             spokenSummary: item.spoken_summary,
             source: source,
             stale: stale
@@ -619,6 +622,13 @@ sub AstrolabeTickPlayback()
     staleNow = m.lastProgramDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
     if m.lastRenderedStale = invalid or staleNow <> m.lastRenderedStale then AstrolabeRenderCurrent()
     item = m.program.items[m.program.playback.current_index]
+    ' A single media item that loops is looped by the player in place. Advancing
+    ' the program here would swap the player's content and paint black at the
+    ' seam, so the tick clears any spurious finish and lets the stream run.
+    if item.scene.kind = "media" and m.program.items.Count() = 1 and m.program.playback.cycle = "loop"
+        if Left(m.top.command, 15) = "media_finished:" then m.top.command = ""
+        return
+    end if
     ' A clip that reached its own end moves the program on at once; the
     ' slot's duration is a ceiling, not a wait.
     finished = item.scene.kind = "media" and Left(m.top.command, 15) = "media_finished:"

@@ -4601,6 +4601,7 @@ name = "mediabox"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
+ "image",
  "mp4-atom",
  "png 0.17.16",
  "runtime",

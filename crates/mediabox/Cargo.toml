@@ -24,6 +24,14 @@ data-encoding = "2.6"
 # Decoding a rendered still (a PNG asset) back to pixels for the H.264 still
 # encoder. Pure Rust, already in the workspace graph via `image`.
 png = "0.17"
+# Decoding a stored image slide (JPEG, WebP, or PNG uploaded to a signage
+# program) to pixels for the same encoder, so an image is one part of the
+# single program stream rather than a surface the receiver has to switch to.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
 
 [features]
 testkit = []

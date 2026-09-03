@@ -81,6 +81,13 @@ pub struct DisplayCoordinator {
     compiler: ProgramCompiler,
     local_root: PathBuf,
     compiled: Mutex<BTreeMap<String, Arc<CompiledProgram>>>,
+    /// The composed program stream is expensive — it reads whole clips and
+    /// encodes stills — and the program is re-derived on every change poll. This
+    /// remembers, per program resource, the signature of the projection last
+    /// composed and the stream's duration, so an unchanged program is not
+    /// recomposed on every poll (which read whole clips repeatedly and could
+    /// outrun the poll's own deadline, so the stream never finished installing).
+    composed: Mutex<BTreeMap<String, (u64, u32)>>,
     assignment_changes: broadcast::Sender<()>,
     live: LiveMediaHub,
     live_tickets: Mutex<BTreeMap<String, LiveTicket>>,
@@ -135,6 +142,7 @@ impl DisplayCoordinator {
             compiler: ProgramCompiler::new(identifier_key)?,
             local_root,
             compiled: Mutex::new(BTreeMap::new()),
+            composed: Mutex::new(BTreeMap::new()),
             assignment_changes,
             live: LiveMediaHub::default(),
             live_tickets: Mutex::new(BTreeMap::new()),
@@ -446,6 +454,147 @@ impl DisplayCoordinator {
     /// Resolve, query, render, validate, and freeze the current assignment for
     /// one enrolled receiver. `now_unix_ms` is supplied by the lifecycle so
     /// expiry and the rendered time window share one clock reading.
+    /// The hub resource a device's whole-program stream lives under. Stable
+    /// per assignment, so re-composition overwrites in place.
+    fn program_resource(assignment: &AssignmentRecord) -> String {
+        format!("prog-{}", assignment.id.as_str())
+    }
+
+    /// Read a stored clip into a program part: its catalog and every group,
+    /// materialised through the content plane. Short signage clips only —
+    /// this reads the whole clip, which a film would not tolerate.
+    async fn clip_part(
+        &self,
+        home: &std::path::Path,
+        route: &ControlRoute,
+        resource: &str,
+    ) -> Result<(
+        runtime::plane::live::media::Catalog,
+        Vec<runtime::plane::live::media::ReceivedGroup>,
+    )> {
+        let total = match crate::control::content_call(
+            home,
+            &crate::control::content_request(
+                route.clone(),
+                crate::control::ContentCall::Stat {
+                    content: resource.to_string(),
+                },
+            ),
+        )
+        .await
+        {
+            Ok((crate::control::ContentReply::ContentStatus { plaintext_len, .. }, _)) => {
+                plaintext_len
+            }
+            Ok((reply, _)) => return Err(anyhow!("clip stat refused: {reply:?}")),
+            Err(error) => return Err(error).context("stat clip"),
+        };
+        let moov = self.fetch_moov(home, route, resource, total).await?;
+        let policy = mediabox::CatalogPolicy {
+            max_group_duration_ms: runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS,
+            target_latency_ms: runtime::plane::live::media::DEFAULT_MAX_LATENCY_MS,
+            jitter_hint_ms: 50,
+            rendition: resource.to_string(),
+        };
+        let plan = mediabox::StoredPlan::from_moov(&moov, &policy)
+            .map_err(|error| anyhow!("clip would not plan: {error}"))?;
+        let mut groups = Vec::new();
+        for sequence in 0..plan.group_count() {
+            let segment = plan
+                .plan(sequence)
+                .ok_or_else(|| anyhow!("clip segment plan is missing"))?;
+            let mut byteses = Vec::with_capacity(segment.ranges.len());
+            for (offset, size) in segment.ranges {
+                byteses.push(
+                    self.read_stored(home, route, resource, offset, u64::from(size))
+                        .await?,
+                );
+            }
+            let mut built = plan
+                .build(sequence, &byteses)
+                .map_err(|error| anyhow!("clip group {sequence} would not build: {error}"))?;
+            groups.append(&mut built);
+        }
+        Ok((plan.catalog.clone(), groups))
+    }
+
+    /// Compose the whole per-device program into one HLS stream the receiver
+    /// plays on a single player. `Ok(None)` means the program cannot be a
+    /// stream (a live source, a non-PNG frame, a read it could not make), and
+    /// the caller falls back to the per-item program that still works.
+    async fn compose_program_stream(
+        &self,
+        assignment: &AssignmentRecord,
+        projection: &DisplayProjection,
+        now_unix_ms: u64,
+    ) -> Result<Option<u32>> {
+        const DEFAULT_ITEM_MS: u32 = 10_000;
+        let resolved = self.router.resolve(&assignment.orbit)?;
+        let home = resolved.home.clone();
+        let content_route = ControlRoute::Orbit {
+            address: resolved.address.clone(),
+        };
+        let orbit = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
+        let program_resource = Self::program_resource(assignment);
+        let mut parts = Vec::new();
+        let mut total_ms: u32 = 0;
+        for item in &projection.program.items {
+            let duration = item.duration_ms.unwrap_or(DEFAULT_ITEM_MS).max(1);
+            total_ms = total_ms.saturating_add(duration);
+            match &item.scene {
+                RenderedScene::Frame(frame) => {
+                    // A rendered card is a PNG; a stored image slide resolves to
+                    // a frame in its own format (JPEG/WebP/PNG). Both decode to
+                    // pixels and encode as a still part, so either is one part
+                    // of the single stream rather than a surface switch.
+                    let part = match frame.media_type {
+                        FrameMediaType::Png => {
+                            self.live
+                                .still_part_png(&program_resource, &frame.bytes, duration)?
+                        }
+                        FrameMediaType::Jpeg | FrameMediaType::WebP => {
+                            self.live
+                                .still_part_image(&program_resource, &frame.bytes, duration)?
+                        }
+                    };
+                    parts.push(part);
+                }
+                RenderedScene::Media(media) => match &media.origin {
+                    world_interface::display::MediaOrigin::Stored(content) => {
+                        let resource = data_encoding::HEXLOWER.encode(content.as_bytes());
+                        parts.push(self.clip_part(&home, &content_route, &resource).await?);
+                    }
+                    // A live source has no finite bytes to lay into a VOD.
+                    world_interface::display::MediaOrigin::Live(_) => return Ok(None),
+                },
+                // Resolved to a Frame before compiling; if one is still here the
+                // program is not one this path can stream.
+                RenderedScene::StoredFrame(_) => return Ok(None),
+                RenderedScene::Blank(_) => {
+                    // A black card holds the slot so the stream stays continuous.
+                    let (width, height) = (1280u32, 720u32);
+                    let mut black = vec![0u8; (width * height * 4) as usize];
+                    for pixel in black.chunks_exact_mut(4) {
+                        pixel[3] = 255;
+                    }
+                    parts.push(self.live.still_part(
+                        &program_resource,
+                        &black,
+                        width,
+                        height,
+                        duration,
+                    )?);
+                }
+            }
+        }
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        self.live
+            .install_program(&orbit, &program_resource, parts, now_unix_ms)?;
+        Ok(Some(total_ms))
+    }
+
     pub async fn compile_for_device(
         &self,
         device: &DisplayDeviceId,
@@ -495,14 +644,88 @@ impl DisplayCoordinator {
             tier = ?capabilities.playback.tier,
             "compiling display program"
         );
-        let compiled = Arc::new(self.compiler.compile(
-            &assignment.id,
-            &assignment.program,
-            assignment.freshness,
-            projection,
-            alignment.as_ref(),
+        // A native-HLS receiver plays the whole program as one composed stream,
+        // so it never switches surfaces mid-program. If the program cannot be a
+        // single stream — a live source, an unusual frame, a read that failed —
+        // fall back to the per-item program, which still works.
+        let native_hls = matches!(
             capabilities.playback.tier,
-        )?);
+            PlaybackTier::NativeHls | PlaybackTier::NativeFull
+        );
+        let program_resource = Self::program_resource(&assignment);
+        let orbit_key = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
+        let signature = projection_signature(&projection);
+        let streamed = if native_hls {
+            // Recompose only when the rendered program actually changed, and the
+            // stream it produced is still installed. Composition reads whole
+            // clips and encodes stills — seconds of work — so redoing it on
+            // every change poll both wasted the work and risked outrunning the
+            // poll's deadline, aborting the install before it finished.
+            let reusable = self
+                .composed
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&program_resource).copied())
+                .filter(|(cached, _)| *cached == signature)
+                .filter(|_| {
+                    self.live
+                        .has_resource(&orbit_key, &program_resource, LiveTransport::Hls)
+                })
+                .map(|(_, total)| total);
+            if let Some(total) = reusable {
+                Some(total)
+            } else {
+                match self
+                    .compose_program_stream(&assignment, &projection, now_unix_ms)
+                    .await
+                {
+                    Ok(Some(total)) => {
+                        if let Ok(mut cache) = self.composed.lock() {
+                            cache.insert(program_resource.clone(), (signature, total));
+                        }
+                        Some(total)
+                    }
+                    Ok(None) => {
+                        if let Ok(mut cache) = self.composed.lock() {
+                            cache.remove(&program_resource);
+                        }
+                        None
+                    }
+                    Err(error) => {
+                        if let Ok(mut cache) = self.composed.lock() {
+                            cache.remove(&program_resource);
+                        }
+                        tracing::warn!(
+                            device = %device,
+                            error = %format_args!("{error:#}"),
+                            "program stream composition failed; serving the per-item program"
+                        );
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let compiled = Arc::new(if let Some(total_ms) = streamed {
+            self.compiler.compile_stream(
+                &assignment.id,
+                &assignment.program,
+                assignment.freshness.clone(),
+                &program_resource,
+                total_ms,
+                projection.program.refresh_after_ms,
+            )?
+        } else {
+            self.compiler.compile(
+                &assignment.id,
+                &assignment.program,
+                assignment.freshness,
+                projection,
+                alignment.as_ref(),
+                capabilities.playback.tier,
+            )?
+        });
         validate_receiver_fit(compiled.as_ref(), capabilities)?;
         self.compiled
             .lock()
@@ -1146,6 +1369,43 @@ fn playback_alignment(
         sampled_at_unix_ms,
         static_delay_ms: sync.static_delay_ms,
     }))
+}
+
+/// A fingerprint of a rendered program, so the composed stream is rebuilt only
+/// when the program a receiver would see actually changed. Frame bytes are
+/// hashed directly; a media item is named by its origin, never re-read here.
+fn projection_signature(projection: &DisplayProjection) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    projection.program.items.len().hash(&mut hasher);
+    for item in &projection.program.items {
+        item.duration_ms.hash(&mut hasher);
+        match &item.scene {
+            RenderedScene::Frame(frame) => {
+                0u8.hash(&mut hasher);
+                (frame.media_type as u8).hash(&mut hasher);
+                frame.width.hash(&mut hasher);
+                frame.height.hash(&mut hasher);
+                frame.bytes.hash(&mut hasher);
+            }
+            RenderedScene::Media(media) => {
+                1u8.hash(&mut hasher);
+                format!("{:?}", media.origin).hash(&mut hasher);
+            }
+            RenderedScene::StoredFrame(stored) => {
+                2u8.hash(&mut hasher);
+                stored.content.as_bytes().hash(&mut hasher);
+                (stored.media_type as u8).hash(&mut hasher);
+                stored.width.hash(&mut hasher);
+                stored.height.hash(&mut hasher);
+            }
+            RenderedScene::Blank(reason) => {
+                3u8.hash(&mut hasher);
+                format!("{reason:?}").hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn validate_assignment(assignment: &AssignmentRecord, now_unix_ms: u64) -> Result<()> {
