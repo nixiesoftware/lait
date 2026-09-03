@@ -4,7 +4,7 @@
  * a window of its own: managing yourself is a first-class view, not a popup.
  *
  * Everything here is a projection of facts other surfaces already own — the
- * claimed card, the friend code, the agent cards, the device set — gathered
+ * claimed card, the friend code, global agent identities, the device set — gathered
  * where "me" is the subject. Dispatch is the only write, and the dialogs are
  * the book's own, so a name edited here is the same edit the book makes.
  */
@@ -12,7 +12,7 @@ import { useState } from "react";
 
 import { actionKey, summonOwnedWindow, type Card, type ClientAction, type ClientView } from "./client";
 import { AddDialog, AgentBand, EditDialog, PictureDialog } from "./book";
-import { FacePlate, isAgentCard, presenceLabel } from "./kit";
+import { FacePlate, presenceLabel } from "./kit";
 import { IconBook, IconDevices } from "./icons";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
@@ -28,7 +28,7 @@ export function HubSurface({ view, dispatch, onBack }: {
   const [dialog, setDialog] = useState<HubDialog | null>(null);
   const [copied, setCopied] = useState(false);
   const mine = view.book?.cards.find((card) => card.selfClaim) ?? null;
-  const agents = view.book?.cards.filter(isAgentCard) ?? [];
+  const agents = view.agents ?? [];
   const code = view.correspondence?.myAddress ?? null;
   const sharing = view.inFlight.includes(actionKey.shareReach);
   const status = mine === null
@@ -78,11 +78,10 @@ export function HubSurface({ view, dispatch, onBack }: {
           </div>}
       </section>
 
-      {agents.length > 0 && <section className="hub-section">
-        <AgentBand agents={agents} onOpen={(card) => {
-          const agent = agents.find((row) => row.card === card);
-          if (agent !== undefined) setDialog({ kind: "edit", card: agent });
-        }} />
+      {view.agents !== null && <section className="hub-section">
+        <AgentBand agents={agents}
+          onCreate={() => void summonOwnedWindow("book")}
+          onOpen={() => void summonOwnedWindow("book")} />
       </section>}
 
       <section className="hub-section">

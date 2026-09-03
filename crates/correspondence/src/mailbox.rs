@@ -14,13 +14,14 @@
 //! the proven one as the author and may show the other as agreement or
 //! disagreement, but never treats the carrier's word as authority.
 //!
-//! # This is the local inbox, not yet the convergent one
+//! # This is the durable local inbox, not yet the convergent one
 //!
 //! A `Mailbox` holds what *this* device has collected. Converging it across a
 //! person's other devices — so a letter read on a laptop is gone from the phone —
 //! is the `message`/`thread`/`mailbox` Body work (CORR-8), the convergent store
-//! this is the front of. Kept in memory here, keyed by the carrier's deposit id so
-//! the same letter collected twice is one entry.
+//! this is the front of. Its durable projection lives beside the reach registry,
+//! keyed by the carrier's deposit id so the same letter collected twice — even
+//! across a restart — is one entry.
 
 use std::collections::BTreeMap;
 
@@ -42,6 +43,10 @@ pub struct Received {
     pub deposited_by: DeviceId,
     /// When the carrier observed the deposit.
     pub arrived_at: u64,
+    /// Exact durable encoding of the signed letter. Private because callers read
+    /// the verified `letter`; retaining it here makes projecting durable state
+    /// infallible and keeps re-encoding out of every save.
+    encoded: Vec<u8>,
 }
 
 impl Received {
@@ -62,9 +67,66 @@ pub struct Mailbox {
     received: BTreeMap<String, Received>,
 }
 
+/// What filing one carrier answer changed, and which deposits it proved safe
+/// to acknowledge after that changed state is durable.
+pub(crate) struct Ingested {
+    pub filed: usize,
+    pub acknowledge: Vec<String>,
+    pub collisions: Vec<String>,
+}
+
 impl Mailbox {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Restore the opened inbox from its bounded durable projection.
+    ///
+    /// Every letter is decoded and its signature re-verified. The disk envelope's
+    /// digest proves only that the bytes were written whole, not that a local file
+    /// was authored by a correspondent, so invalid material refuses the plane
+    /// instead of becoming a trusted transcript row.
+    pub(crate) fn restore(
+        held: std::collections::BTreeMap<String, addressbook::reach_store::Received>,
+    ) -> Result<Self, &'static str> {
+        let mut received = BTreeMap::new();
+        for (id, stored) in held {
+            let letter: Letter =
+                serde_json::from_slice(&stored.letter).map_err(|_| "decode opened letter")?;
+            if !letter.verifies() {
+                return Err("verify opened letter");
+            }
+            received.insert(
+                id.clone(),
+                Received {
+                    id,
+                    letter,
+                    deposited_by: stored.deposited_by,
+                    arrived_at: stored.arrived_at,
+                    encoded: stored.letter,
+                },
+            );
+        }
+        Ok(Self { received })
+    }
+
+    /// The bounded durable projection written with the reach state.
+    pub(crate) fn state(
+        &self,
+    ) -> std::collections::BTreeMap<String, addressbook::reach_store::Received> {
+        self.received
+            .iter()
+            .map(|(id, received)| {
+                (
+                    id.clone(),
+                    addressbook::reach_store::Received {
+                        letter: received.encoded.clone(),
+                        deposited_by: received.deposited_by.clone(),
+                        arrived_at: received.arrived_at,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Open and file everything in `waiting` that this device can read and trust.
@@ -79,12 +141,51 @@ impl Mailbox {
     /// it is a store of already-opened letters, and the one moment a key is needed
     /// is here, passing through.
     pub fn ingest(&mut self, seed: &[u8; 32], device: &DeviceId, waiting: &[Waiting]) -> usize {
+        self.ingest_for_ack(seed, device, waiting).filed
+    }
+
+    /// The collect path's richer filing result.
+    ///
+    /// An id is safe to acknowledge when its letter was opened and filed now,
+    /// or when that id was already in the durable mailbox and the redelivery
+    /// opens to the same canonical signed letter with the same carrier
+    /// provenance and arrival. Material that cannot be opened or verified, and
+    /// a reused id naming different material, is deliberately left at the
+    /// carrier: receipt is not evidence that this device holds a trustworthy
+    /// durable copy.
+    pub(crate) fn ingest_for_ack(
+        &mut self,
+        seed: &[u8; 32],
+        device: &DeviceId,
+        waiting: &[Waiting],
+    ) -> Ingested {
         let mut filed: usize = 0;
+        let mut acknowledge = std::collections::BTreeSet::new();
+        let mut collisions = std::collections::BTreeSet::new();
         for item in waiting {
-            if self.received.contains_key(&item.id) {
+            if let Some(stored) = self.received.get(&item.id) {
+                let same = Letter::open(seed, device, &item.sealed)
+                    .and_then(|letter| serde_json::to_vec(&letter).ok())
+                    .is_some_and(|encoded| {
+                        encoded == stored.encoded
+                            && item.deposited_by == stored.deposited_by
+                            && item.arrived_at == stored.arrived_at
+                    });
+                if same && !collisions.contains(&item.id) {
+                    acknowledge.insert(item.id.clone());
+                } else {
+                    // A carrier-issued id is not authority to overwrite or drop
+                    // different material. One collision poisons that id for the
+                    // whole answer, even if another row in it happened to match.
+                    acknowledge.remove(&item.id);
+                    collisions.insert(item.id.clone());
+                }
                 continue;
             }
             let Some(letter) = Letter::open(seed, device, &item.sealed) else {
+                continue;
+            };
+            let Ok(encoded) = serde_json::to_vec(&letter) else {
                 continue;
             };
             self.received.insert(
@@ -94,11 +195,19 @@ impl Mailbox {
                     letter,
                     deposited_by: item.deposited_by.clone(),
                     arrived_at: item.arrived_at,
+                    encoded,
                 },
             );
+            if !collisions.contains(&item.id) {
+                acknowledge.insert(item.id.clone());
+            }
             filed = filed.saturating_add(1);
         }
-        filed
+        Ingested {
+            filed,
+            acknowledge: acknowledge.into_iter().collect(),
+            collisions: collisions.into_iter().collect(),
+        }
     }
 
     /// Everything filed, oldest first by when it was written.
@@ -250,5 +359,41 @@ mod tests {
             !received.provenance_agrees(),
             "the disagreement is visible, not silently resolved to one or the other"
         );
+    }
+
+    #[test]
+    fn a_reused_deposit_id_for_different_material_is_not_safe_to_acknowledge() {
+        let bob_seed = [2u8; 32];
+        let bob = device_from_seed(&bob_seed);
+        let alice = device_from_seed(&[1u8; 32]);
+        let first = Letter::compose(
+            &[1u8; 32],
+            Content::Message {
+                body: "first".into(),
+            },
+            NOW,
+        );
+        let different = Letter::compose(
+            &[1u8; 32],
+            Content::Message {
+                body: "different".into(),
+            },
+            NOW + 1,
+        );
+        let mut mailbox = Mailbox::new();
+        assert_eq!(
+            mailbox.ingest(&bob_seed, &bob, &[waiting("same", &first, &alice, NOW)]),
+            1
+        );
+
+        let outcome =
+            mailbox.ingest_for_ack(&bob_seed, &bob, &[waiting("same", &different, &alice, NOW)]);
+        assert_eq!(outcome.filed, 0);
+        assert!(outcome.acknowledge.is_empty());
+        assert_eq!(outcome.collisions, vec!["same"]);
+        assert!(matches!(
+            &mailbox.letters()[0].letter.content,
+            Content::Message { body } if body == "first"
+        ));
     }
 }

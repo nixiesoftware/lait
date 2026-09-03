@@ -9,6 +9,7 @@ members = [
     "crates/mediabox",
     "crates/fabric",
     "crates/addressbook",
+    "crates/agent",
     "crates/comms",
     "crates/contact",
     "crates/correspondence",
@@ -132,6 +133,7 @@ install-layout = { path = "crates/install-layout" }
 # dependency edge.
 fabric = { path = "crates/fabric" }
 addressbook = { path = "crates/addressbook" }
+agent = { path = "crates/agent" }
 # The correspondence plane. Here because the daemon is where it belongs: the
 # same plane serves issue notifications, invitation delivery, agent messages and
 # a chat client, and every one of those is a caller rather than the owner.

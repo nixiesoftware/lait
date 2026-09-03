@@ -12,8 +12,8 @@
 //! one that matters: a letter landing while nobody was looking.
 
 use lait::control::{
-    ControlRoute, InterfaceView, MarkerView, OriginView, OwnDeviceView, ReachView, Request,
-    Response, SpaceFanout,
+    ControlRoute, InterfaceView, MarkerView, OriginView, OwnDeviceView, ReachAgentEvidenceView,
+    ReachView, Request, Response, SpaceFanout,
 };
 
 use crate::client::{Client, ClientError, ClientResult};
@@ -180,16 +180,7 @@ fn from_view(view: ReachView) -> Correspondence {
     };
     let contact = |id: String, name: String, added: bool| {
         let devices = proven_devices(&id);
-        Contact {
-            id,
-            name,
-            devices,
-            added,
-            is_agent: false,
-            parent_id: None,
-            parent_name: None,
-            unread: 0,
-        }
+        classified_contact(id, name, added, devices, &view.agents)
     };
 
     // You are not a contact of yourself: the roster is who can be written
@@ -248,5 +239,64 @@ fn from_view(view: ReachView) -> Correspondence {
             .collect(),
         active_tab: open_tabs.first().cloned(),
         open_tabs,
+    }
+}
+
+fn classified_contact(
+    id: String,
+    fallback_name: String,
+    added: bool,
+    devices: Vec<String>,
+    agents: &[ReachAgentEvidenceView],
+) -> Contact {
+    let evidence = agents.iter().find(|evidence| evidence.profile == id);
+    Contact {
+        name: evidence
+            .map(|evidence| evidence.name.clone())
+            .unwrap_or(fallback_name),
+        is_agent: evidence.is_some(),
+        parent_id: evidence.map(|evidence| evidence.owner.clone()),
+        parent_name: evidence.and_then(|evidence| evidence.owner_name.clone()),
+        id,
+        devices,
+        added,
+        unread: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_verified_registry_evidence_marks_a_correspondent_as_agent() {
+        let evidence = vec![ReachAgentEvidenceView {
+            profile: "prf_ADAM".into(),
+            name: "Adam".into(),
+            owner: "prf_OWNER".into(),
+            owner_name: Some("Omar".into()),
+        }];
+        let adam = classified_contact(
+            "prf_ADAM".into(),
+            "unlabelled".into(),
+            true,
+            Vec::new(),
+            &evidence,
+        );
+        assert!(adam.is_agent);
+        assert_eq!(adam.name, "Adam");
+        assert_eq!(adam.parent_id.as_deref(), Some("prf_OWNER"));
+        assert_eq!(adam.parent_name.as_deref(), Some("Omar"));
+
+        let ordinary = classified_contact(
+            "prf_FRIEND".into(),
+            "Ada".into(),
+            true,
+            Vec::new(),
+            &evidence,
+        );
+        assert!(!ordinary.is_agent);
+        assert_eq!(ordinary.name, "Ada");
+        assert_eq!(ordinary.parent_id, None);
     }
 }

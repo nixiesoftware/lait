@@ -54,6 +54,8 @@ pub fn is_read(req: &Request) -> bool {
         | Request::HostWorldUpdateStatus { .. }
         | Request::HostContext
         | Request::Hello { .. }
+        | Request::AgentList
+        | Request::AgentShow { .. }
         // The view alone. Sharing publishes and appends to a log; learning
         // files a correspondent; sending and inviting deposit; collecting
         // drains a mailbox. Only one of the six is a read.
@@ -73,7 +75,11 @@ pub fn is_read(req: &Request) -> bool {
         // than this allowlist could make on its own.
         Request::DisplayPresent { .. } => true,
 
-        Request::AgentAdd { .. }
+        Request::AgentCreate { .. }
+        | Request::AgentSetLifecycle { .. }
+        | Request::AgentInventoryMutate { .. }
+        | Request::AgentAdd { .. }
+        | Request::AgentSponsor { .. }
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
         | Request::DisplayRendezvousMint { .. }
@@ -84,7 +90,6 @@ pub fn is_read(req: &Request) -> bool {
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
         | Request::DisplayIdentifierAdmitPassphrase { .. }
-        | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
@@ -277,7 +282,6 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::ReachLearn { .. }
         | Request::ReachView
         | Request::ReachResolve { .. }
-        | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondBlock { .. }
         | Request::CorrespondInvite { .. }
@@ -333,7 +337,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         // and therefore needs a Space to read.
         | Request::WorldsActive
         | Request::AgentAdd { .. }
-        | Request::AgentProvision { .. }
+        | Request::AgentSponsor { .. }
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceInvite
@@ -357,6 +361,20 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::Find { .. }
         | Request::Subscribe { .. }
         | Request::Status
+        // Agent inventory and management are identity-owner capabilities, not
+        // World tools. Astrolabe reaches them over the native daemon control
+        // channel. Admitting them here would let any credentialled hosted page
+        // borrow the head's primary identity and silently act as the owner.
+        | Request::AgentCreate { .. }
+        | Request::AgentList
+        | Request::AgentShow { .. }
+        | Request::AgentSetLifecycle { .. }
+        | Request::AgentInventoryMutate { .. }
+        // A hosted World must not author ordinary owner correspondence. An
+        // owner message to an owned agent is also executable Console input,
+        // so this is an execution-authority boundary rather than just chat UI.
+        // Native Astrolabe sends over the daemon control channel instead.
+        | Request::CorrespondSend { .. }
         // Orbit-routed, not host-routed, for the same reason `WorldsActive` is:
         // it reads one Space's own store and therefore needs a Space to read.
         // A daemon-scoped total across every Orbit on the machine would be a
@@ -397,6 +415,41 @@ mod tests {
         // that could send it would be able to stop the server serving it.
         assert!(!is_host_plane(&Request::Stop));
         assert!(!is_host_plane(&Request::Status));
+    }
+
+    #[test]
+    fn a_hosted_world_cannot_borrow_owner_agent_authority() {
+        assert!(!is_host_plane(&Request::AgentCreate {
+            name: "Adam".into(),
+            introduction: "virtual assistant".into(),
+        }));
+        assert!(!is_host_plane(&Request::AgentList));
+        assert!(!is_host_plane(&Request::AgentShow {
+            agent: "agent".into(),
+            audience: crate::control::AgentInventoryAudience::Public,
+        }));
+        assert!(!is_host_plane(&Request::AgentSetLifecycle {
+            agent: "agent".into(),
+            expected: crate::control::AgentStateRevision {
+                record: 0,
+                inventory: 0,
+            },
+            lifecycle: crate::control::AgentLifecycleSetting::Suspended,
+        }));
+        assert!(!is_host_plane(&Request::AgentInventoryMutate {
+            agent: "agent".into(),
+            expected: crate::control::AgentStateRevision {
+                record: 0,
+                inventory: 0,
+            },
+            mutation: crate::control::AgentInventoryMutationSetting::SetDefaultVisibility {
+                visibility: crate::control::AgentInventoryVisibility::Private,
+            },
+        }));
+        assert!(!is_host_plane(&Request::CorrespondSend {
+            to: "owned-agent".into(),
+            body: "do something".into(),
+        }));
     }
 
     #[test]

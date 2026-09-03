@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { dayLabel, timeLabel, transcriptItems, type TranscriptItem } from "./chat";
+import { agentMessageClass, dayLabel, timeLabel, transcriptItems, type TranscriptItem } from "./chat";
 import type { ChatMessage } from "./client";
 
 const at = (iso: string): number => Math.floor(new Date(iso).getTime() / 1000);
@@ -38,5 +38,12 @@ describe("the transcript's shape", () => {
   it("tells time the way a chat does", () => {
     expect(timeLabel(new Date("2026-08-19T00:05:00"))).toBe("12:05 AM");
     expect(timeLabel(new Date("2026-08-19T13:07:00"))).toBe("1:07 PM");
+  });
+
+  it("styles ordinary messages as commands and results only for a verified agent contact", () => {
+    expect(agentMessageClass(true, true)).toBe("agent-command");
+    expect(agentMessageClass(true, false)).toBe("agent-result");
+    expect(agentMessageClass(false, true)).toBe("");
+    expect(agentMessageClass(false, false)).toBe("");
   });
 });

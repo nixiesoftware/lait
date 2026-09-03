@@ -408,6 +408,42 @@ export type Staleness =
   | { kind: "neverLoaded" }
   | { kind: "signalled"; reason: string };
 
+/** A globally stable agent identity owned by this profile. */
+export interface AgentSummary {
+  profile: string;
+  owner: string;
+  name: string;
+  introduction: string;
+  lifecycle: string;
+}
+
+/** One public or owner-visible native primitive in an agent's inventory. */
+export interface AgentPrimitive {
+  id: string;
+  primitive: string;
+  label: string;
+  summary: string;
+  standing: string | null;
+  operationalStanding: string | null;
+  visibility: string | null;
+  editable: boolean;
+}
+
+/** The authoritative profile and inventory projection for one agent. */
+export interface Agent {
+  profile: string;
+  owner: string;
+  name: string;
+  introduction: string;
+  lifecycle: string;
+  /** The only fact from which the surface may offer management actions. */
+  canManage: boolean;
+  recordRevision: number;
+  inventoryRevision: number;
+  inventoryVisibility: string;
+  primitives: AgentPrimitive[];
+}
+
 /** The portion of the core's ClientView consumed by the primary window. */
 export interface ClientView {
   loading: boolean;
@@ -424,6 +460,10 @@ export interface ClientView {
   book: Book | null;
   mcp: McpBinding | null;
   correspondence: CorrespondenceFacts | null;
+  /** null means unread; [] means authoritatively no owned agents. */
+  agents: AgentSummary[] | null;
+  /** The agent profile most recently read, if any. */
+  agent: Agent | null;
   /** null until the profile has been read once — not a profile with one device. */
   profile: ProfileFacts | null;
   presentation: PresentationFacts | null;
@@ -481,6 +521,10 @@ export type ClientAction =
   | { type: "startDevice"; id: string } | { type: "stopDevice"; id: string } | { type: "restartDevice"; id: string } | { type: "forceStopDevice"; id: string }
   | { type: "stopAllOwned" } | { type: "removeDevice"; id: string; deleteData: boolean } | { type: "readSpace"; orbit: string }
   | { type: "startHead" } | { type: "stopHead"; id: string } | { type: "forgetOrbit"; space: string }
+  | { type: "createAgent"; name: string; introduction: string }
+  | { type: "readAgent"; agent: string }
+  | { type: "setAgentLifecycle"; agent: string; recordRevision: number; inventoryRevision: number; lifecycle: string }
+  | { type: "setAgentVisibility"; agent: string; recordRevision: number; inventoryRevision: number; visibility: string }
   | { type: "bookPut"; card: string | null; name: string; note: string | null } | { type: "bookDelete"; card: string }
   | { type: "bookSetPicture"; card: string; path: string | null } | { type: "bookMerge"; from: string; into: string }
   | { type: "bookClaimSelf"; card: string } | { type: "bookLink"; card: string; handle: string } | { type: "bookUnlink"; card: string; handle: string }
@@ -527,6 +571,10 @@ export const actionKey = {
   startHead: "head.start",
   stopHead: (id: string) => `head.stop:${id}`,
   forgetOrbit: (space: string) => `orbit.forget:${space}`,
+  createAgent: "agent.create",
+  readAgent: (agent: string) => `agent.read:${agent}`,
+  setAgentLifecycle: (agent: string) => `agent.lifecycle:${agent}`,
+  setAgentVisibility: (agent: string) => `agent.visibility:${agent}`,
   bookPut: (card: string | null) => card === null ? "book.put" : `book.put:${card}`,
   bookDelete: (card: string) => `book.delete:${card}`,
   bookSetPicture: (card: string) => `book.picture:${card}`,
@@ -600,6 +648,10 @@ export function keyFor(action: ClientAction): string {
     case "startHead": return actionKey.startHead;
     case "stopHead": return actionKey.stopHead(action.id);
     case "forgetOrbit": return actionKey.forgetOrbit(action.space);
+    case "createAgent": return actionKey.createAgent;
+    case "readAgent": return actionKey.readAgent(action.agent);
+    case "setAgentLifecycle": return actionKey.setAgentLifecycle(action.agent);
+    case "setAgentVisibility": return actionKey.setAgentVisibility(action.agent);
     case "bookPut": return actionKey.bookPut(action.card);
     case "bookDelete": return actionKey.bookDelete(action.card);
     case "bookSetPicture": return actionKey.bookSetPicture(action.card);
@@ -813,6 +865,8 @@ export const loadingClientView: ClientView = {
   book: null,
   mcp: null,
   correspondence: null,
+  agents: null,
+  agent: null,
   profile: null,
   presentation: null,
   notices: [],
@@ -1043,6 +1097,71 @@ export function createFixtureTransport(initial = fixtureClientView): ClientTrans
               : conversation),
           })));
           break;
+        case "readAgent":
+          complete(key, (current) => ({
+            ...current,
+            agent: current.agents?.some((agent) => agent.profile === action.agent)
+              ? fixtureAgent(action.agent)
+              : null,
+          }));
+          break;
+        case "createAgent":
+          complete(key, (current) => {
+            const profile = `prf_${action.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
+            const summary: AgentSummary = {
+              profile,
+              owner: current.profile?.profile ?? "prf_fixture",
+              name: action.name.trim(),
+              introduction: action.introduction.trim(),
+              lifecycle: "active",
+            };
+            const agent = { ...fixtureAgent(profile), ...summary };
+            return {
+              ...current,
+              agents: [...(current.agents ?? []).filter((item) => item.profile !== profile), summary],
+              agent,
+            };
+          });
+          break;
+        case "setAgentLifecycle":
+          complete(key, (current) => current.agent?.profile !== action.agent
+            ? current
+            : action.recordRevision !== current.agent.recordRevision
+              || action.inventoryRevision !== current.agent.inventoryRevision
+              ? { ...current, failures: [{
+                  what: `Change ${current.agent.name}'s lifecycle`,
+                  error: "Stale agent revision. Read the agent again before changing it.",
+                  retryable: true,
+                  key,
+                }, ...current.failures] }
+              : {
+                  ...current,
+                  agent: { ...current.agent, lifecycle: action.lifecycle, recordRevision: current.agent.recordRevision + 1 },
+                  agents: current.agents?.map((agent) => agent.profile === action.agent
+                    ? { ...agent, lifecycle: action.lifecycle }
+                    : agent) ?? null,
+                });
+          break;
+        case "setAgentVisibility":
+          complete(key, (current) => current.agent?.profile !== action.agent
+            ? current
+            : action.recordRevision !== current.agent.recordRevision
+              || action.inventoryRevision !== current.agent.inventoryRevision
+              ? { ...current, failures: [{
+                  what: `Change ${current.agent.name}'s inventory visibility`,
+                  error: "Stale agent revision. Read the agent again before changing it.",
+                  retryable: true,
+                  key,
+                }, ...current.failures] }
+              : {
+                  ...current,
+                  agent: {
+                    ...current.agent,
+                    inventoryVisibility: action.visibility,
+                    inventoryRevision: current.agent.inventoryRevision + 1,
+                  },
+                });
+          break;
         case "acceptContact":
           complete(key, (current) => withCorrespondence(current, (facts) => ({
             ...facts,
@@ -1136,6 +1255,26 @@ function createUnavailableTransport(): ClientTransport {
     current: async () => unavailable,
     watch: () => () => undefined,
     dispatch: async () => unavailable,
+  };
+}
+
+function fixtureAgent(profile: string): Agent {
+  return {
+    profile,
+    owner: "prf_fixture",
+    name: "Adam",
+    introduction: "Virtual assistant for Security DVR Inc.",
+    lifecycle: "active",
+    canManage: true,
+    recordRevision: 1,
+    inventoryRevision: 1,
+    inventoryVisibility: "public",
+    primitives: [
+      { id: "identity", primitive: "lait.identity", label: "Identity", summary: "Independent profile and device custody.", standing: "ready", operationalStanding: null, visibility: "public", editable: false },
+      { id: "correspondence", primitive: "lait.correspondence", label: "Correspondence", summary: "Private signed conversations through the Address Book.", standing: "ready", operationalStanding: null, visibility: "public", editable: false },
+      { id: "console", primitive: "lait.console", label: "Console", summary: "One command at a time through owner correspondence.", standing: "ready", operationalStanding: "ready", visibility: "public", editable: false },
+      { id: "memory", primitive: "lait.memory", label: "Memory", summary: "Durable agent-owned memory.", standing: "unavailable", operationalStanding: null, visibility: "public", editable: false },
+    ],
   };
 }
 
@@ -1259,6 +1398,14 @@ export const fixtureClientView: ClientView = {
     }],
   },
   mcp: null,
+  agents: [{
+    profile: "prf_adam",
+    owner: "prf_fixture",
+    name: "Adam",
+    introduction: "Virtual assistant for Security DVR Inc.",
+    lifecycle: "active",
+  }],
+  agent: null,
   correspondence: {
     myDevice: "dev_this",
     myReach: null,

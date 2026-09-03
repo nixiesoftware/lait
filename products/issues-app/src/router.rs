@@ -791,6 +791,9 @@ impl<'a> IssueRouter<'a> {
             SessionFailure::Rejected(Rejection::LimitExceeded) => {
                 Response::err("request exceeds a limit")
             }
+            SessionFailure::ResourceLimit => {
+                Response::err("operation exceeded a locally enforced resource limit")
+            }
             SessionFailure::Conflict(SessionConflict::AuthorityChanged) => {
                 Response::retry("membership changed — retry")
             }

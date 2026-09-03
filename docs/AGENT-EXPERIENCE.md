@@ -1,35 +1,73 @@
 # Agent Experience — status and design
 
-lait treats an agent as a **member whose identity is sponsored** — not a separate
-actor class. There is no agent-specific vocabulary: grants, roles, removal,
-attribution, and space selection are the *same* member machinery for humans and
-agents. This document records what has shipped. Plans that govern further
-work live as Specs in the tracker, not in `docs/plans/`.
+Lait treats an agent as a first-class Reach identity with its own profile,
+address, mailbox, signed owner bond, inventory, lifecycle, and identity home.
+It exists outside every World. When an agent enters a Space it uses the same
+actor, grant, role, attribution, and removal machinery as any other member;
+the Space does not create or own the identity. This document records what has
+shipped. Plans that govern further work live as Specs in the tracker, not in
+`docs/plans/`.
+
+## Identity-local Console
+
+An active agent can receive owner-authored command text through its ordinary
+Address Book conversation. Lait files the signed correspondence first, binds it
+to a private Runtime Run, executes it as that agent, and sends the bounded
+result back to the same conversation. A redelivered letter observes the same
+operation; an effect that crossed dispatch without a durable outcome becomes
+`OutcomeUnknown` and is never guessed safe to replay.
+
+The production backend is opt-in and fail-closed. Configure all three required
+values before starting the daemon:
+
+```text
+LAIT_AGENT_OCI_ENGINE=/absolute/path/to/podman
+LAIT_AGENT_OCI_IMAGE=registry.example/agent@sha256:<64 lowercase hex digits>
+LAIT_AGENT_OCI_CLIENT_HOME=/absolute/path/to/an/empty-daemon-owned-home
+```
+
+`LAIT_AGENT_OCI_XDG_RUNTIME_DIR` is optional and, when set, must also be an
+absolute daemon-controlled path outside every agent home. The current ready
+posture is native rootless Podman on Unix. Remote Podman services, including a
+Podman Machine connection, report unavailable until Lait can attest the
+server-side policy; a missing or unhealthy engine never authorizes host
+execution. The image must already exist locally because Console uses
+`--pull=never`.
+
+The container receives only a dedicated persistent home and a fresh bounded
+scratch area. It receives no Lait keys, inherited environment, engine socket,
+network, capabilities, or host identity directory. Execution has explicit
+CPU, memory, wall-time, process, file, descriptor, and output limits. Suspending
+or retiring the agent revokes new Console work immediately. The supervisor also
+bounds host-wide exposure to four concurrent Console executions and one per
+agent, with the permit held through backend cleanup. A saturated gate becomes a
+durable failed Attempt; it never creates an unbounded wait queue.
+
+Correspondence delivery follows the same uncertainty rule as execution. The
+reply body and terminal result are committed together, then the outbound send
+is claimed before deposit. If the transport returns an opaque error, the claim
+becomes `OutcomeUnknown` immediately and is compactable; Lait does not retry a
+message that might already have reached the owner.
 
 ## Sponsoring an agent
 
-Two steps, and only the first is a decision.
+Creation and sponsorship are separate. `agent_create` creates one global Reach
+identity and signed owner bond outside every World. When that agent first acts
+in a Space, it self-signs its actor inception; this proves key ownership but
+grants nothing. The owner then sends
+`{"cmd":"agent_sponsor","agent":"<ProfileId>"}` to the Space. The Space resolves
+the verified canonical device and authors ordinary `AgentAdd` authority. The
+agent seed stays in its identity home and is never copied into a Space.
 
-**1 — sponsor the identity.** The usual path: the agent's first `whoami`
-asks the person (Astrolabe notifies; Approve runs `agent_provision`).
-Or, from the app: **Settings → Members -> Sponsor an
-agent**, name it, done. That sends `{"cmd":"agent_provision","name":"<name>"}`
-to `POST /api/spaces/{id}/rpc`. It mints the agent's seed under this store,
-self-incepts it into the shared actor plane (the co-located analogue of a
-joiner's inception arriving over Contact — no round trip, because the agent is
-on this machine), sponsors it with the default content grant, and grants it the
-contributor role's scoped capabilities. Idempotent: re-provisioning a known,
-sponsored agent returns its actor.
-
-**2 — point the agent's client at it.** Astrolabe's Library authors the
+**Point an agent client at a Space.** Astrolabe's Library authors the
 binding from the selected World (Preview / Write). Or `POST /api/host/rpc`
 with `{"cmd":"host_install_mcp","client":"claude","name":"lait-issues","dir":"<project>","world":"issues"}`
 merges a portable entry into that client's `mcpServers`, preserving any
 others. The written shape is `{"command":"lait","args":["mcp"]}` — `lait`
 off PATH, no captured home, no absolute binary. Naming the client also
-names the agent identity — `claude`, `cursor`, `windsurf` — so the entry
-carries `LAIT_AGENT=<name>` and the agent's work signs as itself.
-`client: "generic"` derives no name, so pass `agent` explicitly;
+names the client integration — `claude`, `cursor`, `windsurf`. When an agent
+acts, the entry carries `LAIT_AGENT=<ProfileId>` so selection cannot be
+retargeted by renaming a local directory or card. Pass `agent` explicitly;
 `no_agent: true` declines one and leaves the work signed by the human.
 `print: true` returns the would-be file contents instead of writing them.
 `$LAIT_WORLD` pins the session to one World mount; omit it only while this
@@ -43,9 +81,9 @@ the process. `lait mcp` is the stdio adapter; traffic is editor →
 `lait mcp` → daemon → WorldHost. `lait mcp` does not generate tools from
 the wire protocol, and Astrolabe is not an MCP interchange.
 
-The order does not matter. Installing the config first is fine; the agent's
+Installing the config first is fine; the agent's
 first `whoami` files a host-plane sponsorship ask and returns `wait_heads`.
-Astrolabe notifies the person; Approve is `AgentProvision`, which moves those
+Astrolabe notifies the person; Approve is `AgentSponsor`, which moves those
 heads. The agent **Watches** (`wait` with the last heads) — Exec Watch's
 comparison, not a `whoami` poll. `Unchanged` means still waiting; `granted`
 is the wake, consumed once. A reconnect that missed the wake still sees it
@@ -166,14 +204,13 @@ are signing clients of it.** This is the seamless bar, and it is live:
 - **The `act_as` selector.** The control envelope (`control::ClientRequest`) is a
   `Request` plus an optional `act_as`, flattened and skip-when-`None`, so a
   request with no selector is byte-identical to the bare request — the wire stays
-  backward-compatible. An MCP head picks the identity with `LAIT_AGENT=<name>`,
+  backward-compatible. An MCP head picks the identity with `LAIT_AGENT=<ProfileId>`,
   which `host_install_mcp` writes into the client config for you; the daemon
   signs as that local agent.
-- **One-step provisioning.** `agent_provision` (Astrolabe Approve, or
-  Settings → Members -> Sponsor an
-  agent) mints the agent's seed under the home, **self-incepts it into the shared
-  store's actor plane** (no Contact round — the co-located analogue of a joiner's
-  inception arriving over the wire), sponsors it with content authority, **and**
+- **Global identity, explicit sponsorship.** `agent_create` establishes an
+  independently addressable ProfileId and identity home. The agent self-incepts
+  under that same device in each Space it reaches; `agent_sponsor` then sponsors
+  the known actor with content authority **and**
   grants it the contributor role's scoped capabilities (`space.contributor` +
   `space.issue.read`) so it can actually read the catalog and write. The ACL
   write grant is content authority; the scoped capabilities are the separate

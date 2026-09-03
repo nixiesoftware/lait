@@ -72,7 +72,7 @@ fn the_load_bearing_placements_are_what_they_claim() {
         "key_rotate",
         "invite",
         "member_add",
-        "agent_provision",
+        "agent_sponsor",
     ] {
         assert_eq!(
             disposition(daemon_only),

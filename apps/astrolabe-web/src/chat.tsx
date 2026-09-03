@@ -22,6 +22,11 @@ import { Badge, FacePlate } from "./kit";
 
 type Dispatch = (action: ClientAction) => Promise<void>;
 
+/** Styling only: command/result semantics remain ordinary signed Messages. */
+export function agentMessageClass(agent: boolean, mine: boolean): string {
+  return agent ? (mine ? "agent-command" : "agent-result") : "";
+}
+
 /**
  * A run of same-sender messages is broken when the sender flips, the day
  * turns, or this much quiet passes — the gap that earns a divider.
@@ -157,6 +162,9 @@ function ChatBody({ view, facts, active, dispatch }: {
   }
   const conversation = facts.conversations.find((row) => row.peerId === active);
   if (conversation === undefined) return <div className="chat-empty" />;
+  // This is verified Reach/registry evidence carried by the daemon. A group
+  // name or card label never turns an ordinary correspondent into an agent.
+  const agent = isAgent(facts, active);
 
   const draft = drafts.current.get(active) ?? "";
   const sending = view.inFlight.includes(actionKey.sendMessage(active));
@@ -184,7 +192,7 @@ function ChatBody({ view, facts, active, dispatch }: {
         onClick={() => void dispatch({ type: "blockSender", person: active })}>Block</button>
     </div>
     {showReach && <ReachPanel view={view} dispatch={dispatch} />}
-    <Transcript conversation={conversation} view={view} dispatch={dispatch} />
+    <Transcript conversation={conversation} agent={agent} view={view} dispatch={dispatch} />
     {carrying === active && <InvitationComposer
       to={active}
       link={invites.current.get(active) ?? ""}
@@ -208,7 +216,7 @@ function ChatBody({ view, facts, active, dispatch }: {
       >✉</button>
       <span className="tip" title="Emoji are not available yet">
         <button className="rail-button" aria-label="Emoji (not available yet)" disabled>🙂</button></span>
-      <textarea className="chat-input" placeholder="Message" rows={1} value={draft}
+      <textarea className="chat-input" placeholder={agent ? `Ask ${conversation.peerName} to…` : "Message"} rows={1} value={draft}
         onChange={(event) => { drafts.current.set(active, event.target.value); bump((n) => n + 1); }}
         onKeyDown={(event) => {
           // Enter sends; Shift+Enter is a newline.
@@ -223,8 +231,9 @@ function ChatBody({ view, facts, active, dispatch }: {
 }
 
 /** The messages, grouped by sender and parted by day and long quiet. */
-function Transcript({ conversation, view, dispatch }: {
+function Transcript({ conversation, agent, view, dispatch }: {
   conversation: Conversation;
+  agent: boolean;
   view: ClientView;
   dispatch: Dispatch;
 }) {
@@ -237,7 +246,8 @@ function Transcript({ conversation, view, dispatch }: {
       if (item.kind === "day") return <div className="chat-day" key={index}><span>{item.label}</span></div>;
       if (item.kind === "gap") return <hr className="chat-gap" key={index} />;
       return <MessageRow key={index} message={item.message} peerName={conversation.peerName}
-        groupStarts={item.groupStarts} groupEnds={item.groupEnds} view={view} dispatch={dispatch} />;
+        groupStarts={item.groupStarts} groupEnds={item.groupEnds} agent={agent}
+        view={view} dispatch={dispatch} />;
     })}
   </div>;
 }
@@ -247,14 +257,15 @@ function Transcript({ conversation, view, dispatch }: {
  * with the sender's name+time above the first of a group and their face below
  * the last.
  */
-function MessageRow({ message, peerName, groupStarts, groupEnds, view, dispatch }: {
+function MessageRow({ message, peerName, groupStarts, groupEnds, agent, view, dispatch }: {
   message: ChatMessage; peerName: string; groupStarts: boolean; groupEnds: boolean;
+  agent: boolean;
   view: ClientView; dispatch: Dispatch;
 }) {
   const at = atOf(message);
   if (message.mine) {
     return <div className="chat-row mine" data-group-ends={groupEnds || undefined}>
-      <MessageComponent message={message} view={view} dispatch={dispatch} />
+      <MessageComponent message={message} agent={agent} view={view} dispatch={dispatch} />
       {groupEnds && <small className="chat-time">{timeLabel(at)}</small>}
     </div>;
   }
@@ -262,7 +273,7 @@ function MessageRow({ message, peerName, groupStarts, groupEnds, view, dispatch 
     <span className="chat-gutter">{groupEnds && <FacePlate picture={null} name={peerName} size={28} />}</span>
     <div className="chat-column">
       {groupStarts && <span className="chat-byline"><strong>{peerName}</strong><small>{timeLabel(at)}</small></span>}
-      <MessageComponent message={message} view={view} dispatch={dispatch} />
+      <MessageComponent message={message} agent={agent} view={view} dispatch={dispatch} />
     </div>
   </div>;
 }
@@ -271,19 +282,22 @@ function MessageRow({ message, peerName, groupStarts, groupEnds, view, dispatch 
  * The seam where a message kind chooses its component. A new kind adds a case
  * here and its own widget; nothing else in the chat changes.
  */
-function MessageComponent({ message, view, dispatch }: {
+function MessageComponent({ message, agent, view, dispatch }: {
   message: ChatMessage;
+  agent: boolean;
   view: ClientView;
   dispatch: Dispatch;
 }) {
   switch (message.kind) {
     case "invitation": return <InvitationCard message={message} view={view} dispatch={dispatch} />;
-    default: return <TextBubble message={message} />;
+    default: return <TextBubble message={message} agent={agent} />;
   }
 }
 
-function TextBubble({ message }: { message: ChatMessage }) {
-  return <div className={message.mine ? "chat-bubble mine" : "chat-bubble"}>
+function TextBubble({ message, agent }: { message: ChatMessage; agent: boolean }) {
+  const kind = agentMessageClass(agent, message.mine);
+  return <div className={`${message.mine ? "chat-bubble mine" : "chat-bubble"} ${kind}`.trim()}>
+    {agent && <small className="agent-message-kind">{message.mine ? "Command" : "Agent reply"}</small>}
     <span>{message.body ?? ""}</span>
     {!message.mine && !message.provenanceAgrees
       && <small className="provenance-note">delivered by a different device</small>}

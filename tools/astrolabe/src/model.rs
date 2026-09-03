@@ -193,6 +193,10 @@ pub struct App {
     /// This identity's correspondence, once read. `None` before the first read —
     /// loading, not an empty mailbox.
     correspondence: Option<Correspondence>,
+    /// Public summaries of this identity's global agents, and the one
+    /// inventory profile most recently opened.
+    agents: Option<Vec<lait::control::AgentListItemView>>,
+    agent: Option<lait::control::AgentView>,
     /// The profile this device belongs to and the devices that hold it.
     /// `None` before the first read: a device set that has not been read is
     /// not a profile with one device.
@@ -317,6 +321,7 @@ impl App {
             Update::PresentationEnded => self.presentation = None,
             Update::Book(book) => self.book = Some(book),
             Update::Correspondence(correspondence) => self.correspondence = Some(correspondence),
+            Update::Agents(agents) => self.agents = Some(agents),
             Update::Profile(profile) => self.profile = Some(*profile),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
@@ -371,6 +376,26 @@ impl App {
                     Read::Events(page) => self.events = Some(*page),
                     Read::Transitions(page) => self.transitions = Some(*page),
                     Read::Space(view) => self.space = Some(*view),
+                    Read::Agent(view) => self.agent = Some(*view),
+                    Read::AgentCreated(agent) => {
+                        let agent = *agent;
+                        let summary = lait::control::AgentListItemView {
+                            profile: agent.profile.clone(),
+                            owner: agent.owner.clone(),
+                            name: agent.name.clone(),
+                            introduction: agent.introduction.clone(),
+                            lifecycle: agent.lifecycle,
+                        };
+                        let agents = self.agents.get_or_insert_with(Vec::new);
+                        agents.retain(|item| item.profile != summary.profile);
+                        agents.push(summary);
+                        agents.sort_by(|left, right| {
+                            left.name
+                                .cmp(&right.name)
+                                .then_with(|| left.profile.cmp(&right.profile))
+                        });
+                        self.agent = Some(agent);
+                    }
                     Read::DisplayChoices { orbit, view } => {
                         self.display_choices
                             .insert((orbit, view.world.clone(), view.surface.clone()), *view);
@@ -578,6 +603,14 @@ impl App {
 
     pub fn correspondence(&self) -> Option<&Correspondence> {
         self.correspondence.as_ref()
+    }
+
+    pub fn agents(&self) -> Option<&[lait::control::AgentListItemView]> {
+        self.agents.as_deref()
+    }
+
+    pub fn agent(&self) -> Option<&lait::control::AgentView> {
+        self.agent.as_ref()
     }
 
     pub fn absorb_correspondence(&mut self, correspondence: Correspondence) {
@@ -1033,6 +1066,44 @@ mod tests {
             !app.is_in_flight("device.stop:bob"),
             "one device's action disabled another device's control"
         );
+    }
+
+    #[test]
+    fn creating_an_agent_lands_its_profile_and_owned_list_from_one_confirmed_reply() {
+        let mut app = App::new();
+        let create = Action::CreateAgent {
+            name: "Adam".into(),
+            introduction: "Adam is a virtual assistant.".into(),
+        };
+        app.dispatched(&create);
+        app.apply(Update::Done {
+            key: create.key(),
+            outcome: Outcome::Read(Read::AgentCreated(Box::new(lait::control::AgentView {
+                profile: "prf_adam".into(),
+                owner: "prf_owner".into(),
+                name: "Adam".into(),
+                introduction: "Adam is a virtual assistant.".into(),
+                lifecycle: lait::control::AgentLifecycleSetting::Active,
+                can_manage: true,
+                revision: lait::control::AgentStateRevision {
+                    record: 1,
+                    inventory: 1,
+                },
+                inventory: lait::control::AgentInventoryView::Hidden,
+            }))),
+        });
+
+        assert_eq!(
+            app.agent().map(|agent| agent.profile.as_str()),
+            Some("prf_adam")
+        );
+        assert_eq!(
+            app.agents()
+                .and_then(|agents| agents.first())
+                .map(|agent| agent.profile.as_str()),
+            Some("prf_adam")
+        );
+        assert!(!app.is_in_flight("agent.create"));
     }
 
     /// A re-read is not an event worth reporting. A record that gained a line

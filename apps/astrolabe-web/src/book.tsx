@@ -6,8 +6,8 @@
  */
 import { useEffect, useState } from "react";
 
-import { actionKey, summonOwnedWindow, type Book, type Card, type ClientAction, type ClientView, type Contact } from "./client";
-import { AiMark, AppDialog, Badge, DialogFooter, Empty, FacePlate, PersonTile, isAgentCard, presenceLabel } from "./kit";
+import { actionKey, summonOwnedWindow, type Agent, type AgentSummary, type Book, type Card, type ClientAction, type ClientView, type Contact } from "./client";
+import { AiMark, AppDialog, Badge, DialogFooter, Empty, FacePlate, PersonTile, presenceLabel } from "./kit";
 import { IconCheck, IconDismiss, IconIncoming, IconSearch, IconUserPlus } from "./icons";
 import { looksLikeFriendCode } from "./chat";
 
@@ -51,6 +51,7 @@ export function partCards(cards: Card[]): { contacts: Card[]; offline: Card[] } 
 
 type BookDialog =
   | { kind: "add" }
+  | { kind: "newAgent" }
   | { kind: "edit"; card: Card }
   | { kind: "link"; card: Card }
   | { kind: "picture"; card: Card }
@@ -66,6 +67,7 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
   // the row is re-read from the book every render, so a profile can never
   // show a card the book no longer holds.
   const [profile, setProfile] = useState<string | null>(null);
+  const [agentProfile, setAgentProfile] = useState<string | null>(null);
   const [dialog, setDialog] = useState<BookDialog | null>(null);
   const [incoming, setIncoming] = useState(false);
 
@@ -80,6 +82,9 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
   // Never strand on an empty Incoming panel if the last stranger cleared.
   const showingIncoming = incoming && unknownContacts.length > 0;
   const profiled = profile === null ? null : book?.cards.find((card) => card.card === profile) ?? null;
+  const profiledAgent = agentProfile !== null && view.agent?.profile === agentProfile ? view.agent : null;
+  const agentReadFailure = agentProfile === null ? null
+    : view.failures.find((failure) => failure.key === actionKey.readAgent(agentProfile)) ?? null;
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -91,6 +96,7 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
       // search draft. A focused dialog consumes its own Escape before this.
       if (event.key === "Escape") {
         if (dialog !== null) { setDialog(null); return; }
+        if (agentProfile !== null) { setAgentProfile(null); return; }
         if (profile !== null) { setProfile(null); return; }
         setSearching(false);
         setQuery("");
@@ -98,7 +104,7 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, [dialog, profile]);
+  }, [agentProfile, dialog, profile]);
 
   const mine = book?.cards.find((card) => card.selfClaim) ?? null;
   const listed = listedCards(book?.cards ?? []);
@@ -110,13 +116,27 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
     {!ownedWindow && <header className="book-top">
       <button className="back-button" onClick={onBack}>← Library</button>
     </header>}
-    {book === null && messageContacts.length === 0
+    {agentProfile !== null
+      ? profiledAgent === null
+        ? <div className="book-gutter"><Empty
+            said={agentReadFailure === null ? "Reading agent inventory…" : "The agent inventory could not be read."}
+            next={agentReadFailure?.error ?? "The daemon is resolving the agent by its stable profile."} /></div>
+        : <AgentProfilePage agent={profiledAgent} view={view} dispatch={dispatch}
+            onBack={() => setAgentProfile(null)} />
+      : book === null && messageContacts.length === 0 && (view.agents?.length ?? 0) === 0
       ? <div className="book-gutter"><Empty said="The book has not been read."
           next="Press F5 to ask the daemon. Nothing is created on your behalf." /></div>
       // The same CONTACTS band, standalone: the known/unknown split holds
       // even with no daemon-backed book behind it.
       : book === null
       ? <>
+        <div className="book-lead">
+          <AgentBand agents={view.agents ?? []} onCreate={() => setDialog({ kind: "newAgent" })} onOpen={(agent) => {
+            setProfile(null);
+            setAgentProfile(agent);
+            void dispatch({ type: "readAgent", agent });
+          }} />
+        </div>
         <div className="contacts-strip">
           <span className="strip-title">CONTACTS</span>
           {unknownContacts.length > 0 && <IncomingButton count={unknownContacts.length}
@@ -143,7 +163,11 @@ export function BookSurface({ view, dispatch, onBack, ownedWindow = false }: {
             <CanonicalCard mine={mine} hostAnswered={view.host !== null}
               onOpen={mine === null ? undefined : () => setProfile(mine.card)}
               onCreate={() => setDialog({ kind: "add" })} />
-            <AgentBand agents={book.cards.filter(isAgentCard)} onOpen={setProfile} />
+            <AgentBand agents={view.agents ?? []} onCreate={() => setDialog({ kind: "newAgent" })} onOpen={(agent) => {
+              setProfile(null);
+              setAgentProfile(agent);
+              void dispatch({ type: "readAgent", agent });
+            }} />
             {book.migrationPending > 0 && <p className="migration-line">
               {book.migrationPending} alias selector(s) still pending. They were not turned into Cards.
             </p>}
@@ -240,20 +264,22 @@ function CanonicalCard({ mine, hostAnswered, onOpen, onCreate }: {
 }
 
 /**
- * The agents this book holds, as chips under your own card: the social face
- * of a sponsored agent, and the way into configuring it. A chip opens the
- * agent's card — its name, picture, and handles are edited there like
- * anybody else's, because an agent's presentation *is* a card.
+ * Global agents owned by this identity, as chips under the canonical card.
+ * The profile id, not a card label or local directory name, is the selector.
  */
-export function AgentBand({ agents, onOpen }: { agents: Card[]; onOpen(card: string): void }) {
-  if (agents.length === 0) return null;
+export function AgentBand({ agents, onOpen, onCreate }: {
+  agents: AgentSummary[]; onOpen(profile: string): void; onCreate(): void;
+}) {
   return <div className="agent-band">
-    <span className="fact-label">AGENTS</span>
+    <span className="agent-band-head"><span className="fact-label">AGENTS</span>
+      <button className="text-button" onClick={onCreate}>New agent</button></span>
     <div className="agent-chips">
-      {agents.map((agent) => <button key={agent.card} className="agent-chip"
-        aria-label={`Configure ${agent.name}`} onClick={() => onOpen(agent.card)}>
-        <FacePlate picture={agent.picture} name={agent.name} size={24} agent />
+      {agents.length === 0 && <small className="muted">No agents yet.</small>}
+      {agents.map((agent) => <button key={agent.profile} className="agent-chip"
+        aria-label={`Open ${agent.name}'s inventory`} onClick={() => onOpen(agent.profile)}>
+        <FacePlate picture={null} name={agent.name} size={24} agent />
         <span>{agent.name}</span>
+        <AiMark />
       </button>)}
     </div>
   </div>;
@@ -317,9 +343,94 @@ function RequestActions({ person, name, view, dispatch }: {
 
 function PersonRow({ card, onOpen }: { card: Card; onOpen(): void }) {
   return <button className="person-row" onClick={onOpen} aria-label={`Open the profile of ${card.name}`}>
-    <PersonTile name={card.name} picture={card.picture} presence={card.presence} agent={isAgentCard(card)}
+    <PersonTile name={card.name} picture={card.picture} presence={card.presence}
       note={card.note} />
   </button>;
+}
+
+/**
+ * An agent is a person-shaped identity with a public inventory. The daemon
+ * says whether this viewer can manage it; no local/card/name inference can
+ * make controls appear.
+ */
+export function AgentProfilePage({ agent, view, dispatch, onBack }: {
+  agent: Agent; view: ClientView; dispatch: Dispatch; onBack(): void;
+}) {
+  const lifecycleKey = actionKey.setAgentLifecycle(agent.profile);
+  const visibilityKey = actionKey.setAgentVisibility(agent.profile);
+  const failure = view.failures.find((item) => item.key === lifecycleKey || item.key === visibilityKey) ?? null;
+  return <div className="book-gutter profile-page agent-profile-page">
+    <div><button className="back-button" onClick={onBack} title="Back (Esc)">← Back</button></div>
+    <div className="profile-head">
+      <FacePlate picture={null} name={agent.name} size={56} agent />
+      <span className="person-copy">
+        <span className="person-name">
+          <strong className="canonical-name">{agent.name}</strong>
+          <AiMark />
+          <Badge label={agent.lifecycle} solid={agent.lifecycle === "active"} />
+        </span>
+        <small>{agent.introduction}</small>
+      </span>
+    </div>
+    <div className="profile-scroll agent-inventory">
+      <section className="handle-section">
+        <span className="fact-label">IDENTITY</span>
+        <div className="handle-row"><code>{agent.profile}</code></div>
+        <small className="muted">Owned by {agent.owner}</small>
+      </section>
+      {agent.canManage && <section className="agent-controls" aria-label={`Manage ${agent.name}`}>
+        <label>Lifecycle
+          <select value={agent.lifecycle}
+            disabled={view.inFlight.includes(lifecycleKey)}
+            onChange={(event) => void dispatch({
+              type: "setAgentLifecycle",
+              agent: agent.profile,
+              recordRevision: agent.recordRevision,
+              inventoryRevision: agent.inventoryRevision,
+              lifecycle: event.target.value,
+            })}>
+            <option value="active">Active</option>
+            <option value="suspended">Suspended</option>
+            <option value="retired">Retired</option>
+          </select>
+        </label>
+        <label>Inventory visibility
+          <select value={agent.inventoryVisibility}
+            disabled={view.inFlight.includes(visibilityKey)}
+            onChange={(event) => void dispatch({
+              type: "setAgentVisibility",
+              agent: agent.profile,
+              recordRevision: agent.recordRevision,
+              inventoryRevision: agent.inventoryRevision,
+              visibility: event.target.value,
+            })}>
+            <option value="public">Public</option>
+            <option value="contacts">Contacts</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+      </section>}
+      {failure !== null && <p className="agent-management-failure" role="alert">{failure.error}</p>}
+      <section className="handle-section">
+        <span className="fact-label">INVENTORY</span>
+        {agent.primitives.length === 0
+          ? <p className="muted">This inventory is not visible to you.</p>
+          : <div className="agent-primitive-list">
+            {agent.primitives.map((item) => <article className="agent-primitive" key={item.id}>
+              <span className="agent-primitive-title">
+                <strong>{item.label}</strong>
+                {item.operationalStanding !== null &&
+                  <Badge label={`live: ${item.operationalStanding}`} solid={item.operationalStanding === "ready"} />}
+              </span>
+              <small>{item.summary}</small>
+              <code>{item.primitive}</code>
+              {item.standing !== null && <small className="muted">Configured: {item.standing}</small>}
+              {item.visibility !== null && <small className="muted">Visibility: {item.visibility}</small>}
+            </article>)}
+          </div>}
+      </section>
+    </div>
+  </div>;
 }
 
 /**
@@ -337,7 +448,6 @@ function ProfilePage({ card, all, view, dispatch, onBack, openDialog }: {
       <span className="person-copy">
         <span className="person-name">
           <strong className="canonical-name">{card.name}</strong>
-          {isAgentCard(card) && <AiMark />}
           {card.selfClaim && <Badge label="My Card" solid />}
         </span>
         {card.note !== "" && <small>{card.note}</small>}
@@ -443,12 +553,38 @@ function BookDialogs({ dialog, all, dispatch, onDismiss }: {
 }) {
   switch (dialog.kind) {
     case "add": return <AddDialog dispatch={dispatch} onDismiss={onDismiss} />;
+    case "newAgent": return <NewAgentDialog dispatch={dispatch} onDismiss={onDismiss} />;
     case "edit": return <EditDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
     case "link": return <LinkDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
     case "picture": return <PictureDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
     case "merge": return <MergeDialog card={dialog.card} all={all} dispatch={dispatch} onDismiss={onDismiss} />;
     case "delete": return <DeleteDialog card={dialog.card} dispatch={dispatch} onDismiss={onDismiss} />;
   }
+}
+
+function NewAgentDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismiss(): void }) {
+  const [name, setName] = useState("");
+  const [introduction, setIntroduction] = useState("");
+  const create = () => {
+    const agentName = name.trim();
+    const transparentIntroduction = introduction.trim();
+    if (agentName === "" || transparentIntroduction === "") return;
+    void dispatch({ type: "createAgent", name: agentName, introduction: transparentIntroduction });
+    onDismiss();
+  };
+  return <AppDialog title="New agent"
+    description="Create an independent identity with its own correspondence and inventory. Its introduction should say plainly that it is an AI or virtual assistant."
+    onDismiss={onDismiss}>
+    <label>Name<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label>
+    <label>Introduction<textarea rows={3} value={introduction}
+      placeholder="Hello, I’m Adam, the virtual assistant for…"
+      onChange={(event) => setIntroduction(event.target.value)} /></label>
+    <DialogFooter>
+      <button className="quiet-button" onClick={onDismiss}>Cancel</button>
+      <button className="primary-button" disabled={name.trim() === "" || introduction.trim() === ""}
+        onClick={create}>Create agent</button>
+    </DialogFooter>
+  </AppDialog>;
 }
 
 export function AddDialog({ dispatch, onDismiss }: { dispatch: Dispatch; onDismiss(): void }) {

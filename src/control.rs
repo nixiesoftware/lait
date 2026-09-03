@@ -154,7 +154,12 @@ impl Endpoint {
 /// `origin`, and `AssignmentRevoke` accepts `grant_ids` — the set a role
 /// expanded into, revoked all-or-nothing — beside the single `grant_id` a
 /// v15 World still sends.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 15;
+///
+/// **v16:** agents become global ProfileId identities with signed inventories.
+/// Daemon-scoped create/list/show/mutation and verified Reach evidence replace
+/// the Space-local identity-provision command; Space sponsorship now selects an
+/// existing profile and creates no key material.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 16;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -776,10 +781,236 @@ pub struct DisplayRendezvousAssignmentView {
     pub surface: String,
 }
 
+// ---- global agent identity and inventory ----
+
+/// The audience whose safe inventory projection is requested. `Owner` is an
+/// authorization request, not a claim carried by the client: the daemon still
+/// derives the requester from its standing primary Reach profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInventoryAudience {
+    Public,
+    Contacts,
+    Owner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLifecycleSetting {
+    Active,
+    Suspended,
+    Retired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInventoryVisibility {
+    Public,
+    Contacts,
+    Private,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentItemVisibility {
+    Inherit,
+    Contacts,
+    Private,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPrimitiveStanding {
+    Ready,
+    Unavailable,
+    Suspended,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSecretStanding {
+    Connected,
+    Missing,
+    Unavailable,
+}
+
+/// A typed inventory value. This deliberately has no arbitrary JSON case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum AgentFieldValue {
+    Boolean(bool),
+    Integer(i64),
+    Unsigned(u64),
+    DurationMillis(u64),
+    ByteSize(u64),
+    Text(String),
+    Choice(String),
+    ContentRef(String),
+    Profile(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentInventoryField {
+    pub key: String,
+    pub value: AgentFieldValue,
+}
+
+/// One owner-authored inventory item. A secret is an opaque reference and safe
+/// standing only; secret values never cross this control protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentInventoryItemSetting {
+    pub id: String,
+    pub primitive: String,
+    pub label: String,
+    pub summary: String,
+    pub visibility: AgentItemVisibility,
+    pub standing: AgentPrimitiveStanding,
+    #[serde(default)]
+    pub public_fields: Vec<AgentInventoryField>,
+    #[serde(default)]
+    pub owner_fields: Vec<AgentInventoryField>,
+    #[serde(default)]
+    pub secrets: Vec<AgentSecretBindingSetting>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentSecretBindingSetting {
+    pub label: String,
+    pub reference: String,
+    pub standing: AgentSecretStanding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentStateRevision {
+    pub record: u64,
+    pub inventory: u64,
+}
+
+/// Owner-authorized inventory edits. Opaque future-version items are absent on
+/// purpose: old clients preserve them but cannot author, replace, or remove
+/// data they do not understand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum AgentInventoryMutationSetting {
+    SetDefaultVisibility {
+        visibility: AgentInventoryVisibility,
+    },
+    Add {
+        item: AgentInventoryItemSetting,
+    },
+    Replace {
+        item: AgentInventoryItemSetting,
+    },
+    Remove {
+        item: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentListItemView {
+    pub profile: String,
+    pub owner: String,
+    pub name: String,
+    pub introduction: String,
+    pub lifecycle: AgentLifecycleSetting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInventoryPublicItemView {
+    pub id: String,
+    pub primitive: String,
+    pub label: String,
+    pub summary: String,
+    /// Absent for a future-version opaque item rendered generically.
+    pub standing: Option<AgentPrimitiveStanding>,
+    /// Unsigned process-local provider health. `standing` remains the exact
+    /// owner-authored value covered by the publication signature.
+    pub operational_standing: Option<AgentPrimitiveStanding>,
+    pub fields: Vec<AgentInventoryField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInventoryOwnerItemView {
+    pub public: AgentInventoryPublicItemView,
+    pub visibility: AgentItemVisibility,
+    pub fields: Vec<AgentInventoryField>,
+    pub secrets: Vec<AgentSecretSummaryView>,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSecretSummaryView {
+    pub label: String,
+    pub standing: AgentSecretStanding,
+}
+
+/// Public/contact projections carry the owner's signed publication verbatim
+/// enough for another implementation to verify it. Owner projections expose
+/// controls but still omit opaque secret references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "visibility", rename_all = "snake_case")]
+pub enum AgentInventoryView {
+    Hidden,
+    Public {
+        version: u16,
+        agent: String,
+        revision: u64,
+        audience: AgentInventoryAudience,
+        items: Vec<AgentInventoryPublicItemView>,
+        authored_by: String,
+        signature: String,
+    },
+    Owner {
+        revision: u64,
+        default_visibility: AgentInventoryVisibility,
+        items: Vec<AgentInventoryOwnerItemView>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentView {
+    pub profile: String,
+    pub owner: String,
+    pub name: String,
+    pub introduction: String,
+    pub lifecycle: AgentLifecycleSetting,
+    /// Explicit authority projection. Clients must never infer management from
+    /// locality, inventory audience, ownership labels, or a matching name.
+    #[serde(default)]
+    pub can_manage: bool,
+    pub revision: AgentStateRevision,
+    pub inventory: AgentInventoryView,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
+    // ---- global agent identities (daemon route only) ----
+    /// Create or idempotently resume one independent Reach identity. Success
+    /// includes durable mutual introduction with the owner's correspondence;
+    /// no World or Space contains this agent.
+    AgentCreate {
+        name: String,
+        introduction: String,
+    },
+    AgentList,
+    AgentShow {
+        agent: String,
+        audience: AgentInventoryAudience,
+    },
+    AgentSetLifecycle {
+        agent: String,
+        expected: AgentStateRevision,
+        lifecycle: AgentLifecycleSetting,
+    },
+    AgentInventoryMutate {
+        agent: String,
+        expected: AgentStateRevision,
+        mutation: AgentInventoryMutationSetting,
+    },
+
     // ---- identity-scoped Astrolabe display coordination ----
     DisplayStatus,
     /// Which code is running, at every layer of the display path: this
@@ -913,15 +1144,12 @@ pub enum Request {
         /// The agent's ed25519 public key (64-hex).
         key: String,
     },
-    /// Provision a **co-located** agent identity by name, in one step: mint (or
-    /// reuse) its seed under this home, self-incept it into the shared store's
-    /// actor plane, and sponsor it with content authority. This is the seamless
-    /// "sponsor once" flow for an agent on the same machine — no Contact round,
-    /// no second daemon, no second store copy. Afterwards a client acts as it
-    /// via the `act_as` selector (`$LAIT_AS`, or an MCP client's own binding).
-    AgentProvision {
-        /// The local name for this agent identity.
-        name: String,
+    /// Sponsor an existing daemon-scoped agent identity into this Space. The
+    /// daemon resolves its stable `ProfileId` through the verified global ownership registry
+    /// and forwards only its local device public key to ordinary `AgentAdd`.
+    /// This never creates, loads, or copies an agent seed inside the Space.
+    AgentSponsor {
+        agent: String,
     },
     KeyRotate,
     /// Revoke an outstanding invite so it can no longer admit anyone (admin-
@@ -2052,7 +2280,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Members
         | Request::MemberLog
         | Request::AgentAdd { .. }
-        | Request::AgentProvision { .. }
+        | Request::AgentSponsor { .. }
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceInvite
@@ -2106,6 +2334,11 @@ pub fn classify(req: &Request) -> RequestOwner {
 
         // ---- Lifecycle/deployment: daemon process + node-local config ----
         Request::Diagnose { .. }
+        | Request::AgentCreate { .. }
+        | Request::AgentList
+        | Request::AgentShow { .. }
+        | Request::AgentSetLifecycle { .. }
+        | Request::AgentInventoryMutate { .. }
         | Request::DisplayStatus
         | Request::DisplayProvenance
         | Request::DisplayPairingApprove { .. }
@@ -2209,6 +2442,33 @@ pub fn representative_requests() -> Vec<Request> {
     )]
     let find_step = runtime::find::StepId::new(1).expect("one is a nonzero Step id");
     vec![
+        Request::AgentCreate {
+            name: s(),
+            introduction: s(),
+        },
+        Request::AgentList,
+        Request::AgentShow {
+            agent: s(),
+            audience: AgentInventoryAudience::Public,
+        },
+        Request::AgentSetLifecycle {
+            agent: s(),
+            expected: AgentStateRevision {
+                record: 0,
+                inventory: 0,
+            },
+            lifecycle: AgentLifecycleSetting::Active,
+        },
+        Request::AgentInventoryMutate {
+            agent: s(),
+            expected: AgentStateRevision {
+                record: 0,
+                inventory: 0,
+            },
+            mutation: AgentInventoryMutationSetting::SetDefaultVisibility {
+                visibility: AgentInventoryVisibility::Public,
+            },
+        },
         Request::DisplayStatus,
         Request::DisplayProvenance,
         Request::DisplayPairingApprove {
@@ -2326,7 +2586,7 @@ pub fn representative_requests() -> Vec<Request> {
             admin: false,
         },
         Request::AgentAdd { key: s() },
-        Request::AgentProvision { name: s() },
+        Request::AgentSponsor { agent: s() },
         Request::KeyRotate,
         Request::InviteRevoke { invite: s() },
         Request::DeviceInvite,
@@ -2606,6 +2866,11 @@ pub struct ReachView {
     pub address: Option<String>,
     /// The correspondents it holds, as address spellings.
     pub correspondents: Vec<String>,
+    /// Verified global agent relationships known to this identity. This is
+    /// additive and empty for older daemons; clients must never infer agenthood
+    /// from a card name or group in its absence.
+    #[serde(default)]
+    pub agents: Vec<ReachAgentEvidenceView>,
     /// The profile the request that produced this view just learned — set
     /// only on the reply to [`Request::ReachLearn`] and
     /// [`Request::ReachResolve`], so a caller that resolved an address knows
@@ -2652,6 +2917,18 @@ pub struct ReachView {
     /// this machine will not give one.
     #[serde(default)]
     pub interface: Option<InterfaceView>,
+}
+
+/// Public relationship evidence for rendering one agent in correspondence.
+/// The daemon includes a row only after verifying the dual-signed owner bond
+/// and current Reach device sets from the global AgentRegistry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachAgentEvidenceView {
+    pub profile: String,
+    pub name: String,
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_name: Option<String>,
 }
 
 /// How a device came to hold its profile: founded on this machine, or
@@ -2971,6 +3248,12 @@ pub enum Response {
     DisplayDevice {
         device: String,
     },
+    /// Public summaries of every durable agent owned by this identity.
+    Agents {
+        agents: Vec<AgentListItemView>,
+    },
+    /// One audience-appropriate, secret-safe agent inventory projection.
+    Agent(Box<AgentView>),
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,
@@ -3385,9 +3668,10 @@ pub struct PairOffer {
 
 /// A co-located agent that attached without standing, waiting on a person.
 ///
-/// Keyed by `(space, name)` — `name` is the local identity (`LAIT_AGENT`),
-/// which is what [`Request::AgentProvision`] takes. `actor` is filled in when
-/// the agent has already incepted and is still unsponsored.
+/// Keyed by `(space, name)` — `name` is the local identity (`LAIT_AGENT`).
+/// `actor` is filled in when an existing signer has already incepted and is
+/// still unsponsored. Creating an agent is the daemon-scoped
+/// [`Request::AgentCreate`] operation; a Space never creates an identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SponsorshipAsk {
     pub space: String,

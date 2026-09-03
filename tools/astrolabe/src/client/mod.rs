@@ -9,6 +9,7 @@
 //! a process supervisor with some status attached. The supervisor is one of four
 //! things it reaches, and the smallest.
 
+pub mod agent;
 pub mod book;
 pub mod correspondence;
 pub mod display;

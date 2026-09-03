@@ -152,6 +152,21 @@ pub enum Action {
     /// Start the browser head this client opens Worlds through.
     StartHead,
     StopHead(String),
+    CreateAgent {
+        name: String,
+        introduction: String,
+    },
+    ReadAgent(String),
+    SetAgentLifecycle {
+        agent: String,
+        expected: lait::control::AgentStateRevision,
+        lifecycle: lait::control::AgentLifecycleSetting,
+    },
+    SetAgentVisibility {
+        agent: String,
+        expected: lait::control::AgentStateRevision,
+        visibility: lait::control::AgentInventoryVisibility,
+    },
     SendMessage {
         to: String,
         body: String,
@@ -328,6 +343,10 @@ impl Action {
             Self::Administer { at, operation } => format!("space:{}:{}", at.space, operation.key()),
             Self::StartHead => "head.start".into(),
             Self::StopHead(id) => format!("head.stop:{id}"),
+            Self::CreateAgent { .. } => "agent.create".into(),
+            Self::ReadAgent(agent) => format!("agent.read:{agent}"),
+            Self::SetAgentLifecycle { agent, .. } => format!("agent.lifecycle:{agent}"),
+            Self::SetAgentVisibility { agent, .. } => format!("agent.visibility:{agent}"),
             Self::SendMessage { to, .. } => format!("correspondence.send:{to}"),
             Self::CollectMail => "correspondence.collect".into(),
             Self::ShareReach => "reach.share".into(),
@@ -457,6 +476,12 @@ impl Action {
             Self::Administer { operation, .. } => operation.what(),
             Self::StartHead => "start a head".into(),
             Self::StopHead(id) => format!("stop head {id}"),
+            Self::CreateAgent { name, .. } => format!("create agent {name}"),
+            Self::ReadAgent(agent) => format!("read agent {agent}"),
+            Self::SetAgentLifecycle { agent, .. } => format!("change agent {agent}'s lifecycle"),
+            Self::SetAgentVisibility { agent, .. } => {
+                format!("change agent {agent}'s inventory visibility")
+            }
             Self::SendMessage { to, .. } => format!("send a message to {to}"),
             Self::CollectMail => "collect what is waiting".into(),
             Self::BlockSender(person) => format!("block {person}"),
@@ -559,6 +584,7 @@ pub enum Update {
     /// screen showing nothing rather than a client that is no longer a screen.
     PresentationEnded,
     Book(crate::client::book::BookSnapshot),
+    Agents(Vec<lait::control::AgentListItemView>),
     /// This identity's mailbox and arrival standing, after a correspondence
     /// action moved it. A whole snapshot, like [`Book`]: the model is pushed,
     /// never mutated in place by a surface.
@@ -612,6 +638,8 @@ pub enum Read {
     Events(Box<EventHistoryPage>),
     Transitions(Box<ConnectionHistoryPage>),
     Space(Box<SpaceView>),
+    Agent(Box<lait::control::AgentView>),
+    AgentCreated(Box<lait::control::AgentView>),
     /// What a display surface can show in one Orbit, keyed by the Orbit it
     /// was asked for so the answer lands beside the question.
     DisplayChoices {
@@ -1216,6 +1244,10 @@ impl Worker {
             Ok(book) => self.send(Update::Book(book)),
             Err(error) => self.fail(None, "read the address book", error),
         }
+        match self.client.agent_list().await {
+            Ok(agents) => self.send(Update::Agents(agents)),
+            Err(error) => self.fail(None, "read agent inventory", error),
+        }
         match self.client.profile().await {
             Ok(profile) => self.send(Update::Profile(Box::new(profile))),
             Err(error) => self.fail(None, "read your devices", error),
@@ -1695,6 +1727,39 @@ impl Worker {
                     )),
                 }
             }
+            Action::ReadAgent(agent) => Ok(Outcome::Read(Read::Agent(Box::new(
+                client.agent_show(agent.clone()).await?,
+            )))),
+            Action::CreateAgent { name, introduction } => {
+                let agent = client
+                    .agent_create(name.clone(), introduction.clone())
+                    .await?;
+                Ok(Outcome::Read(Read::AgentCreated(Box::new(agent))))
+            }
+            Action::SetAgentLifecycle {
+                agent,
+                expected,
+                lifecycle,
+            } => Ok(Outcome::Read(Read::Agent(Box::new(
+                client
+                    .agent_set_lifecycle(agent.clone(), *expected, *lifecycle)
+                    .await?,
+            )))),
+            Action::SetAgentVisibility {
+                agent,
+                expected,
+                visibility,
+            } => Ok(Outcome::Read(Read::Agent(Box::new(
+                client
+                    .agent_inventory_mutate(
+                        agent.clone(),
+                        *expected,
+                        lait::control::AgentInventoryMutationSetting::SetDefaultVisibility {
+                            visibility: *visibility,
+                        },
+                    )
+                    .await?,
+            )))),
             Action::SendMessage { to, body } => {
                 let now = now_secs();
                 self.corresponding(

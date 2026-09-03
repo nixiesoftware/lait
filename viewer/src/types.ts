@@ -1611,11 +1611,9 @@ export type Request =
     }
   | { cmd: "member_add"; who: string; admin?: boolean; as_name?: string | null }
   | { cmd: "member_remove"; who: string }
-  /** Mint (or reuse) a co-located agent's seed, self-incept it, and sponsor it
-   *  with write standing — the one-step form. `agent_add` sponsors a key that
-   *  already exists somewhere else; this creates the identity too, which is what
-   *  `install_mcp` tells people to come here for. */
-  | { cmd: "agent_provision"; name: string }
+  /** Resolve an existing owner-bound global agent identity and sponsor its
+   *  public device into this Space. No agent key is created or copied here. */
+  | { cmd: "agent_sponsor"; agent: string }
   | { cmd: "key_rotate" }
   | { cmd: "device_revoke"; device: string }
   /** Reply is `text` — this actor's devices, one per line. */
@@ -1693,7 +1691,7 @@ export type SpaceRequest = Extract<
     cmd:
       | "member_add"
       | "member_remove"
-      | "agent_provision"
+      | "agent_sponsor"
       | "key_rotate"
       | "members"
       | "member_log"

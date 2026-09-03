@@ -102,6 +102,21 @@ pub(crate) struct AddressBookService {
     identity_dir: PathBuf,
 }
 
+/// Address Book projection of one cryptographically verified ownership bond.
+///
+/// `parent_name` is deliberately optional: the bond names a profile, while a
+/// display name is shown only when this book independently carries authored
+/// evidence for one of that profile's verified devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentContactEvidence {
+    pub agent: mechanics::kinship::ProfileId,
+    pub parent: mechanics::kinship::ProfileId,
+    pub parent_name: Option<String>,
+    /// Whether an existing or newly installed card was durably filed as an
+    /// agent. `false` preserves a prior deletion or a safe name collision.
+    pub filed: bool,
+}
+
 impl AddressBookService {
     pub(crate) fn open(identity_dir: &Path) -> Result<Self, addressbook::Error> {
         let store = Store::at(identity_dir);
@@ -114,6 +129,162 @@ impl AddressBookService {
             engine: Mutex::new(engine),
             identity_dir: identity_dir.to_path_buf(),
         })
+    }
+
+    /// Ensure this identity can present one self-authored social card.
+    ///
+    /// Agent creation calls this against the agent's own book, never its
+    /// owner's. The device handle is the durable, verifiable identity fact;
+    /// name and note are the presentation the agent chose. Repeating the call
+    /// repairs any partially established card without minting a second one.
+    pub(crate) fn ensure_self_card(
+        &self,
+        name: &str,
+        note: &str,
+        device: &DeviceId,
+    ) -> Result<(), String> {
+        let author = self.author()?;
+        if &author.device != device {
+            return Err("the requested self card does not name this identity's device".to_string());
+        }
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| "address book is poisoned".to_string())?;
+        let book = engine.book().map_err(|error| error.to_string())?;
+        let handle = Handle::Device(device.clone());
+        let held = book
+            .cards
+            .values()
+            .find(|card| card.self_claim.is_some())
+            .or_else(|| {
+                book.authored_cards_for(&handle)
+                    .into_iter()
+                    .find_map(|id| book.cards.get(&id))
+            })
+            .cloned();
+        let (id, create) = match held {
+            Some(card) => (card.id, false),
+            None => (CardId::mint(&SystemUlidSource), true),
+        };
+        let apply = |engine: &mut BookEngine, action: Action| {
+            engine
+                .apply(&author, action)
+                .map_err(|error| error.to_string())
+        };
+        let result = (|| {
+            if create {
+                apply(
+                    &mut engine,
+                    Action::Create {
+                        id: id.clone(),
+                        name: name.to_owned(),
+                    },
+                )?;
+            }
+            let current = engine.book().map_err(|error| error.to_string())?;
+            let card = current
+                .cards
+                .get(&id)
+                .ok_or_else(|| "self card disappeared while updating".to_string())?;
+            let needs_name = card.name.value != name;
+            let needs_note = card.note.value != note;
+            let needs_handle = !card.handles.iter().any(|link| link.handle == handle);
+            let needs_claim = card.self_claim.is_none();
+            if !create && !needs_name && !needs_note && !needs_handle && !needs_claim {
+                return Ok(());
+            }
+            if needs_name {
+                apply(
+                    &mut engine,
+                    Action::SetName {
+                        id: id.clone(),
+                        name: name.to_owned(),
+                    },
+                )?;
+            }
+            if needs_note {
+                apply(
+                    &mut engine,
+                    Action::SetNote {
+                        id: id.clone(),
+                        note: note.to_owned(),
+                    },
+                )?;
+            }
+            if needs_handle {
+                apply(
+                    &mut engine,
+                    Action::AddHandle {
+                        id: id.clone(),
+                        handle,
+                        evidence: addressbook::Evidence::Declared,
+                    },
+                )?;
+            }
+            if needs_claim {
+                apply(&mut engine, Action::ClaimSelf { id })?;
+            }
+            self.store
+                .replace(&engine)
+                .map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            self.resync(&mut engine);
+        }
+        result
+    }
+
+    /// Name and file a Reach contact from verified global agent evidence.
+    ///
+    /// The profile classification is supplied only by
+    /// `AgentRegistry::verified_profile_index`; neither a name nor a World
+    /// actor/sponsorship row can enter this path. Current Reach device sets are
+    /// the handles that bind the authored card to the classified profile.
+    pub(crate) fn install_verified_agent(
+        &self,
+        evidence: &crate::daemon::agents::VerifiedAgentProfile,
+    ) -> Result<AgentContactEvidence, String> {
+        let handles: Vec<Handle> = evidence
+            .agent_devices
+            .iter()
+            .cloned()
+            .map(Handle::Device)
+            .collect();
+        let _ = self.install_introduced(&evidence.agent, &evidence.name, "", &handles)?;
+        let mut filed = false;
+        for handle in &handles {
+            if self.file_as_agent_checked(handle)? {
+                filed = true;
+                break;
+            }
+        }
+
+        let book = self.book().map_err(|error| error.to_string())?;
+        let parent_name = evidence
+            .owner_devices
+            .iter()
+            .find_map(|device| first_authored_name(&book, &Handle::Device(device.clone())));
+        Ok(AgentContactEvidence {
+            agent: evidence.agent.clone(),
+            parent: evidence.owner.clone(),
+            parent_name,
+            filed,
+        })
+    }
+
+    /// Resolve only owner-authored display evidence for a verified ownership
+    /// profile. Read-only: a Reach projection must not edit the book merely
+    /// because a client looked at it.
+    pub(crate) fn verified_agent_owner_name(
+        &self,
+        evidence: &crate::daemon::agents::VerifiedAgentProfile,
+    ) -> Option<String> {
+        let book = self.book().ok()?;
+        evidence
+            .owner_devices
+            .iter()
+            .find_map(|device| first_authored_name(&book, &Handle::Device(device.clone())))
     }
 
     pub(crate) async fn handle(&self, request: Request, router: &Router) -> Response {
@@ -391,16 +562,10 @@ impl AddressBookService {
         }
     }
 
-    /// Author a Card for a just-provisioned co-located agent.
-    ///
-    /// Called by the daemon funnel after a successful `AgentProvision`,
-    /// because a Station has no reach into the identity-scoped book. Without
-    /// this, the one verb that creates an agent leaves it unnamed on the one
-    /// surface built to show agents. The card also receives the canonical
-    /// face the product ships for its tool, when one exists and the card has
-    /// none of its own — applications then resolve the picture through the
-    /// book like any other identity fact, instead of matching names
-    /// themselves.
+    /// Legacy fixture helper. Production agent classification is installed by
+    /// [`Self::install_verified_agent`] from a verified ProfileId ownership
+    /// bond; an actor/name pair is never sufficient evidence of agenthood.
+    #[cfg(test)]
     pub(crate) fn name_agent(&self, space: &mechanics::ids::SpaceId, actor: &str, name: &str) {
         let Some(actor) = ActorId::parse(actor) else {
             return;
@@ -422,45 +587,55 @@ impl AddressBookService {
     /// is left untouched, and a handle no card carries files nothing — the
     /// book never invents a card here.
     fn file_as_agent(&self, handle: &Handle) {
-        let Ok(author) = self.author() else {
-            return;
+        let _ = self.file_as_agent_checked(handle);
+    }
+
+    /// Checked half of agent filing for profile evidence. `Ok(false)` means no
+    /// authored card carries this handle; a deliberate deletion or collision
+    /// is preserved rather than papered over.
+    fn file_as_agent_checked(&self, handle: &Handle) -> Result<bool, String> {
+        let author = self.author()?;
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| "address book is poisoned".to_string())?;
+        let (id, filed) = {
+            let book = engine.book().map_err(|error| error.to_string())?;
+            let Some(id) = book.authored_cards_for(handle).into_iter().next() else {
+                return Ok(false);
+            };
+            let filed = book
+                .cards
+                .get(&id)
+                .map(|card| card.groups.iter().any(|link| link.name == AGENT_GROUP))
+                .unwrap_or(true);
+            (id, filed)
         };
-        let Ok(mut engine) = self.engine.lock() else {
-            return;
-        };
-        let Ok(book) = engine.book() else {
-            return;
-        };
-        let Some(id) = book.authored_cards_for(handle).into_iter().next() else {
-            return;
-        };
-        let filed = book
-            .cards
-            .get(&id)
-            .map(|card| card.groups.iter().any(|link| link.name == AGENT_GROUP))
-            .unwrap_or(true);
         if filed {
-            return;
+            return Ok(true);
         }
-        if engine
-            .apply(
-                &author,
-                Action::AddGroup {
-                    id,
-                    name: AGENT_GROUP.to_owned(),
-                },
-            )
-            .is_err()
-        {
-            return;
+        if let Err(error) = engine.apply(
+            &author,
+            Action::AddGroup {
+                id,
+                name: AGENT_GROUP.to_owned(),
+            },
+        ) {
+            self.resync(&mut engine);
+            return Err(error.to_string());
         }
-        let _ = self.store.replace(&engine);
+        if let Err(error) = self.store.replace(&engine) {
+            self.resync(&mut engine);
+            return Err(error.to_string());
+        }
+        Ok(true)
     }
 
     /// Put the shipped canonical face onto the card carrying `handle`, iff a
     /// face exists for `name` and the card has no picture. An authored
     /// picture is never overwritten — the ship is a default, not an
     /// authority.
+    #[cfg(test)]
     fn stamp_face_if_absent(&self, handle: &Handle, name: &str) {
         let Some(bytes) = canonical_agent_face(name) else {
             return;
@@ -1097,6 +1272,7 @@ fn suggestion_view(staged: &StagedSuggestion) -> BookSuggestionView {
 /// every application resolves them through the book API like any other
 /// identity fact. Matching is exact on the provisioned agent name — a face
 /// is a default for the tool's own name, never an inference.
+#[cfg(test)]
 fn canonical_agent_face(name: &str) -> Option<&'static [u8]> {
     match name.to_ascii_lowercase().as_str() {
         "claude" => Some(include_bytes!("agent_faces/claude.png")),

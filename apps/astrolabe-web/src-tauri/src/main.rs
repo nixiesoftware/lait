@@ -40,6 +40,8 @@ struct WebClientView {
     book: Option<WebBook>,
     mcp: Option<WebMcpBinding>,
     correspondence: Option<WebCorrespondenceFacts>,
+    agents: Option<Vec<WebAgentSummary>>,
+    agent: Option<WebAgent>,
     profile: Option<WebProfileFacts>,
     presentation: Option<WebPresentationFacts>,
     notices: Vec<WebNotice>,
@@ -135,6 +137,44 @@ struct WebChatMessage {
     sent_at: u64,
     from_device: String,
     provenance_agrees: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebAgentSummary {
+    profile: String,
+    owner: String,
+    name: String,
+    introduction: String,
+    lifecycle: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebAgent {
+    profile: String,
+    owner: String,
+    name: String,
+    introduction: String,
+    lifecycle: String,
+    can_manage: bool,
+    record_revision: u64,
+    inventory_revision: u64,
+    inventory_visibility: String,
+    primitives: Vec<WebAgentPrimitive>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebAgentPrimitive {
+    id: String,
+    primitive: String,
+    label: String,
+    summary: String,
+    standing: Option<String>,
+    operational_standing: Option<String>,
+    visibility: Option<String>,
+    editable: bool,
 }
 
 /// A person's profile: the devices that are theirs, the code this one is
@@ -764,6 +804,8 @@ impl From<ClientView> for WebClientView {
             space,
             book,
             correspondence,
+            agents,
+            agent,
             profile,
             notices,
             failures,
@@ -1174,6 +1216,43 @@ impl From<ClientView> for WebClientView {
                 open_tabs: corr.open_tabs,
                 active_tab: corr.active_tab,
             }),
+            agents: agents.map(|agents| {
+                agents
+                    .into_iter()
+                    .map(|agent| WebAgentSummary {
+                        profile: agent.profile,
+                        owner: agent.owner,
+                        name: agent.name,
+                        introduction: agent.introduction,
+                        lifecycle: agent.lifecycle,
+                    })
+                    .collect()
+            }),
+            agent: agent.map(|agent| WebAgent {
+                profile: agent.profile,
+                owner: agent.owner,
+                name: agent.name,
+                introduction: agent.introduction,
+                lifecycle: agent.lifecycle,
+                can_manage: agent.can_manage,
+                record_revision: agent.record_revision,
+                inventory_revision: agent.inventory_revision,
+                inventory_visibility: agent.inventory_visibility,
+                primitives: agent
+                    .primitives
+                    .into_iter()
+                    .map(|primitive| WebAgentPrimitive {
+                        id: primitive.id,
+                        primitive: primitive.primitive,
+                        label: primitive.label,
+                        summary: primitive.summary,
+                        standing: primitive.standing,
+                        operational_standing: primitive.operational_standing,
+                        visibility: primitive.visibility,
+                        editable: primitive.editable,
+                    })
+                    .collect(),
+            }),
             profile: profile.map(|profile| {
                 // Destructured whole, without `..`, for the reason the view
                 // itself is: a fact added to a person's devices that never
@@ -1304,9 +1383,7 @@ impl From<ClientView> for WebClientView {
                                 api::MarkerStandingRow::Contradicted => {
                                     WebMarkerStanding::Contradicted
                                 }
-                                api::MarkerStandingRow::Unreadable => {
-                                    WebMarkerStanding::Unreadable
-                                }
+                                api::MarkerStandingRow::Unreadable => WebMarkerStanding::Unreadable,
                             },
                         })
                         .collect(),
@@ -1520,6 +1597,25 @@ enum WebAction {
     StartHead,
     StopHead {
         id: String,
+    },
+    CreateAgent {
+        name: String,
+        introduction: String,
+    },
+    ReadAgent {
+        agent: String,
+    },
+    SetAgentLifecycle {
+        agent: String,
+        record_revision: u64,
+        inventory_revision: u64,
+        lifecycle: String,
+    },
+    SetAgentVisibility {
+        agent: String,
+        record_revision: u64,
+        inventory_revision: u64,
+        visibility: String,
     },
     ForgetOrbit {
         space: String,
@@ -1776,6 +1872,32 @@ impl From<WebAction> for ActionRequest {
             WebAction::ReadSpace { orbit } => Self::ReadSpace { orbit },
             WebAction::StartHead => Self::StartHead,
             WebAction::StopHead { id } => Self::StopHead { id },
+            WebAction::CreateAgent { name, introduction } => {
+                Self::CreateAgent { name, introduction }
+            }
+            WebAction::ReadAgent { agent } => Self::ReadAgent { agent },
+            WebAction::SetAgentLifecycle {
+                agent,
+                record_revision,
+                inventory_revision,
+                lifecycle,
+            } => Self::SetAgentLifecycle {
+                agent,
+                record_revision,
+                inventory_revision,
+                lifecycle,
+            },
+            WebAction::SetAgentVisibility {
+                agent,
+                record_revision,
+                inventory_revision,
+                visibility,
+            } => Self::SetAgentVisibility {
+                agent,
+                record_revision,
+                inventory_revision,
+                visibility,
+            },
             WebAction::ForgetOrbit { space } => Self::ForgetOrbit { space },
             WebAction::BookPut { card, name, note } => Self::BookPut { card, name, note },
             WebAction::BookDelete { card } => Self::BookDelete { card },
@@ -2449,6 +2571,10 @@ mod tests {
             r#"{"type":"open","world":"issues","entryPath":"/"}"#,
             r#"{"type":"updateWorld","world":"issues"}"#,
             r#"{"type":"removeDevice","id":"dev","deleteData":true}"#,
+            r#"{"type":"createAgent","name":"Adam","introduction":"Adam is a virtual assistant."}"#,
+            r#"{"type":"readAgent","agent":"prf_adam"}"#,
+            r#"{"type":"setAgentLifecycle","agent":"prf_adam","recordRevision":2,"inventoryRevision":4,"lifecycle":"suspended"}"#,
+            r#"{"type":"setAgentVisibility","agent":"prf_adam","recordRevision":2,"inventoryRevision":4,"visibility":"contacts"}"#,
             r#"{"type":"installMcp","client":"claude","scope":null,"name":"lait","agent":null,"noAgent":false,"project":".","world":null,"preview":true}"#,
             r#"{"type":"displayAssignmentPut","device":"d","orbit":"o","world":"w","surface":"s","inputJson":"{}","theme":"dark","staleAfterMs":1000,"onStale":"blank","syncGroup":null,"syncMode":"positional","staticDelayMs":0,"expiresAtUnixMs":null}"#,
             r#"{"type":"devicePairEnter","code":"ABCD-EFGH@127.0.0.1:7717"}"#,

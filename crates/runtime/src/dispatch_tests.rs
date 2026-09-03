@@ -456,10 +456,12 @@ pub(crate) fn exec_spec() -> crate::exec::Spec {
             offer: exec_demand("run.offer"),
             control: exec_demand("run.control"),
             accept: exec_demand("run.accept"),
+            attach: None,
         },
         input: payload("agent.input"),
         output: payload("agent.output"),
         mode: crate::exec::Mode::Unary,
+        terminal: crate::exec::TerminalSpec::disabled(),
         resume: crate::exec::Resume::Restart,
         effects: crate::exec::Effects::Pure,
         accept: crate::exec::AcceptRule::World,
@@ -4621,10 +4623,12 @@ fn query_spec(name: &str, grant_bound: u64) -> crate::exec::Spec {
             offer: query_exec_demand("run.offer"),
             control: query_exec_demand("run.control"),
             accept: query_exec_demand("run.accept"),
+            attach: None,
         },
         input: payload("agent.input"),
         output: payload("agent.output"),
         mode: crate::exec::Mode::Unary,
+        terminal: crate::exec::TerminalSpec::disabled(),
         resume: crate::exec::Resume::Restart,
         effects: crate::exec::Effects::Pure,
         accept: crate::exec::AcceptRule::World,
@@ -5190,10 +5194,12 @@ fn checkpoint_spec() -> crate::exec::Spec {
             offer: checkpoint_demand("run.offer"),
             control: checkpoint_demand("run.control"),
             accept: checkpoint_demand("run.accept"),
+            attach: None,
         },
         input: payload("agent.input"),
         output: payload("agent.output"),
         mode: crate::exec::Mode::Unary,
+        terminal: crate::exec::TerminalSpec::disabled(),
         resume: crate::exec::Resume::Checkpoint {
             codec: exec_schema("agent.checkpoint"),
         },
@@ -6485,6 +6491,10 @@ fn a_dispatch_refusal_says_which_kind_of_wrong_it_was() {
         FailureClass::Backend
     );
     assert_eq!(
+        class(DispatchFailure::Backend(Failure::OutputLimit)),
+        FailureClass::Backend
+    );
+    assert_eq!(
         class(DispatchFailure::Backend(Failure::Handler)),
         FailureClass::Handler
     );
@@ -6578,10 +6588,12 @@ mod subprocess_perform {
                 offer: exec_demand("run.offer"),
                 control: exec_demand("run.control"),
                 accept: exec_demand("run.accept"),
+                attach: None,
             },
             input: payload("batch.input"),
             output: payload("batch.output"),
             mode: crate::exec::Mode::Unary,
+            terminal: crate::exec::TerminalSpec::disabled(),
             resume: crate::exec::Resume::Restart,
             effects: crate::exec::Effects::Pure,
             accept: crate::exec::AcceptRule::World,
@@ -6600,15 +6612,14 @@ mod subprocess_perform {
         }
     }
 
-    fn transform_build(world: &WorldId) -> crate::exec::Build {
-        let spec = transform_spec();
+    fn transform_build_for(world: &WorldId, spec: &crate::exec::Spec) -> crate::exec::Build {
         let seed = [0xA1; 32];
         crate::exec::Build {
             id: crate::exec::BuildId::from_bytes([0; 32]),
             world: world.clone(),
             world_build: [0; 32],
             spec: crate::exec::SchemaRef {
-                name: spec.name,
+                name: spec.name.clone(),
                 version: spec.version,
             },
             handler: replica::content::ContentRef {
@@ -6631,16 +6642,25 @@ mod subprocess_perform {
         .unwrap()
     }
 
+    fn transform_build(world: &WorldId) -> crate::exec::Build {
+        transform_build_for(world, &transform_spec())
+    }
+
     struct TransformWorld {
         id: WorldId,
         schemas: Vec<Schema>,
         specs: Vec<crate::exec::Spec>,
         build: crate::exec::BuildId,
-        wall_millis: u64,
+        spec: crate::exec::Spec,
+        cancel_target: Arc<std::sync::Mutex<Option<crate::exec::RunId>>>,
     }
 
     impl TransformWorld {
-        fn new(build: crate::exec::BuildId, wall_millis: u64) -> Self {
+        fn new(
+            build: crate::exec::BuildId,
+            spec: crate::exec::Spec,
+            cancel_target: Arc<std::sync::Mutex<Option<crate::exec::RunId>>>,
+        ) -> Self {
             Self {
                 id: WorldId::parse("com.example.exec-batch").unwrap(),
                 schemas: vec![Schema {
@@ -6650,9 +6670,10 @@ mod subprocess_perform {
                     mutation: MutationModel::Atomic,
                     readable_predecessors: Vec::new(),
                 }],
-                specs: vec![transform_spec()],
+                specs: vec![spec.clone()],
                 build,
-                wall_millis,
+                spec,
+                cancel_target,
             }
         }
 
@@ -6675,9 +6696,10 @@ mod subprocess_perform {
         }
 
         fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
-            Ok(Effect {
-                content_refs: Vec::new(),
-                exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
+            let exec = if let Some(run) = self.cancel_target.lock().unwrap().take() {
+                vec![crate::exec::Cmd::Cancel { run }]
+            } else {
+                vec![crate::exec::Cmd::Start(crate::exec::Start {
                     spec: exec_schema("batch.transform"),
                     build: self.build,
                     input: crate::exec::Input {
@@ -6689,13 +6711,14 @@ mod subprocess_perform {
                     source: None,
                     service: None,
                     resources: Vec::new(),
-                    limits: crate::exec::Limits {
-                        wall_millis: self.wall_millis,
-                        ..transform_spec().limits
-                    },
+                    limits: crate::exec::Limits { ..self.spec.limits },
                     queries: Vec::new(),
                     target: None,
-                })],
+                })]
+            };
+            Ok(Effect {
+                content_refs: Vec::new(),
+                exec,
                 operations: vec![(
                     self.marker(),
                     Op::ReplaceAtomic {
@@ -6716,12 +6739,20 @@ mod subprocess_perform {
 
     fn transform_station(
         wall_millis: u64,
-    ) -> (crate::lifecycle::Station, WorldId, crate::exec::Build) {
-        let build = transform_build(&WorldId::parse("com.example.exec-batch").unwrap());
-        let world = Arc::new(TransformWorld::new(build.id, wall_millis));
+    ) -> (
+        crate::lifecycle::Station,
+        WorldId,
+        crate::exec::Build,
+        Arc<std::sync::Mutex<Option<crate::exec::RunId>>>,
+    ) {
+        let mut spec = transform_spec();
+        spec.limits.wall_millis = wall_millis;
+        let build = transform_build_for(&WorldId::parse("com.example.exec-batch").unwrap(), &spec);
+        let cancel_target = Arc::new(std::sync::Mutex::new(None));
+        let world = Arc::new(TransformWorld::new(build.id, spec, cancel_target.clone()));
         let world_id = world.id();
         let station = station_with(world.descriptor(), world);
-        (station, world_id, build)
+        (station, world_id, build, cancel_target)
     }
 
     fn subprocess_package(
@@ -6729,15 +6760,130 @@ mod subprocess_perform {
         program: &str,
         args: &[&str],
     ) -> crate::exec::Package {
+        subprocess_package_for(&transform_spec(), build, program, args)
+    }
+
+    fn subprocess_package_for(
+        spec: &crate::exec::Spec,
+        build: &crate::exec::Build,
+        program: &str,
+        args: &[&str],
+    ) -> crate::exec::Package {
         crate::exec::Package::new()
-            .with_spec(transform_spec())
+            .with_spec(spec.clone())
             .with_build(build.clone())
             .with_handler(Arc::new(crate::exec::Subprocess::new(
-                &transform_spec(),
+                spec,
                 build,
                 std::path::PathBuf::from(program),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
+                std::env::temp_dir(),
             )))
+    }
+
+    fn interactive_spec(input_limit: u64) -> crate::exec::Spec {
+        let mut spec = transform_spec();
+        spec.mode = crate::exec::Mode::Interactive;
+        spec.access.attach = Some(exec_demand("run.attach"));
+        spec.terminal = crate::exec::TerminalSpec {
+            transcript: crate::exec::Transcript::OnReturn,
+            max_transcript_bytes: 64 * 1024,
+            max_live_input_bytes: input_limit,
+        };
+        spec.resume = crate::exec::Resume::Never;
+        spec
+    }
+
+    fn interactive_station(
+        input_limit: u64,
+    ) -> (
+        crate::lifecycle::Station,
+        WorldId,
+        crate::exec::Build,
+        crate::exec::Spec,
+    ) {
+        let spec = interactive_spec(input_limit);
+        let world_id = WorldId::parse("com.example.exec-batch").unwrap();
+        let build = transform_build_for(&world_id, &spec);
+        let cancel_target = Arc::new(std::sync::Mutex::new(None));
+        let world = Arc::new(TransformWorld::new(build.id, spec.clone(), cancel_target));
+        let station = station_with(world.descriptor(), world);
+        (station, world_id, build, spec)
+    }
+
+    fn stream_station(
+        progress_bytes: u64,
+    ) -> (
+        crate::lifecycle::Station,
+        WorldId,
+        crate::exec::Build,
+        crate::exec::Spec,
+    ) {
+        let mut spec = transform_spec();
+        spec.mode = crate::exec::Mode::Stream;
+        spec.limits.progress_bytes = progress_bytes;
+        spec.terminal = crate::exec::TerminalSpec {
+            transcript: crate::exec::Transcript::OnReturn,
+            max_transcript_bytes: progress_bytes.saturating_add(4 * 1024),
+            max_live_input_bytes: 0,
+        };
+        let world_id = WorldId::parse("com.example.exec-batch").unwrap();
+        let build = transform_build_for(&world_id, &spec);
+        let cancel_target = Arc::new(std::sync::Mutex::new(None));
+        let world = Arc::new(TransformWorld::new(build.id, spec.clone(), cancel_target));
+        let station = station_with(world.descriptor(), world);
+        (station, world_id, build, spec)
+    }
+
+    fn launch_interactive(
+        session: &crate::session::Session,
+        package: &crate::exec::Package,
+        run: crate::exec::RunId,
+    ) -> crate::exec::AttemptId {
+        let report = session
+            .perform(package, |_| panic!("PTY output is transient"))
+            .unwrap();
+        report
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                crate::exec::PerformStep::Began {
+                    run: began,
+                    attempt,
+                } if *began == run => Some(*attempt),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the interactive Attempt did not begin: {:?}", report.steps))
+    }
+
+    fn read_until(
+        attachment: &crate::exec::TerminalAttachment,
+        mut cursor: u64,
+        needle: &[u8],
+    ) -> (u64, Vec<u8>, Vec<crate::exec::TerminalRecord>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut bytes = Vec::new();
+        let mut records = Vec::new();
+        loop {
+            let read = attachment.read(cursor, 4 * 1024).unwrap();
+            cursor = read.next_offset;
+            for record in read.records {
+                if let crate::exec::TerminalRecord::Output { bytes: part, .. } = &record {
+                    bytes.extend_from_slice(part);
+                }
+                records.push(record);
+            }
+            if bytes.windows(needle.len()).any(|window| window == needle) {
+                return (cursor, bytes, records);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal output never contained {:?}; got {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&bytes)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     fn start_run(
@@ -6773,12 +6919,434 @@ mod subprocess_perform {
         )
     }
 
+    fn perform_until_settled(
+        session: &crate::session::Session,
+        package: &crate::exec::Package,
+    ) -> crate::exec::PerformReport {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut merged = crate::exec::PerformReport::default();
+        loop {
+            let report = session
+                .perform(package, |bytes| {
+                    Ok(replica::content::ContentRef {
+                        content_id: *blake3::hash(bytes).as_bytes(),
+                    })
+                })
+                .unwrap();
+            let settled = report.steps.iter().any(|step| {
+                matches!(
+                    step,
+                    crate::exec::PerformStep::Returned { .. }
+                        | crate::exec::PerformStep::Failed { .. }
+                )
+            });
+            merged.steps.extend(report.steps);
+            if settled {
+                return merged;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the activation worker did not hand completion back to the drain"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn perform_interactive_until_settled(
+        session: &crate::session::Session,
+        station: &crate::lifecycle::Station,
+        identity: &crate::world::LocalIdentity,
+        package: &crate::exec::Package,
+    ) -> crate::exec::PerformReport {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut merged = crate::exec::PerformReport::default();
+        loop {
+            let report = session
+                .perform(package, |bytes| {
+                    station
+                        .content_write(identity, [0xD0; 16], &mut std::io::Cursor::new(bytes))
+                        .map_err(|_| crate::session::Failure::Persistence)
+                })
+                .unwrap();
+            let settled = report.steps.iter().any(|step| {
+                matches!(
+                    step,
+                    crate::exec::PerformStep::Returned { .. }
+                        | crate::exec::PerformStep::Failed { .. }
+                )
+            });
+            merged.steps.extend(report.steps);
+            if settled {
+                return merged;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A real PTY preserves one exact byte cursor across detach/reattach,
+    /// accepts bounded input, applies geometry before the next command, and
+    /// observes canonical EOF without turning the attachment into Run truth.
+    #[test]
+    fn an_interactive_pty_supports_input_resize_eof_and_reattach() {
+        let (station, world_id, build, spec) = interactive_station(1_024);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xD1, b"");
+        let script = concat!(
+            "stty -echo; ",
+            "printf 'READY\\n'; ",
+            "while IFS= read -r line; do ",
+            "case \"$line\" in size) stty size;; *) printf 'IN:%s\\n' \"$line\";; esac; ",
+            "done; printf 'EOF\\n'"
+        );
+        let package = subprocess_package_for(&spec, &build, "/bin/sh", &["-c", script]);
+        let attempt = launch_interactive(&session, &package, run);
+        let mut first = session.terminal_attach(run, attempt).unwrap();
+        let (ready_cursor, ready, _) = read_until(&first, 0, b"READY");
+        assert!(ready_cursor > 0);
+        assert!(ready.windows(5).any(|window| window == b"READY"));
+
+        first.detach();
+        assert_eq!(
+            first.stdin(b"refused\n"),
+            Err(crate::exec::TerminalFailure::Detached)
+        );
+        let second = session.terminal_attach(run, attempt).unwrap();
+        assert!(matches!(
+            session.terminal_attach(crate::exec::RunId::from_bytes([0xFF; 16]), attempt),
+            Err(crate::exec::TerminalFailure::MismatchedAttempt)
+        ));
+        assert!(matches!(
+            session.terminal_attach(run, crate::exec::AttemptId::from_bytes([0xFE; 16])),
+            Err(crate::exec::TerminalFailure::Unavailable)
+        ));
+
+        second.resize(100, 40).unwrap();
+        second.stdin(b"size\n").unwrap();
+        second.stdin(b"hello\n").unwrap();
+        let (cursor, output, records) = read_until(&second, ready_cursor, b"IN:hello");
+        assert!(output.windows(6).any(|window| window == b"40 100"));
+        assert!(records.iter().any(|record| matches!(
+            record,
+            crate::exec::TerminalRecord::Resized {
+                cols: 100,
+                rows: 40,
+                ..
+            }
+        )));
+
+        // A clipped read advances only through bytes actually returned.
+        let clipped = second.read(0, 2).unwrap();
+        assert_eq!(clipped.next_offset, 2);
+        assert!(clipped.next_offset < cursor);
+
+        second.end_input().unwrap();
+        let (_end_cursor, output, _) = read_until(&second, cursor, b"EOF");
+        assert!(output.windows(3).any(|window| window == b"EOF"));
+        let report = perform_interactive_until_settled(&session, &station, &identity, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, attempt: ended }
+                if *returned == run && *ended == attempt
+        )));
+    }
+
+    /// Interrupt targets the PTY foreground process group, so a shell trap
+    /// observes SIGINT and the Attempt reaches an ordinary terminal Outcome.
+    #[test]
+    fn an_interactive_pty_interrupts_the_foreground_process_group() {
+        let (station, world_id, build, spec) = interactive_station(1_024);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xD2, b"");
+        let script =
+            "trap 'printf INTERRUPTED\\n; exit 0' INT; printf READY\\n; while :; do sleep 1; done";
+        let package = subprocess_package_for(&spec, &build, "/bin/sh", &["-c", script]);
+        let attempt = launch_interactive(&session, &package, run);
+        let attachment = session.terminal_attach(run, attempt).unwrap();
+        let (cursor, _, _) = read_until(&attachment, 0, b"READY");
+        attachment.interrupt().unwrap();
+        let (_cursor, output, _) = read_until(&attachment, cursor, b"INTERRUPTED");
+        assert!(output
+            .windows(b"INTERRUPTED".len())
+            .any(|window| window == b"INTERRUPTED"));
+        let report = perform_interactive_until_settled(&session, &station, &identity, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, attempt: ended }
+                if *returned == run && *ended == attempt
+        )));
+    }
+
+    /// Live input is cumulative and exact; exceeding the Spec's ceiling is a
+    /// typed refusal and never places a truncated event on the performer queue.
+    #[test]
+    fn interactive_input_overflow_is_typed_and_exact() {
+        let (station, world_id, build, spec) = interactive_station(4);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xD3, b"");
+        let package = subprocess_package_for(
+            &spec,
+            &build,
+            "/bin/sh",
+            &["-c", "stty -echo; printf READY\\n; cat >/dev/null"],
+        );
+        let attempt = launch_interactive(&session, &package, run);
+        let attachment = session.terminal_attach(run, attempt).unwrap();
+        let _ = read_until(&attachment, 0, b"READY");
+        assert_eq!(
+            attachment.stdin(b"12345"),
+            Err(crate::exec::TerminalFailure::InputLimit)
+        );
+        attachment.stdin(b"123\n").unwrap();
+        attachment.end_input().unwrap();
+        let report = perform_interactive_until_settled(&session, &station, &identity, &package);
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+    }
+
+    /// The sealed batch is the restart boundary: it carries exact Run and
+    /// Attempt coordinates and canonically restores ordered terminal records.
+    #[test]
+    fn a_terminal_transcript_batch_round_trips_canonically() {
+        use crate::exec::OutputSink as _;
+
+        let run = crate::exec::RunId::from_bytes([0x31; 16]);
+        let attempt = crate::exec::AttemptId::from_bytes([0x32; 16]);
+        let terminal = Arc::new(crate::exec::TerminalSession::new(
+            run,
+            attempt,
+            64,
+            crate::exec::TerminalSpec {
+                transcript: crate::exec::Transcript::OnReturn,
+                max_transcript_bytes: 4 * 1024,
+                max_live_input_bytes: 8,
+            },
+        ));
+        assert_eq!(terminal.coordinates(), (run, attempt));
+        assert_eq!(
+            terminal
+                .write(crate::exec::OutputChannel::Merged, b"abc")
+                .unwrap(),
+            3
+        );
+        terminal.resized(90, 30).unwrap();
+        assert_eq!(
+            terminal
+                .write(crate::exec::OutputChannel::Merged, b"def")
+                .unwrap(),
+            6
+        );
+        terminal.exited(Some(0)).unwrap();
+        terminal.attempt_ended(crate::exec::EventId::from_bytes([0x33; 32]));
+
+        let encoded = terminal.transcript().unwrap().unwrap();
+        let restored = crate::exec::TranscriptBatch::decode_canonical(&encoded).unwrap();
+        assert_eq!(restored.run, run);
+        assert_eq!(restored.attempt, attempt);
+        assert!(matches!(
+            restored.records.as_slice(),
+            [
+                crate::exec::TerminalRecord::Output {
+                    start: 0,
+                    end: 3,
+                    ..
+                },
+                crate::exec::TerminalRecord::Resized {
+                    at: 3,
+                    cols: 90,
+                    rows: 30
+                },
+                crate::exec::TerminalRecord::Output {
+                    start: 3,
+                    end: 6,
+                    ..
+                },
+                crate::exec::TerminalRecord::ProcessExited {
+                    at: 6,
+                    code: Some(0)
+                },
+                crate::exec::TerminalRecord::AttemptEnded { at: 6, .. },
+            ]
+        ));
+        let mut noncanonical = encoded;
+        noncanonical.push(0);
+        assert!(crate::exec::TranscriptBatch::decode_canonical(&noncanonical).is_err());
+    }
+
+    /// Geometry/status traffic is bounded independently from byte retention;
+    /// a quiet terminal cannot grow an unbounded metadata queue.
+    #[test]
+    fn terminal_metadata_replay_is_bounded() {
+        use crate::exec::OutputSink as _;
+
+        let terminal = Arc::new(crate::exec::TerminalSession::new(
+            crate::exec::RunId::from_bytes([0x41; 16]),
+            crate::exec::AttemptId::from_bytes([0x42; 16]),
+            64,
+            crate::exec::TerminalSpec {
+                transcript: crate::exec::Transcript::Never,
+                max_transcript_bytes: 0,
+                max_live_input_bytes: 8,
+            },
+        ));
+        for cols in 1..=1_100u16 {
+            terminal.resized(cols, 24).unwrap();
+        }
+        let replay = terminal.attach().read(0, 64).unwrap();
+        assert!(replay.records.len() <= 1_024);
+    }
+
+    /// A reader behind the bounded ring gets an in-band counted Gap before
+    /// the retained suffix. The session never presents loss as a complete
+    /// byte sequence.
+    #[test]
+    fn terminal_ring_pressure_is_gap_marked() {
+        use crate::exec::OutputSink as _;
+
+        const RING_LIMIT: usize = 1024 * 1024;
+        let terminal = Arc::new(crate::exec::TerminalSession::new(
+            crate::exec::RunId::from_bytes([0x43; 16]),
+            crate::exec::AttemptId::from_bytes([0x44; 16]),
+            u64::try_from(RING_LIMIT + 2).unwrap(),
+            crate::exec::TerminalSpec {
+                transcript: crate::exec::Transcript::Never,
+                max_transcript_bytes: 0,
+                max_live_input_bytes: 8,
+            },
+        ));
+        let bytes = vec![b'x'; RING_LIMIT + 2];
+        terminal
+            .write(crate::exec::OutputChannel::Merged, &bytes)
+            .unwrap();
+
+        let replay = terminal.attach().read(0, RING_LIMIT).unwrap();
+        assert_eq!(replay.base_offset, 2);
+        assert_eq!(replay.dropped_bytes, 2);
+        assert!(matches!(
+            replay.records.first(),
+            Some(crate::exec::TerminalRecord::Gap {
+                after_seq: 2,
+                dropped_bytes: 2,
+            })
+        ));
+        assert!(matches!(
+            replay.records.get(1),
+            Some(crate::exec::TerminalRecord::Output {
+                start: 2,
+                end,
+                bytes,
+                ..
+            }) if *end == u64::try_from(RING_LIMIT + 2).unwrap()
+                && bytes.len() == RING_LIMIT
+        ));
+        assert_eq!(replay.next_offset, u64::try_from(RING_LIMIT + 2).unwrap());
+    }
+
+    /// Stream mode preserves both process pipes as distinct terminal channels,
+    /// charges them to one output ceiling, and records the real process exit.
+    #[test]
+    fn a_stream_transcript_preserves_stdout_stderr_and_exit_status() {
+        let (station, world_id, build, spec) = stream_station(64 * 1024);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xD6, b"");
+        let package = subprocess_package_for(
+            &spec,
+            &build,
+            "/bin/sh",
+            &["-c", "printf 'out-1\\n'; printf 'err-1\\n' >&2; exit 7"],
+        );
+        let report = perform_interactive_until_settled(&session, &station, &identity, &package);
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id,
+                    run,
+                },
+                [0xD7; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert_eq!(
+            state.attempts[0].returned[0].terminal,
+            crate::exec::TerminalClass::ApplicationFailed
+        );
+        let transcript = state.attempts[0].returned[0]
+            .transcript
+            .as_ref()
+            .expect("OnReturn seals a transcript");
+        let encoded = station
+            .content_read(&identity, transcript, 0, 128 * 1024)
+            .expect("the host-authored transcript is readable");
+        let batch = crate::exec::TranscriptBatch::decode_canonical(&encoded).unwrap();
+        assert!(batch.records.iter().any(|record| matches!(
+            record,
+            crate::exec::TerminalRecord::Output {
+                channel: crate::exec::OutputChannel::Stdout,
+                bytes,
+                ..
+            } if bytes == b"out-1\n"
+        )));
+        assert!(batch.records.iter().any(|record| matches!(
+            record,
+            crate::exec::TerminalRecord::Output {
+                channel: crate::exec::OutputChannel::Stderr,
+                bytes,
+                ..
+            } if bytes == b"err-1\n"
+        )));
+        assert!(batch.records.iter().any(|record| matches!(
+            record,
+            crate::exec::TerminalRecord::ProcessExited { code: Some(7), .. }
+        )));
+    }
+
+    /// stdout and stderr share the one Stream progress budget; neither pipe
+    /// can evade the exact output limit by being drained on another thread.
+    #[test]
+    fn stream_stdout_and_stderr_share_one_output_ceiling() {
+        let (station, world_id, build, spec) = stream_station(6);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xD8, b"");
+        let package = subprocess_package_for(
+            &spec,
+            &build,
+            "/bin/sh",
+            &["-c", "printf 1234; printf 5678 >&2"],
+        );
+        let report = perform_until_settled(&session, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                run: failed,
+                class: crate::exec::FailureClass::Backend,
+                ..
+            } if *failed == run
+        )));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+    }
+
     /// The reference batch transform: real bytes through a real child.
     /// Input rides stdin, output rides stdout, exit zero is Succeeded, and
     /// the Outcome's usage carries measured wall time.
     #[test]
     fn a_subprocess_transforms_committed_input_into_a_sealed_outcome() {
-        let (station, world_id, build) = transform_station(5_000);
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
         let identity = writer();
         let session = station.dock(&world_id, &identity).unwrap();
         let run = start_run(
@@ -6790,9 +7358,7 @@ mod subprocess_perform {
             b"make me loud",
         );
         let package = subprocess_package(&build, "/bin/sh", &["-c", "tr a-z A-Z"]);
-        let report = session
-            .perform(&package, |_| panic!("inline output stages no content"))
-            .unwrap();
+        let report = perform_until_settled(&session, &package);
         assert!(
             report.steps.iter().any(|step| matches!(
                 step,
@@ -6821,16 +7387,53 @@ mod subprocess_perform {
         );
     }
 
+    /// Composition supplies an explicit working directory, but raw daemon
+    /// environment is never ambient authority inherited by the child.
+    #[test]
+    fn a_subprocess_does_not_inherit_the_runtime_environment() {
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xD4, b"");
+        let package = subprocess_package(
+            &build,
+            "/bin/sh",
+            &["-c", "test -z \"${CARGO_MANIFEST_DIR+x}\""],
+        );
+        let report = perform_until_settled(&session, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+        )));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id,
+                    run,
+                },
+                [0xD5; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert_eq!(
+            state.attempts[0].returned[0].terminal,
+            crate::exec::TerminalClass::Succeeded
+        );
+    }
+
     /// A child that exits nonzero is an honest ApplicationFailed Outcome —
     /// returned and judged, never a dispatch error.
     #[test]
     fn a_nonzero_exit_is_an_application_failure_not_a_dispatch_error() {
-        let (station, world_id, build) = transform_station(5_000);
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
         let identity = writer();
         let session = station.dock(&world_id, &identity).unwrap();
         let run = start_run(&session, &station, &world_id, &identity, 0xE3, b"doomed");
         let package = subprocess_package(&build, "/bin/sh", &["-c", "exit 3"]);
-        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        let report = perform_until_settled(&session, &package);
         assert!(
             report.steps.iter().any(|step| matches!(
                 step,
@@ -6862,13 +7465,13 @@ mod subprocess_perform {
     /// parking forever. The durable ledger still allows another Attempt.
     #[test]
     fn a_wall_limited_child_is_killed_and_the_attempt_fails_honestly() {
-        let (station, world_id, build) = transform_station(400);
+        let (station, world_id, build, _cancel_target) = transform_station(400);
         let identity = writer();
         let session = station.dock(&world_id, &identity).unwrap();
         let run = start_run(&session, &station, &world_id, &identity, 0xE5, b"stall");
         let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
         let began = std::time::Instant::now();
-        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        let report = perform_until_settled(&session, &package);
         assert!(
             began.elapsed() < std::time::Duration::from_secs(10),
             "the kill happens at the wall, not at the child's leisure"
@@ -6892,14 +7495,12 @@ mod subprocess_perform {
     /// class must not say it did.
     #[test]
     fn a_wall_expiry_is_a_deadline_not_a_handler_defect() {
-        let (station, world_id, build) = transform_station(200);
+        let (station, world_id, build, _cancel_target) = transform_station(200);
         let identity = writer();
         let session = station.dock(&world_id, &identity).unwrap();
         let run = start_run(&session, &station, &world_id, &identity, 0xE9, b"slow");
         let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
-        let report = session
-            .perform(&package, |_| panic!("a stopped child stages no content"))
-            .unwrap();
+        let report = perform_until_settled(&session, &package);
         assert!(
             report.steps.iter().any(|step| matches!(
                 step,
@@ -6918,10 +7519,228 @@ mod subprocess_perform {
             .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
     }
 
+    /// Began and invocation are split by an activation-owned worker. A long
+    /// child therefore cannot hold the drain hostage, and a CancelAsked that
+    /// commits afterwards reaches the exact live AttemptControl handle.
+    #[test]
+    fn a_cancel_committed_after_began_stops_the_running_worker() {
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xEA, b"cancel me");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let began_at = std::time::Instant::now();
+        let launched = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(
+            began_at.elapsed() < std::time::Duration::from_secs(2),
+            "perform waited for the child instead of handing it to the worker"
+        );
+        assert!(launched.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Began { run: began, .. } if *began == run
+        )));
+        assert!(!launched.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { .. } | crate::exec::PerformStep::Failed { .. }
+        )));
+
+        session
+            .work(
+                crate::exec::WorkRequest::Cancel {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xEB; 16],
+            )
+            .unwrap();
+        let cancelled_at = std::time::Instant::now();
+        let report = perform_until_settled(&session, &package);
+        assert!(
+            cancelled_at.elapsed() < std::time::Duration::from_secs(5),
+            "the committed CancelAsked did not reach the running subprocess"
+        );
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                run: failed,
+                class: crate::exec::FailureClass::Fence,
+                ..
+            } if *failed == run
+        )));
+        assert!(!report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                class: crate::exec::FailureClass::Unknown,
+                ..
+            }
+        )));
+    }
+
+    /// A Cancel command authored beside an ordinary World mutation is
+    /// delivered after that compound transaction commits, not before and not
+    /// only when a later drain happens to rescan it.
+    #[test]
+    fn a_product_commit_delivers_cancel_to_the_running_worker() {
+        let (station, world_id, build, cancel_target) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(
+            &session,
+            &station,
+            &world_id,
+            &identity,
+            0xF0,
+            b"product cancel",
+        );
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let launched = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(launched
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Began { .. })));
+        *cancel_target.lock().unwrap() = Some(run);
+        let request = crate::action::RequestId::from_bytes([0xF1; 16]);
+        session
+            .submit(
+                identity
+                    .sign_action(
+                        &session,
+                        request,
+                        Intent {
+                            schema: SchemaId::parse("batch.request").unwrap(),
+                            schema_version: 1,
+                            payload: b"cancel".to_vec(),
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let report = perform_until_settled(&session, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                class: crate::exec::FailureClass::Fence,
+                ..
+            }
+        )));
+    }
+
+    /// A remotely incorporated CancelAsked has no local post-commit callback.
+    /// The next drain scan must still deliver it through AttemptControl.
+    #[test]
+    fn an_adopted_cancel_is_delivered_by_the_drain_scan() {
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(
+            &session,
+            &station,
+            &world_id,
+            &identity,
+            0xEF,
+            b"adopted cancel",
+        );
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let launched = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(launched
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Began { .. })));
+        session.test_land_adopted_cancel(run).unwrap();
+        let report = perform_until_settled(&session, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                class: crate::exec::FailureClass::Fence,
+                ..
+            }
+        )));
+        assert!(!report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                class: crate::exec::FailureClass::Unknown,
+                ..
+            }
+        )));
+    }
+
+    /// The activation, not the caller that happened to drain, owns the worker
+    /// join. Vacating cancels and reaps a long child before releasing the
+    /// Orbit's store lease.
+    #[test]
+    fn vacate_cancels_and_joins_the_activation_worker() {
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let _run = start_run(
+            &session,
+            &station,
+            &world_id,
+            &identity,
+            0xEE,
+            b"owned worker",
+        );
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let launched = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(launched
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Began { .. })));
+        drop(session);
+        let began = std::time::Instant::now();
+        let _orbit = station.vacate().expect("the owned worker drains");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(5),
+            "vacate waited for the child's wall deadline"
+        );
+    }
+
+    /// Crossing progress_bytes is a runtime limit failure. The prefix read
+    /// before the breach is never committed as a successful truncated result.
+    #[test]
+    fn unary_output_overflow_is_a_typed_failure_not_truncated_success() {
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xEC, b"overflow");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "head -c 131072 /dev/zero"]);
+        let report = perform_until_settled(&session, &package);
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed {
+                run: failed,
+                class: crate::exec::FailureClass::Backend,
+                ..
+            } if *failed == run
+        )));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id,
+                    run,
+                },
+                [0xED; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert!(state.attempts[0].returned.is_empty());
+        assert_eq!(state.attempts[0].failed.len(), 1);
+        assert_eq!(
+            state.attempts[0].failed[0].class,
+            crate::exec::FailureClass::Backend
+        );
+    }
+
     /// A committed cancellation before dispatch means the child never spawns.
     #[test]
     fn a_cancelled_run_never_spawns_its_child() {
-        let (station, world_id, build) = transform_station(5_000);
+        let (station, world_id, build, _cancel_target) = transform_station(5_000);
         let identity = writer();
         let session = station.dock(&world_id, &identity).unwrap();
         let run = start_run(&session, &station, &world_id, &identity, 0xE6, b"never");

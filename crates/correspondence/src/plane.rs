@@ -74,6 +74,9 @@ pub enum Failure {
     /// recipient is reachable — reporting it as `NotReachable` would blame them
     /// for a fault on this side.
     Egress(String),
+    /// The durable inbox could not be decoded or its stored signature did not
+    /// verify. A corrupt transcript is never replaced with an empty one.
+    Mailbox(&'static str),
 }
 
 impl std::fmt::Display for Failure {
@@ -94,6 +97,7 @@ impl std::fmt::Display for Failure {
             Self::Carrier(refused) => write!(f, "the carrier refused: {refused:?}"),
             Self::Seal(refused) => write!(f, "the letter could not be sealed: {refused:?}"),
             Self::Egress(why) => write!(f, "this device could not prove its own key: {why}"),
+            Self::Mailbox(why) => write!(f, "the durable inbox is invalid: {why}"),
         }
     }
 }
@@ -135,6 +139,15 @@ pub struct Opened {
 pub struct Collected {
     /// How many letters were newly filed by this pass.
     pub filed: usize,
+    /// Deposit ids whose opened letters are now held in the mailbox.
+    ///
+    /// The durable owner must commit [`ReachPlane::state`] before acknowledging
+    /// these exact ids. Already-filed redeliveries are included so an
+    /// acknowledgement that failed after a prior commit remains retryable.
+    pub acknowledge: Vec<String>,
+    /// Carrier-issued ids that named material different from the durable letter
+    /// already held under that id. These are never safe to acknowledge.
+    pub collisions: Vec<String>,
     /// Why a device could not be asked, if one could not.
     pub unasked: Option<String>,
 }
@@ -231,19 +244,31 @@ impl ReachPlane {
 
         let expected = mechanics::kinship::KinshipLog::found(genesis.clone())
             .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
-        let (mut registry, epoch, sent, address) = match held {
+        let (mut registry, epoch, sent, address, received) = match held {
             Some(held) => {
                 if held.registry.authored().any(|p| p != expected.profile()) {
                     return Err(Failure::NoGenesis);
                 }
-                (held.registry, held.epoch, held.sent, held.address)
+                (
+                    held.registry,
+                    held.epoch,
+                    held.sent,
+                    held.address,
+                    held.received,
+                )
             }
-            None => (Registry::new(), 1, std::collections::BTreeMap::new(), None),
+            None => (
+                Registry::new(),
+                1,
+                std::collections::BTreeMap::new(),
+                None,
+                std::collections::BTreeMap::new(),
+            ),
         };
         let profile = registry.found(genesis.clone())?;
         registry.extend(&profile, Entry::Retire(retirement))?;
 
-        Ok(Self::stand(
+        Self::stand(
             identity,
             profile,
             genesis,
@@ -255,8 +280,9 @@ impl ReachPlane {
                 address,
                 genesis: None,
                 origin: addressbook::reach_store::Origin::Founded,
+                received,
             },
-        ))
+        )
     }
 
     /// The profile two legacy seeds name, without founding a plane.
@@ -308,7 +334,7 @@ impl ReachPlane {
         {
             return Err(Failure::NotReachable);
         }
-        Ok(Self::stand(seed, profile, genesis, state))
+        Self::stand(seed, profile, genesis, state)
     }
 
     /// The one constructor. `genesis` is the link `profile` hashes to and
@@ -319,10 +345,11 @@ impl ReachPlane {
         profile: ProfileId,
         genesis: DeviceLink,
         state: addressbook::ReachState,
-    ) -> Self {
+    ) -> Result<Self, Failure> {
         let egress_space = SpaceId::mint(&SystemUlidSource);
         let (egress_events, egress_actor) = incept(&seed, 1, &egress_space);
-        Self {
+        let mailbox = Mailbox::restore(state.received).map_err(Failure::Mailbox)?;
+        Ok(Self {
             seed,
             profile,
             genesis,
@@ -331,11 +358,11 @@ impl ReachPlane {
             egress_space,
             egress_actor,
             egress_events,
-            mailbox: Mailbox::new(),
+            mailbox,
             epoch: state.epoch,
             sent: state.sent,
             address: state.address,
-        }
+        })
     }
 
     /// What has to survive a restart: the learned correspondents and the epoch.
@@ -351,6 +378,7 @@ impl ReachPlane {
             address: self.address.clone(),
             genesis: Some(self.genesis.clone()),
             origin: self.origin.clone(),
+            received: self.mailbox.state(),
         }
     }
 
@@ -585,8 +613,6 @@ impl ReachPlane {
         self.registry.portrait(profile, reader)
     }
 
-    /// Every profile this identity holds, its own included.
-    #[must_use]
     /// The registry beneath, read-only — for a caller projecting with a seed
     /// this plane does not hold, which is exactly an adopted placement's case.
     #[must_use]
@@ -594,6 +620,8 @@ impl ReachPlane {
         &self.registry
     }
 
+    /// Every profile this identity holds, its own included.
+    #[must_use]
     pub fn registry_profiles(&self) -> Vec<ProfileId> {
         self.registry.profiles().cloned().collect()
     }
@@ -917,6 +945,12 @@ impl ReachPlane {
 
     /// Collect on exactly one device, with the seed that opens for it — what a
     /// hosted, per-device-signed carrier needs: one device, one signer.
+    ///
+    /// This deliberately does **not** acknowledge. The holder must first commit
+    /// [`Self::state`] through its durable store; only then is it safe to ask the
+    /// carrier to forget the corresponding deposit ids. A collect that coupled
+    /// filing and acknowledgement here would have no way to know the commit
+    /// survived.
     pub fn collect_on(
         &mut self,
         carrier: &mut (impl Carrier + ?Sized),
@@ -925,12 +959,19 @@ impl ReachPlane {
         now: u64,
     ) -> Collected {
         match carrier.collect(device, now) {
-            Missed::Held(waiting) => Collected {
-                filed: self.mailbox.ingest(seed, device, &waiting),
-                unasked: None,
-            },
+            Missed::Held(waiting) => {
+                let ingested = self.mailbox.ingest_for_ack(seed, device, &waiting);
+                Collected {
+                    filed: ingested.filed,
+                    acknowledge: ingested.acknowledge,
+                    collisions: ingested.collisions,
+                    unasked: None,
+                }
+            }
             Missed::Unasked(why) => Collected {
                 filed: 0,
+                acknowledge: Vec::new(),
+                collisions: Vec::new(),
                 unasked: Some(why),
             },
         }
@@ -942,21 +983,47 @@ impl ReachPlane {
     /// This device only: a carrier fetches its own signer's mailbox, and the
     /// seeds of this identity's other devices live on their own machines, where
     /// each collects its own mail.
+    /// Like [`Self::collect_on`], this never acknowledges before the caller has
+    /// persisted [`Self::state`].
     pub fn collect(&mut self, carrier: &mut (impl Carrier + ?Sized), now: u64) -> Collected {
         let seed = self.seed;
         let device = device_from_seed(&seed);
         match carrier.collect(&device, now) {
-            Missed::Held(waiting) => Collected {
-                filed: self.mailbox.ingest(&seed, &device, &waiting),
-                unasked: None,
-            },
+            Missed::Held(waiting) => {
+                let ingested = self.mailbox.ingest_for_ack(&seed, &device, &waiting);
+                Collected {
+                    filed: ingested.filed,
+                    acknowledge: ingested.acknowledge,
+                    collisions: ingested.collisions,
+                    unasked: None,
+                }
+            }
             // Not "nothing was waiting": a device that could not be asked is a
             // measurement that was not taken.
             Missed::Unasked(why) => Collected {
                 filed: 0,
+                acknowledge: Vec::new(),
+                collisions: Vec::new(),
                 unasked: Some(why),
             },
         }
+    }
+
+    /// Ask the configured carrier to forget deposits whose opened letters have
+    /// already been committed through [`Self::state`].
+    ///
+    /// This is deliberately separate from [`Self::collect_via`]: only the
+    /// durable owner knows whether its atomic store commit succeeded.
+    pub fn acknowledge_via(
+        &self,
+        contractor: &dyn crate::Contractor,
+        ids: &[String],
+        now: u64,
+    ) -> Result<usize, Refused> {
+        let seed = self.seed;
+        let device = device_from_seed(&seed);
+        let mut carrier = contractor.carrier_for(&seed);
+        carrier.acknowledge(&device, ids, now)
     }
 
     /// The messages this identity has opened, as (proven sender device, body).
@@ -1910,6 +1977,81 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, device_from_seed(&BOB_A), "proven from Bob");
         assert_eq!(messages[0].1, "reached you");
+    }
+
+    /// Collection only opens and files. The caller persists `state()` before it
+    /// may acknowledge the carrier, so a crash cannot turn a successfully fetched
+    /// command into a vanished one. Until then the carrier may redeliver; the
+    /// durable deposit id makes that one transcript entry across the restart.
+    #[test]
+    fn opened_mail_and_its_dedup_identity_survive_a_durable_restart() {
+        let mut alice = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("alice");
+        let mut bob = ReachPlane::found_here(BOB_A, None, None, NOW).expect("bob");
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB_A)));
+        let announcement = alice.announce(to_bob, &bob.standing()).expect("announce");
+        bob.learn(announcement, &bob.standing()).expect("learn");
+
+        let mut carrier = MemCarrier::new();
+        bob.send(
+            &mut carrier,
+            &alice.profile().clone(),
+            "survive the restart",
+            NOW,
+        )
+        .expect("send");
+        let first = alice.collect(&mut carrier, NOW + 1);
+        assert_eq!(first.filed, 1);
+        assert_eq!(first.acknowledge.len(), 1);
+
+        let home = tempfile::tempdir().expect("home");
+        let store = addressbook::ReachStore::at(home.path());
+        store
+            .save(&alice.state())
+            .expect("persist before acknowledge");
+        let held = store.load().expect("load").expect("state");
+        let mut restored = ReachPlane::restore(ALICE_A, held, NOW + 2).expect("restore");
+        assert_eq!(
+            restored.messages(),
+            vec![(device_from_seed(&BOB_A), "survive the restart".into())]
+        );
+
+        // `collect` has not acknowledged the carrier. Its redelivery after the
+        // restart is harmless because the deposit id was persisted with the mail.
+        let redelivered = restored.collect(&mut carrier, NOW + 3);
+        assert_eq!(redelivered.filed, 0);
+        assert_eq!(
+            redelivered.acknowledge, first.acknowledge,
+            "a durable redelivery returns the same id for an acknowledgement retry"
+        );
+        assert_eq!(restored.messages().len(), 1);
+    }
+
+    #[test]
+    fn a_stored_letter_whose_signature_no_longer_verifies_refuses_restore() {
+        let plane = ReachPlane::found_here(ALICE_A, None, None, NOW).expect("alice");
+        let mut state = plane.state();
+        let forged = Letter::compose(
+            &BOB_A,
+            Content::Message {
+                body: "not durable truth".into(),
+            },
+            NOW,
+        );
+        let mut encoded = serde_json::to_vec(&forged).expect("encode");
+        let last = encoded.len().saturating_sub(1);
+        encoded[last] ^= 0xff;
+        state.received.insert(
+            "forged".into(),
+            addressbook::reach_store::Received {
+                letter: encoded,
+                deposited_by: device_from_seed(&BOB_A),
+                arrived_at: NOW,
+            },
+        );
+        assert!(matches!(
+            ReachPlane::restore(ALICE_A, state, NOW),
+            Err(Failure::Mailbox(_))
+        ));
     }
 
     /// Sending to a profile the plane has never learned is `NotReachable`, never

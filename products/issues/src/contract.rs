@@ -365,6 +365,7 @@ pub fn verify_spec() -> runtime::exec::Spec {
             offer: contributor.clone(),
             control: contributor.clone(),
             accept: contributor,
+            attach: None,
         },
         input: runtime::exec::PayloadSpec {
             schema: runtime::exec::SchemaRef {
@@ -386,6 +387,7 @@ pub fn verify_spec() -> runtime::exec::Spec {
             max_additional_input_bytes: 0,
         },
         mode: runtime::exec::Mode::Unary,
+        terminal: runtime::exec::TerminalSpec::disabled(),
         resume: runtime::exec::Resume::Restart,
         effects: runtime::exec::Effects::Pure,
         accept: runtime::exec::AcceptRule::World,

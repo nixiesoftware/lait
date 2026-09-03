@@ -1845,26 +1845,13 @@ impl SpaceAuthority {
         Ok(agent)
     }
 
-    /// Provision a **co-located** agent identity in THIS shared store: incept
-    /// its actor from its own seed so the plane knows it — the local analogue of
-    /// a joiner's self-inception arriving over Contact, but with no round trip —
-    /// then sponsor it with the default content grant. One store, one step; this
-    /// is what makes "sponsor once, then it works" true for an agent on the same
-    /// machine (Architecture B). Idempotent: re-provisioning a known, sponsored
-    /// agent returns its actor. Returns the agent's actor id.
-    pub fn provision_agent(
-        &self,
-        agent_seed: &[u8; 32],
-        assignments: &[(
-            mechanics::authorization::PolicyCapability,
-            mechanics::authorization::Resource,
-        )],
-    ) -> Result<ActorId> {
+    /// Incept an agent from its own seed so this Space knows the actor.
+    ///
+    /// This is self-authored identity evidence only: it proves key ownership
+    /// and grants no standing. Sponsorship remains a separate owner-authored
+    /// operation. Idempotent for an actor already known to this Space.
+    pub fn incept_agent(&self, agent_seed: &[u8; 32]) -> Result<ActorId> {
         let agent_device = device_from_seed(agent_seed);
-        // 1. Incept into the shared actor plane if not already known. The
-        //    inception is self-signed (it proves key ownership); it establishes
-        //    that the actor *exists*, never that it has standing — standing is
-        //    the separate sponsorship below.
         {
             let mut inner = self.lock();
             if inner.actor_plane().actor_of_device(&agent_device).is_none() {
@@ -1881,6 +1868,23 @@ impl SpaceAuthority {
                     .map_err(|e| anyhow!("agent inception: {e}"))?;
             }
         }
+        self.actor_of_device(&agent_device)
+            .ok_or_else(|| anyhow!("agent inception vanished"))
+    }
+
+    /// Legacy combined helper retained for mechanics-level compatibility.
+    /// New daemon flows call [`Self::incept_agent`] while the agent acts as
+    /// itself, then let its owner sponsor the resulting known actor separately.
+    pub fn provision_agent(
+        &self,
+        agent_seed: &[u8; 32],
+        assignments: &[(
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
+        )],
+    ) -> Result<ActorId> {
+        let agent_device = device_from_seed(agent_seed);
+        self.incept_agent(agent_seed)?;
         // 2. Sponsor with the default content grant. `agent_add` refuses an
         //    existing principal, which for re-provisioning means "already done".
         match self.agent_add(&agent_device.to_string(), assignments) {

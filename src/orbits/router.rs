@@ -212,6 +212,7 @@ impl Placement {
         factory: Arc<dyn TransportFactory>,
         packages: WorldPackages,
         blocking: Arc<Semaphore>,
+        agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
     ) -> Result<Self> {
         let mode = match control::probe(&resolved.home).await {
             control::Probe::Healthy { .. } => PlacementMode::Attached,
@@ -224,7 +225,9 @@ impl Placement {
                 .into())
             }
             control::Probe::Absent => {
-                match Self::start_owned(resolved, factory.as_ref(), packages, blocking).await {
+                match Self::start_owned(resolved, factory.as_ref(), packages, blocking, agent_seeds)
+                    .await
+                {
                     Ok(mode) => mode,
                     Err(start_error) => {
                         // A cwd-bound CLI can win the daemon lock after our
@@ -265,6 +268,7 @@ impl Placement {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
         blocking: Arc<Semaphore>,
+        agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
     ) -> Result<PlacementMode> {
         if !crate::orbital::space_store_present(&resolved.home) {
             return Err(anyhow!(
@@ -273,9 +277,15 @@ impl Placement {
             ));
         }
         let seed = crate::config::load_or_create_identity(&resolved.identity_dir)?;
-        let runner =
-            StationRunner::start_admitted(resolved.home.clone(), seed, factory, packages, blocking)
-                .await?;
+        let runner = StationRunner::start_admitted(
+            resolved.home.clone(),
+            seed,
+            factory,
+            packages,
+            blocking,
+            agent_seeds,
+        )
+        .await?;
         let host = runner.host();
         let stop = runner.stop_handle();
         let mut completion = tokio::spawn(runner.run());
@@ -614,9 +624,10 @@ pub struct Router {
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
-    correspondence: Arc<crate::daemon::correspondence::CorrespondenceService>,
+    correspondence: Arc<crate::daemon::correspondence_host::CorrespondenceHost>,
     pair: Arc<crate::daemon::pair::PairService>,
     asks: crate::daemon::sponsorship::SponsorshipAsks,
+    agent_seeds: Option<crate::daemon::agents::AgentSeedResolver>,
 }
 
 impl Router {
@@ -636,14 +647,24 @@ impl Router {
         let book = crate::daemon::address_book::AddressBookService::open(&identity)
             .map(Arc::new)
             .map_err(|error| error.to_string());
-        let correspondence = Arc::new(crate::daemon::correspondence::CorrespondenceService::open(
-            &identity,
-        ));
+        let correspondence = Arc::new(
+            crate::daemon::correspondence_host::CorrespondenceHost::open(
+                &identity,
+                catalog.agents_base(),
+                !catalog.self_contained(),
+            ),
+        );
+        let agent_registry = crate::daemon::agents::AgentRegistry::from_agents_base(
+            catalog.agents_base(),
+            identity.clone(),
+        )
+        .map_err(|error| error.to_string());
+        let primary_correspondence = correspondence.primary();
         // The one seam between the two identity services, hooked at
         // construction: learning a correspondent is the gesture that installs
         // their card, and sharing reach is the gesture that presents My Card.
         if let Ok(book) = &book {
-            correspondence.hook_book(book.clone());
+            primary_correspondence.hook_book(book.clone());
         }
         // The plane stands whether or not anything carries: the device set it
         // publishes is what the hub admits on, and a daemon with no Post still
@@ -652,15 +673,41 @@ impl Router {
         // a different fact from an empty mailbox and the only one worth acting
         // on.
         let now = crate::daemon::correspondence::now_secs();
-        match correspondence.restore(now) {
+        match primary_correspondence.restore(now) {
             Ok(()) => {
                 if let Some(base) = crate::daemon::correspondence::configured_carrier(&identity) {
-                    if let Err(error) = correspondence.carry_over(base, now) {
+                    if let Err(error) = primary_correspondence.carry_over(base, now) {
                         tracing::warn!(%error, "correspondence could not be carried");
                     }
                 }
             }
             Err(error) => tracing::warn!(%error, "the reach plane could not be restored"),
+        }
+        // Resume crash-journaled agent creation before correspondence scans,
+        // then load only completed, identity-verified registry records. A key
+        // file by itself is never enough to become an agent mailbox.
+        if let Ok(registry) = &agent_registry {
+            match registry.recover_available() {
+                Ok(results) => {
+                    for (name, result) in results {
+                        if let Err(error) = result {
+                            tracing::warn!(%name, %error, "agent creation recovery failed");
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "agent registry recovery could not start"),
+            }
+            match registry.list() {
+                Ok(records) => {
+                    for record in records {
+                        let name = record.name;
+                        if let Err(error) = correspondence.agent(&name, now) {
+                            tracing::warn!(%name, %error, "agent correspondence could not be restored");
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "verified agents could not be enumerated"),
+            }
         }
         // The standing collector: mail is fetched on the daemon's own cadence,
         // so a letter lands while no window is open and an invitation is
@@ -675,15 +722,11 @@ impl Router {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let collector = correspondence.clone();
             let woken = Arc::new(tokio::sync::Notify::new());
-            // The wake listener: one SSE subscription to the carrier's
-            // doorbell, so a deposit is heard within the round trip rather
-            // than on the period — the same posture the update feed takes.
-            // Absent a carrier there is no doorbell to hold.
-            if let Some(base) = crate::daemon::correspondence::configured_post_url(&identity) {
-                if let Some(device) = correspondence.my_wire_device() {
-                    crate::daemon::correspondence::serve_wake(base, device, Arc::clone(&woken));
-                }
-            }
+            // One wake subscription per restored, carried identity. Activation
+            // also covers agents loaded after startup (for example immediately
+            // after AgentCreate), while the host deduplicates by resolved
+            // profile. Every ring wakes this same collect-all pass.
+            correspondence.activate_wakes(Arc::clone(&woken));
             runtime.spawn(async move {
                 let mut failures: u32 = 0;
                 loop {
@@ -698,24 +741,59 @@ impl Router {
                         () = woken.notified() => {}
                     }
                     let now = crate::daemon::correspondence::now_secs();
-                    failures = match collector.collect_standing(now) {
-                        Ok(_) => 0,
-                        Err(_) => failures.saturating_add(1),
+                    failures = match collector.collect_loaded(now) {
+                        Ok(results) if results.iter().all(|result| result.result.is_ok()) => 0,
+                        Ok(_) | Err(_) => failures.saturating_add(1),
                     };
                 }
             });
         }
+        // The Console is a separate identity-local supervisor, not part of
+        // correspondence collection and not a UI session. It keeps private
+        // Runtime Stations alive and only sees letters the agent mailbox has
+        // already verified and persisted.
+        if let (Ok(runtime), Ok(registry)) = (tokio::runtime::Handle::try_current(), agent_registry)
+        {
+            let mut supervisor = crate::daemon::agent_console::AgentConsoleSupervisor::new(
+                registry,
+                correspondence.clone(),
+                catalog.agents_base().to_path_buf(),
+            );
+            runtime.spawn(async move {
+                loop {
+                    supervisor = match tokio::task::spawn_blocking(move || {
+                        supervisor.tick(crate::daemon::correspondence::now_secs());
+                        supervisor
+                    })
+                    .await
+                    {
+                        Ok(supervisor) => supervisor,
+                        Err(error) => {
+                            tracing::warn!(%error, "agent Console supervisor stopped");
+                            return;
+                        }
+                    };
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            });
+        }
         let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
+        let agent_seeds = if catalog.self_contained() {
+            None
+        } else {
+            crate::daemon::agents::AgentSeedResolver::open(catalog.agents_base(), identity.clone())
+                .ok()
+        };
         // The hub admits own devices on the set correspondence publishes, so
         // the service stands first and the hub takes its watch — `None` until
         // restored, and the hub fails closed on `None`.
         let factory = Arc::new(TransportHubFactory::new(
             factory,
-            correspondence.own_devices(),
+            primary_correspondence.own_devices(),
         ));
         let pair = Arc::new(crate::daemon::pair::PairService::open(
             &identity,
-            correspondence.clone(),
+            primary_correspondence,
             factory.clone(),
         ));
         Self {
@@ -731,6 +809,7 @@ impl Router {
             correspondence,
             pair,
             asks,
+            agent_seeds,
         }
     }
 
@@ -748,6 +827,15 @@ impl Router {
     }
 
     pub(crate) fn correspondence(&self) -> &crate::daemon::correspondence::CorrespondenceService {
+        self.correspondence.primary_ref()
+    }
+
+    /// Explicit multi-identity correspondence seam for the agent supervisor.
+    /// This is intentionally separate from ordinary request routing and from
+    /// `act_as`, neither of which selects a mailbox or confers owner authority.
+    pub(crate) fn correspondence_host(
+        &self,
+    ) -> &crate::daemon::correspondence_host::CorrespondenceHost {
         &self.correspondence
     }
 
@@ -904,10 +992,18 @@ impl Router {
         let factory: Arc<dyn TransportFactory> = self.factory.clone();
         let packages = self.packages.clone();
         let blocking = self.blocking.clone();
+        let agent_seeds = self.agent_seeds.clone();
         let placement = self
             .occupancy
             .get_or_try_place(orbit, Placement::is_live, || {
-                Placement::establish(&resolved, doorbells, factory, packages, blocking)
+                Placement::establish(
+                    &resolved,
+                    doorbells,
+                    factory,
+                    packages,
+                    blocking,
+                    agent_seeds,
+                )
             })
             .await?;
         Ok((resolved, placement))
@@ -933,6 +1029,26 @@ impl Router {
         }
         let resolved = self.resolve_address(address)?;
         self.place_resolved(resolved).await
+    }
+
+    /// Commit the agent-authored identity inception that precedes an owner's
+    /// sponsorship. This capability exists only on an in-process Station
+    /// launched with this Router's verified owner-scoped agent resolver.
+    pub(crate) async fn incept_global_agent(
+        &self,
+        address: &OrbitAddress,
+        profile: &str,
+    ) -> Result<mechanics::ids::ActorId> {
+        let (_resolved, placement) = self.place_address_with_host(address).await?;
+        let PlacementMode::Owned { host, .. } = &placement.mode else {
+            return Err(anyhow!(
+                "the Orbit is hosted by a compatibility process without owner-scoped agent custody"
+            ));
+        };
+        let host = host
+            .upgrade()
+            .ok_or_else(|| anyhow!("the in-process Station stopped during sponsorship"))?;
+        host.incept_global_agent(profile)
     }
 
     /// Dispatch a request after ensuring its Orbit has one live placement.

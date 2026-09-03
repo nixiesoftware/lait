@@ -290,6 +290,10 @@ img.world-mark { width: 24px; height: 24px; border-radius: var(--r-row); object-
 .chat-byline small,.chat-time { color: var(--faint); font-size: var(--fs-micro); }
 .chat-bubble { display: grid; gap: 3px; max-width: 460px; border-radius: var(--r-card); padding: 7px 11px; color: var(--text); background: var(--surface-100); font-size: var(--fs-body); line-height: 1.45; overflow-wrap: anywhere; }
 .chat-bubble.mine { color: #fff; background: var(--brand); }
+.chat-bubble.agent-command { border: 1px solid color-mix(in srgb,var(--brand) 58%,transparent); }
+.chat-bubble.agent-result { border: 1px solid color-mix(in srgb,var(--brand) 35%,var(--border)); background: color-mix(in srgb,var(--surface-100) 88%,var(--brand)); }
+.agent-message-kind { color: var(--faint); font-size: var(--fs-micro); font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.chat-bubble.mine .agent-message-kind { color: rgb(255 255 255 / .76); }
 .provenance-note { color: var(--faint); font-size: var(--fs-micro); }
 .invitation-card { display: grid; gap: 7px; max-width: 460px; border: 1px solid var(--brand); border-radius: var(--r-card); padding: 12px; background: var(--surface-100); }
 .invitation-card strong { color: var(--brand-text); font-size: var(--fs-body); }
@@ -308,6 +312,16 @@ img.world-mark { width: 24px; height: 24px; border-radius: var(--r-row); object-
 .agent-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .agent-chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: var(--r-full); padding: 3px 12px 3px 4px; color: var(--text); background: var(--surface-200); font-size: var(--fs-small); font-weight: 650; }
 .agent-chip:hover { border-color: color-mix(in srgb,var(--brand) 45%,transparent); background: var(--surface-300); }
+.agent-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.agent-controls label { display: grid; gap: 5px; color: var(--muted); font-size: var(--fs-micro); font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.agent-controls select { min-width: 0; border: 1px solid var(--border); border-radius: var(--r-ctl); padding: 7px 9px; color: var(--text); background: var(--field); font: inherit; font-size: var(--fs-small); letter-spacing: normal; text-transform: none; }
+.agent-management-failure { margin: 0; border-left: 2px solid var(--danger); padding: 7px 10px; color: var(--danger-text); background: var(--surface-100); font-size: var(--fs-caption); }
+.agent-primitive-list { display: grid; gap: 7px; }
+.agent-primitive { display: grid; gap: 5px; border: 1px solid var(--border); border-radius: var(--r-card); padding: 10px 12px; background: var(--surface-100); }
+.agent-primitive-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); }
+.agent-primitive > small { color: var(--muted); line-height: 1.4; }
+.agent-primitive > code { color: var(--faint); font-size: var(--fs-micro); font-family: var(--mono); }
+@media (max-width: 420px) { .agent-controls { grid-template-columns: 1fr; } }
 .caption-identity { display: inline-flex; align-items: center; gap: 7px; margin-right: 6px; border: 0; border-radius: var(--r-ctl); padding: 3px 10px 3px 4px; color: var(--muted); background: transparent; font-size: var(--fs-small); font-weight: 650; }
 .caption-identity:hover, .caption-identity[aria-pressed="true"] { color: var(--text); background: var(--surface-200); }
 .hub { flex: 1; min-height: 0; overflow: auto; padding: 26px 32px; background: var(--surface-50); }
