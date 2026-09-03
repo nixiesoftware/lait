@@ -187,6 +187,142 @@ impl BrowserEngineHandle {
         ))
     }
 
+    /// Drive carets from the viewer's own `session:watch` question — the real
+    /// frame the editor sends (`{issue, cursor:{field, anchor}}`), rather than a
+    /// bespoke call. When the question carries a cursor over an issue, the tab
+    /// publishes that caret; a question with no cursor (just watching) publishes
+    /// nothing. This is the send half's integration point; the Worker relays the
+    /// viewer's `session:watch` here.
+    #[wasm_bindgen(js_name = watchCaret)]
+    pub async fn watch_caret(&self, question_json: &str) -> Result<bool, JsValue> {
+        let question: serde_json::Value = serde_json::from_str(question_json)
+            .map_err(|e| js_err("the watch question does not decode", e))?;
+        let (Some(issue), Some(cursor)) = (
+            question.get("issue").and_then(serde_json::Value::as_str),
+            question.get("cursor"),
+        ) else {
+            return Ok(false);
+        };
+        let (Some(field), Some(position)) = (
+            cursor.get("field").and_then(serde_json::Value::as_str),
+            cursor.get("anchor").and_then(serde_json::Value::as_u64),
+        ) else {
+            return Ok(false);
+        };
+        self.publish_caret(issue.to_string(), field.to_string(), position as u32)
+            .await
+    }
+
+    /// Drain the next caret a peer published to this tab, as the viewer's own
+    /// `{kind:"live", …}` `SocketEvent` payload — the receive half. Awaits the
+    /// next datagram, resolves its anchor to a position against the live core,
+    /// and shapes one `LiveEntry` in the exact wire form the daemon's socket
+    /// sends, so the viewer's facepile/caret UI draws it with no branch on which
+    /// backend answered. `None` when the Live session has ended. The `sid` is
+    /// the Worker's to attach when it wraps this in a `session:event` for the
+    /// watching session — one Live connection can answer several sessions.
+    ///
+    /// Received carets are the responder's own local editors: the daemon
+    /// publishes only its local presence (it does not relay other peers'), so
+    /// the author is the responder's actor. A future daemon that relays would
+    /// carry the station per item.
+    #[wasm_bindgen(js_name = drainCaret)]
+    pub async fn drain_caret(&self) -> Result<Option<String>, JsValue> {
+        let Some(live) = self.live.as_ref() else {
+            return Ok(None);
+        };
+        let Some(item) = live.next_item().await else {
+            return Ok(None);
+        };
+        let Some(entry) = self.live_entry(&item)? else {
+            // A payload kind this tab does not surface (residency/preview).
+            return Ok(None);
+        };
+        // `issue: null` is the honest whole-table answer: one Live connection
+        // may carry carets for several issues, and the Worker attaches the exact
+        // reff a given watching session asked for when it wraps this.
+        let event = serde_json::json!({
+            "kind": "live",
+            "space": self.space.as_str(),
+            "issue": serde_json::Value::Null,
+            "view": { "kind": "live", "generation": 0, "partial": false, "entries": [entry] },
+        });
+        serde_json::to_string(&event)
+            .map(Some)
+            .map_err(|e| js_err("the live event does not encode", e))
+    }
+
+    /// One received transient item as the viewer's `LiveEntry` — resolving a
+    /// caret/selection anchor to a position against the live core, in the exact
+    /// wire shape `hosting::live_entry` builds on the daemon. `None` for a kind
+    /// the tab does not surface.
+    fn live_entry(
+        &self,
+        item: &runtime::transient::TransientItem,
+    ) -> Result<Option<serde_json::Value>, JsValue> {
+        use runtime::transient::TransientPayload;
+        let actor = runtime::browser::LedgerAuthorityView(self.authority.clone())
+            .resolve(&self.responder.as_device())
+            .map(|resolution| resolution.actor.as_str().to_string());
+        let Some(actor) = actor else {
+            return Ok(None);
+        };
+        let (kind, caret, focus) = match &item.payload {
+            TransientPayload::Presence => ("presence", serde_json::Value::Null, serde_json::Value::Null),
+            TransientPayload::Typing => ("typing", serde_json::Value::Null, serde_json::Value::Null),
+            TransientPayload::Caret { anchor } => (
+                "caret",
+                self.caret_position(&item.scope, anchor),
+                serde_json::Value::Null,
+            ),
+            TransientPayload::Selection { anchor, focus } => (
+                "selection",
+                self.caret_position(&item.scope, anchor),
+                self.caret_position(&item.scope, focus),
+            ),
+            // Preview and residency are not drawn as carets here.
+            TransientPayload::Preview { .. } | TransientPayload::Residency { .. } => {
+                return Ok(None)
+            }
+        };
+        Ok(Some(serde_json::json!({
+            "actor": actor,
+            "scope": live_scope(&item.scope),
+            "kind": kind,
+            "age_ms": 0,
+            "uncertain": false,
+            "caret": caret,
+            "focus": focus,
+        })))
+    }
+
+    /// Resolve a peer's caret anchor to a `CaretPosition` against the live
+    /// core — `at` a position, or `drifted` when the material it named is gone.
+    fn caret_position(
+        &self,
+        scope: &runtime::transient::Target,
+        anchor_bytes: &[u8],
+    ) -> serde_json::Value {
+        let (Some(field), Some(body)) = (scope_field(scope), scope_body_id(scope)) else {
+            return serde_json::json!({ "caret": "unresolved" });
+        };
+        let _ = field;
+        let key = replica::body::BodyKey::new(
+            self.world_id.clone(),
+            replica::body::BodyId::from_bytes(body),
+        );
+        let Ok(anchor) = fabric::Anchor::decode_canonical(anchor_bytes) else {
+            return serde_json::json!({ "caret": "unresolved" });
+        };
+        match self.station.resolve_anchor(&key, &anchor) {
+            Ok(fabric::AnchorResolution::Resolved(position)) => {
+                serde_json::json!({ "caret": "at", "position": position })
+            }
+            Ok(fabric::AnchorResolution::Drifted) => serde_json::json!({ "caret": "drifted" }),
+            Err(_) => serde_json::json!({ "caret": "unresolved" }),
+        }
+    }
+
     /// Converge with the responder over the same transport: pull its material
     /// AND push this tab's own excess on the same connection (symmetric
     /// convergence), then install what arrived into the live core through the
@@ -410,4 +546,65 @@ pub async fn boot(
         live,
         world_id,
     })
+}
+
+/// The base32 render of a Body id — the form the tree renders Body ids in, and
+/// the form the viewer's `LiveScope.body` carries.
+fn render_body(body: &[u8; 16]) -> String {
+    replica::body::BodyId::from_bytes(*body).render()
+}
+
+/// The field a scope names, when it names one.
+fn scope_field(scope: &runtime::transient::Target) -> Option<&str> {
+    use runtime::transient::Target;
+    match scope {
+        Target::Field { field, .. } | Target::Preview { field, .. } | Target::Typing { field, .. } => {
+            Some(field)
+        }
+        _ => None,
+    }
+}
+
+/// The Body id a scope names, when it names one.
+fn scope_body_id(scope: &runtime::transient::Target) -> Option<[u8; 16]> {
+    use runtime::transient::Target;
+    match scope {
+        Target::Body { body, .. }
+        | Target::Material { body, .. }
+        | Target::Field { body, .. }
+        | Target::Preview { body, .. }
+        | Target::Typing { body, .. } => Some(*body),
+        _ => None,
+    }
+}
+
+/// One transient scope as the viewer's `LiveScope` JSON — the exact wire shape
+/// `hosting::live_scope` builds, so a caret drawn in a tab is byte-identical to
+/// one from the daemon.
+fn live_scope(scope: &runtime::transient::Target) -> serde_json::Value {
+    use runtime::transient::Target;
+    match scope {
+        Target::Body { world, body } => {
+            serde_json::json!({ "scope": "issue_view", "world": world, "body": render_body(body) })
+        }
+        Target::Material { world, body } => serde_json::json!({
+            "scope": "document_view", "world": world, "body": render_body(body)
+        }),
+        Target::Field { world, body, field } => serde_json::json!({
+            "scope": "text_caret", "world": world, "body": render_body(body), "field": field
+        }),
+        Target::Preview { world, body, field } => serde_json::json!({
+            "scope": "text_preview", "world": world, "body": render_body(body), "field": field
+        }),
+        Target::Typing { world, body, field } => serde_json::json!({
+            "scope": "typing", "world": world, "body": render_body(body), "field": field
+        }),
+        Target::Content { content } => {
+            let hex: String = content.iter().map(|b| format!("{b:02x}")).collect();
+            serde_json::json!({ "scope": "content_residency", "content": hex })
+        }
+        Target::World { world, schema, key } => serde_json::json!({
+            "scope": "custom_world", "world": world, "schema": schema, "key": key
+        }),
+    }
 }

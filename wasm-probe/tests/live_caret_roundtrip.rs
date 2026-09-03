@@ -73,14 +73,17 @@ async fn a_tab_publishes_a_caret_another_node_reads() {
     let issue = reff_of_titled(&list_json, "caret target")
         .unwrap_or_else(|| panic!("the caret-target issue is not in the tab's pull: {list}"));
 
-    // Publish the caret repeatedly, holding the Live session open the whole
-    // window so the harness — polling alice concurrently — can catch it. Each
-    // call resolves the body through the runner, mints the anchor against the
-    // live Replica, and sends one datagram; the subscribe is sent once.
+    // Drive the caret through the viewer's OWN `session:watch` question shape
+    // ({issue, cursor:{field, anchor}}), not a bespoke call — the real frame the
+    // editor sends. Publish repeatedly, holding the Live session open the whole
+    // window so the harness — polling alice concurrently — can catch it.
+    let question = format!(
+        r#"{{"space":"s","issue":"{issue}","cursor":{{"field":"description","anchor":20}}}}"#
+    );
     let mut published = 0u32;
     for _ in 0..100 {
         let sent = handle
-            .publish_caret(issue.to_string(), "description".to_string(), 20)
+            .watch_caret(&question)
             .await
             .expect("the caret publishes without error");
         if sent {
