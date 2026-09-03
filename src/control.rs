@@ -3258,10 +3258,10 @@ pub enum Response {
     Ref {
         reff: String,
     },
-    /// Reply to [`Request::Coordinates`]: the rendered `lait://join/…` link,
-    /// and beside it the actor and Space it was minted for — so the device it
-    /// is carried to can check the offer names the Space it says it does
-    /// before it parses anything.
+    /// Reply to [`Request::Coordinates`]: the shareable
+    /// `foundation.pub/i#join=…` link, and beside it the actor and Space it was
+    /// minted for — so the device it is carried to can check the offer names the
+    /// Space it says it does before it parses anything.
     Coordinates {
         link: String,
         actor: String,

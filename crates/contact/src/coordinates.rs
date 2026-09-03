@@ -275,6 +275,17 @@ fn is_nfc(s: &str) -> bool {
     s.chars().eq(s.nfc())
 }
 
+/// Find `key=value` in an `&`-separated parameter string (a URL fragment or
+/// query), returning the value. The ticket's base32 needs no percent-decoding
+/// (its alphabet is URL-safe), so this is a plain split — deliberately minimal,
+/// with no URL-parsing dependency.
+fn param<'a>(params: &'a str, key: &str) -> Option<&'a str> {
+    params.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then_some(v)
+    })
+}
+
 /// The rendered-SpaceId bytes for a [`SpaceId`], if it is exactly 29 bytes.
 fn space_id_bytes(space: &SpaceId) -> Option<[u8; SPACE_ID_LEN]> {
     <[u8; SPACE_ID_LEN]>::try_from(space.as_str().as_bytes()).ok()
@@ -538,27 +549,59 @@ impl SignedCoordinates {
         s
     }
 
-    /// Parse a Coordinates link into canonical Coordinates. Accepts both the
-    /// advertised `lait://join/<ticket>` form and the bare base32 ticket, and
-    /// tolerates interior whitespace (terminal line-wrap in a copied link) —
-    /// the base32 alphabet contains none, so stripping it is unambiguous.
+    /// Parse a Coordinates link into canonical Coordinates. Accepts, in order:
+    /// the shareable web form `https://<host>/<path>#join=<ticket>` (or `?join=`)
+    /// — the `foundation.pub/i#join=<ticket>` link a person sends, whose ticket
+    /// rides the fragment so it never reaches a server; the advertised
+    /// `lait://join/<ticket>` scheme; and the bare base32 ticket. Interior
+    /// whitespace (terminal line-wrap in a copied link) is tolerated — the base32
+    /// alphabet contains none, so stripping it is unambiguous.
     pub fn parse_link(link: &str) -> Result<Self, Invalid> {
-        let mut body = link.trim();
-        for scheme in ["lait://join/", "lait://"] {
-            if body.len() >= scheme.len() && body[..scheme.len()].eq_ignore_ascii_case(scheme) {
-                body = &body[scheme.len()..];
-                break;
-            }
-        }
-        let compact: String = body
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>()
-            .to_ascii_uppercase();
+        let compact = Self::ticket_body(link).ok_or(Invalid::BadLink)?;
         let bytes = data_encoding::BASE32_NOPAD
             .decode(compact.as_bytes())
             .map_err(|_| Invalid::BadLink)?;
         Self::decode_canonical(&bytes)
+    }
+
+    /// The bare base32 ticket body inside any link form — the shareable
+    /// `foundation.pub/i#join=<ticket>` (and `?join=`) parameter forms, the
+    /// `lait://join/…` scheme, or a bare ticket — with all whitespace removed and
+    /// uppercased, ready to base32-decode. **Does not decode or validate.**
+    /// [`parse_link`] layers canonical decoding on top; a carrier that only
+    /// relays the ticket and judges nothing (correspondence) base32-decodes this
+    /// opaquely, so the Space that issued the ticket stays the sole judge of it.
+    /// `None` when nothing base32-shaped is left.
+    pub fn ticket_body(link: &str) -> Option<String> {
+        let body = link.trim();
+        // A URL carrying the ticket in a `join` parameter (fragment preferred,
+        // query accepted). Split it out and ignore any sibling params (e.g.
+        // `&relay=`), which are transport hints, not part of the ticket.
+        let ticket = 'ticket: {
+            for sep in ['#', '?'] {
+                if let Some(after) = body.split_once(sep).map(|(_, rest)| rest) {
+                    if let Some(found) = param(after, "join") {
+                        break 'ticket found;
+                    }
+                }
+            }
+            let mut stripped = body;
+            for scheme in ["lait://join/", "lait://"] {
+                if stripped.len() >= scheme.len()
+                    && stripped[..scheme.len()].eq_ignore_ascii_case(scheme)
+                {
+                    stripped = &stripped[scheme.len()..];
+                    break;
+                }
+            }
+            stripped
+        };
+        let compact: String = ticket
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_uppercase();
+        (!compact.is_empty()).then_some(compact)
     }
 
     /// Canonical postcard bytes.
@@ -660,5 +703,59 @@ impl SignedCoordinates {
             approach_routes: p.approach_routes.iter().map(|a| a.to_socket()).collect(),
             admission,
         })
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    /// A structurally-canonical Coordinates envelope. `parse_link`/`decode_canonical`
+    /// check shape and canonical round-trip, not the signature (that is `verify`),
+    /// so an all-zeros-but-shaped envelope is enough to exercise link parsing.
+    fn sample() -> SignedCoordinates {
+        SignedCoordinates {
+            version: 2,
+            payload: CoordinatesPayload {
+                space: [7u8; SPACE_ID_LEN],
+                salt: [0u8; 16],
+                recovery_root: [0u8; 32],
+                founder_inception: Vec::new(),
+                display_name_hint: String::new(),
+                approach_station: [0u8; 32],
+                approach_nick_hint: String::new(),
+                approach_routes: Vec::new(),
+                admission: CoordinatesAdmission::None,
+            },
+            issuer: [0u8; 32],
+            signature_algorithm: SIG_ALG_ED25519,
+            signature: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn parses_every_link_form_to_the_same_coordinates() {
+        let coords = sample();
+        let ticket = coords.render();
+
+        // The shareable web form: the ticket rides the fragment, past sibling
+        // params (a relay hint), and must not reach a server to be usable.
+        let web =
+            format!("https://foundation.pub/i#join={ticket}&relay=https://relay.foundation.pub");
+        // The query form is accepted too (some carriers rewrite `#` to `?`).
+        let query = format!("https://foundation.pub/i?join={ticket}");
+        // The advertised scheme, and the bare ticket.
+        let scheme = format!("lait://join/{ticket}");
+
+        for link in [web, query, scheme, ticket.clone()] {
+            let parsed = SignedCoordinates::parse_link(&link)
+                .unwrap_or_else(|e| panic!("parse {link:?}: {e:?}"));
+            assert_eq!(parsed.encode(), coords.encode(), "for {link:?}");
+        }
+    }
+
+    #[test]
+    fn a_fragment_without_join_is_not_a_link() {
+        assert!(SignedCoordinates::parse_link("https://foundation.pub/i#view=board").is_err());
     }
 }

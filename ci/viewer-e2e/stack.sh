@@ -45,7 +45,11 @@ post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"project_new","name":"Enginee
 # schema 0 (legacy CodeMirror, which writes whole values, no live remote splices).
 post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"issue_new","title":"the tab pulls this issue","project":"ENG","body":""}' >/dev/null
 post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"issue_new","title":"and this one","project":"ENG"}' >/dev/null
-TICKET="$(post "/api/spaces/$AORB/rpc" '{"cmd":"invite","role":"contributor","reusable":true,"ttl_hours":2}' | sed -n 's/.*"reff":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+# The invite reff is now the shareable foundation.pub URL
+# (foundation.pub/i#join=<ticket>); strip the wrapper back to the bare ticket for
+# a local join against this stack's own static server and relay.
+REFF="$(post "/api/spaces/$AORB/rpc" '{"cmd":"invite","role":"contributor","reusable":true,"ttl_hours":2}' | sed -n 's/.*"reff":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+TICKET="${REFF##*join=}"
 LINK="lait://join/$TICKET"
 
 vport=$(( (RANDOM % 20000) + 20000 ))

@@ -1422,6 +1422,15 @@ pub const FOUNDATION_SERVICES: &str = "https://post.foundation.pub";
 /// `relay` is on the registry's RESERVED list for exactly this.
 pub const FOUNDATION_RELAY: &str = "https://relay.foundation.pub";
 
+/// The shareable web front for a join link: `foundation.pub/i#join=<ticket>`.
+/// The ticket rides the URL *fragment*, so it never reaches the server — the
+/// page (the viewer bundle served at `/i`) reads it client-side and joins over
+/// the [`FOUNDATION_RELAY`], which `parseJoin` in the viewer defaults when the
+/// link carries no explicit `&relay=`. Opened in a browser it is a full join;
+/// pasted into the native client, `Coordinates::parse_link` extracts the same
+/// ticket from the fragment. This is the only join form we hand a person.
+pub const FOUNDATION_JOIN_BASE: &str = "https://foundation.pub/i";
+
 /// The Foundation notify relay — `lait-feed-notify` on Cloud Run. What an
 /// installed machine subscribes to so a publish is heard within the round
 /// trip rather than on the period; the bucket stays the authority.

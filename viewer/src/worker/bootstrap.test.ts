@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { parseJoin } from "./bootstrap";
+import { FOUNDATION_RELAY, parseJoin } from "./bootstrap";
 
 /** The topology choice reads the URL fragment, never a dev flag: a join link
- *  (ticket + relay, no seed) picks the in-tab engine; anything else keeps the
- *  head topology. */
+ *  (a ticket, no seed) picks the in-tab engine; anything else keeps the
+ *  head topology. The relay is optional — a shared foundation link carries only
+ *  the ticket and defaults to the foundation relay. */
 describe("parseJoin", () => {
   it("reads a ticket and relay from the fragment", () => {
     expect(
@@ -21,8 +22,8 @@ describe("parseJoin", () => {
     expect(parseJoin("#view=board")).toBeNull();
   });
 
-  it("returns null when the relay is missing — a ticket alone is not a join", () => {
-    expect(parseJoin("#join=t")).toBeNull();
+  it("defaults the relay to the foundation relay when none is given — a shared foundation.pub link", () => {
+    expect(parseJoin("#join=t")).toEqual({ ticket: "t", relay: FOUNDATION_RELAY });
   });
 
   it("never reads a seed from the URL", () => {

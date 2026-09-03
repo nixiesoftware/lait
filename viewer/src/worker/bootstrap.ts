@@ -22,15 +22,27 @@ export interface JoinParams {
 }
 
 /**
- * Parse a join link from a URL fragment: `#join=<ticket>&relay=<url>`. Returns
- * `null` for an ordinary load (no ticket), which keeps the head topology.
+ * The foundation's public relay — the default rendezvous when a shared join link
+ * carries no explicit relay. A bare `foundation.pub/i#join=<ticket>` keeps the
+ * admission capability in the fragment (never sent to the server) and finds the
+ * inviter through this relay. Mirrors `FOUNDATION_RELAY` in `src/config.rs`; a
+ * local/dev link overrides it with its own `&relay=`.
+ */
+export const FOUNDATION_RELAY = "https://relay.foundation.pub";
+
+/**
+ * Parse a join link from a URL fragment: `#join=<ticket>` (with an optional
+ * `&relay=<url>`). Returns `null` for an ordinary load (no ticket), which keeps
+ * the head topology. When the ticket is present but no relay is given, the
+ * foundation relay is the default — so a shared `foundation.pub/i#join=<ticket>`
+ * is a complete join; only the ticket is ever required.
  */
 export function parseJoin(hash: string): JoinParams | null {
   const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
   const params = new URLSearchParams(fragment);
   const ticket = params.get("join");
-  const relay = params.get("relay");
-  if (!ticket || !relay) return null;
+  if (!ticket) return null;
+  const relay = params.get("relay") ?? FOUNDATION_RELAY;
   return { ticket, relay };
 }
 
@@ -45,12 +57,13 @@ const ISSUES = {
   release: "release",
   mount: "issues",
   /** The engine wasm (~14 MiB) — fetched, not bundled (only its small JS glue
-   *  is). Same-origin in dev; the signed channel, pinned by digest, in a
-   *  release. */
-  engineWasmUrl: "/porthole_bg.wasm",
-  /** The 39 MiB World runner, fetched as bytes. Same-origin in dev; the signed
-   *  channel in a release. */
-  runnerUrl: "/lait_issues_runner.wasm",
+   *  is). Resolved against the build base (`import.meta.env.BASE_URL`, always a
+   *  trailing-slashed prefix), so a bundle served under a path prefix — the
+   *  `foundation.pub/i` join surface, built `--base=/i/` — fetches
+   *  `/i/porthole_bg.wasm`, not the apex root. Same-origin either way. */
+  engineWasmUrl: `${import.meta.env.BASE_URL}porthole_bg.wasm`,
+  /** The 39 MiB World runner, fetched as bytes. Base-relative, as above. */
+  runnerUrl: `${import.meta.env.BASE_URL}lait_issues_runner.wasm`,
 };
 
 /**

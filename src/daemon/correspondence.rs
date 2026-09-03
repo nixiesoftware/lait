@@ -1193,14 +1193,15 @@ impl CorrespondenceService {
                 let Some(profile) = ProfileId::parse(&to) else {
                     return Response::err("that is not an address");
                 };
-                let body = link
-                    .trim()
-                    .strip_prefix("lait://join/")
-                    .unwrap_or_else(|| link.trim());
-                let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-                let Ok(coordinates) =
-                    data_encoding::BASE32_NOPAD.decode(cleaned.to_uppercase().as_bytes())
-                else {
+                // Every link form a person might paste — the shareable
+                // `foundation.pub/i#join=<ticket>`, the `lait://join/…` scheme,
+                // or a bare ticket — resolves to the same base32 body. Opaque the
+                // whole way: this carries the ticket and never decodes or judges
+                // it (`ticket_body` strips the wrapper but does not validate), so
+                // the Space that issued it stays the sole judge.
+                let coordinates = runtime::coordinates::SignedCoordinates::ticket_body(&link)
+                    .and_then(|body| data_encoding::BASE32_NOPAD.decode(body.as_bytes()).ok());
+                let Some(coordinates) = coordinates else {
                     return Response::err("that is not an invite link");
                 };
                 // Opaque the whole way. This service carries an invitation and

@@ -115,6 +115,16 @@ fn the_advertised_link_forms_all_parse() {
     let ticket = coords.render();
     let prefixed = format!("lait://join/{ticket}");
     assert_eq!(SignedCoordinates::parse_link(&prefixed).unwrap(), coords);
+    // The shareable web form a person is handed and either opens in a browser or
+    // pastes into the native client: the ticket rides the fragment, past a
+    // sibling relay hint, and never reaches the server that hosts the page.
+    assert_eq!(
+        SignedCoordinates::parse_link(&format!(
+            "https://foundation.pub/i#join={ticket}&relay=https://relay.foundation.pub"
+        ))
+        .unwrap(),
+        coords
+    );
     assert_eq!(
         SignedCoordinates::parse_link(&format!("LAIT://JOIN/{ticket}")).unwrap(),
         coords

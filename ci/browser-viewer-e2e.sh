@@ -109,7 +109,10 @@ post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/worlds/issues/rpc" \
     '{"cmd":"issue_new","title":"and this one","project":"ENG"}' >/dev/null
 invited="$(post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/rpc" \
     '{"cmd":"invite","role":"contributor","reusable":true,"ttl_hours":1}')"
-TICKET="$(printf '%s' "$invited" | sed -n 's/.*"reff":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+# The invite reff is the shareable foundation.pub URL (foundation.pub/i#join=…);
+# strip the wrapper back to the bare ticket for a local join against this stack.
+REFF="$(printf '%s' "$invited" | sed -n 's/.*"reff":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+TICKET="${REFF##*join=}"
 [ -n "$TICKET" ] || { echo "::error::no ticket"; echo "$invited"; exit 1; }
 LINK="lait://join/$TICKET"
 

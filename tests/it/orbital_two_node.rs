@@ -561,7 +561,9 @@ fn coordinates_are_refused_off_a_non_member_and_carry_no_admission() {
         actor.starts_with("act_"),
         "the reply names the actor: {actor}"
     );
-    assert!(link.starts_with("lait://join/"), "{link}");
+    // The shareable web form: the ticket rides the fragment, so it never reaches
+    // the server that hosts the page (`config::FOUNDATION_JOIN_BASE`).
+    assert!(link.starts_with("https://foundation.pub/i#join="), "{link}");
 
     // The link parses back and verifies as the Space's own self-proof, signed
     // by the device that answered, with nothing inside it that admits anyone.

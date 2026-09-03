@@ -3686,7 +3686,7 @@ impl StationHost {
             Some(admission),
         ) {
             Ok(coords) => Response::Ref {
-                reff: coords.render(),
+                reff: foundation_join_link(&coords.render()),
             },
             Err(e) => Response::err(format!("mint coordinates: {e}")),
         }
@@ -3715,7 +3715,7 @@ impl StationHost {
             None,
         ) {
             Ok(ticket) => Response::Coordinates {
-                link: format!("lait://join/{}", ticket.render()),
+                link: foundation_join_link(&ticket.render()),
                 actor: actor.to_string(),
                 space: space.as_str().to_string(),
             },
@@ -4671,6 +4671,15 @@ fn signal_body(signal: &runtime::plane::Signal) -> crate::control::SignalBody {
 /// than in four copies of this function.
 fn now_secs() -> u64 {
     mechanics::wallclock::now_secs()
+}
+
+/// The shareable join link a person is handed: `foundation.pub/i#join=<ticket>`.
+/// The rendered Coordinates ride the URL *fragment* so the ticket never reaches
+/// the server; the viewer served at `/i` reads it client-side (`parseJoin`) and
+/// joins over the default [`FOUNDATION_RELAY`]. Pasted into the native client,
+/// [`SignedCoordinates::parse_link`] extracts the same ticket from the fragment.
+fn foundation_join_link(rendered: &str) -> String {
+    format!("{}#join={rendered}", crate::config::FOUNDATION_JOIN_BASE)
 }
 
 /// Where a co-located sponsored agent's identity seed lives: `agents/<name>/
