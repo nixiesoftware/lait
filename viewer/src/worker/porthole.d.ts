@@ -17,6 +17,10 @@ declare module "porthole" {
     drainRing(): string | undefined;
     drainCaret(): Promise<string | undefined>;
     repull(): Promise<number>;
+    /** Capture the whole live Space (ledger + World) as a bucket-ready blob. */
+    snapshot(): Uint8Array;
+    /** Capture→cold-restore→decrypt round-trip proof (daemon-less hosting). */
+    verify_snapshot_roundtrip(): string;
     free(): void;
   }
 

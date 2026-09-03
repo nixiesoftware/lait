@@ -156,6 +156,17 @@ pub fn restore(
     let mut replica = Replica::open_on(replica_medium, Arc::new(authority.clone()))
         .map_err(|f| Failure::Convergence(format!("open replica: {f:?}")))?;
 
+    // Commit the authority (which refreshes the keyring with the sealed epoch
+    // keys the ledger carries) and incorporate the World material.
+    //
+    // KNOWN GAP (proven by porthole's verify_snapshot_roundtrip): a body whose
+    // epoch key is not in the keyring at import lands OPAQUE and will not read
+    // collaboratively — and re-import does not flip it. `refresh_keyring`
+    // recovers the epochs sealed to this device, but a member that decrypts N
+    // bodies live holds the epoch *history* (older keys, re-sealed across
+    // rotations); recovering only the latest sealed epoch leaves older-epoch
+    // bodies opaque. Closing this needs the full per-device epoch-key history in
+    // the snapshot (or its recovery at restore) — the next slice.
     let bundle = authority.bundle();
     let validated = {
         let mut incorporator = bundle
@@ -166,11 +177,10 @@ pub fn restore(
             .validate_contact(&snapshot.staged, bundle.source.as_ref(), &mut *incorporator)
             .map_err(|f| Failure::Convergence(format!("validate snapshot: {f:?}")))?
     };
-    let frontier = (bundle.frontier)();
     let commit_ctx = CommitContext {
         space: &space,
         signer: &SeedSigner(&seed),
-        authority_frontier: frontier,
+        authority_frontier: (bundle.frontier)(),
     };
     replica
         .incorporate_bundle(&commit_ctx, validated, bundle.source.as_ref())

@@ -665,7 +665,8 @@ impl BrowserEngineHandle {
                 "snapshot round trip",
                 format!(
                     "live decrypted {live_decrypted}, restored decrypted {restored_decrypted} of \
-                     {restored_keys} — the sealed keys did not survive the cold reload"
+                     {restored_keys} — older-epoch bodies stay opaque until the snapshot carries \
+                     the full per-device epoch-key history"
                 ),
             ));
         }
