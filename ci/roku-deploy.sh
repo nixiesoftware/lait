@@ -13,7 +13,8 @@
 #
 # Usage:
 #   ci/roku-deploy.sh [--roku IP] [--user rokudev] [--pass abcd] [--pin|--web]
-#                     [--origin-ip IP] [--identity DIR] [--no-install]
+#                     [--origin-ip IP] [--port N] [--rendezvous CODE]
+#                     [--identity DIR] [--no-install]
 #                     [--force] [--keep]
 #
 #   --pin         bootstrap pinned to the daemon's certificate (default when
@@ -44,6 +45,8 @@ USER_NAME="rokudev"
 PASS="abcd"
 MODE=""
 ORIGIN_IP=""
+PORT=7443
+RENDEZVOUS=""
 IDENTITY=""
 INSTALL=1
 FORCE=0
@@ -63,6 +66,10 @@ while [ $# -gt 0 ]; do
     --pass=*) PASS="${1#--pass=}"; shift ;;
     --pin) MODE=pin; shift ;;
     --web) MODE=web; shift ;;
+    --port) PORT="$2"; shift 2 ;;
+    --port=*) PORT="${1#--port=}"; shift ;;
+    --rendezvous) RENDEZVOUS="$2"; shift 2 ;;
+    --rendezvous=*) RENDEZVOUS="${1#--rendezvous=}"; shift ;;
     --origin-ip) ORIGIN_IP="$2"; shift 2 ;;
     --origin-ip=*) ORIGIN_IP="${1#--origin-ip=}"; shift ;;
     --identity) IDENTITY="$2"; shift 2 ;;
@@ -254,16 +261,17 @@ PYEOF
   der_bytes="$(wc -c <"$der" | tr -d ' ')"
   lan="$(lan_ip)"
   [ -n "$lan" ] || die "could not detect a LAN address; pass --origin-ip"
-  origin="https://$lan:7443"
+  origin="https://$lan:$PORT"
   recorded="$(jq -r '.origin // "absent"' "$TLS_FILE")"
   jq -n --indent 2 \
     --arg origin "$origin" \
     --arg sha "$sha" \
+    --arg rendezvous "$RENDEZVOUS" \
     --rawfile pem "$pem" \
     '{protocol_major: 1,
       trust: {kind: "pinned_certificate", origin: $origin, sha256: $sha},
       certificate_pem: $pem,
-      rendezvous: null}' >receiver-bootstrap.json
+      rendezvous: (if $rendezvous == "" then null else $rendezvous end)}' >receiver-bootstrap.json
   rm -rf "$work"
   echo "bootstrap: pinned_certificate"
   echo "  origin:      $origin"

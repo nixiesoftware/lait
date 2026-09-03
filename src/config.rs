@@ -1828,7 +1828,13 @@ impl Settings {
     /// failure. Zero is excluded because `DisplayTlsIdentity` refuses it —
     /// an ephemeral port cannot be told to a receiver.
     pub fn display_port(&self) -> u16 {
-        self.get("display.port")
+        // `LAIT_DISPLAY_PORT` is a per-process override, for a second daemon
+        // on the same home — a debug build beside the installed one during a
+        // display session — where the config key would move both.
+        std::env::var("LAIT_DISPLAY_PORT")
+            .ok()
+            .as_deref()
+            .or_else(|| self.get("display.port"))
             .and_then(|value| value.trim().parse::<u16>().ok())
             .filter(|port| *port != 0)
             .unwrap_or(crate::display::DEFAULT_DISPLAY_PORT)
