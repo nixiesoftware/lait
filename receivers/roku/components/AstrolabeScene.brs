@@ -489,7 +489,10 @@ sub AstrolabeMediaStateChanged()
         m.task.command = "media_finished:" + m.sequence.ToStr()
     end if
     if m.media.state = "error"
-        AstrolabeMessage("Live media decode failed", "")
+        ' The glass holds what it has while the task asks the stream whether
+        ' it was the player or the ticket that failed; a stream that still
+        ' answers is played again from the same URL. The message is the
+        ' task's to show, once it has nothing left to try.
         m.sequence = m.sequence + 1
         m.task.command = "media_failed:" + m.sequence.ToStr()
     end if

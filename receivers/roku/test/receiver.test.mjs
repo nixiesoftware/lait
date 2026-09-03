@@ -65,3 +65,17 @@ test("Roku stages assignment-bound HLS and hands it to Video", async () => {
   assert.match(scene, /content\.streamFormat = "hls"/);
   assert.match(scene, /m\.media\.control = "play"/);
 });
+
+test("a player error asks the stream before it asks for a ticket", async () => {
+  const task = await read("components/ReceiverTask.brs");
+  const scene = await read("components/AstrolabeScene.brs");
+  const refresh = task.slice(task.indexOf("function AstrolabeRefreshLive"));
+  const probe = refresh.indexOf("AstrolabeProbeLive(current)");
+  const mint = refresh.indexOf("AstrolabeAuthorizedLive(item, m.program)");
+  assert.ok(probe >= 0 && mint > probe, "the live playlist is probed before a ticket is minted");
+  assert.match(task, /verdict = "alive"[\s\S]*?AstrolabeRenderCurrent\(\)/);
+  assert.match(task, /verdict = "refused" or waited >= AstrolabeLiveRetryLimitMs\(\)/);
+  // The scene no longer blanks the glass on the player's word alone.
+  const onError = scene.slice(scene.indexOf('if m.media.state = "error"'));
+  assert.doesNotMatch(onError.slice(0, onError.indexOf("end if")), /AstrolabeMessage\(/);
+});

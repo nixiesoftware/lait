@@ -323,6 +323,26 @@ function AstrolabeAuthorizedLive(item as object, program as object) as dynamic
     return { uri: m.origin + ticket.endpoint, bytes: manifest.encoded_len, live: true, certificates: m.certificates }
 end function
 
+' Ask the stream the player gave up on, before minting anything. "alive":
+' the live playlist still answers, so the player failed and the stream did
+' not; "refused": the coordinator will not serve this ticket any more;
+' "unreachable": nothing answered at all.
+function AstrolabeProbeLive(entry as dynamic) as string
+    if entry = invalid or entry.live <> true or not AstrolabeIsString(entry.uri) then return "refused"
+    if Left(entry.uri, Len(m.origin)) <> m.origin then return "refused"
+    result = AstrolabeTransfer(Mid(entry.uri, Len(m.origin) + 1), "GET", "", {}, 5000)
+    if result = invalid then return "unreachable"
+    if result.status >= 200 and result.status < 300 then return "alive"
+    if result.status = 401 or result.status = 403 or result.status = 404 or result.status = 410 then return "refused"
+    return "unreachable"
+end function
+
+' How long a player that lost its stream waits for the coordinator to answer
+' again before it gives the ticket up and asks for another.
+function AstrolabeLiveRetryLimitMs() as integer
+    return 45000
+end function
+
 function AstrolabeRefreshLive() as boolean
     if m.program = invalid then return false
     playback = AstrolabeCurrentPlayback()
@@ -331,10 +351,33 @@ function AstrolabeRefreshLive() as boolean
     ' The failure is answered once. Restoring the command on a refused ticket
     ' made every later transfer cancel itself on the next tick — a livelock.
     m.top.command = ""
+    ' The player stopped; the stream may not have. A live playlist that still
+    ' answers is played again from the same URL — no ticket minted, nothing
+    ' re-staged — and a coordinator that cannot be reached is waited for, with
+    ' backoff, before a ticket it never refused is thrown away. A hotspot blip
+    ' on the poll used to cost a fresh ticket and a full reload every time.
+    current = m.stage[item.scene.manifest.id]
+    waited = 0
+    delay = 1000
+    while true
+        verdict = AstrolabeProbeLive(current)
+        print "[astrolabe] live stream "; verdict; " after "; waited; " ms"
+        if verdict = "alive"
+            AstrolabeRenderCurrent()
+            return true
+        end if
+        if verdict = "refused" or waited >= AstrolabeLiveRetryLimitMs() then exit while
+        Sleep(delay)
+        waited = waited + delay
+        delay = delay * 2
+        if delay > 8000 then delay = 8000
+    end while
     entry = AstrolabeAuthorizedLive(item, m.program)
     if entry = invalid
         ' A ticket the coordinator will not renew is a program to fetch again:
         ' the snapshot re-stages every item with tickets the coordinator holds.
+        ' Until it lands, the glass says why the picture went.
+        AstrolabePublish({ kind: "message", title: "Live media decode failed", body: "", source: "unavailable", stale: false })
         AstrolabeRetireStage(m.stage)
         m.program = invalid
         m.stage = {}
