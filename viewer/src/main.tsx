@@ -10,6 +10,7 @@ import type { Inspect } from "./dev/inspect";
 import { WorldViewStoreProvider } from "./core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "./projectStore";
 import { laitIcons } from "./theme/icons";
+import { bootstrapEngine } from "./worker/bootstrap";
 import "./styles.css";
 
 /**
@@ -87,12 +88,19 @@ const root = document.getElementById("root");
 if (!root) throw new Error("#root missing from index.html");
 const projectStore = new ProjectViewerStore();
 
-createRoot(root).render(
-  <StrictMode>
-    <WorldViewStoreProvider store={projectStore.resources}>
-      <ProjectViewerStoreProvider store={projectStore}>
-        <App />
-      </ProjectViewerStoreProvider>
-    </WorldViewStoreProvider>
-  </StrictMode>,
-);
+const render = () =>
+  createRoot(root).render(
+    <StrictMode>
+      <WorldViewStoreProvider store={projectStore.resources}>
+        <ProjectViewerStoreProvider store={projectStore}>
+          <App />
+        </ProjectViewerStoreProvider>
+      </WorldViewStoreProvider>
+    </StrictMode>,
+  );
+
+// Choose the backend before render: an invite link in the URL fragment binds
+// the in-tab engine Worker; an ordinary load keeps the daemon head. Render once
+// the link is bound (or the choice fails) so the app never flashes the wrong
+// topology's initial state.
+bootstrapEngine().then(render, render);
