@@ -62,7 +62,7 @@ members = [
 #
 # Excluding both means `cargo build`, `cargo test`, `cargo clippy` and the MSRV
 # job never encounter either.
-exclude = ["fuzz", "sim", "wasm-probe", "crates/world-runner-wasm/tests/proof-world"]
+exclude = ["fuzz", "sim", "wasm-probe", "crates/porthole", "crates/world-runner-wasm/tests/proof-world"]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
 # depends on it, and must not silently regress to v1 if this ever becomes a

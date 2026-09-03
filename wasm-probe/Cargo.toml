@@ -53,13 +53,13 @@ probe-comms = ["dep:comms", "probe-mechanics"]
 # and the joiner's enter: deterministic self-inception (blake3 derivation),
 # a wall clock for the acceptance proof (web-time), and the await-admission
 # loop's cadence (n0-future's web-time-backed sleep).
-probe-contact = ["dep:contact", "probe-comms", "probe-replica", "dep:blake3", "dep:web-time", "dep:n0-future"]
+probe-contact = ["dep:contact", "probe-comms", "probe-replica", "dep:blake3", "dep:web-time", "dep:n0-future", "dep:porthole"]
 # The runner crossing: a World runner module driven from the engine module in
 # a browser, through the same four-function ABI the native wasmtime host uses —
 # but with the browser's own WebAssembly and JS glue as the host, since
 # wasmtime does not target wasm32. Proves the ABI works when the host is the
 # browser, not a JIT.
-probe-runner = ["dep:world-runner", "dep:anyhow"]
+probe-runner = ["dep:world-runner", "dep:anyhow", "dep:porthole"]
 # The engine crossing: the daemon's own Station/Session machinery composed in
 # a browser (`runtime::browser`), querying a real World runner through the
 # runner crossing above. This is the whole read path — Session, publication,
@@ -95,6 +95,12 @@ serde = { version = "1", features = ["derive"], optional = true }
 # grammar — so the engine test asks the real product question. The runner
 # module itself arrives as bytes, not as a dependency.
 lait-issues = { path = "../products/issues", optional = true }
+
+# The shippable engine crate. wasm-probe re-exports its modules (runner /
+# space_pull / dispatch / handle / session / live_client) so the browser tests
+# keep testing the exact code porthole ships. Pulled in by probe-runner /
+# probe-contact / probe-dispatch, the features whose tests name those modules.
+porthole = { path = "../crates/porthole", optional = true }
 
 # The entropy door, opened toward JS.
 #

@@ -11,24 +11,19 @@
 //! What runs today, proven by the smoke tests: identity minting over JS
 //! entropy, and fabric's fork → concurrent edit → exchange → converge cycle.
 
+// The engine modules moved to the shippable `porthole` crate; `wasm-probe`
+// re-exports them under the same feature gates so its browser tests keep
+// naming `wasm_probe::handle`, `::runner`, `::space_pull` etc. unchanged —
+// one body of code, shipped by porthole and verified here.
 #[cfg(all(target_arch = "wasm32", feature = "probe-runner"))]
-pub mod runner;
+pub use porthole::runner;
 
 #[cfg(all(
     target_arch = "wasm32",
     feature = "probe-contact",
     feature = "probe-journal"
 ))]
-pub mod space_pull;
+pub use porthole::space_pull;
 
 #[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
-pub mod dispatch;
-
-#[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
-pub mod handle;
-
-#[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
-pub mod session;
-
-#[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
-pub mod live_client;
+pub use porthole::{dispatch, handle, live_client, session};
