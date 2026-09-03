@@ -13,6 +13,26 @@ import {
 import { laitDocumentSchema, safeDocumentHref } from "./schema";
 
 describe("Lait document projection", () => {
+  it("drops a trailing empty paragraph so ordinary typing never stores a non-editable form", () => {
+    // The read-only regression: a cursor left on a new line at the end (or blank
+    // lines a peer typed) is a trailing empty paragraph. Serializing it wrote a
+    // trailing "\n\n" that `parseDocument` drops on the next open, so the exact
+    // round-trip check failed and EVERY collaborator was locked out (read-only +
+    // Normalize). Trailing spaces WITHIN a paragraph must still survive.
+    const docNode = laitDocumentSchema.nodes.doc!;
+    const paragraph = laitDocumentSchema.nodes.paragraph!;
+    const node = docNode.create(null, [
+      paragraph.create(null, laitDocumentSchema.text("Line one. ")),
+      paragraph.create(null, laitDocumentSchema.text("Line two. ")),
+      paragraph.create(), // trailing empty — a cursor on a fresh line
+    ]);
+    const projected = projectDocument(node);
+    expect(projected.source.endsWith("\n\n")).toBe(false);
+    expect(projected.source).toContain("Line one. \n\nLine two. "); // spaces + break kept
+    // And the stored form round-trips: opening it again is canonical, so editable.
+    expect(projectSource(projected.source).canonical).toBe(true);
+  });
+
   it("round-trips the controlled Typst vocabulary without a second stored format", () => {
     const source = upgradeMarkdown([
       "## Details",

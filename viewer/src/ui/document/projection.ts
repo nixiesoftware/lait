@@ -481,11 +481,23 @@ export function projectDocument(doc: ProseMirrorNode, original?: string): Docume
   const out = new ProjectionWriter(doc.content.size);
   out.syntax(DOCUMENT_PREFIX, 0);
   out.boundary(0);
-  let proseIndex = 0;
-  doc.forEach((node, offset) => {
-    if (proseIndex > 0) out.syntax("\n\n", offset);
+  // Trailing empty paragraphs — a cursor left on a new line at the end, or blank
+  // lines a peer typed and never filled — are NOT serialized. Emitting "\n\n" for
+  // them writes a trailing blank the source→doc parser (`parseDocument`) drops, so
+  // the round-trip would not be stable and the editor would flip read-only on the
+  // next open (locking every collaborator out). A trailing blank line is never
+  // significant in the stored form, so the two directions agree by dropping it.
+  // Only text blocks are droppable-when-empty; a leaf block (rule, etc.) is kept.
+  let lastKept = -1;
+  doc.forEach((node, _offset, index) => {
+    if (!(node.isTextblock && node.content.size === 0)) lastKept = index;
+  });
+  let emitted = 0;
+  doc.forEach((node, offset, index) => {
+    if (index > lastKept) return;
+    if (emitted > 0) out.syntax("\n\n", offset);
     writeBlock(node, offset, out);
-    proseIndex += 1;
+    emitted += 1;
   });
   out.boundary(doc.content.size);
   const result = out.finish();
