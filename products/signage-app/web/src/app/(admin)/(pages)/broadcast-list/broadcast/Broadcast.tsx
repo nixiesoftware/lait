@@ -91,13 +91,29 @@ export default function BroadcastPage() {
       persisted={persisted}
       onRefreshLibrary={refreshLibrary}
       onClose={() => goBack(navigate, "/broadcast-list")}
-      onSave={async (next) => {
+      onDraft={async (next) => {
         if (next.items.length === 0) {
           throw new Error("A program needs at least one item before it can be saved.");
         }
-        await putProgram(next);
+        // The draft rides on the program as it is on air; a screen keeps
+        // showing the on-air fields until this is put on air.
+        const held: SignageProgram = {
+          ...program,
+          draft: { name: next.name, cycle: next.cycle, items: next.items, windows: next.windows },
+        };
+        await putProgram(held);
         sessionStorage.removeItem(draftNameKey(programId));
-        setProgram(next);
+        setProgram(held);
+        setPersisted(true);
+      }}
+      onAir={async (next) => {
+        if (next.items.length === 0) {
+          throw new Error("A program needs at least one item before it can go on air.");
+        }
+        const aired: SignageProgram = { ...next, draft: undefined };
+        await putProgram(aired);
+        sessionStorage.removeItem(draftNameKey(programId));
+        setProgram(aired);
         setPersisted(true);
       }}
     />

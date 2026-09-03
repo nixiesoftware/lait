@@ -179,6 +179,24 @@ pub struct SignageProgram {
     /// Empty preserves the authored program as an always-active playlist.
     #[serde(default)]
     pub windows: Vec<SignageWindow>,
+    /// Work in progress that is not on air. The editor writes every settled
+    /// edit here; nothing a screen shows reads it. One act — put on air —
+    /// copies it over the fields above and clears it. Without this, every
+    /// intermediate state of an edit was a broadcast: a duration typed a
+    /// digit at a time was three programs on glass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<ProgramDraft>,
+}
+
+/// A program as it is being edited: everything a program is, minus its
+/// identity, which the draft borrows from the program it sits on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramDraft {
+    pub name: String,
+    pub cycle: ProgramCycle,
+    pub items: Vec<SignageItem>,
+    #[serde(default)]
+    pub windows: Vec<SignageWindow>,
 }
 
 pub struct ScheduledProgram<'a> {
@@ -187,7 +205,30 @@ pub struct ScheduledProgram<'a> {
 }
 
 impl SignageProgram {
+    /// The program the draft would be, put on air: the same identity, the
+    /// draft's content, no draft.
+    pub fn with_draft_on_air(&self) -> Option<Self> {
+        let draft = self.draft.as_ref()?;
+        Some(Self {
+            id: self.id.clone(),
+            name: draft.name.clone(),
+            cycle: draft.cycle,
+            items: draft.items.clone(),
+            windows: draft.windows.clone(),
+            draft: None,
+        })
+    }
+
+    /// Valid on air, and valid as what the draft would put on air: a draft
+    /// is held to the same bounds, so what is saved is always a program.
     pub fn validate(&self) -> bool {
+        self.validate_on_air()
+            && self
+                .with_draft_on_air()
+                .is_none_or(|drafted| drafted.validate_on_air())
+    }
+
+    fn validate_on_air(&self) -> bool {
         if BodyId::parse(&self.id).is_none()
             || self.name.trim().is_empty()
             || self.name.chars().count() > MAX_PROGRAM_NAME_CHARS
@@ -1201,6 +1242,55 @@ fn scoped(name: &str, on: Resource) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A draft rides on the program without being it: what a screen shows
+    /// comes from the on-air fields, a draft is held to a program's bounds,
+    /// and putting it on air is the on-air fields becoming the draft's.
+    #[test]
+    fn a_draft_is_saved_beside_the_program_and_never_shown_by_it() {
+        let item = |id: &str| SignageItem {
+            id: id.into(),
+            media: BodyId::from_bytes([7; 16]).render(),
+            duration_ms: Some(5_000),
+        };
+        let mut program = SignageProgram {
+            id: BodyId::from_bytes([1; 16]).render(),
+            name: "Lobby".into(),
+            cycle: ProgramCycle::Loop,
+            items: vec![item("a")],
+            windows: Vec::new(),
+            draft: None,
+        };
+        assert!(program.validate());
+        program.draft = Some(ProgramDraft {
+            name: "Lobby (new)".into(),
+            cycle: ProgramCycle::Loop,
+            items: vec![item("a"), item("b")],
+            windows: Vec::new(),
+        });
+        assert!(program.validate());
+        let scheduled = program.scheduled_at(0).unwrap();
+        assert_eq!(scheduled.items.len(), 1, "the draft is not what plays");
+        let aired = program.with_draft_on_air().unwrap();
+        assert_eq!(aired.items.len(), 2);
+        assert!(aired.draft.is_none());
+        assert_eq!(aired.name, "Lobby (new)");
+        // A draft out of bounds is refused with the program that carries it.
+        program.draft = Some(ProgramDraft {
+            name: String::new(),
+            cycle: ProgramCycle::Loop,
+            items: Vec::new(),
+            windows: Vec::new(),
+        });
+        assert!(!program.validate());
+        let bare = SignageProgram {
+            draft: None,
+            ..program.clone()
+        };
+        assert!(bare.validate());
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("draft"), "no draft, no field: {json}");
+    }
 
     #[test]
     fn a_kind_entry_names_its_preset_and_keeps_its_own_settings() {

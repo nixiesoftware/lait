@@ -632,3 +632,9 @@
     padding-right: var(--ds-space-3);
   }
 }
+
+/* The one act a screen sees, at the end of the bar. */
+.pe-bar .pe-air {
+  margin-left: 8px;
+  white-space: nowrap;
+}

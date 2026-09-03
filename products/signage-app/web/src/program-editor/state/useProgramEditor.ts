@@ -35,13 +35,31 @@ import { useTransport } from "./useTransport";
 const UNDO_DEPTH = 40;
 
 export type EditorOptions = {
+  /** The program as it is on air. */
   initial: SignageProgram;
   library: SignageMedia[];
   /** Applies live kind config over the raw library rows. */
   resolve: (library: SignageMedia[]) => SignageMedia[];
-  onSave: (program: SignageProgram) => Promise<void>;
+  /** Write the draft — what the editor holds, not what a screen shows. */
+  onDraft: (program: SignageProgram) => Promise<void>;
+  /** Put what the editor holds on air. The one write a screen sees. */
+  onAir: (program: SignageProgram) => Promise<void>;
   onRefreshLibrary: () => Promise<SignageMedia[]>;
 };
+
+/** The program with its draft applied: what the editor opens on. */
+export function withDraftApplied(program: SignageProgram): SignageProgram {
+  const draft = program.draft;
+  if (!draft) return { ...program, draft: undefined };
+  return {
+    ...program,
+    name: draft.name,
+    cycle: draft.cycle,
+    items: draft.items,
+    windows: draft.windows,
+    draft: undefined,
+  };
+}
 
 export type Editor = ReturnType<typeof useProgramEditor>;
 
@@ -49,11 +67,17 @@ export function useProgramEditor({
   initial,
   library: initialLibrary,
   resolve,
-  onSave,
+  onDraft,
+  onAir,
   onRefreshLibrary,
 }: EditorOptions) {
-  const [program, setProgram] = useState(initial);
-  const [baseline, setBaseline] = useState(initial);
+  // `program` is what the editor holds; `onAir` is what a screen shows;
+  // `draftBaseline` is what was last written as a draft.
+  const opened = withDraftApplied(initial);
+  const [program, setProgram] = useState(opened);
+  const [onAirProgram, setOnAirProgram] = useState<SignageProgram>({ ...initial, draft: undefined });
+  const [draftBaseline, setDraftBaseline] = useState(opened);
+  const [airing, setAiring] = useState(false);
   const [rawLibrary, setRawLibrary] = useState(initialLibrary);
   const [selectedId, setSelectedId] = useState<string | null>(
     initial.items[0]?.id ?? null,
@@ -79,8 +103,11 @@ export function useProgramEditor({
   const selected = clips.find((clip) => clip.item.id === selectedId) ?? current;
   const stageClip = (trim && clips.find((clip) => clip.item.id === trim.id)) || current;
 
-  const dirty = !sameProgram(program, baseline);
-  const canSave = dirty && program.items.length > 0;
+  /** Differs from what is on air: there is something to put on air. */
+  const dirty = !sameProgram(program, onAirProgram);
+  /** Differs from the last written draft: there is something to autosave. */
+  const draftPending = !sameProgram(program, draftBaseline);
+  const canAir = dirty && program.items.length > 0 && !airing;
 
   useEffect(() => {
     setRawLibrary(initialLibrary);
@@ -165,20 +192,18 @@ export function useProgramEditor({
   );
 
   /**
-   * Write the program as it stands.
-   *
-   * Kept as a promise because leaving the editor flushes it, but nothing in
-   * the interface calls it from a button any more — see the effect below.
+   * Write the program as it stands — as the draft. Nothing a screen shows
+   * changes. Kept as a promise because leaving the editor flushes it.
    */
-  const save = useCallback(async (): Promise<boolean> => {
+  const saveDraft = useCallback(async (): Promise<boolean> => {
     if (program.items.length === 0) return false;
     const ticket = ++inflight.current;
     setSaving(true);
     setError(null);
     try {
-      await onSave(program);
+      await onDraft(program);
       if (ticket !== inflight.current) return true;
-      setBaseline(program);
+      setDraftBaseline(program);
       return true;
     } catch (err) {
       if (ticket !== inflight.current) return false;
@@ -189,27 +214,51 @@ export function useProgramEditor({
     } finally {
       if (ticket === inflight.current) setSaving(false);
     }
-  }, [onSave, program]);
+  }, [onDraft, program]);
 
   /**
-   * Change is commitment.
-   *
-   * An edit to the timeline writes itself, debounced only enough that dragging
-   * a clip is one write rather than sixty. There is no Save button in this
-   * product: the engine commits durably before it returns, so the cost of
-   * doing this is a local journal write, not a round trip somebody waits on.
+   * Put what the editor holds on air: the one write a screen sees. The
+   * draft is cleared with it, so what is on air and what is held agree.
+   */
+  const putOnAir = useCallback(async (): Promise<boolean> => {
+    if (program.items.length === 0 || airing) return false;
+    const ticket = ++inflight.current;
+    setAiring(true);
+    setError(null);
+    try {
+      await onAir(program);
+      if (ticket !== inflight.current) return true;
+      setOnAirProgram(program);
+      setDraftBaseline(program);
+      return true;
+    } catch (err) {
+      if (ticket !== inflight.current) return false;
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      haptic("error");
+      return false;
+    } finally {
+      if (ticket === inflight.current) setAiring(false);
+    }
+  }, [airing, onAir, program]);
+
+  /**
+   * An edit writes itself — as the draft — debounced only enough that
+   * dragging a clip is one write rather than sixty. What is on air does not
+   * move until somebody puts the draft there: an edit half made is not a
+   * broadcast.
    *
    * A program with no items is the one state that cannot be written — the
    * contract refuses it — so it is left alone rather than retried forever.
    */
   useEffect(() => {
-    if (!dirty || program.items.length === 0) return;
+    if (!draftPending || program.items.length === 0) return;
     if (commitTimer.current) clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => void save(), 600);
+    commitTimer.current = setTimeout(() => void saveDraft(), 600);
     return () => {
       if (commitTimer.current) clearTimeout(commitTimer.current);
     };
-  }, [dirty, program, save]);
+  }, [draftPending, program, saveDraft]);
 
   const refreshLibrary = useCallback(async () => {
     const latest = await onRefreshLibrary();
@@ -232,7 +281,8 @@ export function useProgramEditor({
 
   return {
     program,
-    baseline,
+    /** What is on air, as this editor last knew it. */
+    baseline: onAirProgram,
     library,
     catalog,
     clips,
@@ -246,7 +296,6 @@ export function useProgramEditor({
     trim,
     clipboard,
     dirty,
-    canSave,
     canUndo: past.length > 0,
     canRedo: future.length > 0,
     saving,
@@ -261,7 +310,11 @@ export function useProgramEditor({
     redo,
     add,
     pasteAfter,
-    save,
+    saveDraft,
+    putOnAir,
+    draftPending,
+    canAir,
+    airing,
     refreshLibrary,
     selectAndSeek,
     rename: (name: string) => apply(rename(program, name)),
@@ -284,6 +337,6 @@ export function useProgramEditor({
       const copied = copyItem(program, id);
       if (copied) setClipboard(copied);
     },
-    discard: () => apply(baseline),
+    discard: () => apply(onAirProgram),
   };
 }

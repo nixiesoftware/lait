@@ -58,14 +58,16 @@ export function EditorProvider({
   initial,
   library,
   orbit,
-  onSave,
+  onDraft,
+  onAir,
   onRefreshLibrary,
   children,
 }: {
   initial: SignageProgram;
   library: SignageMedia[];
   orbit: string | null;
-  onSave: (program: SignageProgram) => Promise<void>;
+  onDraft: (program: SignageProgram) => Promise<void>;
+  onAir: (program: SignageProgram) => Promise<void>;
   onRefreshLibrary: () => Promise<SignageMedia[]>;
   children: ReactNode;
 }) {
@@ -75,7 +77,8 @@ export function EditorProvider({
     initial,
     library,
     resolve: kinds.resolve,
-    onSave,
+    onDraft,
+    onAir,
     onRefreshLibrary,
   });
   const [panel, setPanel] = useState<PanelTarget>({ sort: "none" });

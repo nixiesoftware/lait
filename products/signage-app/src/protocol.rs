@@ -1155,6 +1155,7 @@ mod tests {
                 duration_ms: Some(5_000),
             }],
             windows: Vec::new(),
+            draft: None,
         }
     }
 

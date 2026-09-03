@@ -1357,6 +1357,7 @@ lait-post::over_http a_letter_crosses_the_wire_and_only_its_recipient_collects_i
 lait-reach::bin/lait-reach tests::a_receiver_reaches_its_coordinator_through_the_splice
 lait-reach::bin/lait-reach tests::an_unbound_label_is_refused_without_a_dial
 lait-reach::bin/lait-reach tests::the_label_is_the_first_host_label_and_ports_do_not_confuse_it
+lait-signage contract::tests::a_draft_is_saved_beside_the_program_and_never_shown_by_it
 lait-signage contract::tests::a_kind_entry_names_its_preset_and_keeps_its_own_settings
 lait-signage contract::tests::a_kind_may_have_more_than_one_preset
 lait-signage contract::tests::an_as_run_entry_cannot_end_before_it_started

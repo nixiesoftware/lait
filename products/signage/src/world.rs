@@ -1635,6 +1635,7 @@ mod tests {
                 })
                 .collect(),
             windows: Vec::new(),
+            draft: None,
         }
     }
 

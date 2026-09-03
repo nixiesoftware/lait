@@ -43,6 +43,20 @@ export interface SignageProgram {
   cycle: ProgramCycle;
   items: SignageItem[];
   windows: SignageWindow[];
+  /**
+   * Work in progress that is not on air. The editor autosaves here; a
+   * screen never reads it; "Put on air" copies it over the fields above
+   * and clears it. Absent on the wire when there is none.
+   */
+  draft?: ProgramDraft | null;
+}
+
+/** A program as it is being edited, minus its identity. */
+export interface ProgramDraft {
+  name: string;
+  cycle: ProgramCycle;
+  items: SignageItem[];
+  windows: SignageWindow[];
 }
 
 /**

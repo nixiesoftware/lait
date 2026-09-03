@@ -25,7 +25,8 @@ type Props = {
   initial: SignageProgram;
   library: SignageMedia[];
   persisted: boolean;
-  onSave: (program: SignageProgram) => Promise<void>;
+  onDraft: (program: SignageProgram) => Promise<void>;
+  onAir: (program: SignageProgram) => Promise<void>;
   onClose: () => void;
   onRefreshLibrary: () => Promise<SignageMedia[]>;
 };
@@ -33,7 +34,8 @@ type Props = {
 export function ProgramEditor({
   initial,
   library,
-  onSave,
+  onDraft,
+  onAir,
   onClose,
   onRefreshLibrary,
 }: Props) {
@@ -65,7 +67,8 @@ export function ProgramEditor({
         initial={initial}
         library={library}
         orbit={orbit}
-        onSave={onSave}
+        onDraft={onDraft}
+        onAir={onAir}
         onRefreshLibrary={onRefreshLibrary}
       >
         <Session wide={wide} container={peRef} onClose={onClose} />
@@ -99,14 +102,15 @@ function Session({
   };
 
   /**
-   * Leaving flushes rather than asks.
+   * Leaving flushes the draft rather than asks.
    *
    * "Save this program?" is a question that only exists because a product can
-   * hold unsaved work. This one cannot: the edit already committed, or is
-   * about to, so leaving writes whatever is outstanding and goes.
+   * lose work. This one cannot: the draft already wrote itself, or is about
+   * to, so leaving writes whatever is outstanding and goes. What is on air
+   * is untouched — that takes the one act this screen offers for it.
    */
   const back = () => {
-    if (editor.dirty && editor.program.items.length > 0) void editor.save();
+    if (editor.draftPending && editor.program.items.length > 0) void editor.saveDraft();
     onClose();
   };
 

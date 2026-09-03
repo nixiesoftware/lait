@@ -50,11 +50,27 @@ export function MobileShell({
         />
         <CommitMark
           state={
-            editor.saving ? "committing" : editor.error ? "refused" : editor.dirty ? "pending" : "settled"
+            editor.saving
+              ? "committing"
+              : editor.error
+                ? "refused"
+                : editor.draftPending
+                  ? "pending"
+                  : "settled"
           }
           error={editor.error}
-          onRetry={() => void editor.save()}
+          onRetry={() => void editor.saveDraft()}
         />
+        {/* The one act a screen sees. Everything else on this page is a draft. */}
+        <button
+          type="button"
+          className="ds-btn pe-air"
+          disabled={!editor.canAir}
+          onClick={() => void editor.putOnAir()}
+          title={editor.dirty ? "Put this version on every screen that plays it" : "This version is on air"}
+        >
+          {editor.airing ? "Putting on air…" : editor.dirty ? "Put on air" : "On air"}
+        </button>
       </header>
 
       <div className={`pe-mobile${sheetOpen ? " has-sheet" : ""}`}>
