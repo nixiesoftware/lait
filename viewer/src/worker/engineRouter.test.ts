@@ -83,16 +83,34 @@ describe("engineRouter", () => {
     stop();
   });
 
-  it("fans a drained caret to the open session as a session:event", async () => {
-    const caret = JSON.stringify({ kind: "live", space: "s", issue: null, view: { kind: "live", generation: 0, partial: false, entries: [] } });
+  it("stamps a drained caret with the watched reff and routes it to that session", async () => {
+    const caret = { kind: "live", space: "s", issue: null, view: { kind: "live", generation: 0, partial: false, entries: [] } };
     let handed = false;
     const drainCaret = () =>
-      handed ? new Promise<string | undefined>(() => {}) : ((handed = true), Promise.resolve(caret));
+      handed ? new Promise<string | undefined>(() => {}) : ((handed = true), Promise.resolve(JSON.stringify(caret)));
     const { send, received, stop } = harness(stubHandle({ drainCaret }));
     send({ lait: "session:open", sid: 5 });
+    // A caret drained before any watch has nowhere to route — must be dropped.
     await settle();
     await settle();
-    expect(received).toContainEqual({ lait: "session:event", sid: 5, event: JSON.parse(caret) });
+    expect(received.some((f) => f.lait === "session:event" && f.event?.kind === "live")).toBe(false);
+    stop();
+  });
+
+  it("routes a caret drained after a watch, stamped with that issue's reff", async () => {
+    const caret = { kind: "live", space: "s", issue: null, view: { kind: "live", generation: 0, partial: false, entries: [] } };
+    let handed = false;
+    const drainCaret = () =>
+      handed ? new Promise<string | undefined>(() => {}) : ((handed = true), Promise.resolve(JSON.stringify(caret)));
+    const { send, received, stop } = harness(stubHandle({ drainCaret, handleSession: () => "[]" }));
+    send({ lait: "session:open", sid: 9 });
+    send({ lait: "session:watch", sid: 9, question: { space: "s", issue: "iss_z" } });
+    await settle();
+    await settle();
+    const live = received.find((f) => f.lait === "session:event" && f.event?.kind === "live");
+    expect(live).toBeDefined();
+    expect(live.sid).toBe(9);
+    expect(live.event.issue).toBe("iss_z"); // stamped, not the raw null
     stop();
   });
 

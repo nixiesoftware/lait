@@ -71,10 +71,16 @@ export function engineRouter(
   const pollMs = options.pollMs ?? 2000;
   // Events subscriptions: link-lane id → live. Rings fan to all of them.
   const events = new Set<number>();
-  // Open session ids — the sessions a drained caret fans to. Insertion order is
-  // "most recent watcher last"; the newest is the one the live view answers,
-  // matching the page's one-question-at-a-time LivePlane.
+  // Open session ids.
   const sessions = new Set<number>();
+  // The latest (session, issue) a `session:watch` named. A drained caret is a
+  // whole-table view (`issue:null`); the viewer's live.ts DROPS any live event
+  // whose issue ≠ the question it asked, so the router stamps the watched reff.
+  // The page's LivePlane watches one issue at a time (last-wins), and the tab
+  // only receives carets for the field it subscribed — so the single latest
+  // watch is the right label. (GAP 1: the engine leaves the reff to the Worker,
+  // which knows it; the body→reff direction the engine lacks is not needed.)
+  let watch: { sid: number; issue: string } | null = null;
   let stopped = false;
   let caretLoop: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -112,13 +118,13 @@ export function engineRouter(
       }
       if (event === undefined) return; // no Live plane / connection closed.
       if (stopped) return;
+      // No one is watching an issue yet — nowhere to route a caret.
+      if (!watch) continue;
       const parsed = JSON.parse(event);
-      // Fan to every open session (the page drops events for a question it did
-      // not ask — live.ts admits by liveKey — so an unstamped whole-table view
-      // reaches only the session that is actually watching that issue).
-      for (const sid of sessions) {
-        post({ lait: "session:event", sid, event: parsed });
-      }
+      // Stamp the watched reff so the page's live.ts admits it (it drops a
+      // whole-table `issue:null` view against an asked-for issue).
+      parsed.issue = watch.issue;
+      post({ lait: "session:event", sid: watch.sid, event: parsed });
     }
   };
 
@@ -161,16 +167,22 @@ export function engineRouter(
         const sid = (frame as { sid: number }).sid;
         sessions.add(sid);
         for (const f of JSON.parse(handle.handleSession(json))) post(f);
-        ensureCaretLoop();
         return;
       }
       case "session:watch": {
         // One frame, both lanes: the session host records the watch (silently),
         // and the caret send-half publishes this cursor.
         for (const f of JSON.parse(handle.handleSession(json))) post(f);
-        const question = (frame as { question?: unknown }).question;
-        if (question !== undefined && question !== null) {
+        const sid = (frame as { sid: number }).sid;
+        const question = (frame as { question?: { issue?: string } | null }).question;
+        if (question) {
+          // Record which issue this session now watches, so drained carets are
+          // stamped with its reff; publish this cursor as the send-half caret;
+          // and start the caret receive loop now there is a watch to route to
+          // (carets only arrive for a subscribed scope, so not before a watch).
+          if (typeof question.issue === "string") watch = { sid, issue: question.issue };
           void handle.watchCaret(JSON.stringify(question));
+          ensureCaretLoop();
         }
         return;
       }
@@ -180,7 +192,9 @@ export function engineRouter(
         return;
       }
       case "session:close": {
-        sessions.delete((frame as { sid: number }).sid);
+        const sid = (frame as { sid: number }).sid;
+        sessions.delete(sid);
+        if (watch?.sid === sid) watch = null;
         handle.handleSession(json);
         return;
       }
