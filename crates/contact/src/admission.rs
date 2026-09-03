@@ -89,6 +89,17 @@ pub mod feature {
     /// the same connection it pulls on. Negotiated (not an ALPN bump) so an old
     /// peer that never sets it simply does today's one-way pull, no regression.
     pub const RECIPROCAL_CONVERGE: u64 = 1 << 3;
+    /// The peer relays OTHER peers' presence, not only its own, and frames every
+    /// presence datagram as a `RelayedPresence` carrying the origin station. A
+    /// browser tab is a Live-plane client that nothing can dial back, so two tabs
+    /// never see each other's carets unless a shared node they both dial fans
+    /// presence out; this bit is how a tab asks a supporter to do that and how it
+    /// learns each caret's true author. Negotiated (not an ALPN bump) so an old
+    /// peer that never sets it gets today's own-presence-only, self-attributed
+    /// behavior, no regression. Trust is unchanged: the origin is the station of
+    /// the authenticated connection the supporter recorded the item on, never
+    /// anything from a payload, so a peer still cannot speak for another.
+    pub const PRESENCE_RELAY: u64 = 1 << 4;
 
     /// What *this* build actually implements.
     ///
@@ -101,7 +112,8 @@ pub mod feature {
     ///
     /// A bit joins this constant in the same commit as the code that honours
     /// it, and never before.
-    pub const LOCAL_SUPPORTED: u64 = RESIDENCY_HINTS | NATIVE_LIVE_MEDIA | RECIPROCAL_CONVERGE;
+    pub const LOCAL_SUPPORTED: u64 =
+        RESIDENCY_HINTS | NATIVE_LIVE_MEDIA | RECIPROCAL_CONVERGE | PRESENCE_RELAY;
 }
 
 /// What a peer advertises about a plane it speaks.

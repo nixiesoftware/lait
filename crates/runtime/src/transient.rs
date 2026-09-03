@@ -390,6 +390,55 @@ impl TransientItem {
     }
 }
 
+/// A presence item as a SUPPORTER relays it to a subscriber: the item plus the
+/// origin station it was recorded from.
+///
+/// A bare [`TransientItem`] carries no station on purpose — the station is
+/// whoever the connection was admitted as, so a peer cannot speak for another
+/// (see the type above). That holds for what a peer PUBLISHES (inbound to a
+/// supporter). But a supporter fanning presence OUT to a subscriber must say
+/// whose caret each one is, and the subscriber cannot infer it (one connection
+/// carries many peers' carets). So the trusted supporter — trusted because the
+/// subscriber dialed it and, by grant, it is authorized to serve — attaches the
+/// `origin`, which is the station of the AUTHENTICATED connection it recorded the
+/// item on, never anything a payload claimed. The anti-spoof property is intact:
+/// a peer still publishes station-less items bound to its own connection; only
+/// the relay attributes, and only from the connection.
+///
+/// Sent only when both sides negotiated [`feature::PRESENCE_RELAY`]; once
+/// negotiated, EVERY presence datagram on that connection is a `RelayedPresence`
+/// (the supporter's own presence rides `origin` = the supporter's station), so a
+/// receiver never has to guess a datagram's shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayedPresence {
+    /// The station key of the peer whose presence this is.
+    pub origin: [u8; 32],
+    pub item: TransientItem,
+}
+
+impl RelayedPresence {
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard relayed presence")
+    }
+
+    /// Decode one relayed item, same discipline as [`TransientItem::decode_canonical`]:
+    /// the outer ceiling first, then postcard, then re-encode equality, then the
+    /// inner item's own semantic checks.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        // The envelope is one station key over a `TransientItem`, so the same
+        // ceiling bounds it up to a small constant.
+        if bytes.len() > MAX_TRANSIENT_ITEM_BYTES + 64 {
+            return Err(Invalid::TooLarge);
+        }
+        let relayed: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::Malformed)?;
+        if relayed.encode() != bytes {
+            return Err(Invalid::NonCanonical);
+        }
+        relayed.item.validate()?;
+        Ok(relayed)
+    }
+}
+
 /// Why an item was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Invalid {

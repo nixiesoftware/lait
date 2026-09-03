@@ -26,7 +26,7 @@ use comms::{Connection, Transport};
 use mechanics::ids::SpaceId;
 use mechanics::station::Key;
 use runtime::plane::{feature, stream_kind, Accept, Open, Plane, Refusal, LIVE_ALPN, SPACE_ID_LEN};
-use runtime::transient::{LiveControl, Target, TransientItem, TransientPayload};
+use runtime::transient::{LiveControl, RelayedPresence, Target, TransientItem, TransientPayload};
 
 /// Why a Live dial did not become a session.
 #[derive(Debug)]
@@ -72,6 +72,11 @@ pub struct LiveClient {
     /// enforces on receive.
     subscribed: std::cell::RefCell<std::collections::BTreeSet<Target>>,
     seq: std::cell::Cell<u64>,
+    /// Whether the peer agreed to relay OTHER peers' presence (negotiated
+    /// `feature::PRESENCE_RELAY`). When set, every inbound presence datagram is a
+    /// `RelayedPresence` carrying the true author's station; when not, it is a
+    /// bare `TransientItem` and the author is the responder itself.
+    relay: bool,
 }
 
 impl LiveClient {
@@ -138,11 +143,13 @@ impl LiveClient {
             .map_err(|e| LiveError::Flow(format!("read accept: {e:#}")))?;
 
         match Accept::decode_canonical(&answer) {
-            Ok(_accept) => Ok(Self {
+            Ok(accept) => Ok(Self {
                 connection,
                 epoch,
                 subscribed: std::cell::RefCell::new(std::collections::BTreeSet::new()),
                 seq: std::cell::Cell::new(0),
+                // The peer relays only if it agreed to; the accept is its answer.
+                relay: accept.capability.features & feature::PRESENCE_RELAY != 0,
             }),
             Err(_) => Err(LiveError::Refused(
                 match Refusal::decode_canonical(&answer) {
@@ -216,19 +223,31 @@ impl LiveClient {
         self.connection.send_datagram(&encoded).is_ok()
     }
 
-    /// The next transient item a peer published to this tab, or `None` when
-    /// none is pending. The receive side the viewer's facepile/carets draw
-    /// from; the Worker pumps this like it pumps the doorbell ring. Bound and
-    /// canonicality are checked exactly as the daemon checks an inbound
-    /// datagram, so a malformed or oversize one is skipped, never trusted.
-    pub async fn next_item(&self) -> Option<TransientItem> {
+    /// The next presence item, with its author — or `None` when none is pending.
+    /// The receive side the viewer's facepile/carets draw from; the Worker pumps
+    /// this like it pumps the doorbell ring. Bound and canonicality are checked
+    /// exactly as the daemon checks an inbound datagram, so a malformed or oversize
+    /// one is skipped, never trusted.
+    ///
+    /// The `Option<[u8; 32]>` is the ORIGIN station when the peer is relaying
+    /// (every datagram is a `RelayedPresence` that names the true author), and
+    /// `None` when it is not (a bare `TransientItem` whose author is the responder
+    /// this tab dialed — the caller attributes it to that).
+    pub async fn next_item(&self) -> Option<(Option<[u8; 32]>, TransientItem)> {
         loop {
             let payload = self.connection.read_datagram().await.ok()??;
-            match TransientItem::decode_canonical(&payload) {
-                Ok(item) => return Some(item),
-                // Skip a malformed datagram and keep reading — one bad frame
-                // from a peer is not the end of the session.
-                Err(_) => continue,
+            if self.relay {
+                match RelayedPresence::decode_canonical(&payload) {
+                    Ok(relayed) => return Some((Some(relayed.origin), relayed.item)),
+                    // Skip a malformed frame and keep reading — one bad datagram
+                    // from a supporter is not the end of the session.
+                    Err(_) => continue,
+                }
+            } else {
+                match TransientItem::decode_canonical(&payload) {
+                    Ok(item) => return Some((None, item)),
+                    Err(_) => continue,
+                }
             }
         }
     }

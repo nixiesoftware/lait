@@ -40,7 +40,8 @@ use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
 use crate::plane::{bounds, datagram_fits, stream_kind};
 use crate::plane_stream::{read_framed, read_stream_kind, Invalid as StreamInvalid};
 use crate::transient::{
-    AdmitOutcome, LiveControl, Target, TransientItem, TransientStore, MAX_TRANSIENT_ITEM_BYTES,
+    AdmitOutcome, LiveControl, RelayedPresence, Target, TransientItem, TransientStore,
+    MAX_TRANSIENT_ITEM_BYTES,
 };
 
 /// The close code every Live refusal uses. Coarse on purpose: a peer learns it
@@ -757,6 +758,37 @@ impl LiveHandle {
         }
     }
 
+    /// The raw presence to RELAY to a subscriber: every OTHER station's held
+    /// items in the scopes it subscribed, reconstructed as the `TransientItem`s
+    /// they were recorded as — the UNRESOLVED anchors, so the subscriber resolves
+    /// each against its own Bodies, not this Station's. The subscriber's own
+    /// station is excluded: a peer is never told about itself.
+    ///
+    /// This is the read side of a supporter's fanout (`feature::PRESENCE_RELAY`).
+    /// The station in each pair is the true author, taken from the slot key the
+    /// item was `record`ed under — from an authenticated connection, never a
+    /// payload — which is what the supporter attaches as the relayed origin.
+    pub fn relayable(&self, exclude: &Key, subscribed: &[Target]) -> Vec<(Key, TransientItem)> {
+        let wanted: std::collections::BTreeSet<&Target> = subscribed.iter().collect();
+        let table = self.table();
+        table
+            .slots
+            .iter()
+            .filter(|((station, scope, _), _)| station != exclude && wanted.contains(scope))
+            .map(|((station, scope, _), slot)| {
+                (
+                    station.clone(),
+                    TransientItem {
+                        connection_epoch: slot.connection_epoch,
+                        seq: slot.seq,
+                        scope: scope.clone(),
+                        payload: slot.payload.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Say whether this Station is at its ceiling for sessions it *accepts*.
     pub fn set_accepting_capped(&self, capped: bool) {
         let mut table = self.table();
@@ -1111,6 +1143,12 @@ pub async fn serve_session(
     let media_enabled = peer.features & crate::plane::feature::NATIVE_LIVE_MEDIA != 0
         && peer.granted_lanes.contains(&stream_kind::MEDIA_GROUP)
         && peer.granted_lanes.contains(&stream_kind::MEDIA_CONTROL);
+    // Whether this peer asked us to relay OTHER peers' presence, not only our
+    // own. A browser tab sets it because nothing can dial it back, so a shared
+    // node it dials is the only way it sees another tab's caret. When set, every
+    // presence datagram we send this peer is a `RelayedPresence` carrying the
+    // origin station.
+    let relay = peer.features & crate::plane::feature::PRESENCE_RELAY != 0;
     let media_session = media::Session::new(
         peer.station.clone(),
         peer.connection_id,
@@ -1171,6 +1209,21 @@ pub async fn serve_session(
     let mut local_updates = handle
         .as_ref()
         .map(|handle| handle.subscribe_local_generation());
+    // The SHARED table generation: bumps when ANY peer records presence, which is
+    // exactly when a relaying supporter has something new to fan out. Watched
+    // only when relaying, so a non-relay session pays nothing.
+    let mut shared_updates = if relay {
+        handle.as_ref().map(|handle| handle.subscribe_generation())
+    } else {
+        None
+    };
+    // The shared generation last fanned out, and a periodic re-fan so a subscriber
+    // that missed a datagram recovers within one refresh rather than waiting for
+    // the next time somebody moves.
+    let mut relayed_generation = u64::MAX;
+    let mut relay_refreshed_at = Instant::now()
+        .checked_sub(deadline::PRESENCE_REFRESH)
+        .unwrap_or_else(Instant::now);
 
     // What this session has told its peer we are looking at, and the
     // declaration generation it was built from.
@@ -1235,10 +1288,17 @@ pub async fn serve_session(
         // half is not belt and braces: a slot dies on the *receiver's* clock, so
         // a peer that heard once and never again watches everybody vanish after
         // a minute and a half.
+        // Skipped entirely when relaying: a supporter serving a relay peer sends
+        // ONLY `RelayedPresence` on that connection, so the receiver never has to
+        // guess a datagram's shape. A relay supporter is headless by design (its
+        // own `want` is empty), so nothing is lost here; its peers still see every
+        // OTHER peer through the fanout block below. (A node that both edits and
+        // relays would not broadcast its own caret to relay peers — a documented
+        // limitation, not the supporter's role.)
         if let Some(handle) = &handle {
             let generation = handle.local_generation();
             let due = refreshed_at.elapsed() >= deadline::PRESENCE_REFRESH;
-            if generation != published_generation || due {
+            if !relay && (generation != published_generation || due) {
                 let want: std::collections::BTreeMap<_, _> = handle
                     .local_publications()
                     .into_iter()
@@ -1331,6 +1391,29 @@ pub async fn serve_session(
                     published_generation = generation;
                     if !published.is_empty() {
                         settle_until = Some(Instant::now() + deadline::PRESENCE_SETTLE);
+                    }
+                }
+            }
+
+            // Fanout: relay every OTHER peer's presence in the scopes THIS peer
+            // subscribed, each tagged with its true origin station. This is the
+            // half that makes two browser tabs — neither of which can be dialed —
+            // see each other through a shared supporter they both dial. Gated on
+            // the peer's `PRESENCE_RELAY`, driven by the SHARED generation (any
+            // peer moving) with a periodic re-fan for a missed datagram.
+            if relay {
+                let shared = handle.generation();
+                let due = relay_refreshed_at.elapsed() >= deadline::PRESENCE_REFRESH;
+                if shared != relayed_generation || due {
+                    let subscribed = session.borrow().subscriptions().to_vec();
+                    let items = handle.relayable(&peer.station, &subscribed);
+                    let mut session = session.borrow_mut();
+                    for (origin, item) in items {
+                        publish_relayed(connection.as_ref(), &origin, &item, &mut session.counters);
+                    }
+                    relayed_generation = shared;
+                    if due {
+                        relay_refreshed_at = Instant::now();
                     }
                 }
             }
@@ -1844,6 +1927,22 @@ pub async fn serve_session(
                 }
             }
 
+            // A relaying supporter wakes when ANY peer records presence, so a
+            // fanned caret crosses promptly rather than waiting for the poll. Only
+            // armed when relaying; a `None` here parks this arm forever.
+            shared = async {
+                match shared_updates.as_mut() {
+                    Some(updates) => updates.changed().await,
+                    None => std::future::pending::<
+                        Result<(), tokio::sync::watch::error::RecvError>
+                    >().await,
+                }
+            } => {
+                if shared.is_err() {
+                    break;
+                }
+            }
+
             // Housekeeping fallback for signals, authority revalidation,
             // expiry, and idle connections. Publication itself wakes above.
             _ = tokio::time::sleep(deadline::DRIVER_POLL) => {}
@@ -2014,6 +2113,30 @@ pub fn publish(
     counters: &mut TransientCounters,
 ) -> bool {
     let encoded = item.encode();
+    if !datagram_fits(encoded.len(), connection.datagram_capacity()) {
+        counters.capacity_drops += 1;
+        return false;
+    }
+    connection.send_datagram(&encoded).is_ok()
+}
+
+/// Send one peer's presence to a DIFFERENT subscriber, tagged with its origin
+/// station — the supporter's fanout half (`feature::PRESENCE_RELAY`). Same
+/// no-truncate, no-retransmit contract as [`publish`]: an oversize relayed item
+/// is dropped whole, never fragmented. Only sent on a connection that negotiated
+/// the bit, where every presence datagram is a [`RelayedPresence`] so the
+/// receiver never guesses a datagram's shape.
+fn publish_relayed(
+    connection: &dyn comms::Connection,
+    origin: &Key,
+    item: &TransientItem,
+    counters: &mut TransientCounters,
+) -> bool {
+    let relayed = RelayedPresence {
+        origin: origin.key_bytes(),
+        item: item.clone(),
+    };
+    let encoded = relayed.encode();
     if !datagram_fits(encoded.len(), connection.datagram_capacity()) {
         counters.capacity_drops += 1;
         return false;
@@ -2428,7 +2551,13 @@ pub async fn dial(
     let open = crate::plane::Open {
         plane: crate::plane::Plane::Live,
         protocol_version: crate::plane::Plane::Live.protocol_version(),
-        features: crate::plane::feature::LOCAL_SUPPORTED,
+        // Everything this build honours EXCEPT `PRESENCE_RELAY`: a native dialer's
+        // receive side decodes bare `TransientItem`, not the `RelayedPresence`
+        // envelope, so it must not ask a supporter to relay — that is a browser
+        // tab's request (porthole's dialer decodes the envelope and sets the bit).
+        // "Advertise only what you can honour": the bit is in `LOCAL_SUPPORTED` so
+        // an acceptor HONOURS a peer that asks, but a native dial does not ask.
+        features: crate::plane::feature::LOCAL_SUPPORTED & !crate::plane::feature::PRESENCE_RELAY,
         space: space_bytes,
         initiator_station: local.key_bytes(),
         responder_station: peer.key_bytes(),

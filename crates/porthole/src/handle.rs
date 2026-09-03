@@ -243,10 +243,10 @@ impl BrowserEngineHandle {
         let Some(live) = self.live.as_ref() else {
             return Ok(None);
         };
-        let Some(item) = live.next_item().await else {
+        let Some((origin, item)) = live.next_item().await else {
             return Ok(None);
         };
-        let Some(entry) = self.live_entry(&item)? else {
+        let Some(entry) = self.live_entry(origin, &item)? else {
             // A payload kind this tab does not surface (residency/preview).
             return Ok(None);
         };
@@ -268,13 +268,23 @@ impl BrowserEngineHandle {
     /// caret/selection anchor to a position against the live core, in the exact
     /// wire shape `hosting::live_entry` builds on the daemon. `None` for a kind
     /// the tab does not surface.
+    ///
+    /// `origin` is the caret's true author when a supporter relayed it (its
+    /// station key); `None` means the responder this tab dialed is the author (a
+    /// bare, un-relayed item). Attributing to the origin is what lets one tab draw
+    /// ANOTHER tab's caret rather than mislabel every peer as the supporter.
     fn live_entry(
         &self,
+        origin: Option<[u8; 32]>,
         item: &runtime::transient::TransientItem,
     ) -> Result<Option<serde_json::Value>, JsValue> {
         use runtime::transient::TransientPayload;
+        let author = match origin {
+            Some(bytes) => Key::from_key_bytes(bytes),
+            None => self.responder.clone(),
+        };
         let actor = runtime::browser::LedgerAuthorityView(self.authority.clone())
-            .resolve(&self.responder.as_device())
+            .resolve(&author.as_device())
             .map(|resolution| resolution.actor.as_str().to_string());
         let Some(actor) = actor else {
             return Ok(None);

@@ -14,7 +14,7 @@ use mechanics::station::Key;
 use replica::body::BodyKey;
 use runtime::budget::deadline;
 use runtime::plane::live::{AnchorSource, CaretState, LiveHandle, LiveNarrow};
-use runtime::transient::{Target, TransientItem, TransientPayload};
+use runtime::transient::{RelayedPresence, Target, TransientItem, TransientPayload};
 
 const WORLD: &str = "com.example.notes";
 
@@ -1910,4 +1910,64 @@ mod nudging {
         handle.departed(&station(3));
         assert_eq!(handle.take_outbound_for_test(&station(3)).len(), 1);
     }
+}
+
+#[test]
+fn relayable_gives_a_subscriber_only_other_peers_in_scopes_it_watches() {
+    // The read side of a supporter's fanout (`PRESENCE_RELAY`). A supporter holds
+    // several peers' presence in one shared handle; `relayable` is what it sends
+    // to ONE subscriber: every OTHER peer in the scopes THAT subscriber watches,
+    // never the subscriber itself, never a scope it did not ask for.
+    let now = Instant::now();
+    let handle = LiveHandle::new(None);
+    let scope_a = caret_scope(1);
+    let scope_b = caret_scope(2);
+    handle.record(&station(1), &caret_item(scope_a.clone(), 1, 4), now);
+    handle.record(&station(2), &caret_item(scope_a.clone(), 1, 7), now);
+    handle.record(&station(3), &caret_item(scope_b.clone(), 1, 2), now);
+
+    // Subscriber station 1, watching scope_a: sees station 2 only — not itself,
+    // not station 3's scope_b (unsubscribed).
+    let relayed = handle.relayable(&station(1), &[scope_a.clone()]);
+    assert_eq!(
+        relayed.len(),
+        1,
+        "one other peer in the one subscribed scope"
+    );
+    assert_eq!(relayed[0].0, station(2));
+    assert_eq!(relayed[0].1.scope, scope_a);
+    // Forwarded UNRESOLVED — the raw recorded payload, for the subscriber to
+    // resolve against its OWN Bodies, never this Station's resolved position.
+    assert!(matches!(
+        relayed[0].1.payload,
+        TransientPayload::Caret { .. }
+    ));
+
+    // Watching both scopes: both other peers, still never itself.
+    let mut both: Vec<_> = handle
+        .relayable(&station(1), &[scope_a, scope_b])
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect();
+    both.sort();
+    assert_eq!(both, vec![station(2), station(3)]);
+}
+
+#[test]
+fn relayed_presence_round_trips_carrying_its_origin() {
+    let item = caret_item(caret_scope(1), 5, 9);
+    let relayed = RelayedPresence {
+        origin: station(7).key_bytes(),
+        item: item.clone(),
+    };
+    let bytes = relayed.encode();
+    let decoded = RelayedPresence::decode_canonical(&bytes).expect("round-trips");
+    assert_eq!(
+        decoded.origin,
+        station(7).key_bytes(),
+        "the author survives"
+    );
+    assert_eq!(decoded.item, item, "the item survives");
+    // A truncated frame is refused, not silently half-read.
+    assert!(RelayedPresence::decode_canonical(&bytes[..bytes.len() - 1]).is_err());
 }
