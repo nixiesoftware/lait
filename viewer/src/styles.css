@@ -1466,6 +1466,23 @@
   vertical-align: text-bottom;
   pointer-events: none;
   z-index: 2;
+  /* A peer's caret arrives on the realtime lane in milliseconds; a soft fade-in
+     keeps it from popping, and the gentle breathe reads as "someone is here"
+     without the harsh blink of a native cursor. The widget re-mounts on every
+     move, so the fade-in also smooths each jump to a new position. */
+  animation: remote-caret-in 130ms ease-out, remote-caret-breathe 1.15s ease-in-out 130ms infinite;
+  transition: opacity 140ms ease;
+}
+
+@keyframes remote-caret-in {
+  from { opacity: 0; transform: scaleY(0.6); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Between the full colour and a dim of it — present, never strobing. */
+@keyframes remote-caret-breathe {
+  0%, 100% { border-left-color: var(--remote-color); }
+  50% { border-left-color: color-mix(in oklab, var(--remote-color) 45%, transparent); }
 }
 
 .codemirror-markdown .remote-caret-label,
@@ -1486,23 +1503,51 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: none;
+  transform-origin: left bottom;
+  /* Show the name while a peer is active, then recede to just the bar when they
+     pause — the Google-Docs/Linear behaviour. The caret widget re-mounts on each
+     move, restarting these, so the name is up while they type and fades ~2.4s
+     after they stop. Hovering the caret brings it back. */
+  animation:
+    remote-label-in 150ms ease-out,
+    remote-label-idle 300ms ease-in 2400ms forwards;
+}
+
+.lait-document-editor-host .remote-caret:hover .remote-caret-label,
+.codemirror-markdown .remote-caret:hover .remote-caret-label {
+  animation: remote-label-in 120ms ease-out forwards;
+}
+
+@keyframes remote-label-in {
+  from { opacity: 0; transform: translateY(3px) scale(0.94); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes remote-label-idle {
+  to { opacity: 0; transform: translateY(2px) scale(0.96); }
 }
 
 .codemirror-markdown .remote-caret-uncertain,
 .lait-document-editor-host .remote-caret-uncertain {
   opacity: 0.55;
+  /* A caret whose anchor drifted stops breathing — it is a last-known place, not
+     a live position, and should not claim the same liveness. */
+  animation: remote-caret-in 130ms ease-out;
 }
 
 .codemirror-markdown .remote-selection,
 .lait-document-editor-host .remote-selection {
   background: color-mix(in oklab, var(--remote-color) 22%, transparent);
   border-radius: 2px;
+  transition: background 140ms ease;
 }
 
 /* Optimistic text is a display-only projection over the acknowledged document.
    The hidden range and inserted widget make the remote result visible without
-   mutating CodeMirror's document, so a local edit can never be based on text the CRDT has
-   not accepted yet. */
+   mutating the document, so a local edit can never be based on text the CRDT has
+   not accepted yet. It is the peer's INCOMING text — coloured as theirs and
+   faded in, so a reader sees it land the instant it is typed, before it becomes
+   durable underneath. */
 .codemirror-markdown .remote-preview-insert,
 .lait-document-editor-host .remote-preview-insert {
   border-bottom: 2px solid color-mix(in oklab, var(--remote-color) 72%, transparent);
@@ -1511,6 +1556,23 @@
   color: inherit;
   pointer-events: none;
   white-space: pre-wrap;
+  animation: remote-preview-in 130ms ease-out;
+}
+
+@keyframes remote-preview-in {
+  from { background: color-mix(in oklab, var(--remote-color) 28%, transparent); }
+  to { background: color-mix(in oklab, var(--remote-color) 12%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lait-document-editor-host .remote-caret,
+  .codemirror-markdown .remote-caret,
+  .lait-document-editor-host .remote-caret-label,
+  .codemirror-markdown .remote-caret-label,
+  .lait-document-editor-host .remote-preview-insert,
+  .codemirror-markdown .remote-preview-insert {
+    animation: none;
+  }
 }
 
 /* If a concurrent deletion invalidates the exact anchor, keep the person tied

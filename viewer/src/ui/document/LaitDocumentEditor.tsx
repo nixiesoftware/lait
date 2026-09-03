@@ -204,7 +204,13 @@ function presenceDecorations(
       const anchor = editorPosition(projection, preview.anchor);
       const focus = editorPosition(projection, preview.focus ?? preview.anchor);
       if (anchor !== focus) decorations.push(remoteSelection(preview.color, anchor, focus));
-      decorations.push(Decoration.widget(focus, () => remoteCaret(preview), { side: -1 }));
+      // A stable per-actor key lets ProseMirror REUSE this caret's DOM node as the
+      // peer moves, repositioning it instead of recreating it — so the entrance/
+      // presence animations run once, never restarting (and flickering) on every
+      // keystroke during fast typing.
+      decorations.push(
+        Decoration.widget(focus, () => remoteCaret(preview), { side: -1, key: `caret-${preview.actor}` }),
+      );
       continue;
     }
     if (preview.base !== revision) continue;
@@ -220,7 +226,7 @@ function presenceDecorations(
       if (visible) root.append(document.createTextNode(visible));
       if (preview.anchor !== undefined) root.append(remoteCaret(preview));
       return root;
-    }, { side: -1 }));
+    }, { side: -1, key: `preview-${preview.actor}:${preview.result}` }));
   }
 
   for (const cursor of cursors) {
@@ -228,7 +234,11 @@ function presenceDecorations(
     const anchor = editorPosition(projection, cursor.anchor);
     const focus = editorPosition(projection, cursor.focus ?? cursor.anchor);
     if (anchor !== focus) decorations.push(remoteSelection(cursor.color, anchor, focus));
-    decorations.push(Decoration.widget(focus, () => remoteCaret(cursor), { side: -1 }));
+    // Stable per-actor key: reuse this peer's caret DOM as it moves (no per-move
+    // recreate, so its animations don't restart and flicker).
+    decorations.push(
+      Decoration.widget(focus, () => remoteCaret(cursor), { side: -1, key: `caret-${cursor.actor}` }),
+    );
   }
   return DecorationSet.create(projection.doc, decorations);
 }
