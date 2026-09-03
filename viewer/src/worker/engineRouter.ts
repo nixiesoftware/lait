@@ -84,6 +84,22 @@ export function engineRouter(
   let stopped = false;
   let caretLoop: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  // When a peer's caret/preview arrives it means they are editing HERE, so their
+  // durable text is about to change and this tab should converge it promptly —
+  // far sooner than the steady poll. But a convergence is a heavy Contact
+  // round-trip on the single Worker thread; firing one per caret (they arrive
+  // every ~80ms while a peer types) saturates the thread and starves the very
+  // carets it serves. So a peer's activity nudges a convergence at most this
+  // often: fresh enough that a passive reader's durable base tracks the editor
+  // (so previews apply and text lands fast), throttled enough that carets stay
+  // instant. The steady poll remains the backstop.
+  // Text actively changing (a preview) converges on a tight window; a bare cursor
+  // move on a lazy one. Carets have huge latency headroom (they ride datagrams in
+  // ~1ms), so the cost of a tight preview window is only extra convergence work
+  // while a peer is genuinely typing.
+  const ACTIVITY_CONVERGE_MS = 120;
+  const IDLE_CONVERGE_MS = 600;
+  let lastActivityConverge = 0;
 
   const post = (frame: unknown) => {
     if (!stopped) port.postMessage(frame);
@@ -125,11 +141,22 @@ export function engineRouter(
       // whole-table `issue:null` view against an asked-for issue).
       parsed.issue = watch.issue;
       post({ lait: "session:event", sid: watch.sid, event: parsed });
-      // Deliberately NOT triggering a convergence repull here: a repull is a heavy
-      // Contact round-trip, and firing one per caret pins the single Worker thread
-      // and DELAYS the very carets/previews this loop exists to deliver. The
-      // realtime lane (carets AND preview text) rides the Live plane in
-      // milliseconds; durable convergence is the slow backstop on its own poll.
+      // A peer is editing here — converge their durable text promptly so this
+      // tab's base tracks theirs (previews only apply on a matching base, and
+      // once concurrent edits diverge the base only realigns by converging).
+      // Urgency scales with the activity: a PREVIEW means text is changing right
+      // now, so converge on a tight window to keep the base fresh and text under
+      // the visibility bar; a bare caret is only a cursor move, so nudge far more
+      // gently to spare the single Worker thread. Throttled either way — a burst
+      // nudges at most one convergence per window, and the in-flight guard
+      // collapses any overlap; the steady poll remains the backstop.
+      const kind = (parsed as { view?: { entries?: { kind?: string }[] } }).view?.entries?.[0]?.kind;
+      const window = kind === "preview" ? ACTIVITY_CONVERGE_MS : IDLE_CONVERGE_MS;
+      const now = Date.now();
+      if (now - lastActivityConverge >= window) {
+        lastActivityConverge = now;
+        void convergeAndPump();
+      }
     }
   };
 

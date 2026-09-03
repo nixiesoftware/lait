@@ -137,3 +137,11 @@ echo "== drive the shipped viewer on the join link"
 VIEWER_PKG="$root/viewer/package.json" \
     node "$root/ci/viewer-e2e/drive.mjs" "http://127.0.0.1:${vport}" "$LINK" "$relay"
 echo "browser-viewer-e2e: the shipped viewer ran the tracker on the in-tab engine."
+
+echo "== drive TWO tabs: live carets + bidirectional convergence on one issue"
+# Same stack (relay, alice, reusable invite, served bundle). Two isolated tabs =
+# two distinct actors; alice's daemon fans one's caret out to the other.
+VIEWER_PKG="$root/viewer/package.json" \
+    node "$root/ci/viewer-e2e/drive-two.mjs" \
+    "http://127.0.0.1:${vport}" "$LINK" "$relay" "the tab pulls this issue"
+echo "browser-viewer-e2e: two shipped-viewer tabs synced text both ways and drew each other's live carets."

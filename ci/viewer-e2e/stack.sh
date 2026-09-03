@@ -38,7 +38,12 @@ post() { curl -sS --fail-with-body -X POST "http://127.0.0.1:$APORT$1" \
 post /api/host/rpc "{\"cmd\":\"host_space_found\",\"home\":\"$ROOT/alice/space/.lait\",\"name\":\"Live\",\"nick\":\"alice\"}" >/dev/null
 AORB="$(curl -sS "http://127.0.0.1:${APORT}/api/spaces" -H "Authorization: Bearer $TOKEN" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"project_new","name":"Engineering","key":"ENG"}' >/dev/null
-post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"issue_new","title":"the tab pulls this issue","project":"ENG"}' >/dev/null
+# An empty body still becomes schema 1 (the router wraps it with the document
+# prefix → Typst → ProseMirror LaitDocumentEditor, the collaborative editor),
+# and an EMPTY doc mounts editable (a seeded raw body is stored in a non-canonical
+# form the editor refuses to edit until Normalized). A bodyless issue would be
+# schema 0 (legacy CodeMirror, which writes whole values, no live remote splices).
+post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"issue_new","title":"the tab pulls this issue","project":"ENG","body":""}' >/dev/null
 post "/api/spaces/$AORB/worlds/issues/rpc" '{"cmd":"issue_new","title":"and this one","project":"ENG"}' >/dev/null
 TICKET="$(post "/api/spaces/$AORB/rpc" '{"cmd":"invite","role":"contributor","reusable":true,"ttl_hours":2}' | sed -n 's/.*"reff":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 LINK="lait://join/$TICKET"
