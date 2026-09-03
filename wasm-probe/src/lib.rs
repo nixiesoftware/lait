@@ -29,3 +29,6 @@ pub mod handle;
 
 #[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
 pub mod session;
+
+#[cfg(all(target_arch = "wasm32", feature = "probe-dispatch"))]
+pub mod live_client;

@@ -261,3 +261,19 @@ touch "$root/wasm-probe/tests/session.rs"
         --features probe-dispatch
 )
 echo "browser-live-space: the session/editor lane answered in the tab."
+
+# --- the tab joins the Live plane and publishes presence --------------------
+# The p2p live-caret path: the tab dials alice's real Live plane
+# (lait/session/1), and the Open/Accept handshake succeeds only because alice
+# admits the tab as a member (the enter stage). Proves the whole client-side
+# path — dial, uni/bi flows in a browser, subscribe, datagram publish — against
+# a real daemon acceptor. No runner needed for this stage.
+echo "== the tab joins alice's Live plane and publishes presence"
+touch "$root/wasm-probe/tests/live_caret.rs"
+(
+    cd "$root/wasm-probe"
+    LIVE_RELAY_URL="$relay" LIVE_SEED_HEX="$SEED_HEX" LIVE_TICKET="$LINK" \
+        wasm-pack test --headless --chrome --test live_caret \
+        --features probe-dispatch
+)
+echo "browser-live-space: the tab joined alice's Live plane."
