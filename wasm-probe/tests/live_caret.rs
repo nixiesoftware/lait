@@ -43,7 +43,7 @@ async fn a_tab_joins_the_live_plane_and_publishes_presence() {
     // complete the handshake. A refusal here would mean alice does not admit
     // the tab as a Live peer; an Accept proves membership and that the uni
     // flows the handshake rides work in a browser.
-    let mut live = LiveClient::connect(pulled.transport.as_ref(), &pulled.space, &local, &pulled.responder)
+    let live = LiveClient::connect(pulled.transport.as_ref(), &pulled.space, &local, &pulled.responder)
         .await
         .expect("the tab joins alice's Live plane over lait/session/1");
 

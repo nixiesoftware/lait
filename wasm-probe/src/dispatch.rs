@@ -330,6 +330,17 @@ impl BrowserEngine {
         futures_lite::future::block_on(self.client.execute(&host, invocation))
     }
 
+    /// The world-specific body id for a document, asked of the runner — the
+    /// world-agnostic way a caret finds which Body it is in (issue-reff →
+    /// `[u8; 16]`), exactly as the daemon's socket asks its package's
+    /// `transient_body`. A tab must not compute a World's own hashing itself.
+    pub fn transient_body(&self, document: &str) -> Result<[u8; 16], String> {
+        use world_interface::ClientAdapter;
+        self.client
+            .transient_body(document)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+
     /// Route one decoded frame to the right verb and answer it. The one-shot
     /// rpc verbs (spaces / host / space / world) answer with a `reply` frame;
     /// the streaming lanes (events / abort / close) are the Worker composition

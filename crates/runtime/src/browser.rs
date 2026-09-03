@@ -52,6 +52,27 @@ pub struct Station {
 /// pulls; a browser composition that pulls before composing must make the
 /// same declaration through this seam, or the pull lands unreadable and the
 /// dock's corpus build refuses, loudly but avoidably.
+/// Whether a caret may anchor into this body: `Ok(true)` collaborative and
+/// readable, `Ok(false)` not held (a drift, not a failure), `Err` opaque or
+/// non-collaborative — the same gate `ReplicaReader::anchor_in_body` applies,
+/// factored so the mint and resolve halves share it.
+fn anchorable(
+    replica: &replica::Replica,
+    key: &replica::body::BodyKey,
+) -> Result<bool, crate::world::BodyReadFailure> {
+    let Some(binding) = replica.binding(key) else {
+        return Ok(false);
+    };
+    let coordinate = crate::world::BodyReadCoordinate::new(key.clone(), None);
+    if crate::exec::is_reserved_schema(&binding.schema) || replica.is_opaque(key) {
+        return Err(crate::world::BodyReadFailure::Opaque(coordinate));
+    }
+    if binding.mutation_model != replica::body::MUTATION_COLLABORATIVE {
+        return Err(crate::world::BodyReadFailure::NotCollaborative(coordinate));
+    }
+    Ok(true)
+}
+
 pub fn declare_schemas(replica: &mut replica::Replica, registry: &crate::registry::Catalog) {
     replica.set_supported(registry.supported_schemas());
 }
@@ -129,27 +150,68 @@ impl Station {
 
     /// Mint an anchor for a caret: the viewer sends a `u64` cursor position in a
     /// field, and a live caret rides a `fabric::Anchor` bound to that position so
-    /// it survives concurrent edits. The tab resolves its own carets against the
-    /// same pinned publication its reads answer from — the browser reach into
-    /// `StationCore`'s anchor mechanism, which the native Live plane reaches
-    /// through its `AnchorSource` trait instead.
+    /// it survives concurrent edits. `None` when the position is not anchorable
+    /// (the body is not held, is opaque, or is not a collaborative field).
+    ///
+    /// Reads the LIVE Replica, not the pinned publication the native Live plane
+    /// anchors against: on wasm the publication worker never runs, so the
+    /// Station's snapshot is never built and would report every body absent —
+    /// the same asymmetry that makes the query path build inline. The Replica
+    /// holds the pulled bodies directly, so a tab anchors against it, mirroring
+    /// the `ReplicaReader` gate (bound-out reserved/opaque/non-collaborative
+    /// exactly as a read does).
     pub fn anchor(
         &self,
         key: &replica::body::BodyKey,
         field: &str,
         position: u64,
     ) -> Result<Option<fabric::Anchor>, crate::world::BodyReadFailure> {
-        self.core.anchor_in_body(key, field, position)
+        let dormant = || {
+            crate::world::BodyReadFailure::Interrupted(crate::world::BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            ))
+        };
+        match self.core.with_replica_read(|replica| {
+            let inner = match anchorable(replica, key) {
+                Ok(true) => Ok(replica.anchor(key, field, position)),
+                Ok(false) => Ok(None),
+                Err(failure) => Err(failure),
+            };
+            Ok(inner)
+        }) {
+            Ok(inner) => inner,
+            Err(_) => Err(dormant()),
+        }
     }
 
     /// Resolve a peer's caret anchor to a position this tab can draw — the
-    /// receive half. A deleted position is `Ok(Drifted)`.
+    /// receive half. A deleted position is `Ok(Drifted)`. Reads the live
+    /// Replica for the same reason [`Self::anchor`] does.
     pub fn resolve_anchor(
         &self,
         key: &replica::body::BodyKey,
         anchor: &fabric::Anchor,
     ) -> Result<fabric::AnchorResolution, crate::world::BodyReadFailure> {
-        self.core.resolve_anchor(key, anchor)
+        let dormant = || {
+            crate::world::BodyReadFailure::Interrupted(crate::world::BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            ))
+        };
+        match self.core.with_replica_read(|replica| {
+            let inner = match anchorable(replica, key) {
+                Ok(true) => Ok(replica.resolve_anchor(key, anchor)),
+                // An unheld body cannot resolve a peer's anchor to a position;
+                // that is drift, not a failure.
+                Ok(false) => Ok(fabric::AnchorResolution::Drifted),
+                Err(failure) => Err(failure),
+            };
+            Ok(inner)
+        }) {
+            Ok(inner) => inner,
+            Err(_) => Err(dormant()),
+        }
     }
 
     /// Install converged Contact material into this LIVE Station's Replica: the

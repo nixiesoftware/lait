@@ -57,6 +57,11 @@ impl std::fmt::Display for LiveError {
 
 /// One Live-plane session a tab holds to a peer: the connection, the epoch
 /// every datagram it sends is bound to, and a monotonic sequence per publish.
+///
+/// Every method takes `&self` with interior mutability, so the packaged handle
+/// can hold one directly and drive it across `await`s without a `RefCell`
+/// borrow spanning a yield — the hazard the single-threaded Worker turns into a
+/// panic if another frame re-enters mid-await.
 pub struct LiveClient {
     connection: Box<dyn Connection>,
     /// The connection epoch sent in the `Open` — every `TransientItem` this tab
@@ -65,8 +70,8 @@ pub struct LiveClient {
     /// Whatever this tab has told the peer it is watching. The publish side may
     /// only publish into a scope it subscribed, exactly as the acceptor
     /// enforces on receive.
-    subscribed: std::collections::BTreeSet<Target>,
-    seq: u64,
+    subscribed: std::cell::RefCell<std::collections::BTreeSet<Target>>,
+    seq: std::cell::Cell<u64>,
 }
 
 impl LiveClient {
@@ -136,8 +141,8 @@ impl LiveClient {
             Ok(_accept) => Ok(Self {
                 connection,
                 epoch,
-                subscribed: std::collections::BTreeSet::new(),
-                seq: 0,
+                subscribed: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+                seq: std::cell::Cell::new(0),
             }),
             Err(_) => Err(LiveError::Refused(match Refusal::decode_canonical(&answer) {
                 Ok(refusal) => format!("{refusal:?}"),
@@ -150,7 +155,7 @@ impl LiveClient {
     /// same `LiveControl::Subscribe` a daemon sends, framed for the CONTROL
     /// lane (`[CONTROL][u32 LE len][postcard]`). Publishing into an unsubscribed
     /// scope is dropped by the acceptor, so the publish side checks it too.
-    pub async fn subscribe(&mut self, scopes: Vec<Target>) -> Result<(), LiveError> {
+    pub async fn subscribe(&self, scopes: Vec<Target>) -> Result<(), LiveError> {
         let body = LiveControl::Subscribe {
             scopes: scopes.clone(),
         }
@@ -171,8 +176,18 @@ impl LiveClient {
         send.finish()
             .map_err(|e| LiveError::Flow(format!("finish subscribe: {e:#}")))?;
 
-        self.subscribed = scopes.into_iter().collect();
+        // Set after the write succeeds — a subscription recorded but not sent
+        // would let `publish` send into a scope the peer never heard, which the
+        // acceptor drops silently. Brief borrow, after the await, never across.
+        *self.subscribed.borrow_mut() = scopes.into_iter().collect();
         Ok(())
+    }
+
+    /// Whether this scope is already subscribed — lets a caller skip re-opening
+    /// a CONTROL stream per keystroke and send steady-state carets as pure
+    /// datagrams.
+    pub fn is_subscribed(&self, scope: &Target) -> bool {
+        self.subscribed.borrow().contains(scope)
     }
 
     /// Publish one payload into a scope this tab is watching, as an unreliable
@@ -180,14 +195,15 @@ impl LiveClient {
     /// caller must have `subscribe`d the scope; an oversize datagram (past the
     /// path's capacity) is dropped rather than truncated, exactly as the
     /// daemon's `publish` does.
-    pub fn publish(&mut self, scope: Target, payload: TransientPayload) -> bool {
-        if !self.subscribed.contains(&scope) {
+    pub fn publish(&self, scope: Target, payload: TransientPayload) -> bool {
+        if !self.subscribed.borrow().contains(&scope) {
             return false;
         }
-        self.seq += 1;
+        let seq = self.seq.get() + 1;
+        self.seq.set(seq);
         let item = TransientItem {
             connection_epoch: self.epoch,
-            seq: self.seq,
+            seq,
             scope,
             payload,
         };

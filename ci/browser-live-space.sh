@@ -277,3 +277,44 @@ touch "$root/wasm-probe/tests/live_caret.rs"
         --features probe-dispatch
 )
 echo "browser-live-space: the tab joined alice's Live plane."
+
+# --- a real caret crosses from the tab to alice's daemon --------------------
+# The live-caret round trip. alice creates an issue WITH a body (a bodyless one
+# has no collaborative field to anchor into); the tab boots, mints a real anchor
+# for a position in that issue's description, and publishes its caret over the
+# Live plane in a loop that HOLDS the session open (a peer's caret is dropped
+# the instant its session ends). Concurrently, alice's daemon is polled for the
+# tab's caret in its transient table — nobody else is editing, so any caret is
+# the tab's.
+echo "== a real caret crosses from the tab to alice's daemon"
+# alice creates the issue the tab will edit — WITH a body, since a bodyless
+# issue has no collaborative field to anchor a caret into. The tab finds it by
+# title in its own pull (the canonical iss_ id, not the ENG-4 alias).
+post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/worlds/issues/rpc" \
+    '{"cmd":"issue_new","title":"caret target","project":"ENG","body":"the quick brown fox jumps"}' \
+    >/dev/null
+
+touch "$root/wasm-probe/tests/live_caret_roundtrip.rs"
+(
+    cd "$root/wasm-probe"
+    LIVE_RELAY_URL="$relay" LIVE_SEED_HEX="$SEED_HEX" LIVE_TICKET="$LINK" \
+        ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --test live_caret_roundtrip \
+        --features probe-dispatch
+) >"$ROOT/caret.log" 2>&1 &
+caret_pid=$!
+
+seen_caret=""
+for _ in $(seq 1 150); do
+    kill -0 "$caret_pid" 2>/dev/null || { echo "::error::the caret tab exited before its caret was seen:"; cat "$ROOT/caret.log"; exit 1; }
+    live="$(post "$ALICE_TOKEN" "$ALICE_PORT" "/api/spaces/$AORB/rpc" \
+        '{"cmd":"live","world":"com.lait.issues"}' 2>/dev/null || true)"
+    case "$live" in
+        *'"kind":"caret"'*) seen_caret=yes; break ;;
+    esac
+    sleep 1
+done
+kill "$caret_pid" 2>/dev/null || true
+wait "$caret_pid" 2>/dev/null || true
+[ -n "$seen_caret" ] || { echo "::error::alice never saw the tab's caret:"; echo "last live: $live"; echo "--- caret.log:"; tail -30 "$ROOT/caret.log"; exit 1; }
+echo "browser-live-space: a real caret crossed from the tab to alice's daemon."

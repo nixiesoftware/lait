@@ -55,6 +55,13 @@ pub struct BrowserEngineHandle {
     /// The editor lane's open sessions, same borrow discipline as the ring:
     /// taken per call, released before any dispatch into the engine.
     sessions: RefCell<crate::session::SessionHost>,
+    /// The tab's Live-plane session to the responder, for carets/presence.
+    /// `None` when the peer's Live plane could not be joined at boot — carets
+    /// are then simply absent, never a boot failure. Its methods take `&self`
+    /// (interior mutability), so no borrow spans an await.
+    live: Option<crate::live_client::LiveClient>,
+    /// The World identity, for building the `BodyKey` a caret anchor names.
+    world_id: replica::body::WorldId,
 }
 
 /// Fold any error into a `JsValue` the Worker sees as a rejected Promise or a
@@ -127,6 +134,57 @@ impl BrowserEngineHandle {
         };
         serde_json::to_string(&responses)
             .map_err(|e| js_err("the session response does not encode", e))
+    }
+
+    /// Publish this tab's caret into an issue's field over the Live plane — the
+    /// send half of live carets. The viewer gives an issue reff, a field, and a
+    /// `u64` cursor position; the tab resolves the world-specific body id
+    /// through the runner (`transient_body`, world-agnostic), mints a
+    /// `fabric::Anchor` for the position against the same pinned publication its
+    /// reads answer from, and sends it as a datagram bound to the Live session.
+    /// `false` when the tab holds no Live session, the position is not
+    /// anchorable, or the datagram did not fit — carets are best-effort by
+    /// design. The subscribe is sent once per field, then steady-state carets
+    /// are pure datagram sends.
+    #[wasm_bindgen(js_name = publishCaret)]
+    pub async fn publish_caret(
+        &self,
+        issue: String,
+        field: String,
+        position: u32,
+    ) -> Result<bool, JsValue> {
+        let Some(live) = self.live.as_ref() else {
+            return Ok(false);
+        };
+        let body = self
+            .engine
+            .transient_body(&issue)
+            .map_err(|e| js_err("the caret's body could not be resolved", e))?;
+        let key = replica::body::BodyKey::new(
+            self.world_id.clone(),
+            replica::body::BodyId::from_bytes(body),
+        );
+        let anchor = self
+            .station
+            .anchor(&key, &field, position as u64)
+            .map_err(|e| js_err("the caret anchor could not be minted", format!("{e:?}")))?
+            .ok_or_else(|| JsValue::from_str("the caret position is not anchorable"))?;
+        let scope = runtime::transient::Target::Field {
+            world: self.world_id.as_str().to_string(),
+            body,
+            field,
+        };
+        if !live.is_subscribed(&scope) {
+            live.subscribe(vec![scope.clone()])
+                .await
+                .map_err(|e| js_err("the caret scope could not be subscribed", e))?;
+        }
+        Ok(live.publish(
+            scope,
+            runtime::transient::TransientPayload::Caret {
+                anchor: anchor.encode(),
+            },
+        ))
     }
 
     /// Converge with the responder over the same transport: pull its material
@@ -325,6 +383,20 @@ pub async fn boot(
     )
     .map_err(|e| js_err("the browser engine does not compose", format!("{e:?}")))?;
 
+    // Join the responder's Live plane for carets/presence — best-effort: a peer
+    // whose Live plane is down (or an old peer without one) leaves carets
+    // absent, never a boot failure. The tab dials the SAME peer the Contact
+    // pull dialed, admitted the same way.
+    let local_station = mechanics::station::Key::from_device(&device);
+    let live = match local_station {
+        Some(local) => {
+            crate::live_client::LiveClient::connect(transport.as_ref(), &space, &local, &responder)
+                .await
+                .ok()
+        }
+        None => None,
+    };
+
     Ok(BrowserEngineHandle {
         engine,
         station,
@@ -335,5 +407,7 @@ pub async fn boot(
         space,
         ring,
         sessions: RefCell::new(crate::session::SessionHost::default()),
+        live,
+        world_id,
     })
 }

@@ -3537,17 +3537,9 @@ impl replica::transaction::TransactionAuthorizer for SessionAuthorizer<'_> {
 /// publication selection. Each call pins the shared snapshot under the Station
 /// lock, releases it, then mints or resolves the anchor without holding the
 /// committing writer.
-impl StationCore {
-    /// Mint an anchor for a position in a Body field, against the pinned
-    /// publication — the mechanism a live caret rides on. Pins the shared
-    /// snapshot under the Station lock, releases it, then mints without holding
-    /// the committing writer.
-    ///
-    /// Inherent and ungated because a browser tab resolves its own carets: the
-    /// native Live plane reaches this through the `AnchorSource` trait (which
-    /// lives in the wasm-excluded `plane::live`), and the tab reaches it
-    /// directly through [`crate::browser::Station`]. One body, two callers.
-    pub fn anchor_in_body(
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::plane::live::AnchorSource for StationCore {
+    fn anchor_in_body(
         &self,
         key: &BodyKey,
         path: &str,
@@ -3565,10 +3557,7 @@ impl StationCore {
         crate::world::BodyReader::anchor_in_body(&reader, key, path, position)
     }
 
-    /// Resolve an anchor to its current position against the pinned
-    /// publication — the receive half: a peer's caret anchor becomes a position
-    /// this node can draw. A genuinely deleted position is `Ok(Drifted)`.
-    pub fn resolve_anchor(
+    fn resolve_anchor(
         &self,
         key: &BodyKey,
         anchor: &fabric::Anchor,
@@ -3583,26 +3572,6 @@ impl StationCore {
         drop(inner);
         let reader = SnapshotReader::interactive(snapshot, self.body_images.clone());
         crate::world::BodyReader::resolve_anchor(&reader, key, anchor)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl crate::plane::live::AnchorSource for StationCore {
-    fn anchor_in_body(
-        &self,
-        key: &BodyKey,
-        path: &str,
-        position: u64,
-    ) -> Result<Option<fabric::Anchor>, crate::world::BodyReadFailure> {
-        StationCore::anchor_in_body(self, key, path, position)
-    }
-
-    fn resolve_anchor(
-        &self,
-        key: &BodyKey,
-        anchor: &fabric::Anchor,
-    ) -> Result<fabric::AnchorResolution, crate::world::BodyReadFailure> {
-        StationCore::resolve_anchor(self, key, anchor)
     }
 }
 
