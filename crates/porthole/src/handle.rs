@@ -208,10 +208,26 @@ impl BrowserEngineHandle {
         ))
     }
 
-    /// Subscribe the whole issue (a `Body` scope) so a supporter relays peers'
-    /// carets in it back to this tab — the RECEIVE half for a viewer that has no
-    /// cursor of its own (it opened the issue but is not editing). Idempotent.
-    async fn watch_issue(&self, issue: &str) -> Result<bool, JsValue> {
+    /// Drive the realtime lane from the viewer's own `session:watch` question:
+    /// `{issue, cursor?:{field,anchor}, preview?:{field,base,result,index,delete,
+    /// insert,anchor?,focus?}}`.
+    ///
+    /// Subscribes the whole issue (a `Body` scope) so a supporter relays peers'
+    /// carets AND previews back here even when this tab is only watching, plus this
+    /// tab's own caret field and preview field so the supporter accepts what IT
+    /// publishes — one union, because a subscribe replaces the set. Then publishes
+    /// this tab's caret (a minted anchor) and its preview (a scalar splice from a
+    /// durable base). The preview is the INSTANT text lane a peer sees in
+    /// milliseconds — the durable text follows over Contact underneath. This is the
+    /// send half's integration point; the Worker relays every `session:watch` here.
+    #[wasm_bindgen(js_name = watchCaret)]
+    pub async fn watch_caret(&self, question_json: &str) -> Result<bool, JsValue> {
+        use runtime::transient::{Target, TextPreview, TransientPayload};
+        let question: serde_json::Value = serde_json::from_str(question_json)
+            .map_err(|e| js_err("the watch question does not decode", e))?;
+        let Some(issue) = question.get("issue").and_then(serde_json::Value::as_str) else {
+            return Ok(false);
+        };
         let Some(live) = self.live.as_ref() else {
             return Ok(false);
         };
@@ -219,49 +235,101 @@ impl BrowserEngineHandle {
             .engine
             .transient_body(issue)
             .map_err(|e| js_err("the watched body could not be resolved", e))?;
-        let body_scope = runtime::transient::Target::Body {
-            world: self.world_id.as_str().to_string(),
+        let world = self.world_id.as_str().to_string();
+
+        let cursor = question.get("cursor");
+        let caret_field = cursor
+            .and_then(|c| c.get("field").and_then(serde_json::Value::as_str))
+            .map(str::to_string);
+        let preview = question.get("preview");
+        let preview_field = preview
+            .and_then(|p| p.get("field").and_then(serde_json::Value::as_str))
+            .map(str::to_string);
+
+        // The subscription UNION: the issue (to hear peers' carets and previews),
+        // plus our own caret and preview fields (so the supporter accepts what we
+        // publish). One set, because a subscribe replaces — a passive viewer gets
+        // just the Body, an editor gets all three.
+        let mut scopes = vec![Target::Body {
+            world: world.clone(),
             body,
-        };
-        if !live.is_subscribed(&body_scope) {
-            live.subscribe(vec![body_scope])
+        }];
+        if let Some(field) = &caret_field {
+            scopes.push(Target::Field {
+                world: world.clone(),
+                body,
+                field: field.clone(),
+            });
+        }
+        if let Some(field) = &preview_field {
+            scopes.push(Target::Preview {
+                world: world.clone(),
+                body,
+                field: field.clone(),
+            });
+        }
+        if scopes.iter().any(|scope| !live.is_subscribed(scope)) {
+            live.subscribe(scopes)
                 .await
-                .map_err(|e| js_err("the issue scope could not be subscribed", e))?;
+                .map_err(|e| js_err("the live scopes could not be subscribed", e))?;
+        }
+
+        // Our caret: an anchor minted against the live Replica so it survives
+        // concurrent edits.
+        if let (Some(field), Some(position)) = (
+            caret_field,
+            cursor.and_then(|c| c.get("anchor").and_then(serde_json::Value::as_u64)),
+        ) {
+            let key = replica::body::BodyKey::new(
+                self.world_id.clone(),
+                replica::body::BodyId::from_bytes(body),
+            );
+            if let Some(anchor) = self
+                .station
+                .anchor(&key, &field, position)
+                .map_err(|e| js_err("the caret anchor could not be minted", format!("{e:?}")))?
+            {
+                live.publish(
+                    Target::Field {
+                        world: world.clone(),
+                        body,
+                        field,
+                    },
+                    TransientPayload::Caret {
+                        anchor: anchor.encode(),
+                    },
+                );
+            }
+        }
+
+        // Our preview: the instant text lane. Scalar offsets from a durable base,
+        // copied straight through — no anchor minting, the receiver applies it
+        // against the base/result revisions it carries.
+        if let (Some(field), Some(p)) = (preview_field, preview) {
+            if let (Some(base), Some(result), Some(index), Some(delete), Some(insert)) = (
+                p.get("base").and_then(serde_json::Value::as_str),
+                p.get("result").and_then(serde_json::Value::as_str),
+                p.get("index").and_then(serde_json::Value::as_u64),
+                p.get("delete").and_then(serde_json::Value::as_u64),
+                p.get("insert").and_then(serde_json::Value::as_str),
+            ) {
+                live.publish(
+                    Target::Preview { world, body, field },
+                    TransientPayload::Preview {
+                        preview: TextPreview {
+                            base: base.to_string(),
+                            result: result.to_string(),
+                            index,
+                            delete,
+                            insert: insert.to_string(),
+                            anchor: p.get("anchor").and_then(serde_json::Value::as_u64),
+                            focus: p.get("focus").and_then(serde_json::Value::as_u64),
+                        },
+                    },
+                );
+            }
         }
         Ok(true)
-    }
-
-    /// Drive carets from the viewer's own `session:watch` question — the real
-    /// frame the editor sends (`{issue, cursor:{field, anchor}}`), rather than a
-    /// bespoke call. When the question carries a cursor over an issue, the tab
-    /// publishes that caret; a question with no cursor (just watching) publishes
-    /// nothing. This is the send half's integration point; the Worker relays the
-    /// viewer's `session:watch` here.
-    #[wasm_bindgen(js_name = watchCaret)]
-    pub async fn watch_caret(&self, question_json: &str) -> Result<bool, JsValue> {
-        let question: serde_json::Value = serde_json::from_str(question_json)
-            .map_err(|e| js_err("the watch question does not decode", e))?;
-        let Some(issue) = question.get("issue").and_then(serde_json::Value::as_str) else {
-            return Ok(false);
-        };
-        // A cursor means this tab is editing: publish its caret (and subscribe the
-        // field + the issue). No cursor means it is only watching: still subscribe
-        // the ISSUE, or a passive reader would hear no peer's caret at all — the
-        // bug that made two tabs never see each other. Receiving is a subscription,
-        // not a side effect of having a cursor.
-        match question.get("cursor") {
-            Some(cursor) => {
-                let (Some(field), Some(position)) = (
-                    cursor.get("field").and_then(serde_json::Value::as_str),
-                    cursor.get("anchor").and_then(serde_json::Value::as_u64),
-                ) else {
-                    return self.watch_issue(issue).await;
-                };
-                self.publish_caret(issue.to_string(), field.to_string(), position as u32)
-                    .await
-            }
-            None => self.watch_issue(issue).await,
-        }
     }
 
     /// Drain the next caret a peer published to this tab, as the viewer's own
@@ -331,27 +399,42 @@ impl BrowserEngineHandle {
         let Some(actor) = actor else {
             return Ok(None);
         };
-        let (kind, caret, focus) = match &item.payload {
-            TransientPayload::Presence => {
-                ("presence", serde_json::Value::Null, serde_json::Value::Null)
-            }
-            TransientPayload::Typing => {
-                ("typing", serde_json::Value::Null, serde_json::Value::Null)
-            }
+        let null = serde_json::Value::Null;
+        let (kind, caret, focus, preview) = match &item.payload {
+            TransientPayload::Presence => ("presence", null.clone(), null.clone(), null.clone()),
+            TransientPayload::Typing => ("typing", null.clone(), null.clone(), null.clone()),
             TransientPayload::Caret { anchor } => (
                 "caret",
                 self.caret_position(&item.scope, anchor),
-                serde_json::Value::Null,
+                null.clone(),
+                null.clone(),
             ),
             TransientPayload::Selection { anchor, focus } => (
                 "selection",
                 self.caret_position(&item.scope, anchor),
                 self.caret_position(&item.scope, focus),
+                null.clone(),
             ),
-            // Preview and residency are not drawn as carets here.
-            TransientPayload::Preview { .. } | TransientPayload::Residency { .. } => {
-                return Ok(None)
-            }
+            // A preview is the INSTANT text lane: scalar offsets from a durable
+            // base, copied straight through (no anchor resolution — the receiver
+            // applies it against the `base`/`result` revisions it carries). This is
+            // what a peer sees within milliseconds, before durable convergence.
+            TransientPayload::Preview { preview } => (
+                "preview",
+                null.clone(),
+                null.clone(),
+                serde_json::json!({
+                    "base": preview.base,
+                    "result": preview.result,
+                    "index": preview.index,
+                    "delete": preview.delete,
+                    "insert": preview.insert,
+                    "anchor": preview.anchor,
+                    "focus": preview.focus,
+                }),
+            ),
+            // Residency is not a thing the viewer draws in the editor.
+            TransientPayload::Residency { .. } => return Ok(None),
         };
         Ok(Some(serde_json::json!({
             "actor": actor,
@@ -361,6 +444,7 @@ impl BrowserEngineHandle {
             "uncertain": false,
             "caret": caret,
             "focus": focus,
+            "preview": preview,
         })))
     }
 

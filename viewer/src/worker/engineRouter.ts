@@ -125,6 +125,11 @@ export function engineRouter(
       // whole-table `issue:null` view against an asked-for issue).
       parsed.issue = watch.issue;
       post({ lait: "session:event", sid: watch.sid, event: parsed });
+      // Deliberately NOT triggering a convergence repull here: a repull is a heavy
+      // Contact round-trip, and firing one per caret pins the single Worker thread
+      // and DELAYS the very carets/previews this loop exists to deliver. The
+      // realtime lane (carets AND preview text) rides the Live plane in
+      // milliseconds; durable convergence is the slow backstop on its own poll.
     }
   };
 
