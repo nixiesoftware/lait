@@ -148,6 +148,20 @@ impl Target {
         }
     }
 
+    /// The Body this scope is about, for the scopes that name one. A reader
+    /// watching a whole issue (a `Body` scope) is told about every field caret
+    /// under it, so a supporter's fanout matches by Body, not only by exact scope.
+    pub fn body(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Body { body, .. }
+            | Self::Material { body, .. }
+            | Self::Field { body, .. }
+            | Self::Preview { body, .. }
+            | Self::Typing { body, .. } => Some(*body),
+            Self::Content { .. } | Self::World { .. } => None,
+        }
+    }
+
     /// The same bounds, for a caller outside this module.
     ///
     /// A signal carries a scope and has to check it before anything acts on it,

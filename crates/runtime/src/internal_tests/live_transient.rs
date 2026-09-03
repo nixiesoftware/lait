@@ -1971,3 +1971,24 @@ fn relayed_presence_round_trips_carrying_its_origin() {
     // A truncated frame is refused, not silently half-read.
     assert!(RelayedPresence::decode_canonical(&bytes[..bytes.len() - 1]).is_err());
 }
+
+#[test]
+fn a_body_subscription_relays_field_carets_under_that_body() {
+    // The passive-viewer path: a reader watching a whole issue (a Body scope),
+    // with no cursor of its own and so no field, must still be relayed the FIELD
+    // carets peers hold inside that issue. A field-exact match alone would relay
+    // nothing to it — the bug that made a passive tab see no caret.
+    let now = Instant::now();
+    let handle = LiveHandle::new(None);
+    let field_here = caret_scope(1); // Field { body: 1, "text" }
+    let field_other = caret_scope(2); // Field { body: 2, "text" }
+    handle.record(&station(1), &caret_item(field_here.clone(), 1, 4), now);
+    handle.record(&station(2), &caret_item(field_other.clone(), 1, 9), now);
+
+    // Subscriber station 9 watches the whole issue body 1 (a Body scope).
+    let watching_body_1 = issue_scope(1);
+    let relayed = handle.relayable(&station(9), &[watching_body_1]);
+    assert_eq!(relayed.len(), 1, "the field caret under body 1, not body 2");
+    assert_eq!(relayed[0].0, station(1));
+    assert_eq!(relayed[0].1.scope, field_here);
+}

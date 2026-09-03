@@ -8,7 +8,7 @@
   "implementation_version": 5,
   "accent": 10182117,
   "requires": [
-    { "name": "lait.control", "range": ">=15, <16" },
+    { "name": "lait.control", "range": ">=16, <17" },
     { "name": "lait.world-runner.protocol", "range": ">=1, <2" },
     { "name": "lait.world-sdk.protocol", "range": ">=3, <4" }
   ],

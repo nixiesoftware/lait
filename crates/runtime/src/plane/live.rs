@@ -769,12 +769,26 @@ impl LiveHandle {
     /// item was `record`ed under — from an authenticated connection, never a
     /// payload — which is what the supporter attaches as the relayed origin.
     pub fn relayable(&self, exclude: &Key, subscribed: &[Target]) -> Vec<(Key, TransientItem)> {
-        let wanted: std::collections::BTreeSet<&Target> = subscribed.iter().collect();
+        // A subscription covers an item if it names the exact scope OR it is a
+        // whole-issue `Body` subscription and the item is a caret in a FIELD of
+        // that Body. A passive viewer watches the issue (a Body scope) without
+        // knowing which field a peer will edit, so a field-exact match alone would
+        // relay nothing to it — the reader watching the issue must hear the carets
+        // inside it.
+        let covers = |sub: &Target, scope: &Target| -> bool {
+            sub == scope
+                || matches!(sub, Target::Body { .. })
+                    && sub.world() == scope.world()
+                    && sub.body().is_some()
+                    && sub.body() == scope.body()
+        };
         let table = self.table();
         table
             .slots
             .iter()
-            .filter(|((station, scope, _), _)| station != exclude && wanted.contains(scope))
+            .filter(|((station, scope, _), _)| {
+                station != exclude && subscribed.iter().any(|sub| covers(sub, scope))
+            })
             .map(|((station, scope, _), slot)| {
                 (
                     station.clone(),

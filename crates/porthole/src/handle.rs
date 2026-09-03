@@ -186,8 +186,17 @@ impl BrowserEngineHandle {
             body,
             field,
         };
+        // Subscribe the whole issue (Body) AND this field together: the Body scope
+        // is what makes a supporter relay OTHER peers' carets in this issue back to
+        // this tab (a passive reader watches the Body), and the Field scope is what
+        // lets the supporter accept THIS tab's own published caret. One set, so an
+        // editor both speaks and hears.
         if !live.is_subscribed(&scope) {
-            live.subscribe(vec![scope.clone()])
+            let body_scope = runtime::transient::Target::Body {
+                world: self.world_id.as_str().to_string(),
+                body,
+            };
+            live.subscribe(vec![body_scope, scope.clone()])
                 .await
                 .map_err(|e| js_err("the caret scope could not be subscribed", e))?;
         }
@@ -197,6 +206,29 @@ impl BrowserEngineHandle {
                 anchor: anchor.encode(),
             },
         ))
+    }
+
+    /// Subscribe the whole issue (a `Body` scope) so a supporter relays peers'
+    /// carets in it back to this tab — the RECEIVE half for a viewer that has no
+    /// cursor of its own (it opened the issue but is not editing). Idempotent.
+    async fn watch_issue(&self, issue: &str) -> Result<bool, JsValue> {
+        let Some(live) = self.live.as_ref() else {
+            return Ok(false);
+        };
+        let body = self
+            .engine
+            .transient_body(issue)
+            .map_err(|e| js_err("the watched body could not be resolved", e))?;
+        let body_scope = runtime::transient::Target::Body {
+            world: self.world_id.as_str().to_string(),
+            body,
+        };
+        if !live.is_subscribed(&body_scope) {
+            live.subscribe(vec![body_scope])
+                .await
+                .map_err(|e| js_err("the issue scope could not be subscribed", e))?;
+        }
+        Ok(true)
     }
 
     /// Drive carets from the viewer's own `session:watch` question — the real
@@ -209,20 +241,27 @@ impl BrowserEngineHandle {
     pub async fn watch_caret(&self, question_json: &str) -> Result<bool, JsValue> {
         let question: serde_json::Value = serde_json::from_str(question_json)
             .map_err(|e| js_err("the watch question does not decode", e))?;
-        let (Some(issue), Some(cursor)) = (
-            question.get("issue").and_then(serde_json::Value::as_str),
-            question.get("cursor"),
-        ) else {
+        let Some(issue) = question.get("issue").and_then(serde_json::Value::as_str) else {
             return Ok(false);
         };
-        let (Some(field), Some(position)) = (
-            cursor.get("field").and_then(serde_json::Value::as_str),
-            cursor.get("anchor").and_then(serde_json::Value::as_u64),
-        ) else {
-            return Ok(false);
-        };
-        self.publish_caret(issue.to_string(), field.to_string(), position as u32)
-            .await
+        // A cursor means this tab is editing: publish its caret (and subscribe the
+        // field + the issue). No cursor means it is only watching: still subscribe
+        // the ISSUE, or a passive reader would hear no peer's caret at all — the
+        // bug that made two tabs never see each other. Receiving is a subscription,
+        // not a side effect of having a cursor.
+        match question.get("cursor") {
+            Some(cursor) => {
+                let (Some(field), Some(position)) = (
+                    cursor.get("field").and_then(serde_json::Value::as_str),
+                    cursor.get("anchor").and_then(serde_json::Value::as_u64),
+                ) else {
+                    return self.watch_issue(issue).await;
+                };
+                self.publish_caret(issue.to_string(), field.to_string(), position as u32)
+                    .await
+            }
+            None => self.watch_issue(issue).await,
+        }
     }
 
     /// Drain the next caret a peer published to this tab, as the viewer's own
@@ -255,7 +294,10 @@ impl BrowserEngineHandle {
         // reff a given watching session asked for when it wraps this.
         let event = serde_json::json!({
             "kind": "live",
-            "space": self.space.as_str(),
+            // The mount, not the raw SpaceId: the viewer keys its live slots on the
+            // Space id it selected (= the mount), and drops a live view whose space
+            // is not that key — the same reason the doorbell ring carries the mount.
+            "space": self.mount.as_str(),
             "issue": serde_json::Value::Null,
             "view": { "kind": "live", "generation": 0, "partial": false, "entries": [entry] },
         });
