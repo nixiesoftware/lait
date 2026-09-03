@@ -127,6 +127,31 @@ impl Station {
         self.core.published_root()
     }
 
+    /// Mint an anchor for a caret: the viewer sends a `u64` cursor position in a
+    /// field, and a live caret rides a `fabric::Anchor` bound to that position so
+    /// it survives concurrent edits. The tab resolves its own carets against the
+    /// same pinned publication its reads answer from — the browser reach into
+    /// `StationCore`'s anchor mechanism, which the native Live plane reaches
+    /// through its `AnchorSource` trait instead.
+    pub fn anchor(
+        &self,
+        key: &replica::body::BodyKey,
+        field: &str,
+        position: u64,
+    ) -> Result<Option<fabric::Anchor>, crate::world::BodyReadFailure> {
+        self.core.anchor_in_body(key, field, position)
+    }
+
+    /// Resolve a peer's caret anchor to a position this tab can draw — the
+    /// receive half. A deleted position is `Ok(Drifted)`.
+    pub fn resolve_anchor(
+        &self,
+        key: &replica::body::BodyKey,
+        anchor: &fabric::Anchor,
+    ) -> Result<fabric::AnchorResolution, crate::world::BodyReadFailure> {
+        self.core.resolve_anchor(key, anchor)
+    }
+
     /// Install converged Contact material into this LIVE Station's Replica: the
     /// seam a browser re-pull commits through, so the new snapshot reaches the
     /// docked Session and the doorbell fires — the same `with_replica_
