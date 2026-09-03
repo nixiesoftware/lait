@@ -709,6 +709,7 @@ lait display::conformance::tests::a_reload_that_contradicts_the_one_before_is_re
 lait display::conformance::tests::a_resumed_window_carries_its_dropped_discontinuities_forward
 lait display::coordinator::tests::a_revised_tickets_grace_is_short_and_bounded
 lait display::coordinator::tests::a_stored_still_is_known_by_its_bytes_not_its_record
+lait display::coordinator::tests::a_superseded_ticket_lives_through_the_grace_and_no_longer
 lait display::coordinator::tests::a_used_ticket_slides_its_expiry_and_an_unused_one_lapses
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
 lait display::hls::tests::a_segments_duration_is_its_decode_span_not_its_presentation_span

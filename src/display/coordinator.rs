@@ -141,6 +141,11 @@ struct LiveTicket {
     resource: String,
     transport: LiveTransport,
     expires_at_unix_ms: u64,
+    /// When a newer ticket for the same item replaced this one. The player
+    /// keeps asking on the old ticket while the receiver swaps to the new
+    /// stream, so it is honoured through the re-stage grace and refused after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    superseded_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -1534,14 +1539,17 @@ impl DisplayCoordinator {
             if ticket.expires_at_unix_ms <= now_unix_ms {
                 return false;
             }
-            if &ticket.device != device {
-                return true;
-            }
-            ticket.assignment == compiled.program.assignment
-                && ticket.program == compiled.program.program
-                && ticket.revision == compiled.program.revision
-                && (ticket.current_item != *current_item || ticket.transport != transport)
+            !ticket
+                .superseded_at_unix_ms
+                .is_some_and(|since| !within_restage_grace(Some(since), now_unix_ms))
         });
+        // The device's earlier tickets are superseded, not dropped: its player
+        // is still fetching on them while the receiver swaps over.
+        for ticket in tickets.values_mut() {
+            if &ticket.device == device && ticket.superseded_at_unix_ms.is_none() {
+                ticket.superseded_at_unix_ms = Some(now_unix_ms);
+            }
+        }
         if tickets.len() >= MAX_LIVE_TICKETS {
             return Err(anyhow!("display live ticket bound reached"));
         }
@@ -1558,6 +1566,7 @@ impl DisplayCoordinator {
                 resource,
                 transport,
                 expires_at_unix_ms,
+                superseded_at_unix_ms: None,
             },
         );
         drop(tickets);
@@ -1667,7 +1676,9 @@ impl DisplayCoordinator {
             .lock()
             .ok()
             .and_then(|changes| changes.get(ticket.device.as_str()).copied());
-        if within_restage_grace(changed_at, now_unix_ms) {
+        if within_restage_grace(changed_at, now_unix_ms)
+            || within_restage_grace(ticket.superseded_at_unix_ms, now_unix_ms)
+        {
             return Ok(());
         }
         Err(anyhow!("media program was revised"))
@@ -1812,6 +1823,12 @@ impl DisplayCoordinator {
                     .and_then(|tickets| tickets.get(token).map(|ticket| ticket.revision.clone()))
                     .is_some_and(|revision| revision != compiled.program.revision);
                 if stale {
+                    // The receiver holds the revision before; give its ticket
+                    // the same grace an in-process change would, and wake its
+                    // poll so it re-stages now.
+                    if let Ok(mut changes) = self.revision_changes.lock() {
+                        changes.insert(device.as_str().to_string(), now_unix_ms);
+                    }
                     self.notify_assignment_change();
                 }
             }
@@ -1990,7 +2007,12 @@ fn take_ticket(
     consume: bool,
     now_unix_ms: u64,
 ) -> Result<LiveTicket> {
-    tickets.retain(|_, ticket| ticket.expires_at_unix_ms > now_unix_ms);
+    tickets.retain(|_, ticket| {
+        ticket.expires_at_unix_ms > now_unix_ms
+            && !ticket
+                .superseded_at_unix_ms
+                .is_some_and(|since| !within_restage_grace(Some(since), now_unix_ms))
+    });
     let ticket = tickets
         .get_mut(token)
         .filter(|ticket| ticket.transport == transport)
@@ -2436,7 +2458,36 @@ mod tests {
             resource: "prog-1111".into(),
             transport,
             expires_at_unix_ms,
+            superseded_at_unix_ms: None,
         }
+    }
+
+    /// A ticket replaced by a newer one for the same device is honoured
+    /// through the re-stage grace — the player is still fetching on it — and
+    /// gone after.
+    #[test]
+    fn a_superseded_ticket_lives_through_the_grace_and_no_longer() {
+        let mut tickets = BTreeMap::new();
+        let mut old = ticket(LiveTransport::Hls, 1_000_000);
+        old.superseded_at_unix_ms = Some(10_000);
+        tickets.insert("old".to_string(), old);
+        take_ticket(
+            &mut tickets,
+            "old",
+            LiveTransport::Hls,
+            false,
+            10_000 + RESTAGE_GRACE_MS,
+        )
+        .unwrap();
+        assert!(take_ticket(
+            &mut tickets,
+            "old",
+            LiveTransport::Hls,
+            false,
+            10_001 + RESTAGE_GRACE_MS
+        )
+        .is_err());
+        assert!(!tickets.contains_key("old"));
     }
 
     /// A ticket for the revision before is honoured through the grace and
