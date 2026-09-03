@@ -35,7 +35,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use mediabox::h264still::StillH264;
+use mediabox::h264still::{StillH264, StreamShape};
 use runtime::plane::live::media::TrackKind;
 use sha2::{Digest, Sha256};
 use world_interface::display::{DisplayProjection, FrameMediaType, MediaOrigin, RenderedScene};
@@ -300,6 +300,7 @@ fn still_digest(still: &StillH264) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(still.width.to_be_bytes());
     digest.update(still.height.to_be_bytes());
+    digest.update(&still.avcc);
     digest.update(&still.access_unit);
     digest.finalize().into()
 }
@@ -309,6 +310,8 @@ struct Era {
     from_logical: u64,
     from_unix_ms: u64,
     lap: Lap,
+    /// Discontinuities the stream carried before this era opened.
+    discontinuities_before: u64,
 }
 
 /// What an offered lap did to the timeline.
@@ -343,12 +346,20 @@ impl Timeline {
                 from_logical: 0,
                 from_unix_ms: epoch_unix_ms,
                 lap,
+                discontinuities_before: 0,
             },
             next: 0,
             open: None,
             made_any: false,
         };
         timeline.next = timeline.edge(now_unix_ms).saturating_sub(TRAIL);
+        // A timeline resumed mid-stream (a restart on a persisted epoch)
+        // re-makes a trail of sequences the previous process already listed,
+        // and those must come out byte for byte the same, unflagged: marking
+        // the first of them a discontinuity changes a listed segment, which a
+        // player treats as a broken stream — measured as a 12 s hold on a
+        // Roku. So a restart is seamless by construction, and a build that
+        // changes what a sequence contains is a dev-loop hazard, not a case.
         timeline
     }
 
@@ -379,6 +390,37 @@ impl Timeline {
         let laps = offset.checked_div(count).unwrap_or(0);
         let index = usize::try_from(offset.checked_rem(count).unwrap_or(0)).unwrap_or(0);
         (laps, index)
+    }
+
+    /// How many discontinuities the stream carries before logical `n`: the
+    /// `EXT-X-DISCONTINUITY-SEQUENCE` a window whose first segment is `n`
+    /// must declare. Counted from the schedule, not from what this process
+    /// happened to make and drop: a resumed producer starts a trail behind
+    /// the edge, and every seam between the previous process's window and
+    /// its own was dropped by nobody's counter — measured as a playlist one
+    /// short after a restart, which a strict player answers by re-syncing
+    /// (the picture held for 12 s on a Roku).
+    pub(crate) fn discontinuities_before(&self, n: u64) -> u64 {
+        let (laps, index) = self.locate(n);
+        let per_lap = u64::try_from(self.era.lap.parts.len()).unwrap_or(u64::MAX);
+        let before_index = self
+            .era
+            .lap
+            .slots
+            .get(..index)
+            .map(|slots| slots.iter().filter(|slot| slot.local == 0).count())
+            .unwrap_or(0);
+        let counted = self
+            .era
+            .discontinuities_before
+            .saturating_add(laps.saturating_mul(per_lap))
+            .saturating_add(u64::try_from(before_index).unwrap_or(u64::MAX));
+        // The stream's very first segment opens a part but is no discontinuity.
+        if self.era.from_logical == 0 && n > 0 {
+            counted.saturating_sub(1)
+        } else {
+            counted
+        }
     }
 
     /// When logical `n` begins on the wall clock.
@@ -462,10 +504,12 @@ impl Timeline {
         }
         let at = self.next;
         let from_unix_ms = self.end_ms(at.saturating_sub(1));
+        let discontinuities_before = self.discontinuities_before(at);
         self.era = Era {
             from_logical: at,
             from_unix_ms,
             lap,
+            discontinuities_before,
         };
         self.open = None;
         Splice::Era { at }
@@ -643,6 +687,10 @@ pub(crate) async fn build_lap(
     // the frame every still is fitted into; without one, the screen does.
     let mut plans: BTreeMap<String, Arc<StoredPlan>> = BTreeMap::new();
     let mut frame: Option<(u32, u32)> = None;
+    // The first clip also decides the decoder configuration every still is
+    // written under, and the picture rate it is padded to (see
+    // `StreamShape`): a receiver's decoder then meets nothing new at a seam.
+    let mut shape: Option<StreamShape> = None;
     for item in &projection.program.items {
         if let RenderedScene::Media(media) = &item.scene {
             if let MediaOrigin::Stored(content) = &media.origin {
@@ -661,12 +709,26 @@ pub(crate) async fn build_lap(
                 };
                 let plan = StoredPlan::from_moov(&moov, &policy)
                     .map_err(|error| anyhow!("clip would not plan: {error}"))?;
-                let size = plan
+                let video = plan
                     .catalog
                     .tracks
                     .iter()
-                    .find(|track| track.kind == TrackKind::Video)
-                    .and_then(|track| Some((track.width?, track.height?)));
+                    .find(|track| track.kind == TrackKind::Video);
+                let size = video.and_then(|track| Some((track.width?, track.height?)));
+                if shape.is_none() {
+                    if let Some(track) = video {
+                        let avcc = data_encoding::HEXLOWER
+                            .decode(track.decoder_config_hex.as_bytes())
+                            .unwrap_or_default();
+                        match StreamShape::from_avcc(&avcc, track.frame_rate_milli) {
+                            Ok(read) => shape = Some(read),
+                            Err(error) => tracing::warn!(
+                                ?error,
+                                "the clip's SPS could not be read; stills keep their own shape and the seam reconfigures the decoder"
+                            ),
+                        }
+                    }
+                }
                 match (frame, size) {
                     (None, Some(size)) => frame = Some(size),
                     (Some(chosen), Some(size)) if chosen != size => {
@@ -683,19 +745,23 @@ pub(crate) async fn build_lap(
         }
     }
     let frame = frame.unwrap_or(viewport);
+    let shape = Arc::new(shape.unwrap_or_default());
     let mut parts = Vec::with_capacity(projection.program.items.len());
     for item in &projection.program.items {
         let duration_ms = item.duration_ms.unwrap_or(DEFAULT_ITEM_MS).max(1);
         let part = match &item.scene {
             RenderedScene::Frame(picture) => {
-                let digest = frame_digest(picture.media_type, &picture.bytes, frame);
+                let digest = frame_digest(picture.media_type, &picture.bytes, frame, &shape);
                 let still = match cache.stills.get(&digest) {
                     Some(still) => still.clone(),
                     None => {
                         let bytes = picture.bytes.clone();
                         let (width, height) = frame;
+                        let shape = shape.clone();
                         let still = tokio::task::spawn_blocking(move || {
-                            mediabox::h264still::encode_still_fitted(&bytes, width, height)
+                            mediabox::h264still::encode_still_fitted_shaped(
+                                &bytes, width, height, &shape,
+                            )
                         })
                         .await
                         .context("still encode task")?
@@ -739,13 +805,15 @@ pub(crate) async fn build_lap(
             }
             RenderedScene::Blank(_) => {
                 let (width, height) = frame;
-                let digest = blank_digest(width, height);
+                let digest = blank_digest(width, height, &shape);
                 let still = match cache.stills.get(&digest) {
                     Some(still) => still.clone(),
                     None => {
-                        let still = tokio::task::spawn_blocking(move || black_still(width, height))
-                            .await
-                            .context("black still task")??;
+                        let shape = shape.clone();
+                        let still =
+                            tokio::task::spawn_blocking(move || black_still(width, height, &shape))
+                                .await
+                                .context("black still task")??;
                         let still = Arc::new(still);
                         cache.stills.insert(digest, still.clone());
                         still
@@ -769,9 +837,15 @@ pub(crate) async fn build_lap(
 
 /// A picture's identity in the encode cache: its bytes and the frame it
 /// was fitted into, since the same picture fitted elsewhere is another still.
-fn frame_digest(media_type: FrameMediaType, bytes: &[u8], frame: (u32, u32)) -> [u8; 32] {
+fn frame_digest(
+    media_type: FrameMediaType,
+    bytes: &[u8],
+    frame: (u32, u32),
+    shape: &StreamShape,
+) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"frame");
+    digest.update(shape.digest_bytes());
     digest.update([match media_type {
         FrameMediaType::Png => 0u8,
         FrameMediaType::Jpeg => 1,
@@ -783,9 +857,10 @@ fn frame_digest(media_type: FrameMediaType, bytes: &[u8], frame: (u32, u32)) -> 
     digest.finalize().into()
 }
 
-fn blank_digest(width: u32, height: u32) -> [u8; 32] {
+fn blank_digest(width: u32, height: u32, shape: &StreamShape) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"blank");
+    digest.update(shape.digest_bytes());
     digest.update(width.to_be_bytes());
     digest.update(height.to_be_bytes());
     digest.finalize().into()
@@ -793,7 +868,7 @@ fn blank_digest(width: u32, height: u32) -> [u8; 32] {
 
 /// A black card at the screen's own size, so a blank slot shares the
 /// decoder parameters of the cards around it.
-fn black_still(width: u32, height: u32) -> Result<StillH264> {
+fn black_still(width: u32, height: u32, shape: &StreamShape) -> Result<StillH264> {
     let pixels = usize::try_from(width)
         .ok()
         .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
@@ -805,7 +880,7 @@ fn black_still(width: u32, height: u32) -> Result<StillH264> {
             *alpha = 255;
         }
     }
-    mediabox::h264still::encode_still(&black, width, height)
+    mediabox::h264still::encode_still_shaped(&black, width, height, shape)
         .map_err(|error| anyhow!("black card could not be encoded: {error:?}"))
 }
 
@@ -910,6 +985,50 @@ pub(crate) mod tests {
         let got = read_ranges(&reader, "clip", &far).await.unwrap();
         assert_eq!(reader.calls.lock().unwrap().len(), 2);
         assert_eq!(got[1], reader.bytes[4000..4010].to_vec());
+    }
+
+    /// The discontinuity count a window declares is a fact of the schedule:
+    /// it equals the discontinuities actually written before that sequence,
+    /// through laps and across an era splice, and a timeline resumed
+    /// mid-stream — which never made the earlier segments — says the same
+    /// number a cold one that made them all does.
+    #[tokio::test]
+    async fn the_discontinuity_count_before_a_sequence_is_the_schedules() {
+        let parts = [("a", 40, 2_000), ("b", 90, 1_000), ("c", 120, 3_000)];
+        let mut cold = Timeline::new("prog-1", lap(&parts), 0, 0);
+        let mut written = Vec::new();
+        for n in 0..14u64 {
+            assert_eq!(
+                cold.discontinuities_before(n),
+                written.iter().filter(|flag| **flag).count() as u64,
+                "before sequence {n}"
+            );
+            written.push(make(&mut cold, 1).await[0].discontinuity);
+        }
+        // Splice a differently shaped lap in at 14 and keep counting.
+        let splice = cold.offer(lap(&[("x", 10, 1_000), ("y", 20, 1_000)]));
+        assert!(matches!(splice, Splice::Era { at: 14 }));
+        for n in 14..24u64 {
+            assert_eq!(
+                cold.discontinuities_before(n),
+                written.iter().filter(|flag| **flag).count() as u64,
+                "before sequence {n}, after the splice"
+            );
+            written.push(make(&mut cold, 1).await[0].discontinuity);
+        }
+        // A restart at 11 s resumes at 11 - TRAIL and has made nothing.
+        let resumed = Timeline::new("prog-1", lap(&parts), 0, 11_000);
+        let first = resumed.next();
+        let fresh = Timeline::new("prog-1", lap(&parts), 0, 0);
+        assert_eq!(
+            resumed.discontinuities_before(first),
+            fresh.discontinuities_before(first)
+        );
+        assert_eq!(
+            resumed.discontinuities_before(first),
+            3,
+            "seams at 2, 3, 5 before 6"
+        );
     }
 
     /// The whole reason the producer exists, as the loop test used to state
@@ -1037,6 +1156,17 @@ pub(crate) mod tests {
     async fn a_cold_start_begins_a_trail_behind_the_edge() {
         let timeline = Timeline::new("prog-1", lap(&[("a", 40, 1_000)]), 0, 10_000);
         assert_eq!(timeline.next(), 10 - TRAIL);
+        // Resumed at sequence 8, the first segment of a four-second part: what
+        // it makes is what the previous process listed, so no discontinuity
+        // is written over a sequence a player may already hold.
+        let mut resumed = Timeline::new("prog-1", lap(&[("a", 40, 4_000)]), 0, 11_000);
+        assert_eq!(resumed.next(), 8);
+        let first = make(&mut resumed, 2).await;
+        assert!(
+            !first[0].discontinuity,
+            "a resumed timeline re-makes listed sequences unflagged"
+        );
+        assert!(!first[1].discontinuity);
         let early = Timeline::new("prog-1", lap(&[("a", 40, 1_000)]), 50_000, 10_000);
         assert_eq!(early.next(), 0);
         assert_eq!(early.edge(10_000), 0);

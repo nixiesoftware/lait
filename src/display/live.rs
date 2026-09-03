@@ -268,6 +268,23 @@ impl LiveMediaHub {
             .map(|presentation| presentation.discontinuities_dropped)
     }
 
+    /// The first media sequence a rolling presentation's window still holds:
+    /// the sequence its dropped-discontinuity count is counted before.
+    pub fn window_first_sequence(&self, orbit: &str, resource: &str) -> Option<u64> {
+        let state = lock(&self.inner).ok()?;
+        state
+            .presentations
+            .get(&PresentationKey {
+                orbit: orbit.to_string(),
+                peer: STORED_SOURCE.into(),
+                connection: resource.to_string(),
+            })?
+            .hls_segments
+            .get(resource)?
+            .front()
+            .map(|segment| segment.group_sequence)
+    }
+
     /// Append one segment to a rolling presentation the producer made.
     pub fn push_hls_segment(&self, orbit: &str, resource: &str, segment: HlsSegment) -> Result<()> {
         let mut state = lock(&self.inner)?;
@@ -1174,7 +1191,7 @@ pub(crate) fn still_catalog(resource: &str, still: &mediabox::h264still::StillH2
             bitrate_bps: u32::try_from(frame_bytes.saturating_mul(8)).unwrap_or(u32::MAX),
             width: Some(still.width),
             height: Some(still.height),
-            frame_rate_milli: Some(1_000),
+            frame_rate_milli: Some(still.frames_per_second().saturating_mul(1_000)),
             sample_rate: None,
             channels: None,
             render_group: Some(resource.to_string()),
@@ -1184,15 +1201,50 @@ pub(crate) fn still_catalog(resource: &str, still: &mediabox::h264still::StillH2
     }
 }
 
-/// One one-second group of a still: a single IDR at local sequence
-/// `sequence`, timestamped to run on from the group before it.
+/// One one-second group of a still at local sequence `sequence`,
+/// timestamped to run on from the group before it: a single IDR, followed —
+/// when the still is shaped after a clip — by skip frames up to the clip's
+/// own picture rate, so the decoder sees one rate and one configuration
+/// across the seam.
 pub(crate) fn still_group(
     resource: &str,
     still: &mediabox::h264still::StillH264,
     sequence: usize,
 ) -> ReceivedGroup {
     let sequence = u64::try_from(sequence).unwrap_or(u64::MAX);
-    let frame_bytes = still.access_unit.len();
+    let base = i64::try_from(sequence)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(i64::from(STILL_TIMESCALE));
+    let pictures = still.frames_per_second().max(1);
+    // Ticks per picture; the last picture takes the remainder so the group
+    // is exactly one second long.
+    let tick = u64::from(STILL_TIMESCALE) / u64::from(pictures);
+    let mut frames = Vec::with_capacity(pictures as usize);
+    for index in 0..pictures {
+        let last = index + 1 == pictures;
+        let duration = if last {
+            u64::from(STILL_TIMESCALE) - tick * u64::from(pictures - 1)
+        } else {
+            tick
+        };
+        let (kind, payload) = if index == 0 {
+            (FrameKind::Key, still.access_unit.clone())
+        } else {
+            (FrameKind::Delta, still.skip_frame(index))
+        };
+        frames.push(Frame {
+            header: FrameHeader {
+                timestamp: base
+                    .saturating_add(i64::try_from(tick * u64::from(index)).unwrap_or(i64::MAX)),
+                duration: Some(duration),
+                timescale: STILL_TIMESCALE,
+                kind,
+                payload_len: u32::try_from(payload.len()).unwrap_or(u32::MAX),
+                composition_offset: 0,
+            },
+            payload,
+        });
+    }
     ReceivedGroup {
         header: GroupHeader {
             subscription_id: FIRST_MEDIA_SUBSCRIPTION_ID,
@@ -1203,19 +1255,7 @@ pub(crate) fn still_group(
             timescale: STILL_TIMESCALE,
             max_group_duration_ms: STILL_SEGMENT_MS.saturating_mul(2),
         },
-        frames: vec![Frame {
-            header: FrameHeader {
-                timestamp: i64::try_from(sequence)
-                    .unwrap_or(i64::MAX)
-                    .saturating_mul(i64::from(STILL_TIMESCALE)),
-                duration: Some(u64::from(STILL_TIMESCALE)),
-                timescale: STILL_TIMESCALE,
-                kind: FrameKind::Key,
-                payload_len: u32::try_from(frame_bytes).unwrap_or(u32::MAX),
-                composition_offset: 0,
-            },
-            payload: still.access_unit.clone(),
-        }],
+        frames,
     }
 }
 
@@ -1648,6 +1688,52 @@ mod tests {
             .expect("the first still segment is served");
         assert_eq!(segment.len() % 188, 0, "a real transport stream");
         assert_eq!(segment.first(), Some(&0x47));
+    }
+
+    /// A still shaped after a clip is one IDR and then skip frames at the
+    /// clip's rate, one second exactly, and the packager makes a conformant
+    /// segment of it — so the seam into the clip shows the decoder nothing new.
+    #[test]
+    fn a_shaped_still_group_runs_at_the_clips_rate_and_packages_conformantly() {
+        let sps = "67640020acd9805605be6e6a020202800000030080000019078c18cd";
+        let sps: Vec<u8> = (0..sps.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&sps[i..i + 2], 16).unwrap())
+            .collect();
+        let shape = mediabox::h264still::StreamShape::from_sps_nal(&sps, None).unwrap();
+        assert_eq!(shape.frames_per_second, 25);
+        let still =
+            mediabox::h264still::encode_still_shaped(&still_rgba(320, 240), 320, 240, &shape)
+                .unwrap();
+        let catalog = still_catalog("still", &still);
+        assert_eq!(catalog.tracks[0].codec, "avc1.640020");
+        assert_eq!(catalog.tracks[0].frame_rate_milli, Some(25_000));
+        let group = still_group("still", &still, 3);
+        assert_eq!(group.frames.len(), 25);
+        assert_eq!(group.frames[0].header.kind, FrameKind::Key);
+        assert!(group.frames[1..]
+            .iter()
+            .all(|frame| frame.header.kind == FrameKind::Delta));
+        let total: u64 = group
+            .frames
+            .iter()
+            .map(|frame| frame.header.duration.unwrap())
+            .sum();
+        assert_eq!(total, 90_000, "one second exactly");
+        assert_eq!(group.frames[0].header.timestamp, 3 * 90_000);
+        assert!(group.frames.windows(2).all(|pair| pair[1].header.timestamp
+            == pair[0].header.timestamp + pair[0].header.duration.unwrap() as i64));
+        let mut packager = HlsCatalogPackager::new(&catalog).unwrap();
+        let segment = packager
+            .push_group(&group)
+            .unwrap()
+            .expect("one group is one segment");
+        assert_eq!(segment.duration_ms, 1_000);
+        let violations = super::super::conformance::check_segment(&segment);
+        assert!(violations.is_empty(), "{violations:?}");
+        // The plain still is what it always was: one picture a second.
+        let plain = mediabox::h264still::encode_still(&still_rgba(320, 240), 320, 240).unwrap();
+        assert_eq!(still_group("still", &plain, 0).frames.len(), 1);
     }
 
     /// The still, all the way through the coordinator's packager and back out a

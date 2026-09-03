@@ -121,6 +121,32 @@ struct ProducerMemory {
     epoch_unix_ms: u64,
     #[serde(default)]
     discontinuities_dropped: u64,
+    /// The window's first sequence when `discontinuities_dropped` was last
+    /// recorded: the count is the discontinuities before *this* sequence.
+    /// A restart resumes a trail behind the edge, past sequences nobody's
+    /// window dropped, and counts the seams the schedule carries from here
+    /// to there — without the anchor a playlist came out one short after a
+    /// restart, and a strict player answered with a 12 s re-sync.
+    #[serde(default)]
+    window_first_sequence: Option<u64>,
+}
+
+/// The dropped-discontinuity count a resumed window declares: the count
+/// recorded before `anchor`, moved to `first` by the seams the schedule
+/// carries between the two. Without an anchor the recorded count stands.
+fn resumed_discontinuities(
+    recorded: u64,
+    anchor: Option<u64>,
+    first: u64,
+    before: impl Fn(u64) -> u64,
+) -> u64 {
+    match anchor {
+        Some(anchor) if anchor <= first => {
+            recorded.saturating_add(before(first).saturating_sub(before(anchor)))
+        }
+        Some(anchor) => recorded.saturating_sub(before(anchor).saturating_sub(before(first))),
+        None => recorded,
+    }
 }
 
 /// Where tickets and epochs are kept across restarts: beside the package
@@ -215,8 +241,10 @@ pub(crate) struct Producer {
     /// The epoch this assignment's stream counted from before this process,
     /// if it ran before; a restart continues it.
     stored_epoch_unix_ms: Option<u64>,
-    /// The discontinuities the window had dropped before this process.
+    /// The discontinuities the window had dropped before this process, and
+    /// the window's first sequence when that was recorded.
     resumed_discontinuities_dropped: u64,
+    resumed_window_first_sequence: Option<u64>,
     state: tokio::sync::Mutex<ProducerState>,
     running: AtomicBool,
     /// Cleared when the program stops being one stream, or the producer is
@@ -428,12 +456,22 @@ impl Producer {
             && live.fetched_at(&self.orbit_key, &self.resource).is_none()
         {
             let description = timeline.description();
+            // What the window must declare it has dropped: what the previous
+            // process had recorded, moved from the sequence it recorded it
+            // before to the first sequence this process makes by the seams
+            // the schedule carries between them — the ones a restart skips.
+            let dropped = resumed_discontinuities(
+                self.resumed_discontinuities_dropped,
+                self.resumed_window_first_sequence,
+                timeline.next(),
+                |n| timeline.discontinuities_before(n),
+            );
             live.install_rolling(
                 &self.orbit_key,
                 &self.resource,
                 description,
                 producer::WINDOW,
-                self.resumed_discontinuities_dropped,
+                dropped,
             )?;
             live.touch(&self.orbit_key, &self.resource, now_unix_ms);
         }
@@ -475,14 +513,22 @@ impl DisplayCoordinator {
         else {
             return;
         };
+        let first = self
+            .live
+            .window_first_sequence(&producer.orbit_key, &producer.resource);
         let changed = self
             .producer_epochs
             .lock()
             .ok()
             .and_then(|mut epochs| {
                 let memory = epochs.get_mut(producer.assignment.id.as_str())?;
+                // Recorded when the count moves: "`dropped` seams before
+                // `first`" stays true as later seamless segments drop, so
+                // the file is not rewritten once a second for the window's
+                // slide.
                 (memory.discontinuities_dropped != dropped).then(|| {
                     memory.discontinuities_dropped = dropped;
+                    memory.window_first_sequence = first;
                 })
             })
             .is_some();
@@ -1103,6 +1149,7 @@ impl DisplayCoordinator {
                 .or_insert(ProducerMemory {
                     epoch_unix_ms: now_unix_ms,
                     discontinuities_dropped: 0,
+                    window_first_sequence: None,
                 })
         };
         self.persist_epochs();
@@ -1121,6 +1168,7 @@ impl DisplayCoordinator {
             started_at_unix_ms: now_unix_ms,
             stored_epoch_unix_ms,
             resumed_discontinuities_dropped: memory.discontinuities_dropped,
+            resumed_window_first_sequence: memory.window_first_sequence,
             state: tokio::sync::Mutex::new(ProducerState {
                 timeline: None,
                 cache: StillCache::default(),
@@ -2359,6 +2407,23 @@ impl ClientHost for QueryOnlyHost<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// A resumed window's count is the recorded one moved to the resumed
+    /// first sequence by the seams between: forward past skipped ones, back
+    /// when the resume lands before the anchor, unchanged with no anchor.
+    #[test]
+    fn a_resumed_window_counts_the_seams_between_the_anchor_and_its_first() {
+        // Seams at every multiple of 6.
+        let before = |n: u64| (1..n).filter(|m| m % 6 == 0).count() as u64;
+        assert_eq!(
+            super::resumed_discontinuities(4, Some(17), 233, before),
+            4 + 36
+        );
+        assert_eq!(super::resumed_discontinuities(4, Some(17), 20, before), 5);
+        assert_eq!(super::resumed_discontinuities(4, Some(17), 17, before), 4);
+        assert_eq!(super::resumed_discontinuities(4, Some(17), 11, before), 3);
+        assert_eq!(super::resumed_discontinuities(4, None, 233, before), 4);
+    }
+
     use std::collections::BTreeSet;
 
     #[test]
