@@ -1,0 +1,6 @@
+# The engine wasm is fetched (channel in ship, same-origin in dev), never
+# committed: the viewer build emits it into assets/web for dev serving, and git
+# ignores it. This lives here, one level above the build's outDir, because that
+# dir is emptied on every build (vite emptyOutDir) — an ignore placed inside it
+# is wiped and porthole_bg.wasm resurfaces as untracked every build.
+assets/web/porthole_bg.wasm
