@@ -424,7 +424,12 @@ fn mux_segment(
             let end = clock_90k(end, track.catalog.timescale)?
                 .checked_add(CLOCK_BASE_90K)
                 .ok_or(Failure::TimestampOutOfRange)?;
-            earliest = Some(earliest.map_or(pts, |current: u64| current.min(pts)));
+            // The segment's length is its decode timeline, first decode time
+            // to last frame's end. Measured from the first *presentation*
+            // time it came up short by the reordering delay — two frames on a
+            // clip with B-frames — and a playlist that says 2.960 s over
+            // 3.040 s of video makes a player pacing on it hurry and wait.
+            earliest = Some(earliest.map_or(dts, |current: u64| current.min(dts)));
             latest = Some(latest.map_or(end, |current: u64| current.max(end)));
             let data = match track.catalog.kind {
                 TrackKind::Video => annex_b(
@@ -760,6 +765,30 @@ mod tests {
                 "PID {pid:#x} carries on across the seam"
             );
         }
+    }
+
+    /// A group whose frames present later than they decode — B-frames — is
+    /// as long as its frames, not shorter by the reordering delay.
+    #[test]
+    fn a_segments_duration_is_its_decode_span_not_its_presentation_span() {
+        let mut packager = HlsCatalogPackager::new(&catalog()).unwrap();
+        let plain = group(1);
+        let frames = u32::try_from(plain.frames.len()).unwrap();
+        let frame_ms =
+            plain.frames[0].header.duration.unwrap() * 1_000 / u64::from(plain.header.timescale);
+        let expected = frames * u32::try_from(frame_ms).unwrap();
+        let straight = packager.push_group(&plain).unwrap().unwrap();
+        assert_eq!(straight.duration_ms, expected);
+        let mut reordered = group(2);
+        let offset = i32::try_from(reordered.frames[0].header.duration.unwrap() * 2).unwrap();
+        for frame in &mut reordered.frames {
+            frame.header.composition_offset = offset;
+        }
+        let delayed = packager.push_group(&reordered).unwrap().unwrap();
+        assert_eq!(
+            delayed.duration_ms, expected,
+            "two frames of reordering delay must not shorten the segment"
+        );
     }
 
     #[test]

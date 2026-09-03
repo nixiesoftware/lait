@@ -28,6 +28,7 @@ function usage(message) {
   --origin URL        coordinator origin (default: what display_status announces; must match it)
   --assignment ID     assignment whose pin the probe copies (default: the first active one)
   --seconds N         run length after start (default: 60)
+  --viewport WxH      the screen size this receiver declares (default: 1280x720)
   --prefetch-ms N     fetch a segment this far before it is needed (default: one target duration)
   --stale-after-ms N  freshness pinned on the probe's assignment (default: 120000)
   --state DIR         credential + device state (default: tools/display-probe/.state)
@@ -64,6 +65,12 @@ function parseArgs(argv) {
       case "--origin": options.origin = next(); break;
       case "--assignment": options.assignment = next(); break;
       case "--seconds": options.seconds = Number(next()); break;
+      case "--viewport": {
+        const match = /^(\d+)x(\d+)$/.exec(next());
+        if (!match) usage("--viewport must look like 1920x1080");
+        options.viewport = { width: Number(match[1]), height: Number(match[2]) };
+        break;
+      }
       case "--prefetch-ms": options.prefetchMs = Number(next()); break;
       case "--stale-after-ms": options.staleAfterMs = Number(next()); break;
       case "--state": options.state = path.resolve(next()); break;
@@ -259,7 +266,7 @@ async function main() {
   });
   const receiver = new ProbeReceiver({
     bootstrap,
-    capabilities: probeCapabilities(),
+    capabilities: probeCapabilities(options.viewport ?? {}),
     ui,
     vault: new FileVault(credentialFile),
     transport,

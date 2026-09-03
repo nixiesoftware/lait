@@ -470,6 +470,10 @@ pub struct Spec {
     pub input: PayloadSpec,
     pub output: PayloadSpec,
     pub mode: Mode,
+    /// A World that predates terminals declares none: its specs decode with
+    /// the terminal disabled rather than failing to describe at all, which
+    /// took every installed World, and the daemon with them, down at start.
+    #[serde(default = "TerminalSpec::disabled")]
     pub terminal: TerminalSpec,
     pub resume: Resume,
     pub effects: Effects,

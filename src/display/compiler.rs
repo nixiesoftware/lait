@@ -225,13 +225,20 @@ impl ProgramCompiler {
         program: &DisplayProgramId,
         freshness: FreshnessPolicy,
         program_resource: &str,
+        frame: Option<(u32, u32)>,
         refresh_after_ms: Option<u32>,
     ) -> Result<CompiledProgram> {
         let media_type = DisplayAssetMediaType::HlsManifest;
+        // The frame is part of the stream's identity on the wire: a stream
+        // that changes size is a different stream, and the receiver is sent
+        // for a fresh stage — a new ticket, one deliberate reload — rather
+        // than handed a resolution change behind a discontinuity, which a
+        // television's decoder may not survive.
         let bytes = serde_json::to_vec(&LiveManifest {
             version: 1,
             origin: "stored",
             resource: program_resource,
+            frame: frame.map(|(width, height)| [width, height]),
         })
         .context("encode program stream manifest")?;
         let encoded_len = u32::try_from(bytes.len()).context("program manifest is too large")?;
@@ -309,6 +316,9 @@ struct LiveManifest<'a> {
     /// one `derive_asset_id`, and so the bytes say which plane resolves them.
     origin: &'a str,
     resource: &'a str,
+    /// The frame a whole-program stream is coded at, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame: Option<[u32; 2]>,
 }
 
 fn media_scene(
@@ -343,6 +353,7 @@ fn media_scene(
         version: 1,
         origin: if live { "live" } else { "stored" },
         resource: &resource,
+        frame: None,
     })
     .context("encode live display manifest")?;
     let encoded_len = u32::try_from(bytes.len()).context("live manifest is too large")?;
@@ -524,19 +535,41 @@ mod tests {
             stale_after_ms: 60_000,
             on_stale: StaleAction::KeepWithNativeBanner,
         };
+        let frame = Some((1366, 720));
         let first = compiler
             .compile_stream(
                 &assignment,
                 &program,
                 freshness.clone(),
                 "prog-aa",
+                frame,
                 Some(1_000),
             )
             .unwrap();
         let second = compiler
-            .compile_stream(&assignment, &program, freshness, "prog-aa", None)
+            .compile_stream(
+                &assignment,
+                &program,
+                freshness.clone(),
+                "prog-aa",
+                frame,
+                None,
+            )
             .unwrap();
         assert_eq!(first.program.revision, second.program.revision);
+        // A stream coded at another size is another stream: the receiver
+        // re-stages for it, deliberately, instead of freezing on it.
+        let resized = compiler
+            .compile_stream(
+                &assignment,
+                &program,
+                freshness,
+                "prog-aa",
+                Some((1280, 720)),
+                None,
+            )
+            .unwrap();
+        assert_ne!(first.program.revision, resized.program.revision);
         assert_eq!(first.program.items.len(), 1);
         let item = &first.program.items[0];
         assert_eq!(item.duration_ms, None, "a stream has no length on the wire");

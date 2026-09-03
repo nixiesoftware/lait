@@ -710,6 +710,7 @@ lait display::conformance::tests::a_resumed_window_carries_its_dropped_discontin
 lait display::coordinator::tests::a_stored_still_is_known_by_its_bytes_not_its_record
 lait display::coordinator::tests::a_used_ticket_slides_its_expiry_and_an_unused_one_lapses
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
+lait display::hls::tests::a_segments_duration_is_its_decode_span_not_its_presentation_span
 lait display::hls::tests::avcc_and_aac_are_converted_to_transport_elementary_streams
 lait display::hls::tests::continuity_counters_run_on_across_a_renditions_segments
 lait display::hls::tests::hls_v3_segment_is_real_mpeg_ts_and_discontinuities_are_explicit

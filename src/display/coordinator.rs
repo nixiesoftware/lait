@@ -301,12 +301,15 @@ impl Producer {
     /// The lap is built outside the state lock, because building it decodes
     /// and encodes pictures — seconds, in a debug build — and the keeper
     /// making segments must not wait on that.
+    /// `Ok(true)` when the stream's frame changed with this lap: the stream
+    /// program's revision now differs and the receiver must be woken to
+    /// re-stage for it.
     async fn feed(
         &self,
         live: &LiveMediaHub,
         projection: &DisplayProjection,
         now_unix_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let viewport = (
             self.capabilities.viewport.width,
             self.capabilities.viewport.height,
@@ -321,6 +324,7 @@ impl Producer {
         );
         let mut state = self.state.lock().await;
         state.cache = cache;
+        let frame_before = state.timeline.as_ref().map(Timeline::frame);
         match state.timeline.as_mut() {
             Some(timeline) => match timeline.offer(lap) {
                 Splice::InPlace => {
@@ -358,8 +362,24 @@ impl Producer {
                 self.wake.notify_one();
             }
         }
+        let frame_now = state.timeline.as_ref().map(Timeline::frame);
+        let frame_changed = frame_before.is_some() && frame_now != frame_before;
+        if frame_changed {
+            tracing::info!(resource = %self.resource, ?frame_before, ?frame_now, "program stream changed size; the receiver will re-stage");
+        }
         self.ensure_window_locked(live, &mut state, now_unix_ms)
+            .await?;
+        Ok(frame_changed)
+    }
+
+    /// The frame the stream is coded at, once a lap has decided it.
+    async fn frame(&self) -> Option<(u32, u32)> {
+        self.state
+            .lock()
             .await
+            .timeline
+            .as_ref()
+            .map(Timeline::frame)
     }
 
     /// Make sure the presentation exists and the window through the edge is
@@ -568,10 +588,14 @@ async fn run_renderer(coordinator: Weak<DisplayCoordinator>, producer: Arc<Produ
                         coordinator.notify_assignment_change();
                         break;
                     }
-                    if let Err(error) = producer.feed(&coordinator.live, &projection, now).await {
-                        tracing::warn!(resource = %producer.resource, error = %format_args!("{error:#}"), "program render could not be scheduled; the last one plays on");
-                        producer.state.lock().await.next_render_unix_ms =
-                            now.saturating_add(Producer::RENDER_RETRY_MS);
+                    match producer.feed(&coordinator.live, &projection, now).await {
+                        Ok(true) => coordinator.notify_assignment_change(),
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(resource = %producer.resource, error = %format_args!("{error:#}"), "program render could not be scheduled; the last one plays on");
+                            producer.state.lock().await.next_render_unix_ms =
+                                now.saturating_add(Producer::RENDER_RETRY_MS);
+                        }
                     }
                 }
                 Err(error) => {
@@ -1147,13 +1171,14 @@ impl DisplayCoordinator {
             "compiling display program"
         );
         let program_resource = Self::program_resource(&assignment);
-        let stream = |refresh_after_ms: Option<u32>| -> Result<CompiledProgram> {
+        let stream = |frame: Option<(u32, u32)>| -> Result<CompiledProgram> {
             self.compiler.compile_stream(
                 &assignment.id,
                 &assignment.program,
                 assignment.freshness.clone(),
                 &program_resource,
-                refresh_after_ms,
+                frame,
+                None,
             )
         };
         let mut streaming = self
@@ -1168,7 +1193,7 @@ impl DisplayCoordinator {
         let compiled = if let Some(producer) = streaming {
             producer.ensure_window(&self.live, now_unix_ms).await?;
             self.start_producer(&producer);
-            stream(None)?
+            stream(producer.frame().await)?
         } else {
             let world = WorldId::parse(&assignment.source.world)
                 .ok_or_else(|| anyhow!("display assignment pins an invalid World"))?;
@@ -1197,9 +1222,9 @@ impl DisplayCoordinator {
                     let producer =
                         self.producer_for_receiver(&assignment, capabilities, now_unix_ms)?;
                     match producer.feed(&self.live, &projection, now_unix_ms).await {
-                        Ok(()) => {
+                        Ok(_) => {
                             self.start_producer(&producer);
-                            stream(None)?
+                            stream(producer.frame().await)?
                         }
                         Err(error) => {
                             // A schedule that could not be made — a clip that
@@ -1738,11 +1763,28 @@ impl DisplayCoordinator {
         let Some(capabilities) = self.device_capabilities(&device) else {
             return;
         };
-        if let Err(error) = self
+        match self
             .compile_for_device(&device, &capabilities, now_unix_ms)
             .await
         {
-            tracing::debug!(device = %device, error = %format_args!("{error:#}"), "a ticket from before this process could not be revived");
+            Ok(compiled) => {
+                // The stream came back a different stream (its frame changed
+                // while this process was down): the ticket cannot be honoured,
+                // so the receiver's poll is woken to re-stage now rather than
+                // when its wait runs out.
+                let stale = self
+                    .live_tickets
+                    .lock()
+                    .ok()
+                    .and_then(|tickets| tickets.get(token).map(|ticket| ticket.revision.clone()))
+                    .is_some_and(|revision| revision != compiled.program.revision);
+                if stale {
+                    self.notify_assignment_change();
+                }
+            }
+            Err(error) => {
+                tracing::debug!(device = %device, error = %format_args!("{error:#}"), "a ticket from before this process could not be revived");
+            }
         }
     }
 
