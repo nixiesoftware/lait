@@ -743,6 +743,7 @@ impl ReferenceReceiver {
             drift_residual_ms: runtime.last_sync_residual_ms(),
             correction_events: runtime.correction_events(),
             pipeline_unobservable: true,
+            pipeline: None,
         };
         validate_health(&health).context("validate receiver health")?;
         let body = serde_json::to_vec(&health).context("encode receiver health")?;

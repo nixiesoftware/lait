@@ -352,6 +352,20 @@ pub struct WatchingTyping {
 /// contract, not a display string.
 pub const AGENT_GROUP: &str = "Agents";
 
+/// A receiver's decoder pipeline, as it last reported it. Counters are
+/// cumulative since its player was armed.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayPipelineView {
+    pub state: String,
+    pub position_ms: u32,
+    pub frames_rendered: u32,
+    pub frames_dropped: u32,
+    pub frames_repeated: u32,
+    pub stream_errors: u32,
+    pub segment_sequence: Option<u64>,
+    pub buffering: bool,
+}
+
 /// Which code is running at every layer of the display path. Every field
 /// is a measurement or `None`; nothing here is inferred.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -399,6 +413,8 @@ pub struct DisplayDeviceProvenanceView {
     pub stream_served_at_unix_ms: Option<u64>,
     /// `running`, `idle`, `retired`, or `None` when no producer exists.
     pub producer: Option<String>,
+    /// Its player pipeline as last reported, when it reports one.
+    pub pipeline: Option<DisplayPipelineView>,
 }
 
 /// Astrolabe's controller-facing view of the identity daemon's display service.
@@ -628,6 +644,10 @@ pub struct DisplayHealthView {
     pub drift_residual_ms: i32,
     pub correction_events: u32,
     pub pipeline_unobservable: bool,
+    /// The player pipeline as the receiver last sampled it. `None` from a
+    /// receiver that cannot read its player, or a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<DisplayPipelineView>,
     /// When this report arrived. The report says what the receiver saw; this
     /// says how long ago, which is what tells a receiver that is gone from
     /// one that last said `online`. `None` from a daemon that predates it.

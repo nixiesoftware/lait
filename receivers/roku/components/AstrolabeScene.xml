@@ -152,6 +152,7 @@
     <!-- A liveness change announces itself, then the chip retires so it never
          burns into the glass. Healthy shows nothing at all. -->
     <Timer id="statusHud" duration="6" repeat="false"/>
+    <Timer id="pipelineSample" duration="5" repeat="true"/>
 
     <!-- What is on glass right now breathes. It is the only motion. -->
     <Animation id="breathe" duration="2.4" repeat="true" easeFunction="inOutQuadratic">

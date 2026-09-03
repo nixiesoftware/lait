@@ -237,6 +237,14 @@ impl Producer {
         self.active.load(Ordering::SeqCst)
     }
 
+    /// Whether a lap has ever been laid on this producer's timeline. A
+    /// producer is registered before its first feed, and that feed runs
+    /// inside the request that asked for it — a receiver that hangs up
+    /// mid-way cancels it, and what is left must be fed again, not served.
+    async fn has_program(&self) -> bool {
+        self.state.lock().await.timeline.is_some()
+    }
+
     fn retire(&self) {
         self.active.store(false, Ordering::SeqCst);
         self.wake.notify_one();
@@ -254,7 +262,20 @@ impl Producer {
         )
     }
 
-    fn surface_render(&self, now_unix_ms: u64) -> Result<SurfaceRender> {
+    /// The size to render cards at: the stream's frame once a lap has
+    /// decided it (a clip's size, when there is one), else the screen's.
+    async fn render_size(&self) -> (u32, u32) {
+        let state = self.state.lock().await;
+        state.timeline.as_ref().map_or(
+            (
+                self.capabilities.viewport.width,
+                self.capabilities.viewport.height,
+            ),
+            |timeline| timeline.frame(),
+        )
+    }
+
+    fn surface_render(&self, now_unix_ms: u64, size: (u32, u32)) -> Result<SurfaceRender> {
         let world = WorldId::parse(&self.assignment.source.world)
             .ok_or_else(|| anyhow!("display assignment pins an invalid World"))?;
         Ok(SurfaceRender {
@@ -264,8 +285,8 @@ impl Producer {
             surface: self.assignment.source.surface.clone(),
             input: self.assignment.source.input.clone(),
             theme: self.assignment.theme,
-            width: self.capabilities.viewport.width,
-            height: self.capabilities.viewport.height,
+            width: size.0,
+            height: size.1,
             scale_milli: self.capabilities.viewport.scale_milli,
             locale: self.capabilities.locale.clone(),
             horizon_ms: self.capabilities.max_staging_horizon_ms,
@@ -320,6 +341,23 @@ impl Producer {
             .map_or(u64::MAX, |refresh| {
                 now_unix_ms.saturating_add(u64::from(refresh).max(Self::RENDER_FLOOR_MS))
             });
+        // Cards rendered at a size other than the stream's frame were fitted
+        // onto it; render them again at the frame itself, so a card is drawn
+        // for the size it is shown at rather than scaled to it.
+        let rendered_at = projection
+            .program
+            .items
+            .iter()
+            .find_map(|item| match &item.scene {
+                RenderedScene::Frame(picture) => Some((picture.width, picture.height)),
+                _ => None,
+            });
+        if let (Some(timeline), Some(rendered_at)) = (state.timeline.as_ref(), rendered_at) {
+            if timeline.frame() != rendered_at {
+                state.next_render_unix_ms = 0;
+                self.wake.notify_one();
+            }
+        }
         self.ensure_window_locked(live, &mut state, now_unix_ms)
             .await
     }
@@ -346,10 +384,7 @@ impl Producer {
         if !live.has_resource(&self.orbit_key, &self.resource, LiveTransport::Hls)
             && live.fetched_at(&self.orbit_key, &self.resource).is_none()
         {
-            let description = timeline.description(
-                self.capabilities.viewport.width,
-                self.capabilities.viewport.height,
-            );
+            let description = timeline.description();
             live.install_rolling(
                 &self.orbit_key,
                 &self.resource,
@@ -503,14 +538,16 @@ async fn run_renderer(coordinator: Weak<DisplayCoordinator>, producer: Arc<Produ
             // Render for the slot being made, not for now: the segment this
             // picture lands in begins a lead ahead of the clock.
             let started = std::time::Instant::now();
-            let rendered = match producer.surface_render(now.saturating_add(producer::LEAD_MS)) {
-                Ok(want) => {
-                    coordinator
-                        .render_surface(&want, Some(&producer.assignment))
-                        .await
-                }
-                Err(error) => Err(error),
-            };
+            let size = producer.render_size().await;
+            let rendered =
+                match producer.surface_render(now.saturating_add(producer::LEAD_MS), size) {
+                    Ok(want) => {
+                        coordinator
+                            .render_surface(&want, Some(&producer.assignment))
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
             tracing::debug!(
                 resource = %producer.resource,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -1119,10 +1156,15 @@ impl DisplayCoordinator {
                 refresh_after_ms,
             )
         };
-        let streaming = self
+        let mut streaming = self
             .producer_for(&assignment.id)
             .filter(|producer| native_hls && producer.serves(&assignment, capabilities))
             .filter(|producer| producer.is_active());
+        if let Some(producer) = &streaming {
+            if !producer.has_program().await {
+                streaming = None;
+            }
+        }
         let compiled = if let Some(producer) = streaming {
             producer.ensure_window(&self.live, now_unix_ms).await?;
             self.start_producer(&producer);

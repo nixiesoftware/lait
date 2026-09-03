@@ -50,6 +50,11 @@ sub init()
     m.posterRetire.ObserveField("fire", "AstrolabePosterRetireDue")
     m.statusHud = m.top.FindNode("statusHud")
     m.statusHud.ObserveField("fire", "AstrolabeStatusHudDue")
+    ' The decoder's counters are only kept when asked for.
+    m.media.enableDecoderStats = true
+    m.pipelineSample = m.top.FindNode("pipelineSample")
+    m.pipelineSample.ObserveField("fire", "AstrolabePipelineSample")
+    m.pipelineSample.control = "start"
     m.top.FindNode("statusChip").visible = false
     m.keepAwake = m.top.FindNode("keepAwake")
     silence = CreateObject("roSGNode", "ContentNode")
@@ -144,6 +149,44 @@ end sub
 
 ' The chip has had its moment. Retire it; a further change re-reveals it, and a
 ' screen with nothing to play keeps its chrome regardless.
+' Every few seconds, what the player is actually doing: its state and
+' position, the decoder's cumulative render/drop/repeat/error counts, the
+' segment it is on, and whether it is buffering. Handed to the task for the
+' health report and said on the console, so a stutter is a number here and
+' at the coordinator, never only a person's impression of the picture.
+sub AstrolabePipelineSample()
+    if m.media = invalid then return
+    stats = m.media.decoderStats
+    if stats = invalid then stats = {}
+    segment = m.media.streamingSegment
+    sequence = invalid
+    if segment <> invalid and segment.segSequence <> invalid then sequence = segment.segSequence
+    buffering = m.media.bufferingStatus
+    underflow = false
+    if buffering <> invalid and buffering.isUnderflow = true then underflow = true
+    state = m.media.state
+    if state = invalid or state = "" then state = "none"
+    sample = {
+        state: state,
+        position_ms: Int(m.media.position * 1000),
+        frames_rendered: AstrolabeCount(stats.renderCount),
+        frames_dropped: AstrolabeCount(stats.frameDropCount),
+        frames_repeated: AstrolabeCount(stats.repeatCount),
+        stream_errors: AstrolabeCount(stats.streamErrorCount),
+        segment_sequence: sequence,
+        buffering: underflow or state = "buffering"
+    }
+    m.task.pipeline = sample
+    print "[astrolabe] pipeline state="; sample.state; " pos_ms="; sample.position_ms; " rendered="; sample.frames_rendered; " dropped="; sample.frames_dropped; " repeated="; sample.frames_repeated; " errors="; sample.stream_errors; " seq="; sequence; " buffering="; sample.buffering
+end sub
+
+function AstrolabeCount(value as dynamic) as integer
+    if value = invalid then return 0
+    if value < 0 then return 0
+    if value > 2147483647 then return 2147483647
+    return Int(value)
+end function
+
 sub AstrolabeStatusHudDue()
     m.top.FindNode("statusChip").visible = false
 end sub

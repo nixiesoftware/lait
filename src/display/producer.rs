@@ -210,6 +210,8 @@ struct Slot {
 pub(crate) struct Lap {
     parts: Vec<Part>,
     slots: Vec<Slot>,
+    /// The one frame size every part of this lap is coded at.
+    frame: (u32, u32),
     /// `starts_ms[i]` is where slot `i` begins within the lap; one past the
     /// end is the lap's length.
     starts_ms: Vec<u64>,
@@ -217,7 +219,7 @@ pub(crate) struct Lap {
 }
 
 impl Lap {
-    fn from_parts(parts: Vec<Part>) -> Result<Self> {
+    fn from_parts(parts: Vec<Part>, frame: (u32, u32)) -> Result<Self> {
         let mut slots = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             match &part.source {
@@ -255,9 +257,15 @@ impl Lap {
         Ok(Self {
             parts,
             slots,
+            frame,
             starts_ms,
             lap_ms: at.max(1),
         })
+    }
+
+    /// The frame size every part is coded at.
+    pub(crate) const fn frame(&self) -> (u32, u32) {
+        self.frame
     }
 
     fn same_shape(&self, other: &Self) -> bool {
@@ -392,6 +400,11 @@ impl Timeline {
                 .map(|slot| u64::from(slot.duration_ms))
                 .unwrap_or(0),
         )
+    }
+
+    /// The frame size the current lap is coded at.
+    pub(crate) const fn frame(&self) -> (u32, u32) {
+        self.era.lap.frame
     }
 
     /// The next sequence this timeline will make.
@@ -538,7 +551,8 @@ impl Timeline {
     /// The rendition a master playlist describes. Parts differ in size and
     /// bitrate; the stream is described by the frame it is drawn for and the
     /// codec every part shares.
-    pub(crate) fn description(&self, width: u32, height: u32) -> HlsRenditionDescription {
+    pub(crate) fn description(&self) -> HlsRenditionDescription {
+        let (width, height) = self.era.lap.frame;
         let bitrate_bps = self
             .era
             .lap
@@ -625,22 +639,63 @@ pub(crate) async fn build_lap(
     if let Some(reason) = unstreamable(projection) {
         return Err(anyhow!("program cannot be one stream: {reason}"));
     }
+    // Clips first: a clip cannot be rescaled here, so the first one decides
+    // the frame every still is fitted into; without one, the screen does.
+    let mut plans: BTreeMap<String, Arc<StoredPlan>> = BTreeMap::new();
+    let mut frame: Option<(u32, u32)> = None;
+    for item in &projection.program.items {
+        if let RenderedScene::Media(media) = &item.scene {
+            if let MediaOrigin::Stored(content) = &media.origin {
+                let resource = data_encoding::HEXLOWER.encode(content.as_bytes());
+                if plans.contains_key(&resource) {
+                    continue;
+                }
+                let total = reader.size(&resource).await?;
+                let moov = fetch_moov(reader, &resource, total).await?;
+                let policy = mediabox::CatalogPolicy {
+                    max_group_duration_ms:
+                        runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS,
+                    target_latency_ms: runtime::plane::live::media::DEFAULT_MAX_LATENCY_MS,
+                    jitter_hint_ms: 50,
+                    rendition: resource.clone(),
+                };
+                let plan = StoredPlan::from_moov(&moov, &policy)
+                    .map_err(|error| anyhow!("clip would not plan: {error}"))?;
+                let size = plan
+                    .catalog
+                    .tracks
+                    .iter()
+                    .find(|track| track.kind == TrackKind::Video)
+                    .and_then(|track| Some((track.width?, track.height?)));
+                match (frame, size) {
+                    (None, Some(size)) => frame = Some(size),
+                    (Some(chosen), Some(size)) if chosen != size => {
+                        tracing::warn!(
+                            ?chosen,
+                            ?size,
+                            "a second clip size in one program; the stream keeps the first, and this clip will change the decoder's resolution"
+                        );
+                    }
+                    _ => {}
+                }
+                plans.insert(resource, Arc::new(plan));
+            }
+        }
+    }
+    let frame = frame.unwrap_or(viewport);
     let mut parts = Vec::with_capacity(projection.program.items.len());
     for item in &projection.program.items {
         let duration_ms = item.duration_ms.unwrap_or(DEFAULT_ITEM_MS).max(1);
         let part = match &item.scene {
-            RenderedScene::Frame(frame) => {
-                let digest = frame_digest(frame.media_type, &frame.bytes);
+            RenderedScene::Frame(picture) => {
+                let digest = frame_digest(picture.media_type, &picture.bytes, frame);
                 let still = match cache.stills.get(&digest) {
                     Some(still) => still.clone(),
                     None => {
-                        let bytes = frame.bytes.clone();
-                        let media_type = frame.media_type;
-                        let still = tokio::task::spawn_blocking(move || match media_type {
-                            FrameMediaType::Png => mediabox::h264still::encode_still_png(&bytes),
-                            FrameMediaType::Jpeg | FrameMediaType::WebP => {
-                                mediabox::h264still::encode_still_image(&bytes)
-                            }
+                        let bytes = picture.bytes.clone();
+                        let (width, height) = frame;
+                        let still = tokio::task::spawn_blocking(move || {
+                            mediabox::h264still::encode_still_fitted(&bytes, width, height)
                         })
                         .await
                         .context("still encode task")?
@@ -663,26 +718,16 @@ pub(crate) async fn build_lap(
             RenderedScene::Media(media) => match &media.origin {
                 MediaOrigin::Stored(content) => {
                     let resource = data_encoding::HEXLOWER.encode(content.as_bytes());
-                    let total = reader.size(&resource).await?;
-                    let moov = fetch_moov(reader, &resource, total).await?;
-                    let policy = mediabox::CatalogPolicy {
-                        max_group_duration_ms:
-                            runtime::plane::live::media::DEFAULT_MAX_GROUP_DURATION_MS,
-                        target_latency_ms: runtime::plane::live::media::DEFAULT_MAX_LATENCY_MS,
-                        jitter_hint_ms: 50,
-                        rendition: resource.clone(),
-                    };
-                    let plan = StoredPlan::from_moov(&moov, &policy)
-                        .map_err(|error| anyhow!("clip would not plan: {error}"))?;
+                    let plan = plans
+                        .get(&resource)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("clip was not planned"))?;
                     Part {
                         key: PartKey::Clip {
                             content: resource.clone(),
                         },
                         duration_ms,
-                        source: PartSource::Clip {
-                            resource,
-                            plan: Arc::new(plan),
-                        },
+                        source: PartSource::Clip { resource, plan },
                     }
                 }
                 MediaOrigin::Live(_) => {
@@ -693,7 +738,7 @@ pub(crate) async fn build_lap(
                 return Err(anyhow!("a stored frame reached the producer unresolved"))
             }
             RenderedScene::Blank(_) => {
-                let (width, height) = viewport;
+                let (width, height) = frame;
                 let digest = blank_digest(width, height);
                 let still = match cache.stills.get(&digest) {
                     Some(still) => still.clone(),
@@ -717,12 +762,14 @@ pub(crate) async fn build_lap(
         };
         parts.push(part);
     }
-    let lap = Lap::from_parts(parts)?;
+    let lap = Lap::from_parts(parts, frame)?;
     cache.keep(&lap);
     Ok(lap)
 }
 
-fn frame_digest(media_type: FrameMediaType, bytes: &[u8]) -> [u8; 32] {
+/// A picture's identity in the encode cache: its bytes and the frame it
+/// was fitted into, since the same picture fitted elsewhere is another still.
+fn frame_digest(media_type: FrameMediaType, bytes: &[u8], frame: (u32, u32)) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"frame");
     digest.update([match media_type {
@@ -730,6 +777,8 @@ fn frame_digest(media_type: FrameMediaType, bytes: &[u8]) -> [u8; 32] {
         FrameMediaType::Jpeg => 1,
         FrameMediaType::WebP => 2,
     }]);
+    digest.update(frame.0.to_be_bytes());
+    digest.update(frame.1.to_be_bytes());
     digest.update(bytes);
     digest.finalize().into()
 }
@@ -805,6 +854,7 @@ pub(crate) mod tests {
                     source: PartSource::Still(still(shade, 64, 48)),
                 })
                 .collect(),
+            (64, 48),
         )
         .unwrap()
     }

@@ -3,6 +3,7 @@
   <interface>
     <field id="viewModel" type="assocarray" alwaysNotify="true"/>
     <field id="command" type="string" alwaysNotify="true"/>
+    <field id="pipeline" type="assocarray"/>
   </interface>
   <script type="text/brightscript" uri="pkg:/source/Build.brs"/>
   <script type="text/brightscript" uri="pkg:/source/Protocol.brs"/>

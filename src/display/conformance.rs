@@ -1051,7 +1051,7 @@ mod tests {
         let mut timeline =
             Timeline::new(RESOURCE, lap(&[("a", 40, 1_000), ("b", 200, 1_000)]), 0, 0);
         let hub = LiveMediaHub::default();
-        hub.install_rolling(ORBIT, RESOURCE, timeline.description(64, 48), WINDOW, 7)
+        hub.install_rolling(ORBIT, RESOURCE, timeline.description(), WINDOW, 7)
             .unwrap();
         let segment = make(&mut timeline, 1).await.remove(0);
         hub.push_hls_segment(ORBIT, RESOURCE, segment).unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
         let mut timeline =
             Timeline::new(RESOURCE, lap(&[("a", 40, 2_000), ("b", 200, 3_000)]), 0, 0);
         let hub = LiveMediaHub::default();
-        hub.install_rolling(ORBIT, RESOURCE, timeline.description(64, 48), WINDOW, 0)
+        hub.install_rolling(ORBIT, RESOURCE, timeline.description(), WINDOW, 0)
             .unwrap();
         let mut reloads = Vec::new();
         let count = WINDOW * 3;

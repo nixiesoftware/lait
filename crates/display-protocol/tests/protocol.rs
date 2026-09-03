@@ -5,7 +5,8 @@ use display_protocol::auth::{
 use display_protocol::bounds::{MAX_ASSET_BYTES, MAX_STAGED_BYTES};
 use display_protocol::ids::{
     AuthenticationTag, Challenge, CoordinatorFingerprint, CoordinatorProfile, DisplayAssignmentId,
-    DisplayDeviceId, DisplayPairingId, DisplayProgramId, ProgramRevision, ProofKey, ReceiverNonce,
+    DisplayDeviceId, DisplayPairingId, DisplayProgramId, DisplayProgramItemId, ProgramRevision,
+    ProofKey, ReceiverNonce,
 };
 use display_protocol::pairing::{
     authenticate_pairing_complete, confirmation_phrase, group_rendezvous_code,
@@ -20,8 +21,9 @@ use display_protocol::program::{
     StaleAction,
 };
 use display_protocol::receiver::{
-    validate_capabilities, AccessibilityCapabilities, HealthGranularity, LatencyClass,
-    PlaybackCapabilities, PlaybackTier, ReceiverCapabilities, ReceiverPlatform, SyncClass,
+    validate_capabilities, validate_health, AccessibilityCapabilities, ConnectionState, Fault,
+    HealthGranularity, LatencyBucket, LatencyClass, PipelineStats, PlaybackCapabilities,
+    PlaybackState, PlaybackTier, ReceiverCapabilities, ReceiverHealth, ReceiverPlatform, SyncClass,
     Viewport,
 };
 use display_protocol::{Refusal, PROTOCOL_MAJOR};
@@ -657,4 +659,66 @@ fn language_neutral_fixture_matches_rust_transcripts_and_json() {
         rendezvous_from_code(entered).unwrap().as_str(),
         code.get("rendezvous").unwrap().as_str().unwrap()
     );
+}
+
+fn health() -> ReceiverHealth {
+    ReceiverHealth {
+        protocol_major: PROTOCOL_MAJOR,
+        platform: ReceiverPlatform::Roku,
+        build: "astrolabe-roku/0.1.2+abcdef12".into(),
+        revision: ProgramRevision::parse(repeated('0', 64)).unwrap(),
+        current_item: DisplayProgramItemId::parse(repeated('1', 64)).unwrap(),
+        elapsed_ms: 1_000,
+        last_displayed_asset: None,
+        connection: ConnectionState::Online,
+        playback: PlaybackState::Displaying,
+        last_error: Fault::None,
+        staged_items: 1,
+        staged_bytes: 0,
+        decode_latency: LatencyBucket::Unobserved,
+        swap_latency: LatencyBucket::Unobserved,
+        drift_residual_ms: 0,
+        correction_events: 0,
+        pipeline_unobservable: true,
+        pipeline: None,
+    }
+}
+
+/// A receiver that can read its player says so with numbers; one that
+/// cannot omits the field and the report is still whole. The state word is
+/// the player's own and is bounded like every other string on this plane.
+#[test]
+fn a_health_report_carries_the_player_pipeline_when_the_receiver_can_read_it() {
+    let mut report = health();
+    validate_health(&report).unwrap();
+    let encoded = serde_json::to_string(&report).unwrap();
+    assert!(
+        !encoded.contains("\"pipeline\""),
+        "absent means absent, not null"
+    );
+    let decoded: ReceiverHealth = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, report);
+
+    report.pipeline_unobservable = false;
+    report.pipeline = Some(PipelineStats {
+        state: "playing".into(),
+        position_ms: 12_345,
+        frames_rendered: 400,
+        frames_dropped: 3,
+        frames_repeated: 1,
+        stream_errors: 0,
+        segment_sequence: Some(282),
+        buffering: false,
+    });
+    validate_health(&report).unwrap();
+    let encoded = serde_json::to_string(&report).unwrap();
+    let decoded: ReceiverHealth = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.pipeline.as_ref().unwrap().frames_dropped, 3);
+
+    let mut shouting = report.clone();
+    shouting.pipeline.as_mut().unwrap().state = "Playing!".into();
+    assert!(validate_health(&shouting).is_err());
+    let mut long = report;
+    long.pipeline.as_mut().unwrap().state = repeated('a', 25);
+    assert!(validate_health(&long).is_err());
 }

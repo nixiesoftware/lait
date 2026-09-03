@@ -84,6 +84,59 @@ pub fn encode_still_image(bytes: &[u8]) -> Result<StillH264, StillError> {
     encode_still(&rgba, width, height)
 }
 
+/// Encode a still — rendered card or uploaded image, any format the decoder
+/// knows — **fitted into a frame of `width` x `height`**: scaled to fit
+/// while keeping its shape, centred on black. One stream must keep one
+/// frame size from part to part; a television's decoder that is handed a
+/// new resolution behind a discontinuity may stall on it (a Roku Express
+/// froze with its player still saying `playing`), so every still is made
+/// the size the stream is, and only a clip, which cannot be rescaled here,
+/// gets to decide what that size is.
+pub fn encode_still_fitted(bytes: &[u8], width: u32, height: u32) -> Result<StillH264, StillError> {
+    if width < 2 || height < 2 {
+        return Err(StillError::Dimensions);
+    }
+    let decoded = image::load_from_memory(bytes)
+        .map_err(|_| StillError::Png)?
+        .to_rgba8();
+    let (source_width, source_height) = decoded.dimensions();
+    if source_width == width && source_height == height {
+        return encode_still(&decoded, width, height);
+    }
+    // Scale to fit, never to fill: nothing is cropped, the rest is black.
+    // Integer throughout: the limiting side becomes the frame's, the other
+    // follows the picture's shape.
+    let (source_width, source_height) = (source_width.max(1), source_height.max(1));
+    let wide =
+        u64::from(width) * u64::from(source_height) <= u64::from(height) * u64::from(source_width);
+    let (fitted_width, fitted_height) = if wide {
+        let fitted_height = u64::from(source_height) * u64::from(width) / u64::from(source_width);
+        (
+            width,
+            u32::try_from(fitted_height)
+                .unwrap_or(height)
+                .clamp(1, height),
+        )
+    } else {
+        let fitted_width = u64::from(source_width) * u64::from(height) / u64::from(source_height);
+        (
+            u32::try_from(fitted_width).unwrap_or(width).clamp(1, width),
+            height,
+        )
+    };
+    let scaled = image::imageops::resize(
+        &decoded,
+        fitted_width,
+        fitted_height,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let left = i64::from((width - fitted_width) / 2);
+    let top = i64::from((height - fitted_height) / 2);
+    image::imageops::overlay(&mut canvas, &scaled, left, top);
+    encode_still(&canvas, width, height)
+}
+
 const PROFILE_IDC: u8 = 66; // Constrained Baseline
 const LEVEL_IDC: u8 = 40; // 4.0 — comfortably covers 1080p stills
 const MB: u32 = 16;
@@ -465,6 +518,22 @@ mod tests {
             buf.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
         buf
+    }
+
+    /// A still of another shape comes out the stream's size with its own
+    /// shape kept: scaled to fit, centred, the rest black.
+    #[test]
+    fn a_still_is_fitted_into_the_streams_frame_on_black() {
+        let wide = image::RgbaImage::from_pixel(200, 50, image::Rgba([255, 255, 255, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        wide.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let still = encode_still_fitted(png.get_ref(), 64, 48).unwrap();
+        assert_eq!((still.width, still.height), (64, 48));
+        // Decode the I_PCM samples back: the top rows are black bars, the
+        // middle rows carry the white picture.
+        let same = encode_still_fitted(png.get_ref(), 200, 50).unwrap();
+        assert_eq!((same.width, same.height), (200, 50));
+        assert_ne!(still.access_unit, same.access_unit);
     }
 
     #[test]

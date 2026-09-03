@@ -746,6 +746,11 @@ sub AstrolabeReportHealth()
     end for
     playbackState = "blank"
     if item.scene.kind = "frame" or item.scene.kind = "media" then playbackState = "displaying"
+    ' What the scene last read off the player: the decoder's own counters,
+    ' so "choppy" reaches the coordinator as frames dropped per report.
+    pipeline = invalid
+    sample = m.top.pipeline
+    if sample <> invalid and sample.state <> invalid then pipeline = sample
     ' The header and the body must say the same elapsed time; computing it
     ' twice put them milliseconds apart and every report was refused.
     response = AstrolabeAuthorizedJson("health", "POST", "/head/v1/health", {
@@ -765,7 +770,8 @@ sub AstrolabeReportHealth()
         swap_latency: "unobserved",
         drift_residual_ms: m.lastSyncResidualMs,
         correction_events: m.correctionEvents,
-        pipeline_unobservable: true
+        pipeline_unobservable: pipeline = invalid,
+        pipeline: pipeline
     }, { currentItem: item.id, elapsedMs: playback.elapsedMs })
     if response <> invalid and response.status >= 200 and response.status < 300
         m.lastHealth.Mark()

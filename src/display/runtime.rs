@@ -61,6 +61,22 @@ fn health_view(reported: super::pairing::ReportedHealth) -> crate::control::Disp
         drift_residual_ms: health.drift_residual_ms,
         correction_events: health.correction_events,
         pipeline_unobservable: health.pipeline_unobservable,
+        pipeline: health.pipeline.map(pipeline_view),
+    }
+}
+
+fn pipeline_view(
+    pipeline: display_protocol::receiver::PipelineStats,
+) -> crate::control::DisplayPipelineView {
+    crate::control::DisplayPipelineView {
+        state: pipeline.state,
+        position_ms: pipeline.position_ms,
+        frames_rendered: pipeline.frames_rendered,
+        frames_dropped: pipeline.frames_dropped,
+        frames_repeated: pipeline.frames_repeated,
+        stream_errors: pipeline.stream_errors,
+        segment_sequence: pipeline.segment_sequence,
+        buffering: pipeline.buffering,
     }
 }
 
@@ -785,6 +801,10 @@ impl DisplayRuntime {
                     producer: assignment
                         .and_then(|assignment| producers.get(assignment.id.as_str()))
                         .map(|state| (*state).to_string()),
+                    pipeline: reported
+                        .as_ref()
+                        .and_then(|report| report.health.pipeline.clone())
+                        .map(pipeline_view),
                 }
             })
             .collect();

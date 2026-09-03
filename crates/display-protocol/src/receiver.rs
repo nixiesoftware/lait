@@ -302,9 +302,45 @@ pub struct ReceiverHealth {
     pub drift_residual_ms: i32,
     pub correction_events: u32,
     pub pipeline_unobservable: bool,
+    /// What the receiver's decoder pipeline is doing, when it can be read.
+    /// Absent from a receiver that predates it or cannot observe its player;
+    /// `pipeline_unobservable` says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<PipelineStats>,
 }
 
+/// The player pipeline as the receiver last sampled it. Counters are
+/// cumulative since the player was armed; a report that is the same twice is
+/// a picture standing still, and a rising drop count is what "choppy" is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineStats {
+    /// The player's own state word (`playing`, `buffering`, `error`, …).
+    pub state: String,
+    pub position_ms: u32,
+    pub frames_rendered: u32,
+    pub frames_dropped: u32,
+    pub frames_repeated: u32,
+    pub stream_errors: u32,
+    /// The media sequence the player was fetching, when it says.
+    pub segment_sequence: Option<u64>,
+    pub buffering: bool,
+}
+
+pub const MAX_PIPELINE_STATE_BYTES: usize = 24;
+
 pub fn validate_health(health: &ReceiverHealth) -> Result<(), Refusal> {
+    if let Some(pipeline) = &health.pipeline {
+        if pipeline.state.is_empty()
+            || pipeline.state.len() > MAX_PIPELINE_STATE_BYTES
+            || !pipeline
+                .state
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            return Err(Refusal::BoundExceeded("health pipeline state"));
+        }
+    }
     if health.protocol_major != PROTOCOL_MAJOR {
         return Err(Refusal::Unsupported("protocol major"));
     }
