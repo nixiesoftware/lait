@@ -632,6 +632,58 @@ impl BrowserEngineHandle {
             .map_err(|e| js_err("capture snapshot", format!("{e:?}")))?;
         Ok(snapshot.encode())
     }
+
+    /// Prove the daemon-less round trip end to end (adversary R1): capture the
+    /// live Space, cold-restore it into fresh in-memory storage with this
+    /// device's seed, and DECRYPT every collaborative body on the restored
+    /// replica. Each successful read means the sealed epoch key survived the
+    /// snapshot and unsealed against the seed — the whole ledger → sealed-key →
+    /// unseal → decrypt path a member cold-reload depends on. Returns
+    /// `restored/total` decrypted-body counts; the caller asserts they match
+    /// the live Space and are non-zero.
+    pub fn verify_snapshot_roundtrip(&self) -> Result<String, JsValue> {
+        let bytes = self.snapshot()?;
+        let snapshot = contact::snapshot::SpaceSnapshot::decode(&bytes)
+            .map_err(|f| js_err("decode snapshot", format!("{f:?}")))?;
+        let (restored, _authority) = contact::snapshot::restore(
+            snapshot,
+            self.seed,
+            std::sync::Arc::new(journal::MemMedium::new()),
+            std::sync::Arc::new(journal::MemMedium::new()),
+        )
+        .map_err(|f| js_err("restore snapshot", format!("{f:?}")))?;
+
+        let live_decrypted = self
+            .station
+            .with_replica_read(|replica| Ok(count_decrypted(replica)))
+            .map_err(|e| js_err("read live replica", format!("{e:?}")))?;
+        let restored_keys = restored.body_keys().len();
+        let restored_decrypted = count_decrypted(&restored);
+
+        if restored_decrypted != live_decrypted || restored_decrypted == 0 {
+            return Err(js_err(
+                "snapshot round trip",
+                format!(
+                    "live decrypted {live_decrypted}, restored decrypted {restored_decrypted} of \
+                     {restored_keys} — the sealed keys did not survive the cold reload"
+                ),
+            ));
+        }
+        Ok(format!(
+            "restored {restored_decrypted}/{restored_keys} bodies, decrypted, matching the live Space"
+        ))
+    }
+}
+
+/// How many of a replica's collaborative bodies read back decrypted — a body
+/// that will not `read_collaborative` is one whose epoch key this authority
+/// cannot open.
+fn count_decrypted(replica: &replica::Replica) -> usize {
+    replica
+        .body_keys()
+        .iter()
+        .filter(|key| replica.read_collaborative(key).is_ok())
+        .count()
 }
 
 /// Stand the whole engine up in the Worker: compile the runner once, instantiate
