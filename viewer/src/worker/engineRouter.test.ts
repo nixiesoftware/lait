@@ -114,6 +114,38 @@ describe("engineRouter", () => {
     stop();
   });
 
+  it("coalesces concurrent converges — repulls never pile up (the freeze guard)", async () => {
+    // The primary liveness fix: many triggers (the 2s poll + every rpc/mutate)
+    // must never run repull concurrently, or slow dials stack and freeze the
+    // single Worker thread. Fire a burst of rpcs while a slow repull is in
+    // flight; assert repull runs once now and exactly once more (coalesced),
+    // never N times concurrently.
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const repull = async () => {
+      calls++;
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await gate; // hold the first repull open while the burst arrives
+      active--;
+      return 0;
+    };
+    const { send, stop } = harness(stubHandle({ repull, handleLink: () => "null" }));
+    // Five rpcs in a burst — each would trigger a converge.
+    for (let i = 0; i < 5; i++) send({ lait: "rpc", id: i, verb: "spaces" });
+    await settle();
+    expect(active).toBe(1); // only one repull in flight despite five triggers
+    release();
+    await settle();
+    await settle();
+    expect(maxActive).toBe(1); // never concurrent
+    expect(calls).toBe(2); // the in-flight one, then exactly one coalesced re-run
+    stop();
+  });
+
   it("routes a session:mutate to handleSession and posts its reply", async () => {
     const replyFrame = { lait: "session:reply", sid: 1, rid: 2, outcome: { ok: true, status: 200, response: {} } };
     const handleSession = vi.fn(() => JSON.stringify([replyFrame]));

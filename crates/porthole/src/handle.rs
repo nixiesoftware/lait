@@ -339,6 +339,15 @@ impl BrowserEngineHandle {
             .station
             .export_excess(&self.seed, &self.authority.bundle())
             .map_err(|e| js_err("the tab could not build its push", e))?;
+        // Steady-state deadlines, not the ENTER pull's 120s/20s: this runs on a
+        // ~2s poll, so a stalled dial must give up in seconds and yield the
+        // single Worker thread to the next attempt (the keep-alive keeps the
+        // path warm; a fresh dial re-establishes it) rather than pinning the
+        // worker for 20s and stacking repulls behind it.
+        let deadlines = Deadlines {
+            whole: std::time::Duration::from_secs(6),
+            progress: std::time::Duration::from_secs(3),
+        };
         let received = pull_receive(
             self.transport.as_ref(),
             &self.responder,
@@ -347,7 +356,7 @@ impl BrowserEngineHandle {
             &self.authority.bundle(),
             holdings,
             Some(excess),
-            Deadlines::default(),
+            deadlines,
         )
         .await
         .map_err(|e| js_err("the live converge failed", format!("{e:?}")))?;

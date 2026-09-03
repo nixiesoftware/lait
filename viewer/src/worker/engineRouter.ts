@@ -202,15 +202,36 @@ export function engineRouter(
   });
   port.start?.();
 
-  /** Push local writes out, pull peers' in, then surface both as rings. */
+  // In-flight guard + coalescing: the 2s timer, every rpc, and every mutate all
+  // want a converge, but each repull opens a QUIC dial. Without this they stack
+  // — a slow dial then pins the single Worker thread under many concurrent
+  // repulls and the tab freezes. So at most one repull runs; a request while one
+  // is in flight is coalesced into exactly one more run when it settles.
+  let converging = false;
+  let wantAgain = false;
+
+  /** Push local writes out, pull peers' in, then surface both as rings. Silent
+   *  self-healing: a failed converge just retries next tick (keep-alive keeps
+   *  the path warm), never a user-facing error. */
   const convergeAndPump = async () => {
-    try {
-      await handle.repull();
-    } catch {
-      // A failed converge is "could not be asked", not a write failure; the
-      // next poll retries. The ring pump still surfaces any local commit.
+    if (converging) {
+      wantAgain = true;
+      return;
     }
-    pumpRings();
+    converging = true;
+    try {
+      do {
+        wantAgain = false;
+        try {
+          await handle.repull();
+        } catch {
+          // "Could not be asked", not a write failure — the next tick retries.
+        }
+        pumpRings();
+      } while (wantAgain && !stopped);
+    } finally {
+      converging = false;
+    }
   };
 
   if (pollMs > 0) {
