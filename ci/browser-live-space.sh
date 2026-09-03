@@ -245,3 +245,19 @@ touch "$root/wasm-probe/tests/handle.rs"
         --features probe-dispatch
 )
 echo "browser-live-space: the packaging boundary booted the engine in the tab."
+
+# --- the session/editor lane answers in the tab -----------------------------
+# The Worker-side session host: workerSession.ts's exact frame vocabulary over
+# the composed engine — liveness on open, the daemon's editor allowlist, a
+# CRDT text splice landing with its operation envelope intact, clone-safe
+# refusals, sid scoping, and a read of converged state after a re-pull.
+echo "== the session/editor lane answers in the tab"
+touch "$root/wasm-probe/tests/session.rs"
+(
+    cd "$root/wasm-probe"
+    LIVE_RELAY_URL="$relay" LIVE_SEED_HEX="$SEED_HEX" LIVE_TICKET="$LINK" \
+        ISSUES_RUNNER_WASM="$runner_wasm" \
+        wasm-pack test --headless --chrome --test session \
+        --features probe-dispatch
+)
+echo "browser-live-space: the session/editor lane answered in the tab."

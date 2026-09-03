@@ -52,6 +52,9 @@ pub struct BrowserEngineHandle {
     /// mutates the cursor and JS holds the handle by shared reference — sound
     /// on a single-threaded Worker, where no two calls overlap.
     ring: RefCell<ObservationStream>,
+    /// The editor lane's open sessions, same borrow discipline as the ring:
+    /// taken per call, released before any dispatch into the engine.
+    sessions: RefCell<crate::session::SessionHost>,
 }
 
 /// Fold any error into a `JsValue` the Worker sees as a rejected Promise or a
@@ -100,6 +103,30 @@ impl BrowserEngineHandle {
                 .map_err(|e| js_err("the response does not encode", e)),
             None => Ok("null".to_string()),
         }
+    }
+
+    /// Answer one decoded session frame the viewer's `workerSession` sent —
+    /// the editor lane, JSON string in, a JSON ARRAY of response frames out
+    /// (one request can owe zero or several: `open` answers a liveness event,
+    /// `watch`/`close` answer nothing, `mutate` answers one reply). The
+    /// Worker's glue routes frames whose `lait` tag starts with `session:`
+    /// here and everything else to [`Self::handle_link`], and relays each
+    /// frame of the answered array as its own `postMessage`.
+    #[wasm_bindgen(js_name = handleSession)]
+    pub fn handle_session(&self, frame_json: &str) -> Result<String, JsValue> {
+        let request = serde_json::from_str(frame_json)
+            .map_err(|e| js_err("the session frame does not decode", e))?;
+        // Take, decide, drop: the borrow is released before any engine
+        // dispatch, the same discipline the ring keeps.
+        let accepted = self.sessions.borrow_mut().accept(request);
+        let responses = match accepted {
+            crate::session::Accepted::Respond(responses) => responses,
+            crate::session::Accepted::Mutate { sid, rid, request } => {
+                vec![crate::session::mutate_reply(&self.engine, sid, rid, request)]
+            }
+        };
+        serde_json::to_string(&responses)
+            .map_err(|e| js_err("the session response does not encode", e))
     }
 
     /// Converge with the responder over the same transport: pull its material
@@ -307,5 +334,6 @@ pub async fn boot(
         authority: ledger,
         space,
         ring,
+        sessions: RefCell::new(crate::session::SessionHost::default()),
     })
 }

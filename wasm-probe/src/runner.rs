@@ -204,17 +204,26 @@ impl Conversation for WebConversation {
         })
         .map_err(|e| anyhow!("encode wasm request: {e}"))?;
 
-        // Install the callback for this call, cleared after even on a trap.
-        // SAFETY: used only within this call and cleared below.
+        // Install the callback for this call, restored after even on a trap.
+        // SAFETY: used only within this call and restored below.
         let installed: ErasedCallback = unsafe {
             std::mem::transmute::<
                 *mut (dyn FnMut(&str, &[u8]) -> std::result::Result<Vec<u8>, String> + '_),
                 ErasedCallback,
             >(callback)
         };
-        CURRENT.with(|current| current.set(Some(installed)));
+        // SAVE and RESTORE, not set-then-clear: a client `execute` calls back
+        // into `call_world`, which dispatches a NESTED guest layer (control,
+        // then session) on its own instance but through this SAME thread-local
+        // slot. Clearing to `None` on the inner return would strand the OUTER
+        // dispatch — its next callback (an issue read's body fetch, after the
+        // nested world call) would find no live callback and fail with "a
+        // callback outside a live request". Restoring the previous callback
+        // keeps the nesting a proper stack. (The native wasmtime host is immune:
+        // each instance owns its callback in its own Store.)
+        let previous = CURRENT.with(|current| current.replace(Some(installed)));
         let result = call_guest(self.live.borrow().id, exports::HANDLE, &frame);
-        CURRENT.with(|current| current.set(None));
+        CURRENT.with(|current| current.set(previous));
 
         let outcome_bytes = match result {
             Ok(bytes) => bytes,
